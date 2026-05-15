@@ -159,6 +159,7 @@ import type {
     ApiPreAggregateCheckResponse,
     PreAggregateMatchMiss,
 } from './preAggregate';
+import { type ApiPreviewExpirationProjectSettingsResponse } from './previewExpirationProjectSettings';
 import {
     type ApiProjectCompileLogResponse,
     type ApiProjectCompileLogsResponse,
@@ -1047,6 +1048,7 @@ type ApiResults =
     | ApiGetPreAggregateMaterializationsResponse['results']
     | ApiPreAggregateCheckResponse['results']
     | ApiImpersonationOrganizationSettingsResponse['results']
+    | ApiPreviewExpirationProjectSettingsResponse['results']
     | ApiContentVerificationResponse['results']
     | ApiContentVerificationDeleteResponse['results']
     | ApiVerifiedContentListResponse['results']
