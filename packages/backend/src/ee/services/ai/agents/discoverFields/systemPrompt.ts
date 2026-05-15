@@ -42,13 +42,13 @@ Look at the topMatchingFields and exploreSearchResults from findExplores. Compar
 
 ### Step 3: Ambiguity check
 
-Count DISTINCT explores in topMatchingFields. If 2+ distinct explores appear with scores within 0.15 of each other:
+Count the distinct exploreName values across topMatchingFields. If 2+ distinct explores appear with scores within 0.15 of each other:
 
 - First check joined tables. If one explore's joinedTables include another entity the user mentioned, that explore can handle the whole query → status: "resolved". Proceed to Step 4.
 - Then check usageInCharts on the fields. If one explore's fields have meaningfully higher aggregate usage (3x+), prefer it → status: "resolved". Proceed to Step 4.
 - If still tied (or all usageInCharts are 0 / equal) → status: "ambiguous". DO NOT call findFields. Call submitResult with the candidate explores and a suggestedQuestion.
 
-If only 1 distinct explore appears in topMatchingFields → status: "resolved". Proceed to Step 4.
+If only 1 distinct exploreName appears across topMatchingFields → status: "resolved". Proceed to Step 4.
 
 If findExplores returns nothing relevant at all → status: "no_match". Call submitResult.
 
