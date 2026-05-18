@@ -147,6 +147,24 @@ export enum FeatureFlags {
      * if the flag is later turned off.
      */
     LockDashboardFilters = 'lock-dashboard-filters',
+
+    /**
+     * Show a persistent trial warning banner for an organization on shared
+     * instances. This does not block product access.
+     */
+    OrganizationTrialWarning = 'organization-trial-warning',
+
+    /**
+     * Block product access for an organization whose trial has expired. Recovery
+     * routes such as account, organization settings and invites remain available.
+     */
+    OrganizationTrialBlocked = 'organization-trial-blocked',
+
+    /**
+     * Block API/CLI-style access after the agreed grace period has elapsed for a
+     * trial-blocked organization. Keep disabled during the grace period.
+     */
+    OrganizationTrialApiCliBlocked = 'organization-trial-api-cli-blocked',
 }
 
 export type FeatureFlag = {

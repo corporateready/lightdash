@@ -43,12 +43,18 @@ import { toSessionUser } from '../auth/account';
 import {
     allowApiKeyAuthentication,
     deprecatedResultsRoute,
+    enforceOrganizationAccess,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
 import { BaseController } from './baseController';
 import { ApiRunQueryResponse } from './runQueryController';
 
+@Middlewares([
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    enforceOrganizationAccess,
+])
 @Route('/api/v1/saved/{chartUuid}')
 @Response<ApiErrorPayload>('default', 'Error')
 @Tags('Charts')
@@ -63,11 +69,7 @@ export class SavedChartController extends BaseController {
      * @param req express request
      */
     @Deprecated()
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        deprecatedResultsRoute,
-    ])
+    @Middlewares([deprecatedResultsRoute])
     @SuccessResponse('200', 'Success')
     @Post('/results')
     @OperationId('PostChartResults')
@@ -116,7 +118,6 @@ export class SavedChartController extends BaseController {
      * @summary Get chart and results
      */
     @Deprecated()
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Post('/chart-and-results')
     @OperationId('PostDashboardTile')
@@ -158,7 +159,6 @@ export class SavedChartController extends BaseController {
      * @param chartUuid chartUuid for the chart
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/history')
     @OperationId('GetChartHistory')
@@ -183,7 +183,6 @@ export class SavedChartController extends BaseController {
      * @param versionUuid versionUuid for the chart version
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/version/{versionUuid}')
     @OperationId('GetChartVersion')
@@ -210,11 +209,7 @@ export class SavedChartController extends BaseController {
      * @param req express request
      */
     @Deprecated()
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        deprecatedResultsRoute,
-    ])
+    @Middlewares([deprecatedResultsRoute])
     @SuccessResponse('200', 'Success')
     @Post('version/{versionUuid}/results')
     @OperationId('getChartVersionResults')
@@ -261,11 +256,7 @@ export class SavedChartController extends BaseController {
      * @param versionUuid versionUuid for the chart version
      * @param req express request
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('/rollback/{versionUuid}/')
     @OperationId('postChartVersionRollback')
@@ -291,7 +282,6 @@ export class SavedChartController extends BaseController {
      * @param chartUuid chartUuid for the chart to run
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Post('/calculate-total')
     @OperationId('CalculateTotalFromSavedChart')
@@ -327,11 +317,7 @@ export class SavedChartController extends BaseController {
      * @param chartUuid chartUuid for the chart to run
      * @param req express request
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('/promote')
     @OperationId('promoteChart')
@@ -355,7 +341,6 @@ export class SavedChartController extends BaseController {
      * @param chartUuid chartUuid for the chart to check diff
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/promoteDiff')
     @OperationId('promoteChartDiff')
@@ -377,7 +362,6 @@ export class SavedChartController extends BaseController {
      * Get schedulers for a saved chart
      * @summary List saved chart schedulers
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/schedulers')
     @OperationId('getSavedChartSchedulers')
@@ -404,11 +388,7 @@ export class SavedChartController extends BaseController {
      * Create a scheduler for a saved chart
      * @summary Create saved chart scheduler
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('/schedulers')
     @OperationId('createSavedChartScheduler')
@@ -436,7 +416,6 @@ export class SavedChartController extends BaseController {
      * @param chartUuid chartUuid for the chart to export
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Post('/export')
     @OperationId('exportSavedChartImage')
@@ -460,11 +439,7 @@ export class SavedChartController extends BaseController {
      * @param chartUuid The uuid of the chart to verify
      * @param req
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('verification')
     @OperationId('verifyChart')
@@ -488,11 +463,7 @@ export class SavedChartController extends BaseController {
      * @param chartUuid The uuid of the chart to unverify
      * @param req
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Delete('verification')
     @OperationId('unverifyChart')

@@ -6,6 +6,7 @@ import {
     DeactivatedAccountError,
     InvalidUser,
     LightdashMode,
+    OrganizationAccessStatus,
 } from '@lightdash/common';
 import OAuth2Server from '@node-oauth/oauth2-server';
 import { ErrorRequestHandler, Request, RequestHandler } from 'express';
@@ -43,6 +44,23 @@ export const isAuthenticated: RequestHandler = (req, res, next) => {
     } else {
         next(new AuthorizationError(`Failed to authorize user`));
     }
+};
+
+export const enforceOrganizationAccess: RequestHandler = (req, res, next) => {
+    req.services
+        .getOrganizationAccessService()
+        .assertProductAccess(req.account)
+        .then((access) => {
+            res.setHeader('Lightdash-Organization-Access', access.status);
+            if (
+                access.status === OrganizationAccessStatus.TRIAL_BLOCKED &&
+                !access.apiCliBlocked
+            ) {
+                res.setHeader('Lightdash-Organization-Api-Cli-Grace', 'active');
+            }
+            next();
+        })
+        .catch(next);
 };
 
 export const unauthorisedInDemo: RequestHandler = (req, res, next) => {

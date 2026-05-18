@@ -625,6 +625,22 @@ apiV1Router.get('/logout', (req, res, next) => {
     });
 });
 
+apiV1Router.get(
+    '/organization-access',
+    isAuthenticated,
+    async (req, res, next) =>
+        req.services
+            .getOrganizationAccessService()
+            .getOrganizationAccess(req.account)
+            .then((results) => {
+                res.json({
+                    status: 'ok',
+                    results,
+                });
+            })
+            .catch(next),
+);
+
 apiV1Router.use('/saved', savedChartRouter);
 apiV1Router.use('/invite-links', inviteLinksRouter);
 apiV1Router.use('/org', organizationRouter);

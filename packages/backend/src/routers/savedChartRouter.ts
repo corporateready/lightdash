@@ -2,64 +2,52 @@ import { getObjectValue } from '@lightdash/common';
 import express, { type Router } from 'express';
 import {
     allowApiKeyAuthentication,
+    enforceOrganizationAccess,
     isAuthenticated,
     unauthorisedInDemo,
 } from '../controllers/authentication';
 
 export const savedChartRouter: Router = express.Router();
 
-savedChartRouter.get(
-    '/:savedQueryUuidOrSlug',
+savedChartRouter.use(
     allowApiKeyAuthentication,
     isAuthenticated,
-    async (req, res, next) => {
-        req.services
-            .getSavedChartService()
-            .get(
-                getObjectValue(req.params, 'savedQueryUuidOrSlug'),
-                req.account!,
-                {
-                    projectUuid:
-                        typeof req.query.projectUuid === 'string'
-                            ? req.query.projectUuid
-                            : undefined,
-                },
-            )
-            .then((results) => {
-                res.json({
-                    status: 'ok',
-                    results,
-                });
-            })
-            .catch(next);
-    },
+    enforceOrganizationAccess,
 );
 
-savedChartRouter.get(
-    '/:savedQueryUuid/views',
-    allowApiKeyAuthentication,
-    isAuthenticated,
-    async (req, res, next) => {
-        req.services
-            .getSavedChartService()
-            .getViewStats(
-                req.user!,
-                getObjectValue(req.params, 'savedQueryUuid'),
-            )
-            .then((results) => {
-                res.json({
-                    status: 'ok',
-                    results,
-                });
-            })
-            .catch(next);
-    },
-);
+savedChartRouter.get('/:savedQueryUuidOrSlug', async (req, res, next) => {
+    req.services
+        .getSavedChartService()
+        .get(getObjectValue(req.params, 'savedQueryUuidOrSlug'), req.account!, {
+            projectUuid:
+                typeof req.query.projectUuid === 'string'
+                    ? req.query.projectUuid
+                    : undefined,
+        })
+        .then((results) => {
+            res.json({
+                status: 'ok',
+                results,
+            });
+        })
+        .catch(next);
+});
+
+savedChartRouter.get('/:savedQueryUuid/views', async (req, res, next) => {
+    req.services
+        .getSavedChartService()
+        .getViewStats(req.user!, getObjectValue(req.params, 'savedQueryUuid'))
+        .then((results) => {
+            res.json({
+                status: 'ok',
+                results,
+            });
+        })
+        .catch(next);
+});
 
 savedChartRouter.get(
     '/:savedQueryUuid/availableFilters',
-    allowApiKeyAuthentication,
-    isAuthenticated,
     async (req, res, next) =>
         req.services
             .getProjectService()
@@ -78,8 +66,6 @@ savedChartRouter.get(
 
 savedChartRouter.delete(
     '/:savedQueryUuid',
-    allowApiKeyAuthentication,
-    isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
         req.services
@@ -97,8 +83,6 @@ savedChartRouter.delete(
 
 savedChartRouter.patch(
     '/:savedQueryUuid',
-    allowApiKeyAuthentication,
-    isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
         req.services
@@ -120,8 +104,6 @@ savedChartRouter.patch(
 
 savedChartRouter.patch(
     '/:savedQueryUuid/pinning',
-    allowApiKeyAuthentication,
-    isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
         req.services
@@ -142,8 +124,6 @@ savedChartRouter.patch(
 
 savedChartRouter.post(
     '/:savedQueryUuid/version',
-    allowApiKeyAuthentication,
-    isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
         req.services

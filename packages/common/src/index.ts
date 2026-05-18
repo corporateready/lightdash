@@ -131,6 +131,7 @@ export * from './types/metricsExplorer';
 export * from './types/notifications';
 export * from './types/oauth';
 export * from './types/openIdIdentity';
+export * from './types/organizationAccess';
 export * from './types/organization';
 export * from './types/organizationMemberProfile';
 export * from './types/organizationSso';

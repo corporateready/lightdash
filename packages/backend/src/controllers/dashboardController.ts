@@ -29,11 +29,17 @@ import express from 'express';
 import { toSessionUser } from '../auth/account';
 import {
     allowApiKeyAuthentication,
+    enforceOrganizationAccess,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
 import { BaseController } from './baseController';
 
+@Middlewares([
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    enforceOrganizationAccess,
+])
 @Route('/api/v1/dashboards/{dashboardUuid}')
 @Response<ApiErrorPayload>('default', 'Error')
 @Tags('Dashboards')
@@ -44,11 +50,7 @@ export class DashboardController extends BaseController {
      * @param dashboardUuid dashboardUuid for the dashboard to run
      * @param req express request
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('/promote')
     @OperationId('promoteDashboard')
@@ -72,7 +74,6 @@ export class DashboardController extends BaseController {
      * @param dashboardUuid dashboardUuid for the dashboard to check diff
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/promoteDiff')
     @OperationId('promoteDashboardDiff')
@@ -99,7 +100,6 @@ export class DashboardController extends BaseController {
      * @param dashboardUuid dashboardUuid for the dashboard
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/history')
     @OperationId('getDashboardHistory')
@@ -124,7 +124,6 @@ export class DashboardController extends BaseController {
      * @param versionUuid versionUuid for the dashboard version
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/version/{versionUuid}')
     @OperationId('getDashboardVersion')
@@ -154,11 +153,7 @@ export class DashboardController extends BaseController {
      * @param versionUuid versionUuid for the dashboard version to rollback to
      * @param req express request
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('/rollback/{versionUuid}')
     @OperationId('postDashboardVersionRollback')
@@ -182,7 +177,6 @@ export class DashboardController extends BaseController {
      * Get schedulers for a dashboard
      * @summary List dashboard schedulers
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
     @Get('/schedulers')
     @OperationId('getDashboardSchedulers')
@@ -209,11 +203,7 @@ export class DashboardController extends BaseController {
      * Create a scheduler for a dashboard
      * @summary Create dashboard scheduler
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('/schedulers')
     @OperationId('createDashboardScheduler')
@@ -241,11 +231,7 @@ export class DashboardController extends BaseController {
      * @param dashboardUuid The uuid of the dashboard to verify
      * @param req
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Post('verification')
     @OperationId('verifyDashboard')
@@ -269,11 +255,7 @@ export class DashboardController extends BaseController {
      * @param dashboardUuid The uuid of the dashboard to unverify
      * @param req
      */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
+    @Middlewares([unauthorisedInDemo])
     @SuccessResponse('200', 'Success')
     @Delete('verification')
     @OperationId('unverifyDashboard')

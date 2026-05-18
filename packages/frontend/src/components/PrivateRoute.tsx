@@ -1,8 +1,11 @@
+import { OrganizationAccessStatus } from '@lightdash/common';
 import React, { useEffect, useState, type FC } from 'react';
 import { Navigate, useLocation } from 'react-router';
+import { useOrganizationAccess } from '../hooks/organization/useOrganizationAccess';
 import { useEmailStatus } from '../hooks/useEmailVerification';
 import { useAbilityContext } from '../providers/Ability/useAbilityContext';
 import useApp from '../providers/App/useApp';
+import { TrialExpiredPage } from './OrganizationAccess/TrialExpiredPage';
 import PageSpinner from './PageSpinner';
 
 const PrivateRoute: FC<React.PropsWithChildren> = ({ children }) => {
@@ -14,6 +17,9 @@ const PrivateRoute: FC<React.PropsWithChildren> = ({ children }) => {
     const ability = useAbilityContext();
     const emailStatus = useEmailStatus(!!health.data?.isAuthenticated);
     const isEmailServerConfigured = health.data?.hasEmailClient;
+    const organizationAccess = useOrganizationAccess(
+        !!health.data?.isAuthenticated && !!data?.organizationUuid,
+    );
     // Initialize based on whether ability already has rules (e.g., from previous navigation)
     // This prevents a loading flash when navigating between pages
     const [abilityInitialized, setAbilityInitialized] = useState(
@@ -70,6 +76,18 @@ const PrivateRoute: FC<React.PropsWithChildren> = ({ children }) => {
                 state={{ from: location }}
             />
         );
+    }
+
+    if (organizationAccess.isInitialLoading) {
+        return <PageSpinner />;
+    }
+
+    if (
+        organizationAccess.data?.status ===
+            OrganizationAccessStatus.TRIAL_BLOCKED &&
+        !location.pathname.startsWith('/generalSettings')
+    ) {
+        return <TrialExpiredPage access={organizationAccess.data} />;
     }
 
     return <>{children}</>;

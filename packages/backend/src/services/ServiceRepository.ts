@@ -35,6 +35,7 @@ import { LightdashAnalyticsService } from './LightdashAnalyticsService/Lightdash
 import { MetricsExplorerService } from './MetricsExplorerService/MetricsExplorerService';
 import { NotificationsService } from './NotificationsService/NotificationsService';
 import { OAuthService } from './OAuthService/OAuthService';
+import { OrganizationAccessService } from './OrganizationAccessService/OrganizationAccessService';
 import { OrganizationService } from './OrganizationService/OrganizationService';
 import { OrganizationSsoService } from './OrganizationSsoService/OrganizationSsoService';
 import { PermissionsService } from './PermissionsService/PermissionsService';
@@ -85,7 +86,7 @@ interface ServiceManifest {
     healthService: HealthService;
     notificationService: NotificationsService;
     oauthService: OAuthService;
-
+    organizationAccessService: OrganizationAccessService;
     organizationService: OrganizationService;
     organizationSsoService: OrganizationSsoService;
     preAggregateMaterializationService: PreAggregateMaterializationService;
@@ -505,6 +506,18 @@ export class ServiceRepository
                     userModel: this.models.getUserModel(),
                     oauthModel: this.models.getOauthModel(),
                     lightdashConfig: this.context.lightdashConfig,
+                }),
+        );
+    }
+
+    public getOrganizationAccessService(): OrganizationAccessService {
+        return this.getService(
+            'organizationAccessService',
+            () =>
+                new OrganizationAccessService({
+                    featureFlagService: this.getFeatureFlagService(),
+                    enabled:
+                        !!this.context.lightdashConfig.lightdashCloudInstance,
                 }),
         );
     }
