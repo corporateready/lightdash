@@ -23,9 +23,16 @@ import {
     Text,
     TextInput,
     Title,
+    Tooltip,
 } from '@mantine-8/core';
 import { useForm } from '@mantine/form';
-import { IconEye, IconLink, IconPlus, IconTrash } from '@tabler/icons-react';
+import {
+    IconEye,
+    IconInfoCircle,
+    IconLink,
+    IconPlus,
+    IconTrash,
+} from '@tabler/icons-react';
 import { useMutation } from '@tanstack/react-query';
 import { useCallback, useState, type FC } from 'react';
 import { v4 as uuidv4 } from 'uuid';
@@ -75,6 +82,7 @@ type FormValues = {
     canDateZoom?: boolean;
     canExplore?: boolean;
     canViewUnderlyingData?: boolean;
+    canViewDataApps?: boolean;
 } & IntrinsicUserAttributes;
 
 const EmbedPreviewDashboardForm: FC<{
@@ -110,6 +118,7 @@ const EmbedPreviewDashboardForm: FC<{
             canExportPagePdf: true,
             canExplore: false,
             canViewUnderlyingData: false,
+            canViewDataApps: false,
         },
         validate: {
             dashboardUuid: (value: undefined | string) => {
@@ -151,6 +160,7 @@ const EmbedPreviewDashboardForm: FC<{
                     canExportPagePdf: values.canExportPagePdf ?? true,
                     canExplore: values.canExplore,
                     canViewUnderlyingData: values.canViewUnderlyingData,
+                    canViewDataApps: values.canViewDataApps,
                 },
                 userAttributes: values.userAttributes.reduce(
                     (acc, item) => ({
@@ -392,6 +402,29 @@ const EmbedPreviewDashboardForm: FC<{
                                         },
                                     )}
                                     label="View underlying data"
+                                />
+                                <Switch
+                                    {...form.getInputProps('canViewDataApps', {
+                                        type: 'checkbox',
+                                    })}
+                                    label={
+                                        <Group gap="xs">
+                                            <Text inherit>View data apps</Text>
+                                            <Tooltip
+                                                label="Grants project-wide explore access so the data app can run its metric queries."
+                                                withArrow
+                                                withinPortal
+                                                multiline
+                                                maw="300px"
+                                                position="right"
+                                            >
+                                                <MantineIcon
+                                                    icon={IconInfoCircle}
+                                                    size="sm"
+                                                />
+                                            </Tooltip>
+                                        </Group>
+                                    }
                                 />
                             </Stack>
                         </Stack>
