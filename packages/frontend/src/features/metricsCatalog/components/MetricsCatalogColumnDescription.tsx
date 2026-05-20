@@ -3,9 +3,17 @@ import { Box, Text, useMantineTheme } from '@mantine/core';
 import MarkdownPreview, {
     type MarkdownPreviewProps,
 } from '@uiw/react-markdown-preview';
-import { type MRT_Row, type MRT_TableInstance } from 'mantine-react-table';
-import { useRef, useState, type FC } from 'react';
-import { useIsLineClamped } from '../../../hooks/useIsLineClamped';
+import {
+    useCallback,
+    useRef,
+    useState,
+    type FC,
+    type KeyboardEvent,
+} from 'react';
+import {
+    type MRT_Row,
+    type MRT_TableInstance,
+} from '../../../components/common/InHouseTable';
 import { useAppDispatch, useAppSelector } from '../../sqlRunner/store/hooks';
 import { setDescriptionPopoverIsClosing } from '../store/metricsCatalogSlice';
 import { MetricCatalogCellOverlay } from './MetricCatalogCellOverlay';
@@ -19,10 +27,8 @@ export const MetricsCatalogColumnDescription: FC<Props> = ({ row, table }) => {
     const theme = useMantineTheme();
     const dispatch = useAppDispatch();
     const cellRef = useRef<HTMLDivElement>(null);
-    const { ref: highlightRef, isLineClamped } =
-        useIsLineClamped<HTMLDivElement>(2);
     const [isOpen, setIsOpen] = useState(false);
-    const canOpen = isLineClamped && row.original.description;
+    const canOpen = Boolean(row.original.description);
 
     const isCategoryPopoverClosing = useAppSelector(
         (state) => state.metricsCatalog.popovers.category.isClosing,
@@ -54,28 +60,40 @@ export const MetricsCatalogColumnDescription: FC<Props> = ({ row, table }) => {
         },
     };
 
+    const handleOpen = useCallback(() => {
+        if (
+            canOpen &&
+            !(isCategoryPopoverClosing || isDescriptionPopoverClosing)
+        ) {
+            setIsOpen(true);
+        }
+    }, [canOpen, isCategoryPopoverClosing, isDescriptionPopoverClosing]);
+
     return (
-        <Box ref={cellRef}>
+        <Box
+            ref={cellRef}
+            w="100%"
+            role={canOpen ? 'button' : undefined}
+            tabIndex={canOpen ? 0 : undefined}
+            onClick={handleOpen}
+            onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+                if (!canOpen) return;
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    handleOpen();
+                }
+            }}
+            sx={{
+                cursor: canOpen ? 'pointer' : 'default',
+            }}
+        >
             <Text
-                ref={highlightRef}
                 c={row.original.description ? 'ldGray.6' : 'ldGray.4'}
                 fz="sm"
                 fw={400}
                 lh="150%"
-                onClick={() => {
-                    if (
-                        canOpen &&
-                        !(
-                            isCategoryPopoverClosing ||
-                            isDescriptionPopoverClosing
-                        )
-                    ) {
-                        setIsOpen(true);
-                    }
-                }}
                 lineClamp={2}
                 sx={{
-                    cursor: canOpen ? 'pointer' : 'default',
                     color: row.original.description ? 'ldGray.6' : 'ldGray.4',
                 }}
             >
