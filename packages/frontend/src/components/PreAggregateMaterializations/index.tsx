@@ -53,11 +53,11 @@ import { useTimeAgo } from '../../hooks/useTimeAgo';
 import useSchedulerJobsContext from '../../providers/SchedulerJobs/useSchedulerJobsContext';
 import Callout from '../common/Callout';
 import {
-    MantineReactTable,
-    useMantineReactTable,
+    ContentTable,
+    useContentTable,
     type MRT_ColumnDef,
     type MRT_SortingState,
-} from '../common/InHouseTable';
+} from '../common/ContentTable';
 import MantineIcon from '../common/MantineIcon';
 import MantineModal from '../common/MantineModal';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
@@ -560,7 +560,7 @@ const PreAggregateMaterializations: FC<Props> = ({ projectUuid }) => {
         [isRefreshingOne, refreshingDefinitionName, refreshByName],
     );
 
-    const table = useMantineReactTable({
+    const table = useContentTable({
         columns,
         data: filteredMaterializations,
         enableColumnResizing: false,
@@ -770,7 +770,7 @@ const PreAggregateMaterializations: FC<Props> = ({ projectUuid }) => {
                         />
                     </Paper>
                 ) : (
-                    <MantineReactTable table={table} />
+                    <ContentTable table={table} />
                 )}
             </Stack>
 

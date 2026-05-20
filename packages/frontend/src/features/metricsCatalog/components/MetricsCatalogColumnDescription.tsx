@@ -13,7 +13,7 @@ import {
 import {
     type MRT_Row,
     type MRT_TableInstance,
-} from '../../../components/common/InHouseTable';
+} from '../../../components/common/ContentTable';
 import { useAppDispatch, useAppSelector } from '../../sqlRunner/store/hooks';
 import { setDescriptionPopoverIsClosing } from '../store/metricsCatalogSlice';
 import { MetricCatalogCellOverlay } from './MetricCatalogCellOverlay';
