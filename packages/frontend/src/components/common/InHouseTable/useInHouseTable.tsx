@@ -495,5 +495,3 @@ export const useInHouseTable = <TData extends RowData>(
 
     return table;
 };
-
-export const useMantineReactTable = useInHouseTable;

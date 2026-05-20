@@ -969,5 +969,3 @@ export const InHouseTable = <TData extends RowData>({
         </Paper>
     );
 };
-
-export const MantineReactTable = InHouseTable;
