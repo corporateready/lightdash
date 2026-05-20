@@ -27,6 +27,7 @@ import LoomTile from '../components/DashboardTiles/DashboardLoomTile';
 import MarkdownTile from '../components/DashboardTiles/DashboardMarkdownTile';
 import SqlChartTile from '../components/DashboardTiles/DashboardSqlChartTile';
 import MinimalDashboardTabs from '../components/MinimalDashboardTabs';
+import { MobileFilterDrawer } from '../features/dashboardFilters/MobileFilterDrawer';
 import {
     getReactGridLayoutConfig,
     getResponsiveGridLayoutProps,
@@ -63,6 +64,7 @@ type MinimalDashboardContentProps = {
     canNavigateBetweenTabs: boolean;
     tabsWithUrls: TabWithUrls[];
     activeTab: DashboardTab | null;
+    showMobileFilters: boolean;
 };
 
 const renderDashboardTile = (tile: Dashboard['tiles'][number]) => {
@@ -145,6 +147,7 @@ const MinimalDashboardContent: FC<MinimalDashboardContentProps> = ({
     canNavigateBetweenTabs,
     tabsWithUrls,
     activeTab,
+    showMobileFilters,
 }) => {
     const dashboard = useDashboardContext((c) => c.dashboard);
     const isDashboardLoading = useDashboardContext((c) => c.isDashboardLoading);
@@ -257,6 +260,10 @@ const MinimalDashboardContent: FC<MinimalDashboardContentProps> = ({
                     tilesReady={screenshotReadyTilesCount}
                     tilesErrored={screenshotErroredTilesCount}
                 />
+            )}
+
+            {showMobileFilters && (
+                <MobileFilterDrawer activeTabUuid={activeTab?.uuid} />
             )}
         </>
     );
@@ -530,6 +537,7 @@ const MinimalDashboard: FC = () => {
                 canNavigateBetweenTabs={canNavigateBetweenTabs}
                 tabsWithUrls={tabsWithUrls}
                 activeTab={activeTab}
+                showMobileFilters={!schedulerUuid}
             />
         </DashboardProvider>
     );
