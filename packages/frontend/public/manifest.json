@@ -1,7 +1,13 @@
 {
-  "short_name": "lightdash",
-  "name": "lightdash",
+  "short_name": "ENSO",
+  "name": "ENSO Analytics",
   "icons": [
+    {
+      "src": "favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
     {
       "src": "favicon-16x16.png",
       "sizes": "16x16",
@@ -9,13 +15,8 @@
     },
     {
       "src": "favicon-32x32.png",
-      "sizes": "64x64 32x32",
+      "sizes": "32x32",
       "type": "image/png"
-    },
-    {
-      "src": "favicon.ico",
-      "sizes": "24x24",
-      "type": "image/x-icon"
     },
     {
       "src": "apple-touch-icon.png",
@@ -25,6 +26,6 @@
   ],
   "start_url": ".",
   "display": "standalone",
-  "theme_color": "#0E5A8A",
+  "theme_color": "#000000",
   "background_color": "#ffffff"
 }
