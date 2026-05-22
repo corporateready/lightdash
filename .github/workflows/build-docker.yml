@@ -49,4 +49,4 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           npm i -g @railway/cli
-          railway redeploy --service lightdash-mobile --yes
+          railway redeploy --service lightdash --yes
