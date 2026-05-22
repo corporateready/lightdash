@@ -1,0 +1,11 @@
+/* iOS Safari auto-zooms into form controls when their font-size is
+   below 16px, and never zooms back out. Bump form controls to 16px on
+   small viewports to suppress the zoom entirely. Scoped behind a
+   media query so desktop typography is untouched. */
+@media (max-width: 768px) {
+    :global(input:not([type='checkbox']):not([type='radio']):not([type='range'])),
+    :global(textarea),
+    :global(select) {
+        font-size: 16px !important;
+    }
+}

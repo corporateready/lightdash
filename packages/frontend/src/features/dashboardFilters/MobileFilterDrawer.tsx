@@ -12,6 +12,7 @@ import { type FC } from 'react';
 import MantineIcon from '../../components/common/MantineIcon';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import DashboardFilters from './index';
+import './mobileFilters.module.css';
 
 type Props = {
     activeTabUuid: string | undefined;
