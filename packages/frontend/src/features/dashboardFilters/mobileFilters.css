@@ -1,0 +1,14 @@
+/* iOS Safari auto-zooms into form controls when their computed
+   font-size is below 16px, and never zooms back out. Bumping form
+   controls to 16px on small viewports suppresses the zoom entirely.
+   Scoped behind a media query so desktop typography is untouched.
+
+   Filter inputs render via Mantine portals, so the selectors must be
+   global (not module-scoped) to reach the popover content. */
+@media (max-width: 768px) {
+    input:not([type='checkbox']):not([type='radio']):not([type='range']),
+    textarea,
+    select {
+        font-size: 16px !important;
+    }
+}
