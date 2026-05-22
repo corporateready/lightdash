@@ -1,16 +1,20 @@
 import {
     ActionIcon,
+    Divider,
     Drawer,
     Group,
     Indicator,
     ScrollArea,
+    Stack,
     Text,
 } from '@mantine-8/core';
 import { useDisclosure } from '@mantine-8/hooks';
 import { IconFilter } from '@tabler/icons-react';
 import { type FC } from 'react';
 import MantineIcon from '../../components/common/MantineIcon';
+import { DashboardRefreshButton } from '../../components/common/Dashboard/DashboardRefreshButton';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
+import { DateZoom } from '../dateZoom';
 import DashboardFilters from './index';
 import './mobileFilters.css';
 
@@ -62,12 +66,21 @@ export const MobileFilterDrawer: FC<Props> = ({ activeTabUuid }) => {
                 scrollAreaComponent={ScrollArea.Autosize}
                 styles={{ body: { paddingBottom: 24 } }}
             >
-                <Group align="flex-start" gap="xs" wrap="wrap">
-                    <DashboardFilters
-                        isEditMode={false}
-                        activeTabUuid={activeTabUuid}
-                    />
-                </Group>
+                <Stack gap="md">
+                    <Group gap="xs" wrap="wrap">
+                        <DashboardRefreshButton onIntervalChange={() => {}} />
+                        <DateZoom isEditMode={false} />
+                    </Group>
+
+                    <Divider />
+
+                    <Group align="flex-start" gap="xs" wrap="wrap">
+                        <DashboardFilters
+                            isEditMode={false}
+                            activeTabUuid={activeTabUuid}
+                        />
+                    </Group>
+                </Stack>
             </Drawer>
         </>
     );
