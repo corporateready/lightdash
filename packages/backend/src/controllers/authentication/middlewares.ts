@@ -445,6 +445,13 @@ export const allowApiKeyAuthentication: RequestHandler = (req, res, next) => {
                 next();
                 return;
             }
+            // With no API key passport would end the response with a
+            // plain-text 401, which the frontend reads as "unable to reach
+            // the server". Reject with Lightdash's JSON error instead.
+            if (!req.headers.authorization?.startsWith('ApiKey ')) {
+                next(new AuthorizationError(`Failed to authorize user`));
+                return;
+            }
             if (!lightdashConfig.auth.pat.enabled) {
                 throw new AuthorizationError(
                     'Personal access tokens are disabled',
