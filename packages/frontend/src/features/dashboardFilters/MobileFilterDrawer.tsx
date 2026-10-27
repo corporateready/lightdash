@@ -7,16 +7,15 @@ import {
     ScrollArea,
     Stack,
     Text,
-} from '@mantine-8/core';
-import { useDisclosure } from '@mantine-8/hooks';
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import { IconFilter } from '@tabler/icons-react';
 import { type FC } from 'react';
-import MantineIcon from '../../components/common/MantineIcon';
 import { DashboardRefreshButton } from '../../components/common/Dashboard/DashboardRefreshButton';
-import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
+import MantineIcon from '../../components/common/MantineIcon';
+import { useDashboardAllFilters } from '../dashboard/store';
 import { DateZoom } from '../dateZoom';
 import DashboardFilters from './index';
-import './mobileFilters.css';
 
 type Props = {
     activeTabUuid: string | undefined;
@@ -25,7 +24,7 @@ type Props = {
 export const MobileFilterDrawer: FC<Props> = ({ activeTabUuid }) => {
     const [opened, { open, close }] = useDisclosure(false);
 
-    const allFilters = useDashboardContext((c) => c.allFilters);
+    const allFilters = useDashboardAllFilters();
     const activeCount =
         allFilters.dimensions.length +
         allFilters.metrics.length +

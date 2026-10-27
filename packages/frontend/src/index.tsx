@@ -39,6 +39,9 @@ import '@mantine/code-highlight/styles.css';
 import '@mantine/notifications/styles.css';
 import '@mantine/tiptap/styles.css';
 import './styles/global.css';
+// Phones now use the regular dashboard routes, so the iOS no-zoom rule is
+// loaded app-wide rather than with the minimal page's filter drawer
+import './features/dashboardFilters/mobileFilters.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';

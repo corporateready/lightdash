@@ -39,12 +39,12 @@ import LoomTile from '../components/DashboardTiles/DashboardLoomTile';
 import MarkdownTile from '../components/DashboardTiles/DashboardMarkdownTile';
 import SqlChartTile from '../components/DashboardTiles/DashboardSqlChartTile';
 import MinimalDashboardTabs from '../components/MinimalDashboardTabs';
-import { MobileFilterDrawer } from '../features/dashboardFilters/MobileFilterDrawer';
 import {
     selectDashboardTiles,
     useDashboardSelector,
     useScreenshotReadiness,
 } from '../features/dashboard/store';
+import { MobileFilterDrawer } from '../features/dashboardFilters/MobileFilterDrawer';
 import {
     getReactGridLayoutConfig,
     getResponsiveGridLayoutProps,
