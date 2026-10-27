@@ -5,19 +5,27 @@ import {
     SessionAccount,
 } from '@lightdash/common';
 import { LightdashAnalytics } from '../../../analytics/LightdashAnalytics';
-import { lightdashConfigMock } from '../../../config/lightdashConfig.mock';
+import {
+    lightdashConfigMock,
+    lightdashConfigWithAppRuntimeMock,
+} from '../../../config/lightdashConfig.mock';
+import { AppModel } from '../../../models/AppModel';
 import { DashboardModel } from '../../../models/DashboardModel/DashboardModel';
 import { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
 import { OrganizationModel } from '../../../models/OrganizationModel';
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { SavedChartModel } from '../../../models/SavedChartModel';
 import { SavedSqlModel } from '../../../models/SavedSqlModel';
+import { SpaceModel } from '../../../models/SpaceModel';
 import { UserAttributesModel } from '../../../models/UserAttributesModel';
+import { UserModel } from '../../../models/UserModel';
 import { AsyncQueryService } from '../../../services/AsyncQueryService/AsyncQueryService';
 import { PermissionsService } from '../../../services/PermissionsService/PermissionsService';
 import { ProjectService } from '../../../services/ProjectService/ProjectService';
+import { SpacePermissionService } from '../../../services/SpaceService/SpacePermissionService';
 import { EncryptionUtil } from '../../../utils/EncryptionUtil/EncryptionUtil';
 import { EmbedModel } from '../../models/EmbedModel';
+import { ExternalConnectionModel } from '../../models/ExternalConnectionModel';
 import { EmbedService } from './EmbedService';
 
 export const mockProjectUuid = 'project-123';
@@ -44,6 +52,8 @@ export const mockAccountWithPermission: SessionAccount = {
         lastName: 'User',
         isTrackingAnonymized: false,
         isMarketingOptedIn: false,
+        avatarUrl: null,
+        avatarGradient: null,
         timezone: null,
         isSetupComplete: true,
         userId: 1,
@@ -56,14 +66,14 @@ export const mockAccountWithPermission: SessionAccount = {
             { subject: 'Project', action: ['update', 'view'] },
         ]),
     },
-    isAuthenticated: jest.fn().mockReturnValue(true),
-    isRegisteredUser: jest.fn().mockReturnValue(true),
-    isAnonymousUser: jest.fn().mockReturnValue(false),
-    isSessionUser: jest.fn().mockReturnValue(true),
-    isJwtUser: jest.fn().mockReturnValue(false),
-    isServiceAccount: jest.fn().mockReturnValue(false),
-    isPatUser: jest.fn().mockReturnValue(false),
-    isOauthUser: jest.fn().mockReturnValue(false),
+    isAuthenticated: vi.fn().mockReturnValue(true),
+    isRegisteredUser: vi.fn().mockReturnValue(true),
+    isAnonymousUser: vi.fn().mockReturnValue(false),
+    isSessionUser: vi.fn().mockReturnValue(true),
+    isJwtUser: vi.fn().mockReturnValue(false),
+    isServiceAccount: vi.fn().mockReturnValue(false),
+    isPatUser: vi.fn().mockReturnValue(false),
+    isOauthUser: vi.fn().mockReturnValue(false),
 };
 
 // Mock account without permission
@@ -78,7 +88,7 @@ export const mockAccountWithoutPermission: SessionAccount = {
 
 // Only mock what updateConfig actually uses
 const projectModelMock = {
-    getSummary: jest.fn().mockResolvedValue({
+    getSummary: vi.fn().mockResolvedValue({
         projectUuid: mockProjectUuid,
         organizationUuid: mockOrganizationUuid,
         name: 'Test Project',
@@ -86,18 +96,18 @@ const projectModelMock = {
 } as unknown as ProjectModel;
 
 const featureFlagModelMock = {
-    get: jest.fn().mockResolvedValue({ enabled: true }),
+    get: vi.fn().mockResolvedValue({ enabled: true }),
 } as unknown as FeatureFlagModel;
 
 const organizationModelMock = {
-    get: jest.fn().mockResolvedValue({
+    get: vi.fn().mockResolvedValue({
         organizationUuid: mockOrganizationUuid,
         name: 'Test Org',
     }),
 } as unknown as OrganizationModel;
 
 const embedModelMock = {
-    updateConfig: jest.fn().mockResolvedValue(undefined),
+    updateConfig: vi.fn().mockResolvedValue(undefined),
 } as unknown as EmbedModel;
 
 // Constructor dependencies - minimal mocks since updateConfig doesn't use them
@@ -108,14 +118,28 @@ export const EmbedServiceArgumentsMock: ConstructorParameters<
     analytics: {} as LightdashAnalytics,
     encryptionUtil: {} as EncryptionUtil,
     embedModel: embedModelMock,
+    appModel: {} as AppModel,
     dashboardModel: {} as DashboardModel,
     savedChartModel: {} as SavedChartModel,
     savedSqlModel: {} as SavedSqlModel,
+    spaceModel: {
+        getSpaceNames: async (spaceUuids: string[]) =>
+            spaceUuids.map((uuid) => ({ uuid, name: uuid })),
+    } as unknown as SpaceModel,
     projectModel: projectModelMock,
     userAttributesModel: {} as UserAttributesModel,
+    userModel: {} as UserModel,
     projectService: {} as ProjectService,
+    spacePermissionService: {} as SpacePermissionService,
     asyncQueryService: {} as AsyncQueryService,
     permissionsService: {} as PermissionsService,
     featureFlagModel: featureFlagModelMock,
     organizationModel: organizationModelMock,
+    externalConnectionModel: {} as ExternalConnectionModel,
 };
+
+/** The mock config with or without a configured app runtime, which decides Chart Studio. */
+export const embedLightdashConfigMock = (chartStudioAvailable: boolean) =>
+    chartStudioAvailable
+        ? lightdashConfigWithAppRuntimeMock
+        : EmbedServiceArgumentsMock.lightdashConfig;

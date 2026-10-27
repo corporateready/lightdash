@@ -1,65 +1,110 @@
-import { Transition } from '@mantine-8/core';
-import { useMediaQuery } from '@mantine-8/hooks';
-import { useEffect, useRef, type FC } from 'react';
-import { useLocation, useMatches } from 'react-router';
+import { Box, Transition } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
+import { useEffect, useMemo, useRef, type FC } from 'react';
 import { useActiveProjectUuid } from '../../../../../hooks/useActiveProject';
 import { useAiAgentButtonVisibility } from '../../hooks/useAiAgentsButtonVisibility';
-import { resetActivePanel } from '../../store/aiAgentLauncherSlice';
+import {
+    resetActivePanel,
+    setActiveAgent,
+} from '../../store/aiAgentLauncherSlice';
+import {
+    selectDataAppPreview,
+    selectDocumentPreview,
+    selectSavedChartPreview,
+} from '../../store/aiArtifactSlice';
 import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
 } from '../../store/hooks';
+import { AiDataAppPreviewPanel } from '../ChatElements/AiDataAppPreviewPanel';
+import { AiDocumentPreviewPanel } from '../ChatElements/AiDocumentPreviewPanel';
+import { AiSavedChartPreviewPanel } from '../ChatElements/AiSavedChartPreviewPanel';
 import styles from './AiAgentsLauncher.module.css';
+import { AiAgentsLauncherPortal } from './AiAgentsLauncherPortal';
+import {
+    getLauncherAgentUuid,
+    getLauncherPanelAgent,
+    isLauncherAgentAvailable,
+} from './launcherAgentSelection';
+import { useLauncherAnalysisAdapter } from './launcherAnalysisAdapter';
+import { LauncherAnalysisPanel } from './LauncherAnalysisPanel';
 import { LauncherDock } from './LauncherDock';
 import { LauncherPanel } from './LauncherPanel';
-import { launcherSession } from './launcherSession';
+import { LauncherPanelSizeContext } from './LauncherPanelSizeContext';
+import {
+    shouldRenderAiAgentsLauncher,
+    shouldRenderAiAgentsLauncherContent,
+} from './launcherVisibility';
 import { useDefaultAiAgent } from './useDefaultAiAgent';
+import { useIsLauncherHidden } from './useIsLauncherHidden';
 import { useLauncherDock } from './useLauncherDock';
-
-// Routes opt out of the launcher by setting `handle: { hideAILauncher: true }`
-// on their RouteObject; the flag is inherited by all child routes.
-const useIsLauncherHidden = () => {
-    const matches = useMatches();
-    return matches.some(
-        (m) =>
-            (m.handle as { hideAILauncher?: boolean } | undefined)
-                ?.hideAILauncher,
-    );
-};
+import { useLauncherPanelSize } from './useLauncherPanelSize';
 
 export const AiAgentsLauncher: FC = () => {
-    const { pathname, search } = useLocation();
     const isMobile = useMediaQuery('(max-width: 768px)');
     const isHidden = useIsLauncherHidden();
 
-    useEffect(() => {
-        if (isHidden) return;
-        launcherSession.rememberLastNonAgentUrl(`${pathname}${search}`);
-        // Non-agent routes are the restore target. Clear the expanded marker
-        // so direct fullscreen visits don't show Minimize.
-        launcherSession.clearExpandedFromBubble();
-    }, [isHidden, pathname, search]);
-
-    if (isMobile || isHidden) return null;
-    return <AiAgentsLauncherInner />;
+    return (
+        <AiAgentsLauncherPortal>
+            {(isModalHosted) =>
+                shouldRenderAiAgentsLauncher({
+                    isHidden,
+                    isMobile,
+                    isModalHosted,
+                }) ? (
+                    <AiAgentsLauncherInner isModalHosted={isModalHosted} />
+                ) : null
+            }
+        </AiAgentsLauncherPortal>
+    );
 };
 
-const AiAgentsLauncherInner: FC = () => {
+const AiAgentsLauncherInner: FC<{ isModalHosted: boolean }> = ({
+    isModalHosted,
+}) => {
     const { activeProjectUuid } = useActiveProjectUuid();
 
     const isAiAgentEnabled = useAiAgentButtonVisibility();
 
-    const { agents } = useDefaultAiAgent(activeProjectUuid);
+    const {
+        agents: cachedAgents,
+        agentsUpdatedAt: cachedAgentsUpdatedAt,
+        selectedAgent: cachedSelectedAgent,
+        isResolving,
+    } = useDefaultAiAgent(activeProjectUuid);
+    // The analysis controller fills the shared agents cache even when the org
+    // hides the chat surface, so chat gates on the setting, never the cache.
+    const agents = useMemo(
+        () => (isAiAgentEnabled ? cachedAgents : []),
+        [cachedAgents, isAiAgentEnabled],
+    );
+    const agentsUpdatedAt = isAiAgentEnabled ? cachedAgentsUpdatedAt : 0;
+    const selectedAgent = isAiAgentEnabled ? cachedSelectedAgent : null;
 
     const dispatch = useAiAgentStoreDispatch();
     const mode = useAiAgentStoreSelector((state) => state.aiAgentLauncher.mode);
+    const view = useAiAgentStoreSelector((state) => state.aiAgentLauncher.view);
+    const analysisAdapter = useLauncherAnalysisAdapter(activeProjectUuid);
     const activeThreadId = useAiAgentStoreSelector(
         (state) => state.aiAgentLauncher.activeThreadId,
     );
     const activeAgentUuid = useAiAgentStoreSelector(
         (state) => state.aiAgentLauncher.activeAgentUuid,
     );
+    const savedChartPreview = useAiAgentStoreSelector(selectSavedChartPreview);
+    const dataAppPreview = useAiAgentStoreSelector(selectDataAppPreview);
+    const documentPreview = useAiAgentStoreSelector(selectDocumentPreview);
+    const currentDashboard = useAiAgentStoreSelector(
+        (state) => state.aiAgentLauncher.currentDashboard,
+    );
+    const currentDataApp = useAiAgentStoreSelector(
+        (state) => state.aiAgentLauncher.currentDataApp,
+    );
+    const currentDocument = useAiAgentStoreSelector(
+        (state) => state.aiAgentLauncher.currentDocument,
+    );
     const { dock } = useLauncherDock(activeProjectUuid);
+    const panelSize = useLauncherPanelSize();
 
     const prevProjectUuidRef = useRef(activeProjectUuid);
     useEffect(() => {
@@ -76,19 +121,53 @@ const AiAgentsLauncherInner: FC = () => {
     // current project, e.g. after a project change while the launcher was hidden.
     useEffect(() => {
         if (!activeAgentUuid || agents.length === 0) return;
-        if (!agents.some((a) => a.uuid === activeAgentUuid)) {
+        if (
+            !isLauncherAgentAvailable({
+                activeAgentUuid,
+                agents,
+                selectedAgent,
+            })
+        ) {
             dispatch(resetActivePanel());
         }
-    }, [activeAgentUuid, agents, dispatch]);
+    }, [activeAgentUuid, agents, dispatch, selectedAgent]);
 
+    useEffect(() => {
+        if (
+            mode !== 'panel-open' ||
+            activeAgentUuid !== null ||
+            activeThreadId !== null ||
+            isResolving ||
+            !selectedAgent
+        ) {
+            return;
+        }
+        const resolvedAgentUuid = getLauncherAgentUuid(selectedAgent);
+        if (resolvedAgentUuid) {
+            dispatch(setActiveAgent(resolvedAgentUuid));
+        }
+    }, [
+        mode,
+        activeAgentUuid,
+        activeThreadId,
+        isResolving,
+        selectedAgent,
+        dispatch,
+    ]);
+
+    // A registered analysis adapter grants access on its own: detection is
+    // agentless, so viewers without any accessible agent still get analysis.
     const isAllowed =
-        Boolean(activeProjectUuid) && isAiAgentEnabled && agents.length > 0;
+        Boolean(activeProjectUuid) &&
+        ((isAiAgentEnabled && agents.length > 0) || analysisAdapter !== null);
 
     // Only mount the panel when the active agent/thread belongs to this project;
     // mounting an existing-thread panel starts the thread query.
-    const activeAgentBelongsToProject =
-        activeAgentUuid !== null &&
-        agents.some((a) => a.uuid === activeAgentUuid);
+    const activeAgentBelongsToProject = isLauncherAgentAvailable({
+        activeAgentUuid,
+        agents,
+        selectedAgent,
+    });
     const activeThreadBelongsToProject =
         activeThreadId !== null &&
         dock.some((item) => item.threadId === activeThreadId);
@@ -101,37 +180,192 @@ const AiAgentsLauncherInner: FC = () => {
             : activeThreadBelongsToProject && activeAgentBelongsToProject
               ? activeThreadId
               : null;
-    const isPanelOpenSafe =
+    const isChatPanelOpen =
         mode === 'panel-open' &&
+        view === 'chat' &&
         (safeActiveThreadId !== null || safeActiveAgentUuid !== null);
+    const isAnalysisPanelOpen =
+        mode === 'panel-open' &&
+        view === 'analysis' &&
+        analysisAdapter !== null;
+    const isPanelOpenSafe = isChatPanelOpen || isAnalysisPanelOpen;
+    // A preview renders only where its thread is on screen.
+    const activeSavedChartPreview =
+        savedChartPreview !== null &&
+        savedChartPreview.projectUuid === activeProjectUuid &&
+        savedChartPreview.threadUuid === safeActiveThreadId
+            ? savedChartPreview
+            : null;
+    const lastSavedChartPreviewRef = useRef(activeSavedChartPreview);
+    if (activeSavedChartPreview) {
+        lastSavedChartPreviewRef.current = activeSavedChartPreview;
+    }
+    const transitionSavedChartPreview =
+        activeSavedChartPreview ?? lastSavedChartPreviewRef.current;
+    const activeDataAppPreview =
+        dataAppPreview !== null &&
+        dataAppPreview.projectUuid === activeProjectUuid &&
+        dataAppPreview.threadUuid === safeActiveThreadId
+            ? dataAppPreview
+            : null;
+    const lastDataAppPreviewRef = useRef(activeDataAppPreview);
+    if (activeDataAppPreview) {
+        lastDataAppPreviewRef.current = activeDataAppPreview;
+    }
+    const transitionDataAppPreview =
+        activeDataAppPreview ?? lastDataAppPreviewRef.current;
+    const activeDocumentPreview =
+        documentPreview !== null &&
+        documentPreview.projectUuid === activeProjectUuid &&
+        documentPreview.threadUuid === safeActiveThreadId
+            ? documentPreview
+            : null;
+    const lastDocumentPreviewRef = useRef(activeDocumentPreview);
+    if (activeDocumentPreview) {
+        lastDocumentPreviewRef.current = activeDocumentPreview;
+    }
+    const transitionDocumentPreview =
+        activeDocumentPreview ?? lastDocumentPreviewRef.current;
+    // Keep the exiting analysis panel rendered while it slides away.
+    const lastAnalysisAdapterRef = useRef(analysisAdapter);
+    if (analysisAdapter) {
+        lastAnalysisAdapterRef.current = analysisAdapter;
+    }
+    const transitionAnalysisAdapter =
+        analysisAdapter ?? lastAnalysisAdapterRef.current;
+    const isContentPage =
+        currentDashboard?.projectUuid === activeProjectUuid ||
+        currentDataApp?.projectUuid === activeProjectUuid ||
+        currentDocument?.projectUuid === activeProjectUuid;
 
-    // The launcher has no persistent affordance: it appears only when the
-    // user opens a panel (via AskAiAgentMenuItem) or has active dock items.
-    if (!isAllowed || !activeProjectUuid) return null;
-    if (!isPanelOpenSafe && dock.length === 0) return null;
+    if (
+        !activeProjectUuid ||
+        !shouldRenderAiAgentsLauncherContent({
+            dockItemCount: dock.length,
+            hasAnalysisTab: analysisAdapter !== null,
+            hasSelectedAgent: !!selectedAgent,
+            isAllowed,
+            isContentPage,
+            isModalHosted,
+            isPanelOpen: isPanelOpenSafe,
+        })
+    ) {
+        return null;
+    }
 
-    const panelAgent =
-        agents.find((a) => a.uuid === safeActiveAgentUuid) ?? null;
+    const panelAgent = getLauncherPanelAgent(safeActiveAgentUuid, agents);
 
     return (
-        <div className={styles.root}>
-            <LauncherDock projectUuid={activeProjectUuid} agents={agents} />
+        <Box
+            ref={panelSize.rootRef}
+            className={styles.root}
+            __vars={panelSize.rootVars}
+        >
+            <LauncherDock
+                projectUuid={activeProjectUuid}
+                agents={agents}
+                agentsUpdatedAt={agentsUpdatedAt}
+                selectedAgent={selectedAgent}
+            />
+            {transitionSavedChartPreview && (
+                <Transition
+                    mounted={
+                        isChatPanelOpen && activeSavedChartPreview !== null
+                    }
+                    transition="slide-up"
+                    duration={180}
+                    timingFunction="ease"
+                >
+                    {(transitionStyle) => (
+                        <Box
+                            className={styles.previewPanel}
+                            style={transitionStyle}
+                        >
+                            <AiSavedChartPreviewPanel
+                                savedChartPreview={transitionSavedChartPreview}
+                            />
+                        </Box>
+                    )}
+                </Transition>
+            )}
+            {transitionDataAppPreview && (
+                <Transition
+                    mounted={isChatPanelOpen && activeDataAppPreview !== null}
+                    transition="slide-up"
+                    duration={180}
+                    timingFunction="ease"
+                >
+                    {(transitionStyle) => (
+                        <Box
+                            className={styles.previewPanel}
+                            style={transitionStyle}
+                        >
+                            <AiDataAppPreviewPanel
+                                dataAppPreview={transitionDataAppPreview}
+                                showInspector={false}
+                            />
+                        </Box>
+                    )}
+                </Transition>
+            )}
+            {transitionDocumentPreview && (
+                <Transition
+                    mounted={isChatPanelOpen && activeDocumentPreview !== null}
+                    transition="slide-up"
+                    duration={180}
+                    timingFunction="ease"
+                >
+                    {(transitionStyle) => (
+                        <Box
+                            className={styles.previewPanel}
+                            style={transitionStyle}
+                        >
+                            <AiDocumentPreviewPanel
+                                documentPreview={transitionDocumentPreview}
+                            />
+                        </Box>
+                    )}
+                </Transition>
+            )}
             <Transition
-                mounted={isPanelOpenSafe}
+                mounted={isChatPanelOpen}
                 transition="slide-up"
                 duration={180}
                 timingFunction="ease"
             >
                 {(transitionStyle) => (
-                    <LauncherPanel
-                        projectUuid={activeProjectUuid}
-                        agent={panelAgent}
-                        agents={agents}
-                        activeThreadId={safeActiveThreadId}
-                        style={transitionStyle}
-                    />
+                    <LauncherPanelSizeContext.Provider
+                        value={panelSize.context}
+                    >
+                        <LauncherPanel
+                            projectUuid={activeProjectUuid}
+                            agent={panelAgent}
+                            agents={agents}
+                            activeThreadId={safeActiveThreadId}
+                            style={transitionStyle}
+                        />
+                    </LauncherPanelSizeContext.Provider>
                 )}
             </Transition>
-        </div>
+            {transitionAnalysisAdapter && (
+                <Transition
+                    mounted={isAnalysisPanelOpen}
+                    transition="slide-up"
+                    duration={180}
+                    timingFunction="ease"
+                >
+                    {(transitionStyle) => (
+                        <LauncherPanelSizeContext.Provider
+                            value={panelSize.context}
+                        >
+                            <LauncherAnalysisPanel
+                                adapter={transitionAnalysisAdapter}
+                                style={transitionStyle}
+                            />
+                        </LauncherPanelSizeContext.Provider>
+                    )}
+                </Transition>
+            )}
+        </Box>
     );
 };

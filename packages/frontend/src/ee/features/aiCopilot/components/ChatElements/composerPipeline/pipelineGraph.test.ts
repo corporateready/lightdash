@@ -1,0 +1,193 @@
+import { QuerySourceType, type SourceQuery } from '@lightdash/common';
+import { describe, expect, it } from 'vitest';
+import { groupPipeline } from './groupPipeline';
+import {
+    layoutPipelineFlow,
+    toPipelineFlow,
+    type PipelineFlowNode,
+} from './pipelineGraph';
+
+const sql = (nodeId: string, title: string): SourceQuery => ({
+    sourceType: QuerySourceType.SQL,
+    nodeId,
+    title,
+    sql: 'select 1',
+});
+
+const duckdb = (
+    nodeId: string,
+    title: string,
+    references: string[] | Record<string, string>,
+): SourceQuery => ({
+    sourceType: QuerySourceType.DUCKDB,
+    nodeId,
+    title,
+    sql: 'select 1',
+    references,
+});
+
+const measured = (nodes: PipelineFlowNode[]) =>
+    nodes.map((node) => ({ ...node, measured: { width: 160, height: 40 } }));
+
+const noDisplay = {
+    displayedNodeId: '',
+    displayableNodeIds: new Set<string>(),
+};
+
+const xOf = (nodes: PipelineFlowNode[], id: string) =>
+    nodes.find((node) => node.id === id)!.position.x;
+
+describe('toPipelineFlow', () => {
+    it('labels python nodes and draws edges into and out of them', () => {
+        const { nodes, edges } = toPipelineFlow(
+            groupPipeline(
+                [
+                    sql('orders', 'Orders by status'),
+                    {
+                        sourceType: QuerySourceType.PYTHON,
+                        nodeId: 'sim',
+                        title: 'Simulation',
+                        code: 'def run(inputs, params):\n    return inputs["orders"]',
+                        references: ['orders'],
+                    },
+                    duckdb('summary', 'Summary', ['sim']),
+                ],
+                'summary',
+            ),
+            noDisplay,
+        );
+        expect(nodes.map((node) => [node.id, node.data.typeLabel])).toEqual([
+            ['orders', 'Warehouse SQL'],
+            ['sim', 'Python'],
+            ['summary', 'DuckDB'],
+        ]);
+        expect(edges.map((edge) => edge.id)).toEqual([
+            'orders->sim',
+            'sim->summary',
+        ]);
+    });
+
+    it('makes one node per pipeline node with source and terminal flags', () => {
+        const { nodes } = toPipelineFlow(
+            groupPipeline(
+                [
+                    sql('orders', 'Orders by status'),
+                    duckdb('joined', 'Orders with amounts', ['orders']),
+                ],
+                'joined',
+            ),
+            noDisplay,
+        );
+        expect(nodes.map((node) => node.data)).toEqual([
+            {
+                title: 'Orders by status',
+                typeLabel: 'Warehouse SQL',
+                isTerminal: false,
+                isDisplayed: false,
+                isDisplayable: false,
+            },
+            {
+                title: 'Orders with amounts',
+                typeLabel: 'DuckDB',
+                isTerminal: true,
+                isDisplayed: false,
+                isDisplayable: false,
+            },
+        ]);
+    });
+
+    it('marks the displayed node and the nodes with a stored result', () => {
+        const { nodes } = toPipelineFlow(
+            groupPipeline(
+                [
+                    sql('orders', 'Orders by status'),
+                    duckdb('joined', 'Orders with amounts', ['orders']),
+                ],
+                'joined',
+            ),
+            {
+                displayedNodeId: 'orders',
+                displayableNodeIds: new Set(['orders']),
+            },
+        );
+        expect(
+            nodes.map(({ id, data }) => [
+                id,
+                data.isDisplayed,
+                data.isDisplayable,
+            ]),
+        ).toEqual([
+            ['orders', true, true],
+            ['joined', false, false],
+        ]);
+    });
+
+    it('makes one edge per read, from the read node to the reader', () => {
+        const { edges } = toPipelineFlow(
+            groupPipeline(
+                [
+                    sql('a', 'A'),
+                    sql('b', 'B'),
+                    duckdb('ab', 'AB', ['a', 'b']),
+                    duckdb('final', 'Final', ['ab', 'missing']),
+                ],
+                'final',
+            ),
+            noDisplay,
+        );
+        expect(edges.map((edge) => [edge.source, edge.target])).toEqual([
+            ['a', 'ab'],
+            ['b', 'ab'],
+            ['ab', 'final'],
+        ]);
+    });
+
+    it('returns empty arrays for an empty pipeline', () => {
+        expect(toPipelineFlow([], noDisplay)).toEqual({ nodes: [], edges: [] });
+        expect(layoutPipelineFlow([], [])).toEqual([]);
+    });
+});
+
+describe('layoutPipelineFlow', () => {
+    it('flows left to right, reads before readers', () => {
+        const { nodes, edges } = toPipelineFlow(
+            groupPipeline(
+                [
+                    sql('a', 'A'),
+                    duckdb('ab', 'AB', ['a']),
+                    duckdb('final', 'Final', ['ab']),
+                ],
+                'final',
+            ),
+            noDisplay,
+        );
+        const laidOut = layoutPipelineFlow(measured(nodes), edges);
+        expect(xOf(laidOut, 'a')).toBeLessThan(xOf(laidOut, 'ab'));
+        expect(xOf(laidOut, 'ab')).toBeLessThan(xOf(laidOut, 'final'));
+        expect(laidOut.every((node) => Number.isFinite(node.position.y))).toBe(
+            true,
+        );
+    });
+
+    it('puts the terminal furthest right in a multi-sink pipeline', () => {
+        const { nodes, edges } = toPipelineFlow(
+            groupPipeline(
+                [
+                    sql('a', 'A'),
+                    duckdb('x', 'X', ['a']),
+                    duckdb('y', 'Y', ['x']),
+                    duckdb('z', 'Z', ['a']),
+                ],
+                'x',
+            ),
+            noDisplay,
+        );
+        const laidOut = layoutPipelineFlow(measured(nodes), edges);
+        const terminalX = xOf(laidOut, 'x');
+        ['a', 'y', 'z'].forEach((id) =>
+            expect(xOf(laidOut, id)).toBeLessThan(terminalX),
+        );
+        // y reads the terminal, so it sits just before it rather than at rank 0
+        expect(xOf(laidOut, 'y')).toBeGreaterThan(xOf(laidOut, 'a'));
+    });
+});

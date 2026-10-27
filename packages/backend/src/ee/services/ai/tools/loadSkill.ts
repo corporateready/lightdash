@@ -1,33 +1,9 @@
+import { loadSkillToolDefinition } from '@lightdash/common';
 import { tool } from 'ai';
-import { z } from 'zod';
+import type { AiAgentSkill } from '../skills/types';
 import { LoadAgentSkillFn } from '../types/aiAgentDependencies';
 import { toModelOutput } from '../utils/toModelOutput';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
-
-const toolLoadSkillArgsSchema = z
-    .object({
-        name: z
-            .string()
-            .min(1)
-            .describe('Exact name of the built-in skill to load.'),
-        resourceName: z
-            .string()
-            .min(1)
-            .nullable()
-            .describe(
-                'Optional sub-resource file name to load from the skill. You can find names of sub-resources by first loading the skill without this parameter.',
-            ),
-    })
-    .describe(
-        "Load a built-in skill by name, One of it's sub-resources. Always start by loading the skill itself and then load resources on demand",
-    );
-
-const toolLoadSkillOutputSchema = z.object({
-    result: z.string(),
-    metadata: z.object({
-        status: z.enum(['success', 'error']),
-    }),
-});
+import { toolErrorOutput } from '../utils/toolErrorHandler';
 
 const formatResourceList = (
     resources: Array<{ name: string; description: string }>,
@@ -38,20 +14,41 @@ const formatResourceList = (
               .join('\n')
         : '- No resources available for this skill.';
 
+/** The tool result text for a whole skill; the slash-command path writes the same text. */
+export const formatSkillResult = (
+    skill: Pick<AiAgentSkill, 'name' | 'body' | 'resources'>,
+): string => `# Skill: ${skill.name}
+
+${skill.body.trim()}
+
+## Available Resources
+
+${formatResourceList(
+    skill.resources?.map((resource) => ({
+        name: resource.name,
+        description: resource.description,
+    })) ?? [],
+)}`;
+
+const toolDefinition = loadSkillToolDefinition.for('agent');
+
 export const getLoadSkill = ({ loadSkill }: { loadSkill: LoadAgentSkillFn }) =>
     tool({
-        description: toolLoadSkillArgsSchema.description,
-        inputSchema: toolLoadSkillArgsSchema,
-        outputSchema: toolLoadSkillOutputSchema,
-        execute: async ({ name, resourceName }) => {
+        ...toolDefinition,
+        execute: async ({ name, resourceName, arguments: argumentsText }) => {
             try {
-                const skill = await loadSkill(name);
+                const skill = await loadSkill(name, {
+                    arguments: argumentsText ?? null,
+                });
 
                 if (!skill) {
                     return {
                         result: `Skill "${name}" was not found.`,
                         metadata: {
                             status: 'error' as const,
+                        },
+                        structuredContent: {
+                            error: `Skill "${name}" was not found.`,
                         },
                     };
                 }
@@ -64,8 +61,9 @@ export const getLoadSkill = ({ loadSkill }: { loadSkill: LoadAgentSkillFn }) =>
                     );
 
                     if (!resource) {
-                        return {
-                            result: `Resource "${resourceName}" was not found for skill "${skill.name}".
+                        // One string, two views: the structured error must
+                        // carry exactly what the text tells the model.
+                        const result = `Resource "${resourceName}" was not found for skill "${skill.name}".
 
 Available resources:
 ${formatResourceList(
@@ -73,10 +71,13 @@ ${formatResourceList(
         name: item.name,
         description: item.description,
     })) ?? [],
-)}`,
+)}`;
+                        return {
+                            result,
                             metadata: {
                                 status: 'error' as const,
                             },
+                            structuredContent: { error: result },
                         };
                     }
 
@@ -88,34 +89,38 @@ Skill: ${skill.name}
 ${resource.content.trim()}`,
                         metadata: {
                             status: 'success' as const,
+                            skill: skill.metadata,
+                        },
+                        structuredContent: {
+                            kind: 'resource',
+                            skill: skill.name,
+                            resource: {
+                                name: resource.name,
+                                content: resource.content.trim(),
+                            },
                         },
                     };
                 }
 
                 return {
-                    result: `# Skill: ${skill.name}
-
-${skill.body.trim()}
-
-## Available Resources
-
-${formatResourceList(
-    skill.resources?.map((resource) => ({
-        name: resource.name,
-        description: resource.description,
-    })) ?? [],
-)}`,
+                    result: formatSkillResult(skill),
                     metadata: {
                         status: 'success' as const,
+                        skill: skill.metadata,
+                    },
+                    structuredContent: {
+                        kind: 'skill',
+                        skill: skill.name,
+                        body: skill.body.trim(),
+                        resources:
+                            skill.resources?.map((item) => ({
+                                name: item.name,
+                                description: item.description,
+                            })) ?? [],
                     },
                 };
             } catch (error) {
-                return {
-                    result: toolErrorHandler(error, 'Error loading skill'),
-                    metadata: {
-                        status: 'error' as const,
-                    },
-                };
+                return toolErrorOutput(error, 'Error loading skill');
             }
         },
         toModelOutput: ({ output }) => toModelOutput(output),

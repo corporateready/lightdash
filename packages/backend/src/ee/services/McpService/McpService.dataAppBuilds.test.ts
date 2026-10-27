@@ -1,0 +1,1252 @@
+import {
+    APP_VERSION_CANCELLED_BY_USER,
+    DATA_APP_VIZ_TEMPLATE,
+    DimensionType,
+    FieldType,
+    NotFoundError,
+    ParameterError,
+    QueryExecutionContext,
+    QueryHistoryStatus,
+} from '@lightdash/common';
+import { McpService, McpToolName } from './McpService';
+import { makeMcpServerOptions } from './McpService.mock';
+
+type RegisteredToolCallback = (
+    args: Record<string, unknown>,
+    extra: Record<string, unknown>,
+) => Promise<Record<string, unknown>>;
+
+const mockRegisteredMcpTools = new Map<string, RegisteredToolCallback>();
+const mockRegisteredToolNames: string[] = [];
+
+vi.mock('@sentry/node', () => ({
+    captureException: vi.fn(),
+    addBreadcrumb: vi.fn(),
+    getActiveSpan: () => undefined,
+    isEnabled: () => false,
+    wrapMcpServerWithSentry: (server: unknown) => server,
+}));
+
+vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => ({
+    McpServer: vi.fn().mockImplementation(
+        // eslint-disable-next-line prefer-arrow-callback
+        function MockMcpServer() {
+            return {
+                server: {
+                    registerCapabilities: vi.fn(),
+                    setRequestHandler: vi.fn(),
+                },
+                registerResource: vi.fn(),
+                registerPrompt: vi.fn(),
+                registerTool: vi.fn(
+                    (
+                        name: string,
+                        _config: Record<string, unknown>,
+                        callback: RegisteredToolCallback,
+                    ) => {
+                        mockRegisteredMcpTools.set(name, callback);
+                        mockRegisteredToolNames.push(name);
+                        return {};
+                    },
+                ),
+            };
+        },
+    ),
+}));
+
+const organizationUuid = 'organization-uuid';
+const userUuid = 'user-uuid';
+const projectUuid = 'project-uuid';
+const appUuid = '11111111-2222-3333-4444-555555555555';
+
+const user = {
+    userUuid,
+    organizationUuid,
+    ability: {
+        can: vi.fn(() => true),
+        cannot: vi.fn(() => false),
+        relevantRuleFor: vi.fn(() => ({ inverted: false })),
+        rules: [],
+    },
+};
+
+const account = {
+    isRegisteredUser: () => true,
+    isServiceAccount: () => false,
+    authentication: { type: 'pat' },
+    user: { id: userUuid },
+    organization: { organizationUuid },
+};
+
+const makeExtra = () => ({
+    signal: new AbortController().signal,
+    requestId: 'request-id',
+    sendNotification: vi.fn(),
+    sendRequest: vi.fn(),
+    authInfo: { extra: { user, account } },
+});
+
+type QueryServiceDeps = {
+    asyncQueryService: Record<string, unknown>;
+    sampleDataEnabled: boolean;
+};
+
+const makeMcpService = (
+    createRuntime: () => unknown,
+    { asyncQueryService, sampleDataEnabled }: QueryServiceDeps = {
+        asyncQueryService: {},
+        sampleDataEnabled: true,
+    },
+) =>
+    new McpService({
+        agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
+        aiAgentService: {},
+        aiAgentToolsService: { createRuntime },
+        aiOrganizationSettingsService: {},
+        aiRouterService: {},
+        aiWritebackService: {},
+        analytics: { track: vi.fn() },
+        asyncQueryService,
+        catalogService: {},
+        contentVerificationService: {},
+        featureFlagService: {},
+        lightdashConfig: {
+            mcp: { runSqlMaxLimit: 500 },
+            siteUrl: 'https://lightdash.example',
+            appRuntime: { sampleDataEnabled },
+        },
+        mcpContextModel: { getContext: vi.fn().mockResolvedValue(undefined) },
+        mcpToolCallModel: {
+            createToolCall: vi.fn(),
+            findClientInfo: vi.fn(),
+        },
+        projectModel: {},
+        projectService: {
+            getProject: vi.fn().mockResolvedValue({ organizationUuid }),
+        },
+        searchModel: {},
+        shareService: {},
+        spaceService: {},
+        userAttributesModel: {},
+    } as unknown as ConstructorParameters<typeof McpService>[0]);
+
+const versionRow = (
+    overrides: Partial<{
+        version: number;
+        status: string;
+        error: string | null;
+        statusMessage: string | null;
+    }> = {},
+    app: Partial<{ slug: string; name: string; template: string | null }> = {},
+) => ({
+    app: {
+        uuid: appUuid,
+        slug: 'quarterly-review',
+        name: 'Quarterly review',
+        template: null,
+        spaceUuid: null,
+        ...app,
+    },
+    version: {
+        version: 1,
+        status: 'generating',
+        error: null,
+        statusMessage: null,
+        ...overrides,
+    },
+});
+
+/** Registers the tools against a stubbed tools runtime. */
+const createServerWithRuntime = async (
+    runtimeFns: Record<string, unknown>,
+    featureAvailability: Parameters<typeof makeMcpServerOptions>[0] = {},
+    queryServiceDeps?: QueryServiceDeps,
+) => {
+    const mcpService = makeMcpService(() => runtimeFns, queryServiceDeps);
+    mockRegisteredMcpTools.clear();
+    mockRegisteredToolNames.length = 0;
+    await mcpService.createServer(
+        makeMcpServerOptions({
+            dataAppBuildsEnabled: true,
+            chartTypeBuildsEnabled: true,
+            ...featureAvailability,
+        }),
+    );
+};
+
+const createServerWithBuildStatus = async (
+    source: ReturnType<typeof versionRow>,
+    featureAvailability: Parameters<typeof makeMcpServerOptions>[0] = {},
+) => {
+    const getDataAppBuildStatus = vi.fn().mockResolvedValue(source);
+    await createServerWithRuntime(
+        { getDataAppBuildStatus },
+        featureAvailability,
+    );
+    return { getDataAppBuildStatus };
+};
+
+const callTool = (name: McpToolName, args: Record<string, unknown>) => {
+    const callback = mockRegisteredMcpTools.get(name);
+    if (!callback) {
+        throw new Error(`${name} was not registered`);
+    }
+    return callback({ projectUuid, ...args }, makeExtra());
+};
+
+const callBuildStatus = (args: Record<string, unknown>) =>
+    callTool(McpToolName.GET_DATA_APP_BUILD_STATUS, args);
+
+describe('McpService get_data_app_build_status', () => {
+    describe('registration', () => {
+        it('registers the tool when the caller may create data apps', async () => {
+            await createServerWithBuildStatus(versionRow());
+
+            expect(
+                mockRegisteredMcpTools.has(
+                    McpToolName.GET_DATA_APP_BUILD_STATUS,
+                ),
+            ).toBe(true);
+        });
+
+        it('omits the tool when data app and chart type builds are unavailable', async () => {
+            await createServerWithBuildStatus(versionRow(), {
+                dataAppBuildsEnabled: false,
+                chartTypeBuildsEnabled: false,
+            });
+
+            expect(
+                mockRegisteredMcpTools.has(
+                    McpToolName.GET_DATA_APP_BUILD_STATUS,
+                ),
+            ).toBe(false);
+        });
+    });
+
+    describe('callback', () => {
+        it('reports the pipeline stage of the version the runtime returned', async () => {
+            await createServerWithBuildStatus(
+                versionRow({ status: 'packaging' }),
+            );
+
+            const result = await callBuildStatus({
+                appSlug: 'quarterly-review',
+            });
+
+            expect(result.structuredContent).toEqual({
+                status: 'packaging',
+                statusMessage: 'Packaging the app.',
+                errorMessage: null,
+                name: 'Quarterly review',
+                slug: 'quarterly-review',
+                href: `https://lightdash.example/projects/${projectUuid}/apps/quarterly-review`,
+                nextPollAfterMs: 15000,
+            });
+        });
+
+        it('returns the app URL once the build is ready', async () => {
+            await createServerWithBuildStatus(versionRow({ status: 'ready' }));
+
+            const result = await callBuildStatus({
+                appSlug: 'quarterly-review',
+            });
+
+            expect(result.structuredContent).toMatchObject({
+                status: 'ready',
+                href: `https://lightdash.example/projects/${projectUuid}/apps/quarterly-review`,
+            });
+        });
+
+        it('links a ready chart type to Chart Studio', async () => {
+            await createServerWithBuildStatus(
+                versionRow(
+                    { status: 'ready', version: 2 },
+                    {
+                        slug: 'sankey-flow',
+                        name: 'Sankey Flow',
+                        template: DATA_APP_VIZ_TEMPLATE,
+                    },
+                ),
+            );
+
+            const result = await callBuildStatus({ appSlug: 'sankey-flow' });
+
+            expect(result.structuredContent).toMatchObject({
+                status: 'ready',
+                statusMessage:
+                    'Version 2 of the chart type "Sankey Flow" is ready.',
+                href: `https://lightdash.example/projects/${projectUuid}/chart-studio/sankey-flow`,
+            });
+            const [{ text }] = result.content as Array<{ text: string }>;
+            expect(text).toContain(
+                `https://lightdash.example/projects/${projectUuid}/chart-studio/sankey-flow`,
+            );
+        });
+
+        it('reports a cancelled build as cancelled, not an error', async () => {
+            await createServerWithBuildStatus(
+                versionRow({
+                    status: 'error',
+                    error: APP_VERSION_CANCELLED_BY_USER,
+                }),
+            );
+
+            const result = await callBuildStatus({
+                appSlug: 'quarterly-review',
+            });
+
+            expect(result.structuredContent).toMatchObject({
+                status: 'cancelled',
+                errorMessage: null,
+            });
+        });
+
+        it('surfaces the failure reason of a failed build', async () => {
+            await createServerWithBuildStatus(
+                versionRow({
+                    status: 'error',
+                    error: 'npm install exited with code 1',
+                    statusMessage: 'Build failed',
+                }),
+            );
+
+            const result = await callBuildStatus({
+                appSlug: 'quarterly-review',
+            });
+
+            expect(result.structuredContent).toMatchObject({
+                status: 'error',
+                errorMessage: 'npm install exited with code 1',
+            });
+        });
+
+        it('asks the runtime for the latest version when none is given', async () => {
+            const { getDataAppBuildStatus } =
+                await createServerWithBuildStatus(versionRow());
+
+            await callBuildStatus({ appSlug: 'quarterly-review' });
+
+            expect(getDataAppBuildStatus).toHaveBeenCalledWith({
+                appSlug: 'quarterly-review',
+                version: undefined,
+            });
+        });
+
+        it('asks the runtime for the named version', async () => {
+            const { getDataAppBuildStatus } = await createServerWithBuildStatus(
+                versionRow({ version: 3 }),
+            );
+
+            await callBuildStatus({ appSlug: 'quarterly-review', version: 3 });
+
+            expect(getDataAppBuildStatus).toHaveBeenCalledWith({
+                appSlug: 'quarterly-review',
+                version: 3,
+            });
+        });
+
+        it('returns a tool error when the app is not found', async () => {
+            await createServerWithRuntime({
+                getDataAppBuildStatus: vi
+                    .fn()
+                    .mockRejectedValue(
+                        new Error('Data app "missing" was not found'),
+                    ),
+            });
+
+            const result = await callBuildStatus({ appSlug: 'missing' });
+
+            expect(result.isError).toBe(true);
+            expect(result.content).toEqual([
+                { type: 'text', text: 'Data app "missing" was not found' },
+            ]);
+        });
+    });
+});
+
+describe('McpService generate_data_app', () => {
+    const generateArgs = {
+        name: 'Quarterly review',
+        prompt: 'Build a quarterly revenue review',
+    };
+
+    it('registers the tool when the caller may create data apps', async () => {
+        await createServerWithRuntime({ generateDataApp: vi.fn() });
+
+        expect(mockRegisteredMcpTools.has(McpToolName.GENERATE_DATA_APP)).toBe(
+            true,
+        );
+    });
+
+    it('omits the tool when data app builds are unavailable', async () => {
+        await createServerWithRuntime(
+            { generateDataApp: vi.fn() },
+            { dataAppBuildsEnabled: false },
+        );
+
+        expect(mockRegisteredMcpTools.has(McpToolName.GENERATE_DATA_APP)).toBe(
+            false,
+        );
+    });
+
+    it('returns the slug and version the runtime produced, without the uuid', async () => {
+        await createServerWithRuntime({
+            generateDataApp: vi.fn().mockResolvedValue({
+                appUuid,
+                slug: 'quarterly-review-2',
+                version: 1,
+                warnings: ['Brief mentions "Amplitude"'],
+            }),
+        });
+
+        const result = await callTool(
+            McpToolName.GENERATE_DATA_APP,
+            generateArgs,
+        );
+
+        expect(result.structuredContent).toEqual({
+            slug: 'quarterly-review-2',
+            version: 1,
+            warnings: ['Brief mentions "Amplitude"'],
+        });
+        expect(JSON.stringify(result.content)).toContain('Brief mentions');
+    });
+
+    it('starts the build with no agent tool-call reference', async () => {
+        const generateDataApp = vi.fn().mockResolvedValue({
+            appUuid,
+            slug: 'quarterly-review',
+            version: 1,
+            warnings: [],
+        });
+        await createServerWithRuntime({ generateDataApp });
+
+        await callTool(McpToolName.GENERATE_DATA_APP, {
+            ...generateArgs,
+            themeSlug: 'brand',
+            externalConnectionSlugs: ['amplitude-1'],
+        });
+
+        expect(generateDataApp).toHaveBeenCalledWith({
+            name: 'Quarterly review',
+            prompt: 'Build a quarterly revenue review',
+            template: null,
+            dashboardSlug: null,
+            chartSlugs: null,
+            themeSlug: 'brand',
+            externalConnectionSlugs: ['amplitude-1'],
+            toolCallId: null,
+        });
+    });
+
+    it('fails with the valid theme slugs when the theme is unknown', async () => {
+        await createServerWithRuntime({
+            generateDataApp: vi
+                .fn()
+                .mockRejectedValue(
+                    new Error(
+                        'Theme "neon" was not found. Valid theme slugs: brand, dark',
+                    ),
+                ),
+        });
+
+        const result = await callTool(McpToolName.GENERATE_DATA_APP, {
+            ...generateArgs,
+            themeSlug: 'neon',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([
+            {
+                type: 'text',
+                text: 'Theme "neon" was not found. Valid theme slugs: brand, dark',
+            },
+        ]);
+    });
+});
+
+describe('McpService create_custom_chart_type', () => {
+    const createArgs = {
+        name: 'Sankey Flow',
+        prompt: 'Draw a sankey of flows between stages',
+    };
+
+    it('registers the tool when the caller may create data apps', async () => {
+        await createServerWithRuntime({ createCustomChartType: vi.fn() });
+
+        expect(
+            mockRegisteredMcpTools.has(McpToolName.CREATE_CUSTOM_CHART_TYPE),
+        ).toBe(true);
+    });
+
+    it('omits the tool when chart type builds are unavailable', async () => {
+        await createServerWithRuntime(
+            { createCustomChartType: vi.fn() },
+            { chartTypeBuildsEnabled: false },
+        );
+
+        expect(
+            mockRegisteredMcpTools.has(McpToolName.CREATE_CUSTOM_CHART_TYPE),
+        ).toBe(false);
+    });
+
+    it('registers the chart type build tools and their companions without the data app build tools', async () => {
+        await createServerWithRuntime(
+            { createCustomChartType: vi.fn() },
+            { dataAppBuildsEnabled: false, chartTypeBuildsEnabled: true },
+        );
+
+        for (const tool of [
+            McpToolName.CREATE_CUSTOM_CHART_TYPE,
+            McpToolName.ITERATE_CUSTOM_CHART_TYPE,
+            McpToolName.LIST_DATA_APP_THEMES,
+            McpToolName.GET_DATA_APP_BUILD_STATUS,
+        ]) {
+            expect(mockRegisteredMcpTools.has(tool)).toBe(true);
+        }
+        for (const tool of [
+            McpToolName.GENERATE_DATA_APP,
+            McpToolName.ITERATE_DATA_APP,
+            McpToolName.LIST_DATA_APP_CONNECTIONS,
+        ]) {
+            expect(mockRegisteredMcpTools.has(tool)).toBe(false);
+        }
+    });
+
+    it('registers the shared build tools once when both groups are enabled', async () => {
+        await createServerWithRuntime(
+            { createCustomChartType: vi.fn() },
+            { dataAppBuildsEnabled: true, chartTypeBuildsEnabled: true },
+        );
+
+        for (const tool of [
+            McpToolName.LIST_DATA_APP_THEMES,
+            McpToolName.GET_DATA_APP_BUILD_STATUS,
+        ]) {
+            expect(
+                mockRegisteredToolNames.filter((name) => name === tool),
+            ).toHaveLength(1);
+        }
+    });
+
+    it('starts the build with the name, brief and theme', async () => {
+        const createCustomChartType = vi.fn().mockResolvedValue({
+            appUuid,
+            slug: 'sankey-flow',
+            version: 1,
+        });
+        await createServerWithRuntime({ createCustomChartType });
+
+        await callTool(McpToolName.CREATE_CUSTOM_CHART_TYPE, {
+            ...createArgs,
+            themeSlug: 'brand',
+        });
+
+        expect(createCustomChartType).toHaveBeenCalledWith({
+            name: 'Sankey Flow',
+            prompt: 'Draw a sankey of flows between stages',
+            themeSlug: 'brand',
+            vizContext: null,
+        });
+    });
+
+    it('passes a null theme when none is given', async () => {
+        const createCustomChartType = vi.fn().mockResolvedValue({
+            appUuid,
+            slug: 'sankey-flow',
+            version: 1,
+        });
+        await createServerWithRuntime({ createCustomChartType });
+
+        await callTool(McpToolName.CREATE_CUSTOM_CHART_TYPE, createArgs);
+
+        expect(createCustomChartType).toHaveBeenCalledWith({
+            ...createArgs,
+            themeSlug: null,
+            vizContext: null,
+        });
+    });
+
+    it('returns the slug and version with polling and Chart Studio guidance', async () => {
+        await createServerWithRuntime({
+            createCustomChartType: vi.fn().mockResolvedValue({
+                appUuid,
+                slug: 'sankey-flow-2',
+                version: 1,
+            }),
+        });
+
+        const result = await callTool(
+            McpToolName.CREATE_CUSTOM_CHART_TYPE,
+            createArgs,
+        );
+
+        expect(result.structuredContent).toEqual({
+            slug: 'sankey-flow-2',
+            version: 1,
+        });
+        const [{ text }] = result.content as Array<{ text: string }>;
+        expect(text).toContain(
+            'Started building the chart type "Sankey Flow" as slug "sankey-flow-2", version 1.',
+        );
+        expect(text).toContain(
+            'Poll get_data_app_build_status with appSlug "sankey-flow-2" every 15 seconds',
+        );
+        expect(text).toContain(
+            `https://lightdash.example/projects/${projectUuid}/chart-studio/sankey-flow-2`,
+        );
+        expect(text).not.toContain(appUuid);
+        expect(text).not.toMatch(/shared|sample/i);
+    });
+
+    it('surfaces a failed start as a tool error', async () => {
+        await createServerWithRuntime({
+            createCustomChartType: vi
+                .fn()
+                .mockRejectedValue(
+                    new Error(
+                        'Theme "neon" was not found. Valid theme slugs: brand, dark',
+                    ),
+                ),
+        });
+
+        const result = await callTool(McpToolName.CREATE_CUSTOM_CHART_TYPE, {
+            ...createArgs,
+            themeSlug: 'neon',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([
+            {
+                type: 'text',
+                text: 'Theme "neon" was not found. Valid theme slugs: brand, dark',
+            },
+        ]);
+    });
+});
+
+describe('McpService create_custom_chart_type with a queryUuid', () => {
+    const queryUuid = '22222222-3333-4444-8555-666666666666';
+    const createArgs = {
+        name: 'Sankey Flow',
+        prompt: 'Draw a sankey of flows between stages',
+        queryUuid,
+    };
+    const metricQuery = {
+        exploreName: 'orders',
+        dimensions: [],
+        metrics: [],
+        sorts: [],
+        filters: {},
+        tableCalculations: [],
+        limit: 500,
+    };
+    const fields = {
+        orders_status: {
+            fieldType: FieldType.DIMENSION,
+            type: DimensionType.STRING,
+            name: 'status',
+            label: 'Status',
+            table: 'orders',
+            tableLabel: 'Orders',
+            sql: 'status',
+            compiledSql: 'status',
+            tablesReferences: ['orders'],
+            hidden: false,
+        },
+    };
+    const queryHistory = (
+        overrides: Partial<{
+            context: QueryExecutionContext;
+            status: QueryHistoryStatus;
+            error: string | null;
+        }> = {},
+    ) => ({
+        context: QueryExecutionContext.MCP_RUN_METRIC_QUERY,
+        status: QueryHistoryStatus.READY,
+        error: null,
+        metricQuery,
+        ...overrides,
+    });
+
+    const setup = async ({
+        history = queryHistory(),
+        explore = {
+            status: 'success',
+            data: { name: 'orders', tables: {} },
+        } as Record<string, unknown>,
+        sampleDataEnabled = true,
+        rows = [{ orders_status: 'shipped' }] as Record<string, unknown>[],
+    } = {}) => {
+        const createCustomChartType = vi.fn().mockResolvedValue({
+            appUuid,
+            slug: 'sankey-flow',
+            version: 1,
+        });
+        const asyncQueryService = {
+            getAsyncQueryHistory: vi.fn().mockResolvedValue(history),
+            getRawAsyncQueryResults: vi.fn().mockResolvedValue({
+                rows,
+                fields,
+                displayTimezone: null,
+            }),
+        };
+        await createServerWithRuntime(
+            {
+                createCustomChartType,
+                getExplore: vi.fn().mockResolvedValue(explore),
+            },
+            {},
+            { asyncQueryService, sampleDataEnabled },
+        );
+        return { createCustomChartType, asyncQueryService };
+    };
+
+    const summaryText = async () => {
+        const result = await callTool(
+            McpToolName.CREATE_CUSTOM_CHART_TYPE,
+            createArgs,
+        );
+        const [{ text }] = result.content as Array<{ text: string }>;
+        return text;
+    };
+
+    it('shares the first rows of the query with the build', async () => {
+        const { createCustomChartType, asyncQueryService } = await setup();
+
+        expect(await summaryText()).toContain(
+            'Shared 1 sample row from the query.',
+        );
+
+        expect(createCustomChartType).toHaveBeenCalledWith({
+            name: 'Sankey Flow',
+            prompt: 'Draw a sankey of flows between stages',
+            themeSlug: null,
+            vizContext: { sampleRows: [{ orders_status: 'shipped' }] },
+        });
+        expect(asyncQueryService.getRawAsyncQueryResults).toHaveBeenCalledWith(
+            expect.objectContaining({
+                projectUuid,
+                queryUuid,
+                maxRows: 10,
+                aiAccessOnly: true,
+            }),
+        );
+    });
+
+    it('does not read the query when sample data is disabled', async () => {
+        const { createCustomChartType, asyncQueryService } = await setup({
+            sampleDataEnabled: false,
+        });
+
+        expect(await summaryText()).toContain(
+            'Sample data is switched off on this instance, so no rows were shared.',
+        );
+
+        expect(asyncQueryService.getAsyncQueryHistory).not.toHaveBeenCalled();
+        expect(createCustomChartType).toHaveBeenCalledWith(
+            expect.objectContaining({ vizContext: null }),
+        );
+    });
+
+    it('says no rows were shared when the query returned none', async () => {
+        const { createCustomChartType } = await setup({ rows: [] });
+
+        expect(await summaryText()).toContain(
+            'The query returned no rows, so none were shared.',
+        );
+        expect(createCustomChartType).toHaveBeenCalledWith(
+            expect.objectContaining({ vizContext: null }),
+        );
+    });
+
+    it('rejects a query not started by run_metric_query', async () => {
+        const { createCustomChartType } = await setup({
+            history: queryHistory({
+                context: QueryExecutionContext.MCP_RUN_SQL,
+            }),
+        });
+
+        const result = await callTool(
+            McpToolName.CREATE_CUSTOM_CHART_TYPE,
+            createArgs,
+        );
+
+        expect(result).toMatchObject({
+            isError: true,
+            content: [
+                {
+                    type: 'text',
+                    text: 'create_custom_chart_type currently supports queries started by run_metric_query',
+                },
+            ],
+        });
+        expect(createCustomChartType).not.toHaveBeenCalled();
+    });
+
+    it('rejects a query that is not ready', async () => {
+        const { createCustomChartType, asyncQueryService } = await setup({
+            history: queryHistory({ status: QueryHistoryStatus.EXECUTING }),
+        });
+
+        const result = await callTool(
+            McpToolName.CREATE_CUSTOM_CHART_TYPE,
+            createArgs,
+        );
+
+        expect(result).toMatchObject({
+            isError: true,
+            content: [
+                {
+                    type: 'text',
+                    text: 'Query is not ready to share sample rows; current status is executing',
+                },
+            ],
+        });
+        expect(
+            asyncQueryService.getRawAsyncQueryResults,
+        ).not.toHaveBeenCalled();
+        expect(createCustomChartType).not.toHaveBeenCalled();
+    });
+
+    it('rejects a query outside the effective scope', async () => {
+        const { createCustomChartType, asyncQueryService } = await setup({
+            explore: {
+                status: 'error',
+                error: new NotFoundError('Explore not found'),
+            },
+        });
+
+        const result = await callTool(
+            McpToolName.CREATE_CUSTOM_CHART_TYPE,
+            createArgs,
+        );
+
+        expect(result).toMatchObject({
+            isError: true,
+            content: [{ type: 'text', text: 'Explore not found' }],
+        });
+        expect(
+            asyncQueryService.getRawAsyncQueryResults,
+        ).not.toHaveBeenCalled();
+        expect(createCustomChartType).not.toHaveBeenCalled();
+    });
+});
+
+describe('McpService iterate_custom_chart_type', () => {
+    const queryUuid = '22222222-3333-4444-8555-666666666666';
+    const iterateArgs = {
+        slug: 'sankey-flow',
+        prompt: 'Colour the links by source',
+    };
+    const started = () =>
+        vi.fn().mockResolvedValue({
+            appUuid,
+            slug: 'sankey-flow',
+            version: 3,
+            name: 'Sankey Flow',
+        });
+
+    it('registers the tool when the caller may create data apps', async () => {
+        await createServerWithRuntime({ iterateCustomChartType: vi.fn() });
+
+        expect(
+            mockRegisteredMcpTools.has(McpToolName.ITERATE_CUSTOM_CHART_TYPE),
+        ).toBe(true);
+    });
+
+    it('omits the tool when chart type builds are unavailable', async () => {
+        await createServerWithRuntime(
+            { iterateCustomChartType: vi.fn() },
+            { chartTypeBuildsEnabled: false },
+        );
+
+        expect(
+            mockRegisteredMcpTools.has(McpToolName.ITERATE_CUSTOM_CHART_TYPE),
+        ).toBe(false);
+    });
+
+    it('starts the build with the slug and brief, and no sample rows by default', async () => {
+        const iterateCustomChartType = started();
+        await createServerWithRuntime({ iterateCustomChartType });
+
+        await callTool(McpToolName.ITERATE_CUSTOM_CHART_TYPE, iterateArgs);
+
+        expect(iterateCustomChartType).toHaveBeenCalledWith({
+            slug: 'sankey-flow',
+            prompt: 'Colour the links by source',
+            themeSlug: null,
+            vizContext: null,
+        });
+    });
+
+    it('passes a themeSlug to the build', async () => {
+        const iterateCustomChartType = started();
+        await createServerWithRuntime({ iterateCustomChartType });
+
+        await callTool(McpToolName.ITERATE_CUSTOM_CHART_TYPE, {
+            ...iterateArgs,
+            themeSlug: 'brand',
+        });
+
+        expect(iterateCustomChartType).toHaveBeenCalledWith({
+            slug: 'sankey-flow',
+            prompt: 'Colour the links by source',
+            themeSlug: 'brand',
+            vizContext: null,
+        });
+    });
+
+    it('returns the slug and version with polling and Chart Studio guidance', async () => {
+        await createServerWithRuntime({ iterateCustomChartType: started() });
+
+        const result = await callTool(
+            McpToolName.ITERATE_CUSTOM_CHART_TYPE,
+            iterateArgs,
+        );
+
+        expect(result.structuredContent).toEqual({
+            slug: 'sankey-flow',
+            version: 3,
+        });
+        const [{ text }] = result.content as Array<{ text: string }>;
+        expect(text).toContain(
+            'Started building version 3 of the chart type "Sankey Flow" (slug "sankey-flow").',
+        );
+        expect(text).toContain(
+            'Poll get_data_app_build_status with appSlug "sankey-flow" every 15 seconds',
+        );
+        expect(text).toContain(
+            `https://lightdash.example/projects/${projectUuid}/chart-studio/sankey-flow`,
+        );
+        expect(text).not.toContain(appUuid);
+    });
+
+    it('shares the first rows of a queryUuid with the build', async () => {
+        const iterateCustomChartType = started();
+        const asyncQueryService = {
+            getAsyncQueryHistory: vi.fn().mockResolvedValue({
+                context: QueryExecutionContext.MCP_RUN_METRIC_QUERY,
+                status: QueryHistoryStatus.READY,
+                error: null,
+                metricQuery: {
+                    exploreName: 'orders',
+                    dimensions: [],
+                    metrics: [],
+                    sorts: [],
+                    filters: {},
+                    tableCalculations: [],
+                    limit: 500,
+                },
+            }),
+            getRawAsyncQueryResults: vi.fn().mockResolvedValue({
+                rows: [{ orders_status: 'shipped' }],
+                fields: {
+                    orders_status: {
+                        fieldType: FieldType.DIMENSION,
+                        type: DimensionType.STRING,
+                        name: 'status',
+                        label: 'Status',
+                        table: 'orders',
+                        tableLabel: 'Orders',
+                        sql: 'status',
+                        compiledSql: 'status',
+                        tablesReferences: ['orders'],
+                        hidden: false,
+                    },
+                },
+                displayTimezone: null,
+            }),
+        };
+        await createServerWithRuntime(
+            {
+                iterateCustomChartType,
+                getExplore: vi.fn().mockResolvedValue({
+                    status: 'success',
+                    data: { name: 'orders', tables: {} },
+                }),
+            },
+            {},
+            { asyncQueryService, sampleDataEnabled: true },
+        );
+
+        const result = await callTool(McpToolName.ITERATE_CUSTOM_CHART_TYPE, {
+            ...iterateArgs,
+            queryUuid,
+        });
+
+        expect(iterateCustomChartType).toHaveBeenCalledWith({
+            slug: 'sankey-flow',
+            prompt: 'Colour the links by source',
+            themeSlug: null,
+            vizContext: { sampleRows: [{ orders_status: 'shipped' }] },
+        });
+        const [{ text }] = result.content as Array<{ text: string }>;
+        expect(text).toContain('Shared 1 sample row from the query.');
+    });
+
+    it('rejects a query not started by run_metric_query, naming this tool', async () => {
+        const iterateCustomChartType = started();
+        await createServerWithRuntime(
+            { iterateCustomChartType },
+            {},
+            {
+                asyncQueryService: {
+                    getAsyncQueryHistory: vi.fn().mockResolvedValue({
+                        context: QueryExecutionContext.MCP_RUN_SQL,
+                        status: QueryHistoryStatus.READY,
+                        error: null,
+                    }),
+                },
+                sampleDataEnabled: true,
+            },
+        );
+
+        const result = await callTool(McpToolName.ITERATE_CUSTOM_CHART_TYPE, {
+            ...iterateArgs,
+            queryUuid,
+        });
+
+        expect(result).toMatchObject({
+            isError: true,
+            content: [
+                {
+                    type: 'text',
+                    text: 'iterate_custom_chart_type currently supports queries started by run_metric_query',
+                },
+            ],
+        });
+        expect(iterateCustomChartType).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a data app slug as a tool error naming iterate_data_app', async () => {
+        await createServerWithRuntime({
+            iterateCustomChartType: vi
+                .fn()
+                .mockRejectedValue(
+                    new ParameterError(
+                        '"quarterly-review" is a data app, not a custom chart type. Use iterate_data_app to change it',
+                    ),
+                ),
+        });
+
+        const result = await callTool(McpToolName.ITERATE_CUSTOM_CHART_TYPE, {
+            ...iterateArgs,
+            slug: 'quarterly-review',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([
+            {
+                type: 'text',
+                text: '"quarterly-review" is a data app, not a custom chart type. Use iterate_data_app to change it',
+            },
+        ]);
+    });
+});
+
+describe('McpService list_data_app_themes', () => {
+    const themes = [
+        {
+            slug: 'brand',
+            name: 'Brand',
+            isDefault: true,
+            description: 'Company colours',
+        },
+        { slug: 'dark', name: 'Dark', isDefault: false, description: null },
+    ];
+
+    it('omits the tool when data app and chart type builds are unavailable', async () => {
+        await createServerWithRuntime(
+            { listDataAppThemes: vi.fn() },
+            { dataAppBuildsEnabled: false, chartTypeBuildsEnabled: false },
+        );
+
+        expect(
+            mockRegisteredMcpTools.has(McpToolName.LIST_DATA_APP_THEMES),
+        ).toBe(false);
+    });
+
+    it('passes the themes the runtime listed through', async () => {
+        await createServerWithRuntime({
+            listDataAppThemes: vi.fn().mockResolvedValue(themes),
+        });
+
+        const result = await callTool(McpToolName.LIST_DATA_APP_THEMES, {});
+
+        expect(result.structuredContent).toEqual({ themes });
+    });
+
+    it('reports an organization with no themes', async () => {
+        await createServerWithRuntime({
+            listDataAppThemes: vi.fn().mockResolvedValue([]),
+        });
+
+        const result = await callTool(McpToolName.LIST_DATA_APP_THEMES, {});
+
+        expect(result.structuredContent).toEqual({ themes: [] });
+    });
+});
+
+describe('McpService list_data_app_connections', () => {
+    const connections = [
+        {
+            slug: 'amplitude-1',
+            name: 'Amplitude',
+            authType: 'api_key' as const,
+            origin: 'https://amplitude.com',
+            instructions: 'Use the export API',
+            linkedAliases: ['amplitude'],
+        },
+    ];
+
+    it('omits the tool when data app builds are unavailable', async () => {
+        await createServerWithRuntime(
+            { listDataAppConnections: vi.fn() },
+            { dataAppBuildsEnabled: false },
+        );
+
+        expect(
+            mockRegisteredMcpTools.has(McpToolName.LIST_DATA_APP_CONNECTIONS),
+        ).toBe(false);
+    });
+
+    it('lists the connections for the given app', async () => {
+        const listDataAppConnections = vi.fn().mockResolvedValue(connections);
+        await createServerWithRuntime({ listDataAppConnections });
+
+        const result = await callTool(McpToolName.LIST_DATA_APP_CONNECTIONS, {
+            appSlug: 'quarterly-review',
+        });
+
+        expect(listDataAppConnections).toHaveBeenCalledWith({
+            appSlug: 'quarterly-review',
+        });
+        expect(result.structuredContent).toEqual({ connections });
+    });
+});
+
+describe('McpService iterate_data_app', () => {
+    const iterateArgs = {
+        appSlug: 'quarterly-review',
+        prompt: 'Add a churn section',
+    };
+
+    it('registers the tool when the caller may create data apps', async () => {
+        await createServerWithRuntime({ iterateDataApp: vi.fn() });
+
+        expect(mockRegisteredMcpTools.has(McpToolName.ITERATE_DATA_APP)).toBe(
+            true,
+        );
+    });
+
+    it('omits the tool when data app builds are unavailable', async () => {
+        await createServerWithRuntime(
+            { iterateDataApp: vi.fn() },
+            { dataAppBuildsEnabled: false },
+        );
+
+        expect(mockRegisteredMcpTools.has(McpToolName.ITERATE_DATA_APP)).toBe(
+            false,
+        );
+    });
+
+    it('returns the slug and version the runtime produced, without the uuid', async () => {
+        await createServerWithRuntime({
+            iterateDataApp: vi.fn().mockResolvedValue({
+                appUuid,
+                slug: 'quarterly-review',
+                version: 4,
+                warnings: [],
+            }),
+        });
+
+        const result = await callTool(
+            McpToolName.ITERATE_DATA_APP,
+            iterateArgs,
+        );
+
+        expect(result.structuredContent).toEqual({
+            slug: 'quarterly-review',
+            version: 4,
+            warnings: [],
+        });
+    });
+
+    it('adds the version with no agent tool-call reference', async () => {
+        const iterateDataApp = vi.fn().mockResolvedValue({
+            appUuid,
+            slug: 'quarterly-review',
+            version: 2,
+            warnings: [],
+        });
+        await createServerWithRuntime({ iterateDataApp });
+
+        // Harness skips schema parsing, so pass the default the SDK applies.
+        await callTool(McpToolName.ITERATE_DATA_APP, {
+            ...iterateArgs,
+            themeSlug: 'brand',
+            externalConnectionSlugs: null,
+        });
+
+        expect(iterateDataApp).toHaveBeenCalledWith({
+            appSlug: 'quarterly-review',
+            prompt: 'Add a churn section',
+            dashboardSlug: null,
+            chartSlugs: null,
+            themeSlug: 'brand',
+            externalConnectionSlugs: null,
+            toolCallId: null,
+        });
+    });
+
+    it('surfaces the already-building error to the caller', async () => {
+        await createServerWithRuntime({
+            iterateDataApp: vi
+                .fn()
+                .mockRejectedValue(
+                    new ParameterError(
+                        'A version is already building for this app',
+                    ),
+                ),
+        });
+
+        const result = await callTool(
+            McpToolName.ITERATE_DATA_APP,
+            iterateArgs,
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([
+            {
+                type: 'text',
+                text: 'A version is already building for this app',
+            },
+        ]);
+    });
+
+    it('surfaces a chart type slug as a tool error naming iterate_custom_chart_type', async () => {
+        await createServerWithRuntime({
+            iterateDataApp: vi
+                .fn()
+                .mockRejectedValue(
+                    new ParameterError(
+                        '"sankey-flow" is a custom chart type. Use iterate_custom_chart_type to change it',
+                    ),
+                ),
+        });
+
+        const result = await callTool(McpToolName.ITERATE_DATA_APP, {
+            ...iterateArgs,
+            appSlug: 'sankey-flow',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([
+            {
+                type: 'text',
+                text: '"sankey-flow" is a custom chart type. Use iterate_custom_chart_type to change it',
+            },
+        ]);
+    });
+});

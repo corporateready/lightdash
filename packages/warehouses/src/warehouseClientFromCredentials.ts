@@ -5,38 +5,55 @@ import {
     WarehouseTypes,
 } from '@lightdash/common';
 import { WarehouseClient } from './types';
-import { AthenaWarehouseClient } from './warehouseClients/AthenaWarehouseClient';
+import {
+    AthenaWarehouseClient,
+    type AthenaWarehouseClientOptions,
+} from './warehouseClients/AthenaWarehouseClient';
 import { BigqueryWarehouseClient } from './warehouseClients/BigqueryWarehouseClient';
-import { ClickhouseWarehouseClient } from './warehouseClients/ClickhouseWarehouseClient';
+import {
+    ClickhouseWarehouseClient,
+    type ClickhouseWarehouseClientOptions,
+} from './warehouseClients/ClickhouseWarehouseClient';
 import { DatabricksWarehouseClient } from './warehouseClients/DatabricksWarehouseClient';
-import { DuckdbWarehouseClient } from './warehouseClients/DuckdbWarehouseClient';
+import {
+    DuckdbWarehouseClient,
+    type DuckdbWarehouseClientOptions,
+} from './warehouseClients/DuckdbWarehouseClient';
 import { PostgresWarehouseClient } from './warehouseClients/PostgresWarehouseClient';
 import { RedshiftWarehouseClient } from './warehouseClients/RedshiftWarehouseClient';
 import { SnowflakeWarehouseClient } from './warehouseClients/SnowflakeWarehouseClient';
 import { TrinoWarehouseClient } from './warehouseClients/TrinoWarehouseClient';
 
+export type WarehouseClientOptions = DuckdbWarehouseClientOptions &
+    ClickhouseWarehouseClientOptions &
+    AthenaWarehouseClientOptions & {
+        agentSession?: boolean;
+        agentJobControls?: boolean;
+    };
+
 export const warehouseClientFromCredentials = (
     credentials: CreateWarehouseCredentials,
+    options?: WarehouseClientOptions,
 ): WarehouseClient => {
     switch (credentials.type) {
         case WarehouseTypes.SNOWFLAKE:
-            return new SnowflakeWarehouseClient(credentials);
+            return new SnowflakeWarehouseClient(credentials, options);
         case WarehouseTypes.POSTGRES:
-            return new PostgresWarehouseClient(credentials);
+            return new PostgresWarehouseClient(credentials, options);
         case WarehouseTypes.REDSHIFT:
-            return new RedshiftWarehouseClient(credentials);
+            return new RedshiftWarehouseClient(credentials, options);
         case WarehouseTypes.BIGQUERY:
-            return new BigqueryWarehouseClient(credentials);
+            return new BigqueryWarehouseClient(credentials, options);
         case WarehouseTypes.DATABRICKS:
-            return new DatabricksWarehouseClient(credentials);
+            return new DatabricksWarehouseClient(credentials, options);
         case WarehouseTypes.TRINO:
-            return new TrinoWarehouseClient(credentials);
+            return new TrinoWarehouseClient(credentials, options);
         case WarehouseTypes.CLICKHOUSE:
-            return new ClickhouseWarehouseClient(credentials);
+            return new ClickhouseWarehouseClient(credentials, options);
         case WarehouseTypes.ATHENA:
-            return new AthenaWarehouseClient(credentials);
+            return new AthenaWarehouseClient(credentials, options);
         case WarehouseTypes.DUCKDB:
-            return new DuckdbWarehouseClient(credentials);
+            return new DuckdbWarehouseClient(credentials, options);
         default:
             return assertUnreachable(
                 credentials,

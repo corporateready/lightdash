@@ -1,50 +1,21 @@
 import { Stack } from '@mantine/core';
+import { type FC } from 'react';
 import { Navigate, Outlet, type RouteObject } from 'react-router';
+import AUTH_ROUTES from './AuthRoutes';
 import AppRoute from './components/AppRoute';
 import ProjectLayout from './components/common/ProjectLayout';
 import ForbiddenPanel from './components/ForbiddenPanel';
 import JobDetailsDrawer from './components/JobDetailsDrawer';
 import NavBar from './components/NavBar';
+import { NavBarLayout } from './components/NavBarLayout';
 import PrivateRoute from './components/PrivateRoute';
 import ProjectRoute from './components/ProjectRoute';
+import CreateProjectSettings from './components/Settings/CreateProjectSettings';
 import UserCompletionModal from './components/UserCompletionModal';
-import FunnelBuilder from './features/funnelBuilder/FunnelBuilderPage';
+import LegacyAppPreviewRedirect from './features/apps/LegacyAppPreviewRedirect';
+import LegacyChartTypesRedirect from './features/chartTypes/LegacyChartTypesRedirect';
+import { loadLazyRouteDefault } from './features/chunkErrorHandler';
 import { MetricCatalogView } from './features/metricsCatalog/types';
-import AppGenerate from './pages/AppGenerate';
-import AppPreviewTest from './pages/AppPreviewTest';
-import AuthPopupResult from './pages/AuthPopupResult';
-import ChartHistory from './pages/ChartHistory';
-import CreateProject from './pages/CreateProject';
-import CreateProjectSettings from './pages/CreateProjectSettings';
-import Dashboard from './pages/Dashboard';
-import DashboardHistory from './pages/DashboardHistory';
-import Explorer from './pages/Explorer';
-import Home from './pages/Home';
-import Invite from './pages/Invite';
-import JoinOrganization from './pages/JoinOrganization';
-import LegacySqlRunner from './pages/LegacySqlRunner';
-import Login from './pages/Login';
-import MetricsCatalog from './pages/MetricsCatalog';
-import MinimalApp from './pages/MinimalApp';
-import MinimalDashboard from './pages/MinimalDashboard';
-import MinimalSavedExplorer from './pages/MinimalSavedExplorer';
-import MinimalSqlChart from './pages/MinimalSqlChart';
-import PasswordRecovery from './pages/PasswordRecovery';
-import PasswordReset from './pages/PasswordReset';
-import Projects from './pages/Projects';
-import Register from './pages/Register';
-import SavedDashboards from './pages/SavedDashboards';
-import SavedExplorer from './pages/SavedExplorer';
-import SavedQueries from './pages/SavedQueries';
-import Settings from './pages/Settings';
-import ShareRedirect from './pages/ShareRedirect';
-import SourceCodeEditorRedirect from './pages/SourceCodeEditorRedirect';
-import Space from './pages/Space';
-import Spaces from './pages/Spaces';
-import SqlRunner from './pages/SqlRunner';
-import UserActivity from './pages/UserActivity';
-import VerifyEmailPage from './pages/VerifyEmail';
-import ViewSqlChart from './pages/ViewSqlChart';
 import { TrackPage } from './providers/Tracking/TrackingProvider';
 import { PageName } from './types/Events';
 
@@ -54,65 +25,57 @@ const FALLBACK_ROUTE: RouteObject = {
 };
 
 const PUBLIC_ROUTES: RouteObject[] = [
-    {
-        path: '/auth/popup/:status',
-        element: <AuthPopupResult />,
-    },
+    ...AUTH_ROUTES,
     {
         path: '/register',
-        element: (
-            <TrackPage name={PageName.REGISTER}>
-                <Register />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Register = await loadLazyRouteDefault(
+                './pages/Register',
+                () => import('./pages/Register'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.REGISTER}>
+                        <Register />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: '/login',
-        element: (
-            <TrackPage name={PageName.LOGIN}>
-                <Login />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Login = await loadLazyRouteDefault(
+                './pages/Login',
+                () => import('./pages/Login'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.LOGIN}>
+                        <Login />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
-        path: '/recover-password',
-        element: (
-            <TrackPage name={PageName.PASSWORD_RECOVERY}>
-                <PasswordRecovery />
-            </TrackPage>
-        ),
-    },
-    {
-        path: '/reset-password/:code',
-        element: (
-            <TrackPage name={PageName.PASSWORD_RESET}>
-                <PasswordReset />
-            </TrackPage>
-        ),
-    },
-    {
-        path: '/invite/:inviteCode',
-        element: (
-            <TrackPage name={PageName.SIGNUP}>
-                <Invite />
-            </TrackPage>
-        ),
-    },
-    {
-        path: '/verify-email',
-        element: (
-            <TrackPage name={PageName.VERIFY_EMAIL}>
-                <VerifyEmailPage />
-            </TrackPage>
-        ),
-    },
-    {
-        path: '/join-organization',
-        element: (
-            <TrackPage name={PageName.JOIN_ORGANIZATION}>
-                <JoinOrganization />
-            </TrackPage>
-        ),
+        path: '/organization-setup',
+        lazy: async () => {
+            const OrganizationSetup = await loadLazyRouteDefault(
+                './pages/OrganizationSetup',
+                () => import('./pages/OrganizationSetup'),
+            );
+            return {
+                Component: () => (
+                    <>
+                        <NavBar />
+                        <TrackPage name={PageName.ORGANIZATION_SETUP}>
+                            <OrganizationSetup />
+                        </TrackPage>
+                    </>
+                ),
+            };
+        },
     },
 ];
 
@@ -123,31 +86,91 @@ const MINIMAL_ROUTES: RouteObject[] = [
         children: [
             {
                 path: '/minimal/projects/:projectUuid/saved/:savedQueryUuid',
-                element: (
-                    <Stack p="lg" h="100vh">
-                        <MinimalSavedExplorer />
-                    </Stack>
-                ),
+                lazy: async () => {
+                    const MinimalSavedExplorer = await loadLazyRouteDefault(
+                        './pages/MinimalSavedExplorer',
+                        () => import('./pages/MinimalSavedExplorer'),
+                    );
+                    return {
+                        Component: () => (
+                            <Stack p="lg" h="100vh">
+                                <MinimalSavedExplorer />
+                            </Stack>
+                        ),
+                    };
+                },
             },
             {
                 path: '/minimal/projects/:projectUuid/dashboards/:dashboardUuid',
-                element: <MinimalDashboard />,
+                lazy: async () => {
+                    const MinimalDashboard = await loadLazyRouteDefault(
+                        './pages/MinimalDashboard',
+                        () => import('./pages/MinimalDashboard'),
+                    );
+                    return { Component: MinimalDashboard };
+                },
             },
             {
                 path: '/minimal/projects/:projectUuid/dashboards/:dashboardUuid/view/tabs/:tabUuid',
-                element: <MinimalDashboard />,
+                lazy: async () => {
+                    const MinimalDashboard = await loadLazyRouteDefault(
+                        './pages/MinimalDashboard',
+                        () => import('./pages/MinimalDashboard'),
+                    );
+                    return { Component: MinimalDashboard };
+                },
             },
             {
                 path: '/minimal/projects/:projectUuid/sql-runner/:savedSqlUuid',
-                element: (
-                    <Stack p="lg" h="100vh">
-                        <MinimalSqlChart />
-                    </Stack>
-                ),
+                lazy: async () => {
+                    const MinimalSqlChart = await loadLazyRouteDefault(
+                        './pages/MinimalSqlChart',
+                        () => import('./pages/MinimalSqlChart'),
+                    );
+                    return {
+                        Component: () => (
+                            <Stack p="lg" h="100vh">
+                                <MinimalSqlChart />
+                            </Stack>
+                        ),
+                    };
+                },
+            },
+            {
+                path: '/minimal/projects/:projectUuid/ai-agents/:agentUuid/artifacts/:artifactUuid/versions/:versionUuid',
+                lazy: async () => {
+                    const MinimalAiAgentArtifact = await loadLazyRouteDefault(
+                        './ee/pages/MinimalAiAgentArtifact',
+                        () => import('./ee/pages/MinimalAiAgentArtifact'),
+                    );
+                    return {
+                        Component: () => (
+                            <Stack p="lg" h="100vh">
+                                <MinimalAiAgentArtifact />
+                            </Stack>
+                        ),
+                    };
+                },
+            },
+            {
+                path: '/minimal/projects/:projectUuid/documents/:documentUuid',
+                lazy: async () => {
+                    const MinimalDocument = await loadLazyRouteDefault(
+                        './pages/MinimalDocument',
+                        () => import('./pages/MinimalDocument'),
+                    );
+                    return { Component: MinimalDocument };
+                },
             },
             {
                 path: '/minimal/projects/:projectUuid/apps/:appUuid',
-                element: <MinimalApp />,
+                lazy: async () => {
+                    const MinimalApp = await loadLazyRouteDefault(
+                        './pages/MinimalApp',
+                        () => import('./pages/MinimalApp'),
+                    );
+                    return { Component: MinimalApp };
+                },
             },
         ],
     },
@@ -156,11 +179,19 @@ const MINIMAL_ROUTES: RouteObject[] = [
 const CHART_ROUTES: RouteObject[] = [
     {
         path: 'saved',
-        element: (
-            <TrackPage name={PageName.SAVED_QUERIES}>
-                <SavedQueries />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const SavedQueries = await loadLazyRouteDefault(
+                './pages/SavedQueries',
+                () => import('./pages/SavedQueries'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.SAVED_QUERIES}>
+                        <SavedQueries />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'saved/:savedQueryUuid',
@@ -168,20 +199,36 @@ const CHART_ROUTES: RouteObject[] = [
         children: [
             {
                 path: 'history',
-                element: (
-                    <TrackPage name={PageName.CHART_HISTORY}>
-                        <ChartHistory />
-                    </TrackPage>
-                ),
+                lazy: async () => {
+                    const ChartHistory = await loadLazyRouteDefault(
+                        './pages/ChartHistory',
+                        () => import('./pages/ChartHistory'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.CHART_HISTORY}>
+                                <ChartHistory />
+                            </TrackPage>
+                        ),
+                    };
+                },
             },
             {
                 path: ':mode?',
                 index: false,
-                element: (
-                    <TrackPage name={PageName.SAVED_QUERY_EXPLORER}>
-                        <SavedExplorer />
-                    </TrackPage>
-                ),
+                lazy: async () => {
+                    const SavedExplorer = await loadLazyRouteDefault(
+                        './pages/SavedExplorer',
+                        () => import('./pages/SavedExplorer'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.SAVED_QUERY_EXPLORER}>
+                                <SavedExplorer />
+                            </TrackPage>
+                        ),
+                    };
+                },
             },
         ],
     },
@@ -191,23 +238,59 @@ const CHART_ROUTES: RouteObject[] = [
 const DASHBOARD_LIST_ROUTES: RouteObject[] = [
     {
         path: 'dashboards',
-        element: (
-            <TrackPage name={PageName.SAVED_DASHBOARDS}>
-                <SavedDashboards />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const SavedDashboards = await loadLazyRouteDefault(
+                './pages/SavedDashboards',
+                () => import('./pages/SavedDashboards'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.SAVED_DASHBOARDS}>
+                        <SavedDashboards />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'dashboards/:dashboardUuid/history',
-        element: (
-            <TrackPage name={PageName.DASHBOARD_HISTORY}>
-                <DashboardHistory />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const DashboardHistory = await loadLazyRouteDefault(
+                './pages/DashboardHistory',
+                () => import('./pages/DashboardHistory'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.DASHBOARD_HISTORY}>
+                        <DashboardHistory />
+                    </TrackPage>
+                ),
+            };
+        },
     },
 ];
 
 // Dashboard view routes (use handle.navBarFixed=false for non-fixed NavBar)
+// Both dashboard routes (`:mode?` and `:mode/tabs/:tabUuid?`) must resolve to the
+// SAME Component identity. Otherwise navigating between them (e.g. adding the first
+// tab navigates `/edit` -> `/edit/tabs/:uuid`) swaps the component type at the Outlet
+// and React remounts DashboardProvider, discarding unsaved tabs.
+let DashboardRouteComponent: FC | undefined;
+const loadDashboardRoute = async () => {
+    if (!DashboardRouteComponent) {
+        const Dashboard = await loadLazyRouteDefault(
+            './pages/Dashboard',
+            () => import('./pages/Dashboard'),
+        );
+        DashboardRouteComponent = () => (
+            <TrackPage name={PageName.DASHBOARD}>
+                <Dashboard />
+            </TrackPage>
+        );
+    }
+    return { Component: DashboardRouteComponent };
+};
+
 const DASHBOARD_VIEW_ROUTES: RouteObject[] = [
     {
         path: 'dashboards/:dashboardUuid',
@@ -216,19 +299,11 @@ const DASHBOARD_VIEW_ROUTES: RouteObject[] = [
             {
                 path: ':mode?',
                 index: false,
-                element: (
-                    <TrackPage name={PageName.DASHBOARD}>
-                        <Dashboard />
-                    </TrackPage>
-                ),
+                lazy: loadDashboardRoute,
             },
             {
                 path: ':mode/tabs/:tabUuid?',
-                element: (
-                    <TrackPage name={PageName.DASHBOARD}>
-                        <Dashboard />
-                    </TrackPage>
-                ),
+                lazy: loadDashboardRoute,
             },
         ],
     },
@@ -241,124 +316,317 @@ const SQL_RUNNER_ROUTES: RouteObject[] = [
         children: [
             {
                 index: true,
-                element: <SqlRunner />,
+                lazy: async () => {
+                    const SqlRunner = await loadLazyRouteDefault(
+                        './pages/SqlRunner',
+                        () => import('./pages/SqlRunner'),
+                    );
+                    return { Component: SqlRunner };
+                },
             },
             {
                 path: ':slug',
-                element: <ViewSqlChart />,
+                lazy: async () => {
+                    const ViewSqlChart = await loadLazyRouteDefault(
+                        './pages/ViewSqlChart',
+                        () => import('./pages/ViewSqlChart'),
+                    );
+                    return { Component: ViewSqlChart };
+                },
             },
             {
                 path: ':slug/edit',
-                element: <SqlRunner isEditMode />,
+                lazy: async () => {
+                    const SqlRunner = await loadLazyRouteDefault(
+                        './pages/SqlRunner',
+                        () => import('./pages/SqlRunner'),
+                    );
+                    return { Component: () => <SqlRunner isEditMode /> };
+                },
             },
         ],
-    },
-];
-
-const SOURCE_CODE_ROUTES: RouteObject[] = [
-    {
-        // Redirect old source-code route to project home with editor drawer open
-        path: 'source-code',
-        element: <SourceCodeEditorRedirect />,
     },
 ];
 
 const TABLES_ROUTES: RouteObject[] = [
     {
         path: 'tables',
-        element: (
-            <TrackPage name={PageName.EXPLORE_TABLES}>
-                <Explorer />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Explorer = await loadLazyRouteDefault(
+                './pages/Explorer',
+                () => import('./pages/Explorer'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.EXPLORE_TABLES}>
+                        <Explorer />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'tables/:tableId',
-        element: (
-            <TrackPage name={PageName.EXPLORER}>
-                <Explorer />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Explorer = await loadLazyRouteDefault(
+                './pages/Explorer',
+                () => import('./pages/Explorer'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.EXPLORER}>
+                        <Explorer />
+                    </TrackPage>
+                ),
+            };
+        },
     },
 ];
 
 const SPACES_ROUTES: RouteObject[] = [
     {
         path: 'spaces',
-        element: (
-            <TrackPage name={PageName.SPACES}>
-                <Spaces />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Spaces = await loadLazyRouteDefault(
+                './pages/Spaces',
+                () => import('./pages/Spaces'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.SPACES}>
+                        <Spaces />
+                    </TrackPage>
+                ),
+            };
+        },
+    },
+    {
+        path: 'shared-with-me',
+        lazy: async () => {
+            const SharedWithMe = await loadLazyRouteDefault(
+                './pages/SharedWithMe',
+                () => import('./pages/SharedWithMe'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.SHARED_WITH_ME}>
+                        <SharedWithMe />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'spaces/:spaceUuid',
-        element: (
-            <TrackPage name={PageName.SPACE}>
-                <Space />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Space = await loadLazyRouteDefault(
+                './pages/Space',
+                () => import('./pages/Space'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.SPACE}>
+                        <Space />
+                    </TrackPage>
+                ),
+            };
+        },
     },
 ];
 
 const METRICS_ROUTES: RouteObject[] = [
     {
         path: 'metrics',
-        element: (
-            <TrackPage name={PageName.METRICS_CATALOG}>
-                <MetricsCatalog />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const MetricsCatalog = await loadLazyRouteDefault(
+                './pages/MetricsCatalog',
+                () => import('./pages/MetricsCatalog'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.METRICS_CATALOG}>
+                        <MetricsCatalog />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'metrics/peek/:tableName/:metricName',
-        element: (
-            <TrackPage name={PageName.METRICS_CATALOG}>
-                <MetricsCatalog />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const MetricsCatalog = await loadLazyRouteDefault(
+                './pages/MetricsCatalog',
+                () => import('./pages/MetricsCatalog'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.METRICS_CATALOG}>
+                        <MetricsCatalog />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'metrics/canvas',
-        element: (
-            <TrackPage name={PageName.METRICS_CATALOG}>
-                <MetricsCatalog metricCatalogView={MetricCatalogView.CANVAS} />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const MetricsCatalog = await loadLazyRouteDefault(
+                './pages/MetricsCatalog',
+                () => import('./pages/MetricsCatalog'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.METRICS_CATALOG}>
+                        <MetricsCatalog
+                            metricCatalogView={MetricCatalogView.CANVAS}
+                        />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'metrics/canvas/:treeSlug',
-        element: (
-            <TrackPage name={PageName.METRICS_CATALOG}>
-                <MetricsCatalog metricCatalogView={MetricCatalogView.CANVAS} />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const MetricsCatalog = await loadLazyRouteDefault(
+                './pages/MetricsCatalog',
+                () => import('./pages/MetricsCatalog'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.METRICS_CATALOG}>
+                        <MetricsCatalog
+                            metricCatalogView={MetricCatalogView.CANVAS}
+                        />
+                    </TrackPage>
+                ),
+            };
+        },
     },
 ];
 
-// Routes that use ProjectLayout (fixed NavBar + SourceCodeDrawer)
+// Routes that use ProjectLayout (fixed NavBar)
 const PROJECT_LAYOUT_ROUTES: RouteObject[] = [
     ...TABLES_ROUTES,
     ...SQL_RUNNER_ROUTES,
-    ...SOURCE_CODE_ROUTES,
     ...CHART_ROUTES,
     ...DASHBOARD_LIST_ROUTES,
+    {
+        path: 'documents',
+        lazy: async () => ({
+            Component: await loadLazyRouteDefault(
+                './pages/Documents',
+                () => import('./pages/Documents'),
+            ),
+        }),
+    },
+    {
+        path: 'documents/:documentUuidOrSlug',
+        lazy: async () => ({
+            Component: await loadLazyRouteDefault(
+                './pages/Document',
+                () => import('./pages/Document'),
+            ),
+        }),
+    },
+    {
+        path: 'documents/:documentUuidOrSlug/history',
+        lazy: async () => ({
+            Component: await loadLazyRouteDefault(
+                './pages/DocumentHistory',
+                () => import('./pages/DocumentHistory'),
+            ),
+        }),
+    },
     ...SPACES_ROUTES,
     ...METRICS_ROUTES,
     {
+        path: 'learn',
+        lazy: async () => {
+            const Learn = await loadLazyRouteDefault(
+                './pages/Learn',
+                () => import('./pages/Learn'),
+            );
+            return { Component: Learn };
+        },
+    },
+    {
+        path: 'learn/workspace',
+        lazy: async () => {
+            const LearnWorkspace = await loadLazyRouteDefault(
+                './pages/LearnWorkspace',
+                () => import('./pages/LearnWorkspace'),
+            );
+            return { Component: LearnWorkspace };
+        },
+    },
+    {
         path: 'home',
-        element: (
-            <TrackPage name={PageName.HOME}>
-                <Home />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const Home = await loadLazyRouteDefault(
+                './pages/Home',
+                () => import('./pages/Home'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.HOME}>
+                        <Home />
+                    </TrackPage>
+                ),
+            };
+        },
+    },
+    {
+        path: 'review-requests',
+        lazy: async () => {
+            const ContentReviewRequestsPage = await loadLazyRouteDefault(
+                './ee/features/contentReview/pages/ContentReviewRequestsPage',
+                () =>
+                    import('./ee/features/contentReview/pages/ContentReviewRequestsPage'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.CONTENT_REVIEW_REQUESTS}>
+                        <ContentReviewRequestsPage />
+                    </TrackPage>
+                ),
+            };
+        },
+    },
+    {
+        path: 'review-requests/:requestUuid',
+        lazy: async () => {
+            const ContentReviewRequestPage = await loadLazyRouteDefault(
+                './ee/features/contentReview/pages/ContentReviewRequestPage',
+                () =>
+                    import('./ee/features/contentReview/pages/ContentReviewRequestPage'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.CONTENT_REVIEW_REQUEST}>
+                        <ContentReviewRequestPage />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'autopilot',
         lazy: async () => {
-            const { ManagedAgentActivityPage } =
-                await import('./ee/features/managedAgent/ManagedAgentActivityPage');
+            const ManagedAgentActivityPage = await loadLazyRouteDefault(
+                './ee/features/managedAgent/ManagedAgentActivityPage',
+                () =>
+                    import('./ee/features/managedAgent/ManagedAgentActivityPage'),
+            );
             return { Component: ManagedAgentActivityPage };
+        },
+    },
+    {
+        path: 'homepage-builder',
+        lazy: async () => {
+            const { HomepageBuilderPage } =
+                await import('./ee/features/homepageBuilder/HomepageBuilderPage');
+            return { Component: HomepageBuilderPage };
         },
     },
     {
@@ -366,41 +634,157 @@ const PROJECT_LAYOUT_ROUTES: RouteObject[] = [
         element: <Navigate to="../autopilot" replace />,
     },
     {
+        path: 'apps',
+        lazy: async () => {
+            const SavedApps = await loadLazyRouteDefault(
+                './pages/SavedApps',
+                () => import('./pages/SavedApps'),
+            );
+            return { Component: SavedApps };
+        },
+    },
+    {
+        path: 'chart-types',
+        element: <LegacyChartTypesRedirect />,
+    },
+    {
+        path: 'chart-types/new',
+        element: <LegacyChartTypesRedirect newChartType />,
+    },
+    {
+        path: 'chart-types/:dataAppVizUuid',
+        element: <LegacyChartTypesRedirect />,
+    },
+    {
+        path: 'chart-studio',
+        lazy: async () => {
+            const ChartTypeGallery = await loadLazyRouteDefault(
+                './pages/ChartTypeGallery',
+                () => import('./pages/ChartTypeGallery'),
+            );
+            return { Component: ChartTypeGallery };
+        },
+    },
+    {
+        path: 'chart-studio/new',
+        handle: { hideAILauncher: true },
+        lazy: async () => {
+            const ChartTypeBuilder = await loadLazyRouteDefault(
+                './pages/ChartTypeBuilder',
+                () => import('./pages/ChartTypeBuilder'),
+            );
+            return { Component: ChartTypeBuilder };
+        },
+    },
+    {
+        path: 'chart-studio/:dataAppVizUuid',
+        handle: { hideAILauncher: true },
+        lazy: async () => {
+            const ChartTypeBuilder = await loadLazyRouteDefault(
+                './pages/ChartTypeBuilder',
+                () => import('./pages/ChartTypeBuilder'),
+            );
+            return { Component: ChartTypeBuilder };
+        },
+    },
+    {
         path: 'apps/generate',
         handle: { hideAILauncher: true },
-        element: <AppGenerate />,
+        lazy: async () => {
+            const AppGenerate = await loadLazyRouteDefault(
+                './pages/AppGenerate',
+                () => import('./pages/AppGenerate'),
+            );
+            return { Component: AppGenerate };
+        },
     },
     {
         path: 'apps/:appUuid',
         handle: { hideAILauncher: true },
-        element: <AppGenerate />,
+        lazy: async () => {
+            const AppGenerate = await loadLazyRouteDefault(
+                './pages/AppGenerate',
+                () => import('./pages/AppGenerate'),
+            );
+            return { Component: AppGenerate };
+        },
+    },
+    {
+        path: 'apps/:appUuid/versions/:version/view',
+        lazy: async () => {
+            const AppPreviewTest = await loadLazyRouteDefault(
+                './pages/AppPreviewTest',
+                () => import('./pages/AppPreviewTest'),
+            );
+            return { Component: AppPreviewTest };
+        },
+    },
+    {
+        path: 'apps/:appUuid/view',
+        lazy: async () => {
+            const AppPreviewTest = await loadLazyRouteDefault(
+                './pages/AppPreviewTest',
+                () => import('./pages/AppPreviewTest'),
+            );
+            return { Component: AppPreviewTest };
+        },
     },
     {
         path: 'apps/:appUuid/versions/:version/preview',
-        handle: { hideAILauncher: true },
-        element: <AppPreviewTest />,
+        element: <LegacyAppPreviewRedirect />,
     },
     {
         path: 'apps/:appUuid/preview',
-        handle: { hideAILauncher: true },
-        element: <AppPreviewTest />,
+        element: <LegacyAppPreviewRedirect />,
     },
     {
         path: 'user-activity',
-        element: (
-            <TrackPage name={PageName.USER_ACTIVITY}>
-                <UserActivity />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const UserActivity = await loadLazyRouteDefault(
+                './pages/UserActivity',
+                () => import('./pages/UserActivity'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.USER_ACTIVITY}>
+                        <UserActivity />
+                    </TrackPage>
+                ),
+            };
+        },
+    },
+    {
+        path: 'query-history',
+        lazy: async () => {
+            const QueryHistory = await loadLazyRouteDefault(
+                './pages/QueryHistory',
+                () => import('./pages/QueryHistory'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.QUERY_HISTORY}>
+                        <QueryHistory />
+                    </TrackPage>
+                ),
+            };
+        },
     },
     {
         path: 'funnel-builder',
         handle: { hideAILauncher: true },
-        element: (
-            <TrackPage name={PageName.FUNNEL_BUILDER}>
-                <FunnelBuilder />
-            </TrackPage>
-        ),
+        lazy: async () => {
+            const FunnelBuilder = await loadLazyRouteDefault(
+                './features/funnelBuilder/FunnelBuilderPage',
+                () => import('./features/funnelBuilder/FunnelBuilderPage'),
+            );
+            return {
+                Component: () => (
+                    <TrackPage name={PageName.FUNNEL_BUILDER}>
+                        <FunnelBuilder />
+                    </TrackPage>
+                ),
+            };
+        },
     },
 ];
 
@@ -415,7 +799,13 @@ const APP_ROUTES: RouteObject[] = [
         children: [
             {
                 path: '/projects',
-                element: <Projects />,
+                lazy: async () => {
+                    const Projects = await loadLazyRouteDefault(
+                        './pages/Projects',
+                        () => import('./pages/Projects'),
+                    );
+                    return { Component: Projects };
+                },
             },
             {
                 path: '/projects/:projectUuid',
@@ -426,12 +816,69 @@ const APP_ROUTES: RouteObject[] = [
                 ),
                 children: [
                     { index: true, element: <Navigate to="home" replace /> },
+                    {
+                        element: <NavBarLayout />,
+                        children: [
+                            {
+                                path: 'onboarding/agent',
+                                handle: { hideAILauncher: true },
+                                lazy: async () => {
+                                    const AgentOnboardingStartPage =
+                                        await loadLazyRouteDefault(
+                                            './ee/features/agentOnboarding/AgentOnboardingStartPage',
+                                            () =>
+                                                import('./ee/features/agentOnboarding/AgentOnboardingStartPage'),
+                                        );
+                                    return {
+                                        Component: () => (
+                                            <TrackPage
+                                                name={
+                                                    PageName.AGENT_ONBOARDING_START
+                                                }
+                                            >
+                                                <AgentOnboardingStartPage />
+                                            </TrackPage>
+                                        ),
+                                    };
+                                },
+                            },
+                            {
+                                path: 'onboarding/runs/:agentOnboardingRunUuid',
+                                handle: { hideAILauncher: true },
+                                lazy: async () => {
+                                    const AgentOnboardingRunPage =
+                                        await loadLazyRouteDefault(
+                                            './ee/features/agentOnboarding/AgentOnboardingRunPage',
+                                            () =>
+                                                import('./ee/features/agentOnboarding/AgentOnboardingRunPage'),
+                                        );
+                                    return {
+                                        Component: () => (
+                                            <TrackPage
+                                                name={
+                                                    PageName.AGENT_ONBOARDING_RUN
+                                                }
+                                            >
+                                                <AgentOnboardingRunPage />
+                                            </TrackPage>
+                                        ),
+                                    };
+                                },
+                            },
+                        ],
+                    },
                     // Legacy sqlRunner redirect (no layout needed)
                     {
                         path: 'sqlRunner',
-                        element: <LegacySqlRunner />,
+                        lazy: async () => {
+                            const LegacySqlRunner = await loadLazyRouteDefault(
+                                './pages/LegacySqlRunner',
+                                () => import('./pages/LegacySqlRunner'),
+                            );
+                            return { Component: LegacySqlRunner };
+                        },
                     },
-                    // All project routes share ProjectLayout (NavBar + SourceCodeDrawer)
+                    // All project routes share ProjectLayout (NavBar)
                     {
                         element: <ProjectLayout />,
                         children: [
@@ -459,79 +906,200 @@ const PRIVATE_ROUTES: RouteObject[] = [
             ...MINIMAL_ROUTES,
             ...APP_ROUTES,
             {
+                path: '/agent/connection-approval',
+                lazy: async () => {
+                    const AgentConnectionApprovalPage =
+                        await loadLazyRouteDefault(
+                            './features/agentConnections/AgentConnectionApprovalPage',
+                            () =>
+                                import('./features/agentConnections/AgentConnectionApprovalPage'),
+                        );
+                    return { Component: AgentConnectionApprovalPage };
+                },
+            },
+            {
+                path: '/agent/connect',
+                lazy: async () => {
+                    const AgentConnect = await loadLazyRouteDefault(
+                        './pages/AgentConnect',
+                        () => import('./pages/AgentConnect'),
+                    );
+                    return { Component: AgentConnect };
+                },
+            },
+            {
                 path: '/',
                 element: <Navigate to="/projects" replace />,
             },
             {
-                path: '/createProject/:method?',
+                // Themes moved under the Data apps settings section. Redirect
+                // here rather than inside Settings so the sidebar mounts on the
+                // new path and expands the group.
+                path: '/generalSettings/themes',
                 element: (
-                    <>
-                        <NavBar />
-                        <TrackPage name={PageName.CREATE_PROJECT}>
-                            <CreateProject />
-                        </TrackPage>
-                    </>
+                    <Navigate to="/generalSettings/dataApps/themes" replace />
                 ),
             },
             {
-                path: '/createProjectSettings/:projectUuid',
-                handle: { hideAILauncher: true },
-                element: (
-                    <>
-                        <NavBar />
-                        <TrackPage name={PageName.CREATE_PROJECT_SETTINGS}>
-                            <CreateProjectSettings />
-                        </TrackPage>
-                    </>
-                ),
+                path: '/roadmap',
+                element: <Navigate to="/generalSettings/roadmap" replace />,
             },
             {
-                path: '/generalSettings/*',
-                handle: { hideAILauncher: true },
-                element: (
-                    <>
-                        <NavBar />
-                        <TrackPage name={PageName.GENERAL_SETTINGS}>
-                            <Settings />
-                        </TrackPage>
-                    </>
-                ),
-            },
-            {
-                path: '/no-access',
-                handle: { hideAILauncher: true },
-                element: (
-                    <>
-                        <NavBar />
-                        <TrackPage name={PageName.NO_ACCESS}>
-                            <ForbiddenPanel />
-                        </TrackPage>
-                    </>
-                ),
-            },
-            {
-                path: '/no-project-access',
-                handle: { hideAILauncher: true },
-                element: (
-                    <>
-                        <NavBar />
-                        <TrackPage name={PageName.NO_PROJECT_ACCESS}>
-                            <ForbiddenPanel subject="project" />
-                        </TrackPage>
-                    </>
-                ),
-            },
-            {
-                path: '/share/:shareNanoid',
-                handle: { hideAILauncher: true },
-                element: (
-                    <>
-                        <NavBar />
-                        <TrackPage name={PageName.SHARE}>
-                            <ShareRedirect />
-                        </TrackPage>
-                    </>
-                ),
+                element: <NavBarLayout />,
+                children: [
+                    {
+                        path: '/get-started',
+                        lazy: async () => {
+                            const { default: NoProjectHomepage } =
+                                await import('./ee/features/homepageBuilder/NoProjectHomepage');
+                            return {
+                                Component: () => (
+                                    <TrackPage
+                                        name={PageName.NO_PROJECT_HOMEPAGE}
+                                    >
+                                        <NoProjectHomepage />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                    {
+                        path: '/onboarding/data-source/:warehouse?',
+                        handle: { hideAILauncher: true },
+                        lazy: async () => {
+                            const OnboardingDataSource =
+                                await loadLazyRouteDefault(
+                                    './pages/OnboardingDataSource',
+                                    () =>
+                                        import('./pages/OnboardingDataSource'),
+                                );
+                            return {
+                                Component: () => (
+                                    <TrackPage
+                                        name={PageName.ONBOARDING_DATA_SOURCE}
+                                    >
+                                        <OnboardingDataSource />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                    {
+                        path: '/onboarding/dbt/:method?',
+                        handle: { hideAILauncher: true },
+                        lazy: async () => {
+                            const OnboardingDbt = await loadLazyRouteDefault(
+                                './pages/OnboardingDbt',
+                                () => import('./pages/OnboardingDbt'),
+                            );
+                            return {
+                                Component: () => (
+                                    <TrackPage name={PageName.ONBOARDING_DBT}>
+                                        <OnboardingDbt />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                    {
+                        path: '/onboarding/invite-expert',
+                        handle: { hideAILauncher: true },
+                        lazy: async () => {
+                            const OnboardingInviteExpert =
+                                await loadLazyRouteDefault(
+                                    './pages/OnboardingInviteExpert',
+                                    () =>
+                                        import('./pages/OnboardingInviteExpert'),
+                                );
+                            return {
+                                Component: () => (
+                                    <TrackPage
+                                        name={PageName.ONBOARDING_INVITE_EXPERT}
+                                    >
+                                        <OnboardingInviteExpert />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                    {
+                        path: '/createProject/:method?',
+                        lazy: async () => {
+                            const CreateProject = await loadLazyRouteDefault(
+                                './pages/CreateProject',
+                                () => import('./pages/CreateProject'),
+                            );
+                            return {
+                                Component: () => (
+                                    <TrackPage name={PageName.CREATE_PROJECT}>
+                                        <CreateProject />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                    {
+                        path: '/createProjectSettings/:projectUuid',
+                        handle: { hideAILauncher: true },
+                        element: (
+                            <TrackPage name={PageName.CREATE_PROJECT_SETTINGS}>
+                                <CreateProjectSettings />
+                            </TrackPage>
+                        ),
+                    },
+                    {
+                        path: '/generalSettings/*',
+                        handle: { hideAILauncher: true },
+                        lazy: async () => {
+                            const Settings = await loadLazyRouteDefault(
+                                './pages/Settings',
+                                () => import('./pages/Settings'),
+                            );
+                            return {
+                                Component: () => (
+                                    <TrackPage name={PageName.GENERAL_SETTINGS}>
+                                        <Settings />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                    {
+                        path: '/no-access',
+                        handle: { hideAILauncher: true },
+                        element: (
+                            <TrackPage name={PageName.NO_ACCESS}>
+                                <ForbiddenPanel />
+                            </TrackPage>
+                        ),
+                    },
+                    {
+                        path: '/no-project-access',
+                        handle: { hideAILauncher: true },
+                        element: (
+                            <TrackPage name={PageName.NO_PROJECT_ACCESS}>
+                                <ForbiddenPanel subject="project" />
+                            </TrackPage>
+                        ),
+                    },
+                    {
+                        path: '/share/:shareNanoid',
+                        handle: { hideAILauncher: true },
+                        lazy: async () => {
+                            const ShareRedirect = await loadLazyRouteDefault(
+                                './pages/ShareRedirect',
+                                () => import('./pages/ShareRedirect'),
+                            );
+                            return {
+                                Component: () => (
+                                    <TrackPage name={PageName.SHARE}>
+                                        <ShareRedirect />
+                                    </TrackPage>
+                                ),
+                            };
+                        },
+                    },
+                ],
             },
         ],
     },

@@ -1,0 +1,183 @@
+import { z } from 'zod';
+import { type ToolDescriptionContext } from '../defineTool';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
+import { toolNameFor } from './discoveryToolNames';
+import { findExploresRequiredFilterSchema } from './toolFindExploresArgs';
+
+const exploreMetadataGuidanceByRuntime = {
+    agent: 'joined tables, table filters, and parameters',
+    mcp: 'joined tables, table filters, required filters, and parameters',
+} satisfies Record<ToolDescriptionContext['runtime'], string>;
+
+export const GET_METADATA_DESCRIPTION = ({
+    runtime,
+}: ToolDescriptionContext): string => {
+    const getMetadata = toolNameFor('getMetadata', runtime);
+    const grepFields = toolNameFor('grepFields', runtime);
+    return `Tool: ${getMetadata}
+
+Purpose:
+Get the full metadata for explores and fields whose IDs you already know, typically from ${grepFields}: an explore's ${exploreMetadataGuidanceByRuntime[runtime]}, and a field's filter type, case-sensitivity, resolved default time dimension, parameter dependencies, hints, and whether it comes from a joined table.
+
+When to use:
+Call this for the explores and fields you intend to use whose full detail you do not already have. Batch every explore and field you need into one call. Descriptions and hints truncated elsewhere ("...(truncated)") are returned here in full.
+
+Inputs:
+Each entry in \`requests\` is one of:
+- \`{ "type": "explore", "exploreIds": ["orders", "customers"] }\` for whole explores.
+- \`{ "type": "field", "fields": [{ "exploreId": "orders", "fieldId": "orders_status" }] }\` for specific fields.
+
+Applying the result:
+Use a metric's default time dimension unless the user asks for a different one.
+`;
+};
+
+const exploreMetadataRequestSchema = z.object({
+    type: z.literal('explore'),
+    exploreIds: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe('Explore IDs (names) to fetch full metadata for.'),
+});
+
+const fieldMetadataRequestSchema = z.object({
+    type: z.literal('field'),
+    fields: z
+        .array(
+            z.object({
+                exploreId: z
+                    .string()
+                    .min(1)
+                    .describe('The explore the field belongs to.'),
+                fieldId: z
+                    .string()
+                    .min(1)
+                    .describe('The fieldId, e.g. `orders_status`.'),
+            }),
+        )
+        .min(1)
+        .describe('Specific fields to fetch full metadata for.'),
+});
+
+export const getMetadataInputSchema = z.object({
+    requests: z
+        .array(
+            z.discriminatedUnion('type', [
+                exploreMetadataRequestSchema,
+                fieldMetadataRequestSchema,
+            ]),
+        )
+        .min(1)
+        .max(20)
+        .describe(
+            'A batch of explore and/or field metadata requests, resolved together in one call.',
+        ),
+});
+
+export type ToolGetMetadataArgs = z.infer<typeof getMetadataInputSchema>;
+
+const parameterValueSchema = z.union([
+    z.string(),
+    z.number(),
+    z.array(z.string()),
+    z.array(z.number()),
+]);
+
+const getMetadataParameterSchema = z.object({
+    name: z.string(),
+    label: z.string(),
+    description: z.string().nullable(),
+    type: z.enum(['string', 'number', 'date']),
+    default: parameterValueSchema.nullable(),
+    multiple: z.boolean(),
+    allowCustomValues: z.boolean(),
+    options: z.array(z.union([z.string(), z.number()])).nullable(),
+    optionsFromDimension: z
+        .object({ model: z.string(), dimension: z.string() })
+        .nullable(),
+});
+
+export type GetMetadataParameter = z.infer<typeof getMetadataParameterSchema>;
+
+const getMetadataExploreFoundSchema = z.object({
+    exploreId: z.string(),
+    status: z.literal('found'),
+    label: z.string(),
+    description: z.string().nullable(),
+    hint: z.string().nullable(),
+    baseTable: z.string(),
+    joinedTables: z.array(z.string()),
+    requiredFilters: z.array(findExploresRequiredFilterSchema),
+    parameters: z.array(getMetadataParameterSchema),
+    baseDimensions: z.object({
+        count: z.number(),
+        fieldIds: z.array(z.string()),
+    }),
+    baseMetrics: z.object({
+        count: z.number(),
+        fieldIds: z.array(z.string()),
+    }),
+});
+
+const getMetadataExploreNotFoundSchema = z.object({
+    exploreId: z.string(),
+    status: z.literal('not_found'),
+    error: z.string(),
+});
+
+const getMetadataFieldFoundSchema = z.object({
+    exploreId: z.string(),
+    fieldId: z.string(),
+    status: z.literal('found'),
+    kind: z.enum(['dimension', 'metric']),
+    fieldType: z.string(),
+    label: z.string(),
+    filterType: z.string(),
+    isFromJoinedTable: z.boolean(),
+    joinedTableName: z.string().nullable(),
+    caseSensitiveFilters: z.boolean().nullable(),
+    defaultTimeDimension: z.string().nullable(),
+    defaultTimeDimensionGranularity: z.string().nullable(),
+    requiredParameters: z.array(z.string()),
+    description: z.string().nullable(),
+    hint: z.string().nullable(),
+});
+
+const getMetadataFieldNotFoundSchema = z.object({
+    exploreId: z.string(),
+    fieldId: z.string(),
+    status: z.literal('not_found'),
+    error: z.string(),
+});
+
+export const getMetadataResultSchema = z.object({
+    explores: z.array(
+        z.union([
+            getMetadataExploreFoundSchema,
+            getMetadataExploreNotFoundSchema,
+        ]),
+    ),
+    fields: z.array(
+        z.union([getMetadataFieldFoundSchema, getMetadataFieldNotFoundSchema]),
+    ),
+});
+
+// Same shape MCP surfaces as structuredContent, so agent and MCP callers read one contract.
+export const toolGetMetadataStructuredContentSchema =
+    getMetadataResultSchema.describe(
+        'One entry per requested explore and per requested field, in request order; a `not_found` entry carries the same error text shown in `result`.',
+    );
+
+export const toolGetMetadataOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema,
+    structuredContent: toolGetMetadataStructuredContentSchema,
+});
+
+export type GetMetadataResult = z.infer<typeof getMetadataResultSchema>;
+export type ToolGetMetadataStructuredContent = z.infer<
+    typeof toolGetMetadataStructuredContentSchema
+>;
+export type ToolGetMetadataOutput = z.infer<typeof toolGetMetadataOutputSchema>;

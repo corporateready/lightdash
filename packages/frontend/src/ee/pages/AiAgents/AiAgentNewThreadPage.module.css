@@ -1,0 +1,30 @@
+.agentAvatarWrap {
+    position: relative;
+    display: inline-flex;
+}
+
+.defaultAgentBadge {
+    position: absolute;
+    right: calc(var(--mantine-spacing-xs) / -2);
+    bottom: calc(var(--mantine-spacing-xs) / -2);
+    width: rem(24px);
+    height: rem(24px);
+    min-width: rem(24px);
+    min-height: rem(24px);
+    border-radius: 999px;
+    border: rem(2px) solid var(--mantine-color-body);
+    box-shadow: none;
+
+    &[data-starred='false'] {
+        background-color: var(--mantine-color-ldGray-1);
+        color: var(--mantine-color-dimmed);
+    }
+}
+
+.agentInstruction {
+    white-space: pre-wrap;
+}
+
+.agentDescription {
+    white-space: pre-wrap;
+}

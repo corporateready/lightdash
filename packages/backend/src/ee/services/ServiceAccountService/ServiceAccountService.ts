@@ -4,20 +4,31 @@ import {
     AuthTokenPrefix,
     CreateServiceAccount,
     ForbiddenError,
+    getAllScopesForRole,
+    getServiceAccountScopePermissions,
+    isOrganizationOnlyScope,
     NotFoundError,
     ParameterError,
     ServiceAccount,
+    ServiceAccountProjectAccessInput,
     ServiceAccountProjectGrant,
     ServiceAccountScope,
     ServiceAccountWithProjectAccessCount,
     ServiceAccountWithToken,
     SessionUser,
     UnexpectedDatabaseError,
+    UpdateServiceAccount,
 } from '@lightdash/common';
 import { LightdashAnalytics } from '../../../analytics/LightdashAnalytics';
+import { assertOAuthCredentialOperationAllowed } from '../../../auth/oauthScopes/credentials';
 import { LightdashConfig } from '../../../config/parseConfig';
+import { createAuditLogEvent } from '../../../logging/auditLog';
+import { createActorFromUser } from '../../../logging/caslAuditWrapper';
+import { logAuditEvent } from '../../../logging/winston';
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
+import { RolesModel } from '../../../models/RolesModel';
 import { BaseService } from '../../../services/BaseService';
+import { validateOrganizationScopesCanBeGranted } from '../../../utils/organizationRolePermissions';
 import {
     ScimAccessTokenAuthenticationEvent,
     ScimAccessTokenEvent,
@@ -31,12 +42,17 @@ type ServiceAccountServiceArguments = {
     serviceAccountModel: ServiceAccountModel;
     commercialFeatureFlagModel: CommercialFeatureFlagModel;
     projectModel: ProjectModel;
+    rolesModel: RolesModel;
 };
 
 function isSameMinute(a: Date | null, b: Date): boolean {
     if (!a) return false;
     return Math.floor(a.getTime() / 60000) === Math.floor(b.getTime() / 60000);
 }
+
+export type ScimAuthentication =
+    | { result: 'authenticated'; serviceAccount: ServiceAccount }
+    | { result: 'expired'; serviceAccount: ServiceAccount };
 
 export class ServiceAccountService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
@@ -49,12 +65,15 @@ export class ServiceAccountService extends BaseService {
 
     private readonly projectModel: ProjectModel;
 
+    private readonly rolesModel: RolesModel;
+
     constructor({
         lightdashConfig,
         analytics,
         serviceAccountModel,
         commercialFeatureFlagModel,
         projectModel,
+        rolesModel,
     }: ServiceAccountServiceArguments) {
         super();
         this.lightdashConfig = lightdashConfig;
@@ -62,6 +81,111 @@ export class ServiceAccountService extends BaseService {
         this.serviceAccountModel = serviceAccountModel;
         this.commercialFeatureFlagModel = commercialFeatureFlagModel;
         this.projectModel = projectModel;
+        this.rolesModel = rolesModel;
+    }
+
+    private async validateOrganizationPermissionsCanBeGranted({
+        user,
+        organizationUuid,
+        scopes,
+        roleUuid,
+    }: {
+        user: SessionUser;
+        organizationUuid: string;
+        scopes?: ServiceAccountScope[];
+        roleUuid?: string | null;
+    }): Promise<void> {
+        const getGrantedScopes = async (): Promise<string[]> => {
+            if (!roleUuid) {
+                return [
+                    ...new Set(
+                        (scopes ?? []).flatMap(
+                            getServiceAccountScopePermissions,
+                        ),
+                    ),
+                ];
+            }
+
+            // Same unknown-role contract as ServiceAccountModel, so running
+            // this check earlier doesn't change the status callers already get.
+            const role = await this.rolesModel
+                .getRoleWithScopesByUuid(roleUuid)
+                .catch((error) => {
+                    if (error instanceof NotFoundError) return undefined;
+                    throw error;
+                });
+            if (!role || role.organizationUuid !== organizationUuid) {
+                throw new ParameterError(
+                    `Role ${roleUuid} not found in this organization`,
+                );
+            }
+
+            return role.scopes;
+        };
+
+        await validateOrganizationScopesCanBeGranted({
+            user,
+            organizationUuid,
+            grantedScopes: await getGrantedScopes(),
+            rolesModel: this.rolesModel,
+        });
+    }
+
+    // Validates a batch of project-access grants: each must carry exactly one
+    // of `role` (system) or `roleUuid` (custom), and every custom role must
+    // belong to the org. Shared by create and the project-scoped edit path.
+    private async validateProjectAccessGrantsOrThrow(
+        projectAccess: ServiceAccountProjectAccessInput[],
+        organizationUuid: string,
+        user: SessionUser,
+    ): Promise<void> {
+        // Each grant carries exactly one of `role` / `roleUuid`. The TS union
+        // covers compile-time callers, but request bodies arrive as JSON, so
+        // we double-check at the boundary.
+        for (const grant of projectAccess) {
+            const hasRole = grant.role !== undefined;
+            const hasRoleUuid = grant.roleUuid !== undefined;
+            if (hasRole === hasRoleUuid) {
+                throw new ParameterError(
+                    'Each projectAccess grant must specify exactly one of role or roleUuid',
+                );
+            }
+        }
+        // One bulk query for the whole batch (no per-grant N+1).
+        const customRoleUuids = projectAccess
+            .map((g) => g.roleUuid)
+            .filter((u): u is string => u !== undefined);
+        if (customRoleUuids.length > 0) {
+            const invalid = await this.projectModel.findInvalidCustomRoleUuids(
+                customRoleUuids,
+                organizationUuid,
+            );
+            if (invalid.length > 0) {
+                throw new ParameterError(
+                    `Unknown role uuid(s) for this organization: ${invalid.join(
+                        ', ',
+                    )}`,
+                );
+            }
+        }
+        const grantedScopes = await Promise.all(
+            projectAccess.map(async (grant) => {
+                if (grant.role) return getAllScopesForRole(grant.role);
+                const role = await this.rolesModel.getRoleWithScopesByUuid(
+                    grant.roleUuid!,
+                );
+                return role.scopes;
+            }),
+        );
+        // Delegate from organization permissions, never from unrelated projects.
+        await validateOrganizationScopesCanBeGranted({
+            user,
+            organizationUuid,
+            grantedScopes: grantedScopes
+                .flat()
+                .filter((scope) => !isOrganizationOnlyScope(scope)),
+            rolesModel: this.rolesModel,
+        });
     }
 
     private throwForbiddenErrorOnNoPermission(user: SessionUser) {
@@ -86,7 +210,13 @@ export class ServiceAccountService extends BaseService {
         user: SessionUser;
         tokenDetails: CreateServiceAccount;
         prefix?: string;
-    }): Promise<ServiceAccount> {
+    }): Promise<ServiceAccountWithToken> {
+        assertOAuthCredentialOperationAllowed(
+            user,
+            prefix === AuthTokenPrefix.SCIM
+                ? 'createScimToken'
+                : 'createServiceAccount',
+        );
         // Project-scope create: validate before touching the DB so a malformed
         // request can't half-create an SA. The invariant is "Member-scoped SA
         // must have ≥1 project from the moment it exists", so we refuse any
@@ -102,43 +232,25 @@ export class ServiceAccountService extends BaseService {
                     'projectAccess can only be set when scopes = [system:member]',
                 );
             }
-            // Each grant carries exactly one of `role` (system) or
-            // `roleUuid` (custom). The TS discriminated union covers
-            // compile-time callers, but request bodies arrive as JSON, so
-            // we double-check at the boundary.
-            for (const grant of projectAccess) {
-                const hasRole = grant.role !== undefined;
-                const hasRoleUuid = grant.roleUuid !== undefined;
-                if (hasRole === hasRoleUuid) {
-                    throw new ParameterError(
-                        'Each projectAccess grant must specify exactly one of role or roleUuid',
-                    );
-                }
-            }
-            // Bulk-validate custom-role grants belong to the SA's org.
-            // Doing this before the SA insert avoids creating an SA that
-            // we'd then have to compensate-delete.
-            const customRoleUuids = projectAccess
-                .map((g) => g.roleUuid)
-                .filter((u): u is string => u !== undefined);
-            if (customRoleUuids.length > 0) {
-                const invalid =
-                    await this.projectModel.findInvalidCustomRoleUuids(
-                        customRoleUuids,
-                        tokenDetails.organizationUuid,
-                    );
-                if (invalid.length > 0) {
-                    throw new ParameterError(
-                        `Unknown role uuid(s) for this organization: ${invalid.join(
-                            ', ',
-                        )}`,
-                    );
-                }
-            }
+            // Validate grant shape + custom roles before the SA insert so we
+            // never create an SA we'd then have to compensate-delete.
         }
 
         try {
             this.throwForbiddenErrorOnNoPermission(user);
+            if (projectAccess.length > 0) {
+                await this.validateProjectAccessGrantsOrThrow(
+                    projectAccess,
+                    tokenDetails.organizationUuid,
+                    user,
+                );
+            }
+            await this.validateOrganizationPermissionsCanBeGranted({
+                user,
+                organizationUuid: tokenDetails.organizationUuid,
+                scopes: tokenDetails.scopes,
+                roleUuid: tokenDetails.roleUuid,
+            });
             const token = await this.serviceAccountModel.create({
                 user,
                 data: {
@@ -279,6 +391,12 @@ export class ServiceAccountService extends BaseService {
         update: { expiresAt: Date };
         prefix?: string;
     }): Promise<ServiceAccountWithToken> {
+        assertOAuthCredentialOperationAllowed(
+            user,
+            prefix === AuthTokenPrefix.SCIM
+                ? 'rotateScimToken'
+                : 'rotateServiceAccount',
+        );
         this.throwForbiddenErrorOnNoPermission(user);
 
         if (update.expiresAt.getTime() < Date.now()) {
@@ -324,6 +442,192 @@ export class ServiceAccountService extends BaseService {
             },
         });
         return newToken;
+    }
+
+    async update({
+        user,
+        tokenUuid,
+        update,
+    }: {
+        user: SessionUser;
+        tokenUuid: string;
+        update: UpdateServiceAccount;
+    }): Promise<ServiceAccount> {
+        this.throwForbiddenErrorOnNoPermission(user);
+
+        if (!update.description || update.description.trim() === '') {
+            throw new ParameterError('Description is required');
+        }
+
+        // Existence + cross-org guard before any write, mirroring delete/rotate.
+        const existingToken =
+            await this.serviceAccountModel.getTokenbyUuid(tokenUuid);
+        if (!existingToken) {
+            throw new NotFoundError(`Token with UUID ${tokenUuid} not found`);
+        }
+        if (existingToken.organizationUuid !== user.organizationUuid) {
+            throw new ForbiddenError("Token doesn't belong to organization");
+        }
+
+        // The SA's scope mode is fixed: a `system:member` SA is project-scoped
+        // (access comes from project grants), anything else is org-scoped. Each
+        // mode edits a disjoint set of fields; switching between them is not
+        // supported (delete + recreate instead).
+        const wasProjectScoped = existingToken.scopes.includes(
+            ServiceAccountScope.SYSTEM_MEMBER,
+        );
+
+        // The request describes the SA's target shape:
+        //  - `projectAccess` present  → project-scoped (system:member + grants)
+        //  - org `scopes` / `roleUuid` → organization-scoped
+        //  - neither                  → rename only, preserve the current mode
+        const scopesAreMember =
+            !!update.scopes &&
+            update.scopes.length === 1 &&
+            update.scopes[0] === ServiceAccountScope.SYSTEM_MEMBER;
+        // `system:member` always means project-scoped — even without
+        // `projectAccess` it routes here, where the ≥1-grant check rejects it.
+        const targetIsProject =
+            update.projectAccess !== undefined || scopesAreMember;
+        const hasOrgScopes =
+            !!update.scopes && update.scopes.length > 0 && !scopesAreMember;
+        const hasOrgPermission = hasOrgScopes || !!update.roleUuid;
+        // Project grants are written when targeting project mode (replace) or
+        // when switching an org permission onto a previously project-scoped SA
+        // (clear). Used for the audit entry below.
+        const projectAccessChanged =
+            targetIsProject || (hasOrgPermission && wasProjectScoped);
+
+        let updated: ServiceAccount;
+        if (targetIsProject) {
+            // Edit a project-scoped SA's grants, or switch an org-scoped SA to
+            // project-scoped. Either way the result is system:member + grants.
+            if (hasOrgPermission) {
+                throw new ParameterError(
+                    'Provide either project access or an organization role, not both',
+                );
+            }
+            if (update.scopes && !scopesAreMember) {
+                throw new ParameterError(
+                    'A project-scoped service account must use scopes = [system:member]',
+                );
+            }
+            const grants = update.projectAccess ?? [];
+            if (grants.length === 0) {
+                throw new ParameterError(
+                    'A project-scoped service account must have at least one project. Delete it instead to remove all access.',
+                );
+            }
+            await this.validateProjectAccessGrantsOrThrow(
+                grants,
+                existingToken.organizationUuid,
+                user,
+            );
+
+            // Replace grants first, then flip scopes to system:member. Grant
+            // replacement is the step that can fail, so doing it first means a
+            // failure leaves the SA unchanged. Because ≥1 grant exists before
+            // scopes become member, the forbidden "member with no projects"
+            // state is never persisted. The two writes span two models (not one
+            // transaction); the worst case is a renamed SA whose scopes lag its
+            // grants, never a corrupt one.
+            await this.projectModel.setServiceAccountProjectAccess(
+                tokenUuid,
+                grants,
+                { makeProjectScoped: true },
+            );
+            updated = await this.serviceAccountModel.update({
+                serviceAccountUuid: tokenUuid,
+                data: {
+                    description: update.description,
+                },
+            });
+        } else if (hasOrgPermission) {
+            await this.validateOrganizationPermissionsCanBeGranted({
+                user,
+                organizationUuid: existingToken.organizationUuid,
+                scopes: update.scopes,
+                roleUuid: update.roleUuid,
+            });
+            // Edit an org-scoped SA's role, or switch a project-scoped SA to
+            // organization-scoped. Set the org permission first (so it's no
+            // longer member), then drop any project grants — order that never
+            // leaves a "member with no projects" SA.
+            updated = await this.serviceAccountModel.update({
+                serviceAccountUuid: tokenUuid,
+                data: {
+                    description: update.description,
+                    scopes: update.scopes,
+                    roleUuid: update.roleUuid,
+                },
+            });
+            if (wasProjectScoped) {
+                await this.projectModel.setServiceAccountProjectAccess(
+                    tokenUuid,
+                    [],
+                );
+            }
+        } else {
+            // Rename only — preserve the current scope mode and permission.
+            updated = await this.serviceAccountModel.update({
+                serviceAccountUuid: tokenUuid,
+                data: { description: update.description },
+            });
+        }
+
+        // Product analytics (org context only, no sensitive values).
+        this.analytics.track<ScimAccessTokenEvent>({
+            event: 'scim_access_token.updated',
+            userId: user.userUuid,
+            properties: {
+                organizationId: existingToken.organizationUuid,
+            },
+        });
+
+        // Structured audit-log entry: record the before/after of the
+        // non-sensitive fields (name, scopes, role) so the change is
+        // attributable. The token is never included.
+        try {
+            logAuditEvent(
+                createAuditLogEvent(
+                    createActorFromUser(user),
+                    'update',
+                    {
+                        type: 'ServiceAccount',
+                        organizationUuid: existingToken.organizationUuid,
+                        metadata: {
+                            serviceAccountUuid: tokenUuid,
+                            before: {
+                                description: existingToken.description,
+                                scopes: existingToken.scopes,
+                                roleUuid: existingToken.roleUuid,
+                            },
+                            after: {
+                                description: updated.description,
+                                scopes: updated.scopes,
+                                roleUuid: updated.roleUuid,
+                            },
+                            projectAccessChanged,
+                        },
+                    },
+                    {},
+                    'allowed',
+                ),
+            );
+        } catch (auditError) {
+            this.logger.warn(
+                'Failed to log service account update audit event',
+                {
+                    serviceAccountUuid: tokenUuid,
+                    error:
+                        auditError instanceof Error
+                            ? auditError.message
+                            : String(auditError),
+                },
+            );
+        }
+
+        return updated;
     }
 
     async get({
@@ -420,16 +724,17 @@ export class ServiceAccountService extends BaseService {
             path: string;
             routePath: string;
         },
-    ): Promise<ServiceAccount | null> {
+    ): Promise<ScimAuthentication | null> {
         // return null if token is empty
         if (token === '') return null;
 
         try {
-            const dbToken = await this.serviceAccountModel.getByToken(token);
+            const dbToken = await this.serviceAccountModel.findByToken(token);
             if (dbToken) {
-                // return null if expired
+                // expired tokens still resolve so the failure can be
+                // attributed in the SCIM request log
                 if (dbToken.expiresAt && dbToken.expiresAt < new Date()) {
-                    return null;
+                    return { result: 'expired', serviceAccount: dbToken };
                 }
 
                 this.logger.info('SCIM: access token authenticated', {
@@ -453,7 +758,7 @@ export class ServiceAccountService extends BaseService {
                 if (!isSameMinute(dbToken.lastUsedAt, new Date())) {
                     await this.serviceAccountModel.updateUsedDate(dbToken.uuid);
                 }
-                return dbToken;
+                return { result: 'authenticated', serviceAccount: dbToken };
             }
         } catch (error) {
             return null;
@@ -468,7 +773,7 @@ export class ServiceAccountService extends BaseService {
         if (token === '') return null;
 
         try {
-            const dbToken = await this.serviceAccountModel.getByToken(token);
+            const dbToken = await this.serviceAccountModel.findByToken(token);
             if (dbToken) {
                 // return null if expired
                 if (dbToken.expiresAt && dbToken.expiresAt < new Date()) {

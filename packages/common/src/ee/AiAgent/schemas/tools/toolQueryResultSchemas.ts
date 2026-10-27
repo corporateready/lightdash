@@ -1,0 +1,179 @@
+import { z } from 'zod';
+import type { WarehouseExecutionStats } from '../../../../types/warehouse';
+
+const createMcpAsyncQueryUuidSchema = () => z.string().uuid();
+
+export const mcpAsyncQueryUuidSchema = createMcpAsyncQueryUuidSchema();
+
+export const mcpNextPollAfterMsSchema = z.number().int().positive();
+
+export const mcpHeartbeatAtSchema = z
+    .string()
+    .describe(
+        'ISO timestamp for when Lightdash last checked this async query and confirmed it is still running.',
+    );
+
+export const mcpRunningQueryResultSchema = z.object({
+    status: z
+        .literal('running')
+        .describe(
+            'Present when the query is still running and should be polled with get_query_result.',
+        ),
+    queryUuid: mcpAsyncQueryUuidSchema.describe(
+        'Async query UUID to pass to get_query_result when status is running.',
+    ),
+    nextPollAfterMs: mcpNextPollAfterMsSchema.describe(
+        'Suggested delay before polling get_query_result for this query.',
+    ),
+    heartbeatAt: mcpHeartbeatAtSchema,
+});
+
+export const mcpSqlQueryRowsColumnsSchema = z.object({
+    rows: z
+        .array(z.record(z.string(), z.unknown()))
+        .describe(
+            'Result rows. Each row is an object keyed by column name. Values come from the warehouse as JSON-serializable primitives (numbers, strings, booleans, ISO date strings, or null).',
+        ),
+    columns: z
+        .array(z.string())
+        .describe(
+            'Ordered list of column names matching the keys in each row of `rows`.',
+        ),
+    rowCount: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+            'Total number of rows returned. May be less than the requested limit.',
+        ),
+});
+
+export const mcpSqlQueryCompletedResultSchema =
+    mcpSqlQueryRowsColumnsSchema.extend({
+        status: z.literal('done'),
+        sqlRunnerUrl: z.string().nullable(),
+    });
+
+export const mcpMetricQueryResultRowsFieldsSchema = z.object({
+    rows: z.array(z.record(z.string(), z.unknown())),
+    fields: z.record(z.string(), z.unknown()),
+});
+
+export const mcpMetricQueryCompletedResultSchema =
+    mcpMetricQueryResultRowsFieldsSchema.extend({
+        status: z.literal('done'),
+        queryUuid: createMcpAsyncQueryUuidSchema(),
+        exploreUrl: z.string().nullable(),
+    });
+
+export const mcpRenderChartResultSchema = z
+    .object({
+        status: z.literal('done'),
+        queryUuid: createMcpAsyncQueryUuidSchema(),
+        exploreUrl: z.string().nullable(),
+        echartsOption: z.unknown().nullable().optional(),
+    })
+    .describe('Rendered chart result for a completed query.');
+
+export const mcpQueryResultDoneSqlResultSchema = z.object({
+    status: z.literal('done'),
+    queryUuid: createMcpAsyncQueryUuidSchema(),
+    sqlRunnerUrl: z.string().nullable(),
+    ...mcpSqlQueryRowsColumnsSchema.shape,
+});
+
+export const mcpQueryResultDoneMetricQueryResultSchema = z.object({
+    status: z.literal('done'),
+    queryUuid: createMcpAsyncQueryUuidSchema(),
+    exploreUrl: z.string().nullable(),
+    ...mcpMetricQueryResultRowsFieldsSchema.shape,
+});
+
+export const mcpQueryResultTerminalResultSchema = z.object({
+    status: z.enum(['error', 'cancelled', 'expired']),
+    queryUuid: createMcpAsyncQueryUuidSchema(),
+    error: z.string().nullable(),
+});
+
+export const createMcpStructuredOutputSchema = <TResult extends z.ZodType>(
+    result: TResult,
+) =>
+    z.object({
+        result,
+    });
+
+export const createMcpAsyncQueryRunStructuredOutputSchema = <
+    TCompletedResult extends z.ZodType,
+>(
+    completedResult: TCompletedResult,
+) =>
+    createMcpStructuredOutputSchema(
+        z.union([completedResult, mcpRunningQueryResultSchema]),
+    );
+
+export const mcpRunSqlStructuredOutputSchema =
+    createMcpAsyncQueryRunStructuredOutputSchema(
+        mcpSqlQueryCompletedResultSchema,
+    );
+
+export const mcpRunMetricQueryStructuredOutputSchema =
+    createMcpAsyncQueryRunStructuredOutputSchema(
+        mcpMetricQueryCompletedResultSchema,
+    );
+
+export const mcpGetQueryResultStructuredOutputSchema =
+    createMcpStructuredOutputSchema(
+        z.union([
+            mcpRunningQueryResultSchema,
+            mcpQueryResultDoneSqlResultSchema,
+            mcpQueryResultDoneMetricQueryResultSchema,
+            mcpQueryResultTerminalResultSchema,
+        ]),
+    );
+
+export const mcpRenderChartRunningResultSchema = z
+    .object({
+        status: z
+            .literal('running')
+            .describe(
+                'Present while the grouped query for the chart is still running. Call render_chart again with the same arguments.',
+            ),
+        queryUuid: createMcpAsyncQueryUuidSchema().describe(
+            'The queryUuid render_chart was called with.',
+        ),
+        nextPollAfterMs: mcpNextPollAfterMsSchema.describe(
+            'Suggested delay before calling render_chart again.',
+        ),
+        heartbeatAt: mcpHeartbeatAtSchema,
+    })
+    .describe(
+        'The chart is not drawn yet because its grouped query is running.',
+    );
+
+export const mcpRenderChartStructuredOutputSchema =
+    createMcpStructuredOutputSchema(
+        z.union([
+            mcpRenderChartResultSchema,
+            mcpRenderChartRunningResultSchema,
+        ]),
+    );
+
+export const warehouseExecutionStatsSchema = z
+    .object({
+        jobId: z.string().nullable(),
+        bytesProcessed: z.number().nullable(),
+        bytesBilled: z.number().nullable(),
+        executionTimeMs: z.number().nullable(),
+        cacheHit: z.boolean().nullable(),
+    })
+    .describe(
+        "The warehouse's own report for the query job, as stated in the result.",
+    ) satisfies z.ZodType<WarehouseExecutionStats>;
+
+// Optional: results recorded before execution stats existed lack the field.
+export const executionStatsContentSchema = warehouseExecutionStatsSchema
+    .nullable()
+    .optional()
+    .describe(
+        'Warehouse execution stats, when the warehouse reported them; null when it did not or the results came from the results cache.',
+    );

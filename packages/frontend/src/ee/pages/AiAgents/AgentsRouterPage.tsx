@@ -1,0 +1,594 @@
+import {
+    type AiPromptContext,
+    type AiPromptContextInput,
+} from '@lightdash/common';
+import {
+    ActionIcon,
+    Badge,
+    Box,
+    Center,
+    Group,
+    Popover,
+    Stack,
+    Text,
+    Title,
+    UnstyledButton,
+} from '@mantine/core';
+import {
+    IconChevronRight,
+    IconInfoCircle,
+    IconNotebook,
+} from '@tabler/icons-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router';
+import { LightdashUserAvatar } from '../../../components/Avatar';
+import MantineIcon from '../../../components/common/MantineIcon';
+import { useProject } from '../../../hooks/useProject';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { AgentSettingsSelector } from '../../features/aiCopilot/components/AgentSelector';
+import { AutoModeSidebar } from '../../features/aiCopilot/components/AiAgentPageLayout/AgentSidebar';
+import { AiAgentPageLayout } from '../../features/aiCopilot/components/AiAgentPageLayout/AiAgentPageLayout';
+import { NewThreadButton } from '../../features/aiCopilot/components/AiAgentPageLayout/NewThreadButton';
+import { AgentChatInput } from '../../features/aiCopilot/components/ChatElements/AgentChatInput';
+import {
+    mergeAiPromptContextInput,
+    mergeAiPromptContextItems,
+} from '../../features/aiCopilot/components/ChatElements/contentMentions';
+import { getPromptContextItemKey } from '../../features/aiCopilot/components/ChatElements/contentReferenceUtils';
+import { ChatElementsUtils } from '../../features/aiCopilot/components/ChatElements/utils';
+import { MyMemoriesModal } from '../../features/aiCopilot/components/MyMemories/MyMemoriesModal';
+import { usePendingPrompt } from '../../features/aiCopilot/components/PendingPromptContext/PendingPromptContext';
+import { PinnedContextCard } from '../../features/aiCopilot/components/PinnedContextCard/PinnedContextCard';
+import { type StartDeepResearchArgs } from '../../features/aiCopilot/deepResearch/types';
+import { useAiAgentModelSelection } from '../../features/aiCopilot/hooks/useAiAgentModelSelection';
+import { useAiAgentPermission } from '../../features/aiCopilot/hooks/useAiAgentPermission';
+import {
+    useAiAgentRouterFlow,
+    type AiAgentRouterErrorArgs,
+    type CreateThreadForAgent,
+} from '../../features/aiCopilot/hooks/useAiAgentRouterFlow';
+import { useAiAgentSqlModeAvailable } from '../../features/aiCopilot/hooks/useAiAgentSqlModeAvailable';
+import { useAiAgentMemoryEnabled } from '../../features/aiCopilot/hooks/useAiOrganizationSettings';
+import { useStartDeepResearchForThreadMutation } from '../../features/aiCopilot/hooks/useDeepResearch';
+import { useDeepResearchAccess } from '../../features/aiCopilot/hooks/useDeepResearchAccess';
+import { usePinnedContext } from '../../features/aiCopilot/hooks/usePinnedContext';
+import {
+    useCreateAgentThreadMutation,
+    useProjectAiAgents,
+} from '../../features/aiCopilot/hooks/useProjectAiAgents';
+import { setThreadSqlMode } from '../../features/aiCopilot/store/aiAgentThreadModeSlice';
+import { useAiAgentStoreDispatch } from '../../features/aiCopilot/store/hooks';
+import classes from './AgentsRouterPage.module.css';
+
+const AgentsRouterPage = () => {
+    const projectUuid = useProjectUuid();
+    const navigate = useNavigate();
+    const location = useLocation();
+    const [searchParams] = useSearchParams();
+    const dispatch = useAiAgentStoreDispatch();
+
+    const { data: agents } = useProjectAiAgents({
+        projectUuid: projectUuid!,
+        redirectOnUnauthorized: true,
+    });
+    const { data: project } = useProject(projectUuid);
+
+    const canManageAgents = useAiAgentPermission({
+        action: 'manage',
+        projectUuid,
+    });
+
+    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+    const [isMemoriesModalOpen, setIsMemoriesModalOpen] = useState(false);
+    const memoryEnabled = useAiAgentMemoryEnabled();
+
+    const sqlModeAvailable = useAiAgentSqlModeAvailable(projectUuid);
+    const canStartDeepResearch = useDeepResearchAccess(projectUuid);
+    const chartUuid = searchParams.get('chartUuid');
+    const dashboardUuid = searchParams.get('dashboardUuid');
+    const dataAppUuid = searchParams.get('dataAppUuid');
+    const documentUuid = searchParams.get('documentUuid');
+
+    const {
+        contextInput,
+        previewItems,
+        contentMentionItems,
+        isReady: isPinnedContextReady,
+    } = usePinnedContext({
+        projectUuid,
+        chartUuidOrSlug: chartUuid,
+        dashboardUuidOrSlug: dashboardUuid,
+        dataAppUuidOrSlug: dataAppUuid,
+        documentUuid,
+    });
+
+    const {
+        agentDefault,
+        explicitModelConfig,
+        extendedThinking,
+        handleExtendedThinkingChange,
+        handleSelectedModelKeyChange,
+        modelOptions,
+        selectedModelKey,
+        showExtendedThinking,
+    } = useAiAgentModelSelection({
+        projectUuid,
+        agentUuid: undefined,
+    });
+
+    const { pendingPrompt, setPendingPrompt } = usePendingPrompt();
+
+    const consumedAutoSubmitKeyRef = useRef<string | undefined>(undefined);
+
+    const { mutateAsync: createThread } = useCreateAgentThreadMutation(
+        projectUuid!,
+    );
+    const startDeepResearch = useStartDeepResearchForThreadMutation(
+        projectUuid!,
+    );
+
+    const createThreadForAgent = useCallback(
+        async (args: {
+            agentUuid: string;
+            context?: AiPromptContextInput;
+            message: string;
+            optimisticContext?: AiPromptContext;
+            toolHints: string[];
+        }) => {
+            const enableSqlMode =
+                sqlModeAvailable &&
+                (agents?.find((agent) => agent.uuid === args.agentUuid)
+                    ?.enableSqlMode ??
+                    true);
+            const thread = await createThread({
+                agentUuid: args.agentUuid,
+                context: args.context,
+                enableSqlMode,
+                optimisticContext: args.optimisticContext,
+                prompt: args.message,
+                toolHints: args.toolHints,
+                modelConfig: explicitModelConfig,
+            });
+            dispatch(
+                setThreadSqlMode({
+                    threadUuid: thread.uuid,
+                    enabled: enableSqlMode,
+                }),
+            );
+            return thread;
+        },
+        [createThread, dispatch, explicitModelConfig, agents, sqlModeAvailable],
+    );
+
+    const createDeepResearchForAgent = useCallback<CreateThreadForAgent>(
+        async (args) => {
+            const thread = await createThread({
+                agentUuid: args.agentUuid,
+                context: args.context,
+                modelConfig: explicitModelConfig,
+                optimisticContext: args.optimisticContext,
+                prompt: args.message,
+                skipAgentResponse: true,
+            });
+            await startDeepResearch.mutateAsync({
+                agentUuid: args.agentUuid,
+                promptUuid: thread.firstMessage.uuid,
+                question: args.message,
+                threadUuid: thread.uuid,
+            });
+            return thread;
+        },
+        [createThread, explicitModelConfig, startDeepResearch],
+    );
+
+    const handleRouteError = useCallback(
+        ({
+            fallbackAgent,
+            context,
+            createThreadForAgent: createThreadForAgentOverride,
+            message,
+            optimisticContext,
+            toolHints,
+        }: AiAgentRouterErrorArgs) => {
+            setPendingPrompt(message);
+            if (fallbackAgent && projectUuid) {
+                void (createThreadForAgentOverride ?? createThreadForAgent)({
+                    agentUuid: fallbackAgent.uuid,
+                    context,
+                    message,
+                    optimisticContext,
+                    toolHints,
+                });
+            }
+        },
+        [createThreadForAgent, projectUuid, setPendingPrompt],
+    );
+
+    const {
+        confirmPick,
+        handleSubmit: handleRouterSubmit,
+        isCreating,
+        isLocked,
+        isPickingAgent,
+        isRouting,
+        phase,
+        sortedCandidates,
+    } = useAiAgentRouterFlow({
+        agents: agents ?? [],
+        createThreadForAgent,
+        onRouteError: handleRouteError,
+        projectUuid,
+    });
+
+    const handleSubmit = useCallback(
+        async ({
+            context,
+            message,
+            optimisticContext,
+            toolHints,
+        }: {
+            context?: AiPromptContextInput;
+            message: string;
+            optimisticContext?: AiPromptContext;
+            toolHints: string[];
+        }) => {
+            if (!isPinnedContextReady) return;
+            setPendingPrompt('');
+            const mergedContext = mergeAiPromptContextInput(
+                contextInput,
+                context,
+            );
+            const mergedOptimisticContext = mergeAiPromptContextItems(
+                previewItems,
+                optimisticContext,
+            );
+            await handleRouterSubmit({
+                context: mergedContext,
+                message,
+                optimisticContext: mergedOptimisticContext,
+                toolHints,
+            });
+        },
+        [
+            contextInput,
+            handleRouterSubmit,
+            isPinnedContextReady,
+            previewItems,
+            setPendingPrompt,
+        ],
+    );
+
+    const handleStartDeepResearch = useCallback(
+        async ({ question }: StartDeepResearchArgs) => {
+            if (!isPinnedContextReady || !canStartDeepResearch) {
+                return;
+            }
+
+            setPendingPrompt('');
+            await handleRouterSubmit({
+                context: contextInput,
+                createThreadForAgent: createDeepResearchForAgent,
+                message: question,
+                optimisticContext: previewItems,
+                toolHints: [],
+            });
+        },
+        [
+            canStartDeepResearch,
+            contextInput,
+            createDeepResearchForAgent,
+            handleRouterSubmit,
+            isPinnedContextReady,
+            previewItems,
+            setPendingPrompt,
+        ],
+    );
+
+    const autoSubmitPrompt =
+        typeof location.state?.autoSubmitPrompt === 'string'
+            ? location.state.autoSubmitPrompt.trim()
+            : '';
+
+    useEffect(() => {
+        if (
+            !autoSubmitPrompt ||
+            phase.kind !== 'idle' ||
+            !isPinnedContextReady
+        ) {
+            return;
+        }
+        if (consumedAutoSubmitKeyRef.current === location.key) return;
+
+        consumedAutoSubmitKeyRef.current = location.key;
+
+        void navigate(
+            { pathname: location.pathname, search: location.search },
+            { replace: true, state: undefined },
+        );
+        void handleSubmit({
+            message: autoSubmitPrompt,
+            toolHints: [],
+        });
+    }, [
+        autoSubmitPrompt,
+        handleSubmit,
+        location.key,
+        location.pathname,
+        location.search,
+        navigate,
+        phase.kind,
+        isPinnedContextReady,
+    ]);
+
+    const isWorking = isRouting || isCreating;
+    const workingLabel = isRouting
+        ? 'Finding the right agent…'
+        : isCreating
+          ? 'Opening the conversation…'
+          : null;
+
+    const title = project?.name ? `Ask ${project.name}` : 'Ask this project';
+    const placeholder = project?.name
+        ? `Ask ${project.name} anything...`
+        : 'Ask anything about your data...';
+    const settingsHref = projectUuid
+        ? `/generalSettings/ai/agents?projects=${projectUuid}`
+        : '/generalSettings/ai/agents';
+
+    return (
+        <AiAgentPageLayout
+            isAgentSidebarCollapsed={isSidebarCollapsed}
+            setIsAgentSidebarCollapsed={setIsSidebarCollapsed}
+            SidebarHeader={
+                <NewThreadButton
+                    to={`/projects/${projectUuid}/ai-agents`}
+                    isCollapsed={isSidebarCollapsed}
+                />
+            }
+            Sidebar={
+                <AutoModeSidebar
+                    projectUuid={projectUuid!}
+                    isAgentSidebarCollapsed={isSidebarCollapsed}
+                />
+            }
+        >
+            <Box className={classes.routerView}>
+                <Group gap={4} className={classes.routerActions}>
+                    {memoryEnabled && (
+                        <UnstyledButton
+                            type="button"
+                            className={classes.memoriesButton}
+                            onClick={() => setIsMemoriesModalOpen(true)}
+                        >
+                            <Group gap={6} wrap="nowrap" align="center">
+                                <MantineIcon
+                                    icon={IconNotebook}
+                                    size="sm"
+                                    color="dimmed"
+                                />
+                                <Text size="xs">Memories</Text>
+                            </Group>
+                        </UnstyledButton>
+                    )}
+                    {canManageAgents && (
+                        <AgentSettingsSelector
+                            agents={agents ?? []}
+                            projectUuid={projectUuid!}
+                            askAiSettingsHref={settingsHref}
+                        />
+                    )}
+                </Group>
+
+                <MyMemoriesModal
+                    opened={isMemoriesModalOpen}
+                    onClose={() => setIsMemoriesModalOpen(false)}
+                    projectUuid={projectUuid!}
+                />
+
+                <Center h="100%">
+                    <Stack
+                        gap="lg"
+                        {...ChatElementsUtils.centeredElementProps}
+                        h="unset"
+                        py="xl"
+                    >
+                        <Stack align="center" gap="xxs">
+                            <Title order={2}>{title}</Title>
+                        </Stack>
+
+                        {previewItems.length > 0 && (
+                            <Stack gap="xxs" w="100%">
+                                <Text
+                                    size="xs"
+                                    fw={600}
+                                    c="dimmed"
+                                    tt="uppercase"
+                                >
+                                    Pinned context
+                                </Text>
+                                <Group gap="xs" wrap="wrap">
+                                    {previewItems.map((item) => (
+                                        <PinnedContextCard
+                                            key={getPromptContextItemKey(item)}
+                                            item={item}
+                                            projectUuid={projectUuid!}
+                                            previewScope={null}
+                                        />
+                                    ))}
+                                </Group>
+                            </Stack>
+                        )}
+
+                        <AgentChatInput
+                            projectUuid={projectUuid}
+                            agents={agents ?? []}
+                            selectedAgent="auto"
+                            placeholder={placeholder}
+                            loading={isLocked}
+                            disabled={!isPinnedContextReady}
+                            onSubmit={handleSubmit}
+                            onStartDeepResearch={
+                                canStartDeepResearch
+                                    ? handleStartDeepResearch
+                                    : undefined
+                            }
+                            defaultValue={pendingPrompt}
+                            onValueChange={setPendingPrompt}
+                            models={modelOptions}
+                            selectedModelId={selectedModelKey}
+                            onModelChange={handleSelectedModelKeyChange}
+                            extendedThinking={
+                                showExtendedThinking
+                                    ? extendedThinking
+                                    : undefined
+                            }
+                            onExtendedThinkingChange={
+                                showExtendedThinking
+                                    ? handleExtendedThinkingChange
+                                    : undefined
+                            }
+                            agentDefault={agentDefault}
+                            clearOnSubmit={false}
+                            fullWidth
+                            showSuggestions={false}
+                            contentMentionPriorityItems={contentMentionItems}
+                        />
+
+                        {isWorking && workingLabel && (
+                            <Group
+                                gap={8}
+                                justify="center"
+                                className={classes.routingStatus}
+                                aria-live="polite"
+                            >
+                                <span className={classes.routingDots}>
+                                    <span />
+                                    <span />
+                                    <span />
+                                </span>
+                                <Text size="xs" c="dimmed">
+                                    {workingLabel}
+                                </Text>
+                            </Group>
+                        )}
+
+                        {isPickingAgent && phase.kind === 'picker' && (
+                            <Stack gap="xs" className={classes.pickerStack}>
+                                <div className={classes.pickerHeader}>
+                                    <Text size="sm" fw={600}>
+                                        Which agent should answer?
+                                    </Text>
+                                    {phase.decision.decision.reasoning && (
+                                        <Popover
+                                            width={280}
+                                            position="bottom-end"
+                                            withArrow
+                                        >
+                                            <Popover.Target>
+                                                <ActionIcon
+                                                    size="sm"
+                                                    aria-label="Why these agents?"
+                                                >
+                                                    <MantineIcon
+                                                        icon={IconInfoCircle}
+                                                        size={14}
+                                                    />
+                                                </ActionIcon>
+                                            </Popover.Target>
+                                            <Popover.Dropdown>
+                                                <Text size="xs" c="dimmed">
+                                                    {
+                                                        phase.decision.decision
+                                                            .reasoning
+                                                    }
+                                                </Text>
+                                            </Popover.Dropdown>
+                                        </Popover>
+                                    )}
+                                </div>
+
+                                <Box className={classes.pickerScroll}>
+                                    {sortedCandidates.map((c) => {
+                                        return (
+                                            <UnstyledButton
+                                                key={c.agentUuid}
+                                                onClick={() =>
+                                                    confirmPick(c.agentUuid)
+                                                }
+                                                className={`${classes.candidateButton} ${
+                                                    c.isRecommended
+                                                        ? classes.recommended
+                                                        : ''
+                                                }`}
+                                                aria-label={`Send to ${c.name}`}
+                                            >
+                                                <Group
+                                                    gap="sm"
+                                                    wrap="nowrap"
+                                                    align="center"
+                                                >
+                                                    <LightdashUserAvatar
+                                                        size={32}
+                                                        name={c.name}
+                                                        src={c.agent?.imageUrl}
+                                                    />
+                                                    <Stack
+                                                        gap={2}
+                                                        miw={0}
+                                                        flex={1}
+                                                    >
+                                                        <Group
+                                                            gap="xs"
+                                                            wrap="nowrap"
+                                                        >
+                                                            <Text
+                                                                size="sm"
+                                                                fw={600}
+                                                                truncate="end"
+                                                            >
+                                                                {c.name}
+                                                            </Text>
+                                                            {c.isRecommended && (
+                                                                <Badge
+                                                                    size="xs"
+                                                                    color="violet"
+                                                                >
+                                                                    Recommended
+                                                                </Badge>
+                                                            )}
+                                                        </Group>
+                                                        {c.description && (
+                                                            <Text
+                                                                size="xs"
+                                                                c="dimmed"
+                                                                truncate="end"
+                                                                className={
+                                                                    classes.candidateDescription
+                                                                }
+                                                            >
+                                                                {c.description}
+                                                            </Text>
+                                                        )}
+                                                    </Stack>
+                                                    <MantineIcon
+                                                        icon={IconChevronRight}
+                                                        size={16}
+                                                        className={
+                                                            classes.chevron
+                                                        }
+                                                    />
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    })}
+                                </Box>
+                            </Stack>
+                        )}
+                    </Stack>
+                </Center>
+            </Box>
+        </AiAgentPageLayout>
+    );
+};
+
+export default AgentsRouterPage;

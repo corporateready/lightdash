@@ -3,9 +3,10 @@ import {
     Tooltip,
     type AnchorProps,
     type TooltipProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconHelpCircle } from '@tabler/icons-react';
 import { type FC } from 'react';
+import useIsEmbedded from '../ee/providers/Embed/useIsEmbedded';
 import MantineIcon, { type MantineIconProps } from './common/MantineIcon';
 
 type Props = React.AnchorHTMLAttributes<HTMLAnchorElement> &
@@ -18,29 +19,33 @@ const DocumentationHelpButton: FC<Props> = ({
     iconProps,
     tooltipProps,
     ...anchorProps
-}) => (
-    <Tooltip
-        withinPortal
-        label="Open documentation"
-        position="top"
-        maw={350}
-        {...tooltipProps}
-    >
-        <Anchor
-            role="button"
-            target="_blank"
-            rel="noreferrer"
-            c="dimmed"
-            {...anchorProps}
+}) => {
+    const isEmbedded = useIsEmbedded();
+    if (isEmbedded) return null;
+
+    return (
+        <Tooltip
+            label="Open documentation"
+            position="top"
+            maw={350}
+            {...tooltipProps}
         >
-            <MantineIcon
-                icon={IconHelpCircle}
-                size="md"
-                display="inline"
-                {...iconProps}
-            />
-        </Anchor>
-    </Tooltip>
-);
+            <Anchor
+                role="button"
+                target="_blank"
+                rel="noreferrer"
+                c="dimmed"
+                {...anchorProps}
+            >
+                <MantineIcon
+                    icon={IconHelpCircle}
+                    size="md"
+                    display="inline"
+                    {...iconProps}
+                />
+            </Anchor>
+        </Tooltip>
+    );
+};
 
 export default DocumentationHelpButton;

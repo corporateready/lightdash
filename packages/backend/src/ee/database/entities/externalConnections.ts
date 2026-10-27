@@ -1,0 +1,196 @@
+import {
+    type ApiKeyLocation,
+    type ExternalConnectionAuthType,
+    type ExternalConnectionMethod,
+    type OAuthClientAuthMethod,
+} from '@lightdash/common';
+import { type Knex } from 'knex';
+
+export const ExternalConnectionsTableName = 'external_connections';
+export const ExternalConnectionSecretsTableName = 'external_connection_secrets';
+export const AppExternalConnectionsTableName = 'app_external_connections';
+export const ExternalConnectionRateCountersTableName =
+    'external_connection_rate_counters';
+export const ExternalConnectionSamplesTableName = 'external_connection_samples';
+
+export type DbExternalConnection = {
+    external_connection_uuid: string;
+    project_uuid: string;
+    organization_uuid: string;
+    name: string;
+    // Portable identity: unique per project among live rows, stable across renames
+    slug: string;
+    type: ExternalConnectionAuthType;
+    origin: string;
+    allow_browser_images: boolean;
+    allow_data_app_builder_linking: boolean;
+    forward_user_identity: boolean;
+    instructions: string | null;
+    allowed_path_prefixes: string[];
+    allowed_methods: ExternalConnectionMethod[];
+    allowed_content_types: string[];
+    response_max_bytes: number;
+    request_max_bytes: number;
+    timeout_ms: number;
+    rate_limit_per_minute: number | null;
+    api_key_name: string | null;
+    api_key_location: ApiKeyLocation | null;
+    oauth_scopes: string[] | null;
+    oauth_token_url: string | null;
+    oauth_client_id: string | null;
+    oauth_client_auth_method: OAuthClientAuthMethod | null;
+    custom_headers: Record<string, string> | null;
+    created_by_user_uuid: string | null;
+    updated_by_user_uuid: string | null;
+    created_at: Date;
+    updated_at: Date;
+    deleted_at: Date | null;
+};
+
+export type ExternalConnectionsTable = Knex.CompositeTableType<
+    DbExternalConnection,
+    Pick<
+        DbExternalConnection,
+        | 'project_uuid'
+        | 'organization_uuid'
+        | 'name'
+        | 'slug'
+        | 'type'
+        | 'origin'
+    > & {
+        // jsonb columns are written as serialized JSON strings (read back as arrays)
+        allowed_path_prefixes: string;
+        allowed_methods: string;
+        allowed_content_types: string;
+        oauth_scopes?: string | null;
+        custom_headers?: string | null;
+    } & Partial<
+            Pick<
+                DbExternalConnection,
+                | 'external_connection_uuid'
+                | 'instructions'
+                | 'response_max_bytes'
+                | 'request_max_bytes'
+                | 'timeout_ms'
+                | 'rate_limit_per_minute'
+                | 'api_key_name'
+                | 'api_key_location'
+                | 'oauth_token_url'
+                | 'oauth_client_id'
+                | 'oauth_client_auth_method'
+                | 'allow_browser_images'
+                | 'allow_data_app_builder_linking'
+                | 'forward_user_identity'
+                | 'created_by_user_uuid'
+                | 'updated_by_user_uuid'
+            >
+        >,
+    Partial<
+        Pick<
+            DbExternalConnection,
+            | 'name'
+            | 'type'
+            | 'origin'
+            | 'instructions'
+            | 'response_max_bytes'
+            | 'request_max_bytes'
+            | 'timeout_ms'
+            | 'rate_limit_per_minute'
+            | 'api_key_name'
+            | 'api_key_location'
+            | 'oauth_token_url'
+            | 'oauth_client_id'
+            | 'oauth_client_auth_method'
+            | 'allow_browser_images'
+            | 'allow_data_app_builder_linking'
+            | 'forward_user_identity'
+            | 'updated_by_user_uuid'
+            | 'updated_at'
+            | 'deleted_at'
+        > & {
+            // jsonb columns written as serialized JSON strings
+            allowed_path_prefixes: string;
+            allowed_methods: string;
+            allowed_content_types: string;
+            oauth_scopes: string | null;
+            custom_headers: string | null;
+        }
+    >
+>;
+
+export type DbExternalConnectionSecret = {
+    external_connection_uuid: string;
+    encrypted_payload: Buffer;
+    created_at: Date;
+    rotated_at: Date | null;
+};
+
+export type ExternalConnectionSecretsTable = Knex.CompositeTableType<
+    DbExternalConnectionSecret,
+    Pick<
+        DbExternalConnectionSecret,
+        'external_connection_uuid' | 'encrypted_payload'
+    >,
+    Partial<
+        Pick<DbExternalConnectionSecret, 'encrypted_payload' | 'rotated_at'>
+    >
+>;
+
+export type DbAppExternalConnection = {
+    app_id: string;
+    external_connection_uuid: string;
+    alias: string;
+    created_at: Date;
+};
+
+export type AppExternalConnectionsTable = Knex.CompositeTableType<
+    DbAppExternalConnection,
+    Pick<
+        DbAppExternalConnection,
+        'app_id' | 'external_connection_uuid' | 'alias'
+    >
+>;
+
+export type DbExternalConnectionRateCounter = {
+    external_connection_uuid: string;
+    app_id: string;
+    window_started_at: Date;
+    request_count: number;
+};
+
+export type ExternalConnectionRateCountersTable = Knex.CompositeTableType<
+    DbExternalConnectionRateCounter,
+    Pick<
+        DbExternalConnectionRateCounter,
+        'external_connection_uuid' | 'app_id' | 'window_started_at'
+    > &
+        Partial<Pick<DbExternalConnectionRateCounter, 'request_count'>>,
+    Partial<Pick<DbExternalConnectionRateCounter, 'request_count'>>
+>;
+
+export type DbExternalConnectionSample = {
+    sample_uuid: string;
+    external_connection_uuid: string;
+    label: string | null;
+    // jsonb columns come back as parsed objects on read
+    request: unknown;
+    response: unknown;
+    created_by_user_uuid: string | null;
+    created_at: Date;
+};
+
+export type ExternalConnectionSamplesTable = Knex.CompositeTableType<
+    DbExternalConnectionSample,
+    // INSERT shape — jsonb columns written as serialized JSON strings
+    Pick<DbExternalConnectionSample, 'external_connection_uuid'> & {
+        request: string;
+        response: string;
+    } & Partial<
+            Pick<
+                DbExternalConnectionSample,
+                'sample_uuid' | 'label' | 'created_by_user_uuid'
+            >
+        >,
+    // UPDATE shape — not used
+    never
+>;

@@ -1,28 +1,47 @@
 import {
+    AgentSqlScope,
     AlreadyExistsError,
     AnyType,
+    assertUnreachable,
     AthenaAuthenticationType,
     BigqueryAuthenticationType,
-    ChangesetUtils,
     CompiledTable,
+    ConflictError,
+    convertOrganizationRoleToProjectRole,
     CreateProject,
     CreateProjectOptionalCredentials,
     CreateSnowflakeCredentials,
     createVirtualView,
     CreateVirtualViewPayload,
     CreateWarehouseCredentials,
+    CreateWarehouseCredentialsWithOptionalSecrets,
     DbtProjectConfig,
+    DbtProjectType,
     DEFAULT_USER_SPACES_PARENT_NAME,
+    DuckdbConnectionType,
     Explore,
     ExploreError,
+    ExploreSplitError,
     ExploreType,
+    ExternalSourceScope,
+    FeatureFlags,
+    generateSlug,
+    getErrorMessage,
+    getExploreSplitCandidates,
+    getHighestProjectRole,
     getLtreePathFromSlug,
+    getPersonSignIn,
     GroupType,
     IdContentMapping,
     isExploreError,
+    isUserManagedExplore,
+    normalizeWarehouseCredentials,
     NotFoundError,
+    NotImplementedError,
+    OrganizationMemberRole,
     OrganizationProject,
     ParameterError,
+    PersonSignInProvider,
     PreviewContentMapping,
     Project,
     ProjectDefaults,
@@ -31,61 +50,116 @@ import {
     ProjectMemberRole,
     ProjectSummary,
     ProjectType,
+    resolveSignInSubject,
     sensitiveCredentialsFieldNames,
     sensitiveDbtCredentialsFieldNames,
+    ServiceAccountProjectAccessInput,
     ServiceAccountProjectGrant,
+    ServiceAccountScope,
+    SignInSubjectBasis,
     SnowflakeAuthenticationType,
     SpaceMemberRole,
     SpaceSummary,
+    stripDucklakeNestedSensitive,
     SupportedDbtVersions,
     TablesConfiguration,
+    UnexpectedDatabaseError,
     UnexpectedServerError,
     UpdateMetadata,
     UpdateProject,
+    UpdateProjectDetails,
     UpdateQueryTimezoneSettings,
     UpdateSchedulerSettings,
     UpdateVirtualViewPayload,
+    USER_MANAGED_EXPLORE_TYPES,
     WarehouseClient,
     WarehouseCredentials,
     WarehouseTypes,
+    type ConnectionRoute,
+    type CreateBigqueryCredentials,
+    type PersonSignIn,
+    type SignInSubject,
+    type StoredSignInSubject,
     type SummaryExplore,
+    type WarehouseSqlBuilder,
+    type WeekDay,
 } from '@lightdash/common';
 import {
+    buildMotherduckConnectionString,
+    MotherduckInstanceCache,
     WarehouseCatalog,
     warehouseClientFromCredentials,
+    type WarehouseClientOptions,
 } from '@lightdash/warehouses';
 import { Knex } from 'knex';
+import isEqual from 'lodash/isEqual';
 import NodeCache from 'node-cache';
+import { createHash } from 'node:crypto';
 import { DatabaseError } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { LightdashConfig } from '../../config/parseConfig';
 import {
+    CatalogTableName,
+    MetricsTreeEdgesTableName,
+    MetricsTreeNodesTableName,
+    MetricsTreesTableName,
+} from '../../database/entities/catalog';
+import { DashboardTileCommentsTableName } from '../../database/entities/comments';
+import {
     DashboardsTableName,
     DashboardTabsTableName,
+    DashboardTileChartTableName,
+    DashboardTileDataAppsTableName,
+    DashboardTileHeadingsTableName,
+    DashboardTileLoomsTableName,
+    DashboardTileMarkdownsTableName,
+    DashboardTileSqlChartTableName,
+    DashboardTilesTableName,
+    DashboardVersionsTableName,
     DashboardViewsTableName,
     DbDashboard,
     DbDashboardTabs,
 } from '../../database/entities/dashboards';
+import { DashboardSlugMappingsTableName } from '../../database/entities/dashboardSlugMappings';
+import { DbtSourceRefCatalogsTableName } from '../../database/entities/dbtSourceRefCatalogs';
+import {
+    ExternalSourcesTableName,
+    ExternalSourceTablesTableName,
+} from '../../database/entities/externalSources';
 import { GroupMembershipTableName } from '../../database/entities/groupMemberships';
+import { GroupTableName } from '../../database/entities/groups';
+import { OrganizationMembershipCustomRolesTableName } from '../../database/entities/organizationMembershipCustomRoles';
 import { OrganizationMembershipsTableName } from '../../database/entities/organizationMemberships';
 import {
     DbOrganization,
     OrganizationTableName,
 } from '../../database/entities/organizations';
-import { PinnedListTableName } from '../../database/entities/pinnedList';
+import {
+    PinnedChartTableName,
+    PinnedDashboardTableName,
+    PinnedListTableName,
+    PinnedSpaceTableName,
+} from '../../database/entities/pinnedList';
+import { ProjectDbtSourcesTableName } from '../../database/entities/projectDbtSources';
 import { ProjectGroupAccessTableName } from '../../database/entities/projectGroupAccess';
+import { ProjectGroupAccessCustomRolesTableName } from '../../database/entities/projectGroupAccessCustomRoles';
+import { ProjectMembershipCustomRolesTableName } from '../../database/entities/projectMembershipCustomRoles';
 import {
     DbProjectMembership,
     ProjectMembershipsTableName,
 } from '../../database/entities/projectMemberships';
+import { ProjectMergedManifestsTable } from '../../database/entities/projectMergedManifests';
 import {
     CachedExploresTableName,
+    CachedExploreStagingTableName,
     CachedExploreTableName,
     CachedWarehouseTableName,
     DbCachedWarehouse,
     DbProject,
+    PlaygroundBundleVersionsTableName,
     ProjectTableName,
     type DbCachedExplore,
+    type DbCachedExploreStaging,
 } from '../../database/entities/projects';
 import { RolesTableName } from '../../database/entities/roles';
 import {
@@ -94,6 +168,7 @@ import {
     SavedChartCustomSqlDimensionsTableName,
     SavedChartsTableName,
 } from '../../database/entities/savedCharts';
+import { SavedChartSlugMappingsTableName } from '../../database/entities/savedChartSlugMappings';
 import {
     DbSavedSql,
     InsertSql,
@@ -104,8 +179,14 @@ import {
     SpaceTableName,
     SpaceUserAccessTableName,
 } from '../../database/entities/spaces';
+import { TagsTableName } from '../../database/entities/tags';
 import { DbUser, UserTableName } from '../../database/entities/users';
 import { WarehouseCredentialTableName } from '../../database/entities/warehouseCredentials';
+import {
+    AiPromptTableName,
+    AiThreadTableName,
+    AiWebAppThreadTableName,
+} from '../../ee/database/entities/ai';
 import {
     AiAgentGroupAccessTableName,
     AiAgentInstructionVersionsTableName,
@@ -115,22 +196,144 @@ import {
     AiAgentUserAccessTableName,
     type DbAiAgent,
 } from '../../ee/database/entities/aiAgent';
+import {
+    AiDeepResearchEventsTableName,
+    AiDeepResearchRunsTableName,
+} from '../../ee/database/entities/aiDeepResearch';
 import { ServiceAccountsTableName } from '../../ee/database/entities/serviceAccounts';
+import {
+    newExploreCacheReadContext,
+    summarizeExploreCacheRead,
+    type ExploreCacheReadContext,
+} from '../../logging/exploreCacheReadMetrics';
 import Logger from '../../logging/logger';
+import { measureTime } from '../../logging/measureTime';
+import {
+    lockCompilePublication,
+    markCompilePublished,
+} from '../../scheduler/compileShutdown';
+import { type StoredPreAggregateRefresh } from '../../services/ProjectService/preAggregateRefresh';
 import { wrapSentryTransaction, wrapSentryTransactionSync } from '../../utils';
+import { AwsWebIdentityResolver } from '../../utils/awsWebIdentity/AwsWebIdentityResolver';
+import {
+    defaultGoogleIdentityTokenSource,
+    type GoogleIdentityTokenSource,
+} from '../../utils/awsWebIdentity/googleIdentityTokenSource';
+import {
+    chunkAsyncRowsByBytes,
+    chunkRowsByBytes,
+} from '../../utils/chunkRowsByBytes';
+import {
+    cliDeployCollisionReason,
+    cliDeployConflictError,
+} from '../../utils/cliDeployError';
+import {
+    hasSameDbtCredentialDestination,
+    hasSameWarehouseCredentialDestination,
+} from '../../utils/credentialDestination';
 import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
-import { generateUniqueSpaceSlug } from '../../utils/SlugUtils';
-import { ChangesetModel } from '../ChangesetModel';
+import {
+    acquireProjectSlugLock,
+    generateUniqueProjectSlug,
+    generateUniqueSlugScopedToProject,
+} from '../../utils/SlugUtils';
+import { warehouseCredentialsEqual } from '../../utils/warehouseCredentialsEqual';
+import {
+    copyWarehouseCredentialVersions,
+    getWarehouseCredentialVersions,
+    withNewWarehouseCredentialVersion,
+    withPreservedWarehouseCredentialVersion,
+    withWarehouseCredentialVersion,
+    withWarehouseCredentialVersions,
+} from '../../utils/warehouseCredentialVersion';
+import { AwsWebIdentityAudienceModel } from '../AwsWebIdentityAudienceModel';
+import { FeatureFlagModel } from '../FeatureFlagModel/FeatureFlagModel';
+import { OrganizationWarehouseCredentialsModel } from '../OrganizationWarehouseCredentialsModel';
+import { RefreshTokenSourceChangedError } from '../RefreshTokenRotation/RefreshTokenRotation';
+import { clearProjectExtraRoles } from '../roleSetUtils';
+import {
+    remapRowBinding,
+    type WarehouseConnectionMap,
+} from '../WarehouseConnectionIdentityModel/WarehouseConnectionIdentityModel';
+import { WarehouseConnectionModel } from '../WarehouseConnectionModel/WarehouseConnectionModel';
+import {
+    WarehouseConnectionRouter,
+    type ConnectionBinding,
+    type CredentialReadTarget,
+    type ResolvedCredentialRead,
+} from '../WarehouseConnectionRouter/WarehouseConnectionRouter';
+import {
+    cachedExploreSourcesForSources,
+    type CachedExploreSource,
+    type CachedSourceCatalog,
+} from './cachedExploreSource';
+import {
+    allocateStagedExploreNames,
+    getLegacyPrimaryExploreNames,
+    type ExploreNaming,
+} from './exploreNameAllocation';
+import { validateExplorePublication } from './explorePublication';
+import { normalizeStoredDbtConnection } from './normalizeStoredDbtConnection';
+import { omitProjectUuid, replaceProjectUuid } from './previewContent';
 import Transaction = Knex.Transaction;
+
+export type PushToPreview = (args: {
+    previewCredentials: CreateWarehouseCredentials;
+    previousUpstreamCredentials: CreateWarehouseCredentials;
+}) => CreateWarehouseCredentials | null;
+
+export type PreviewCredentialsPush =
+    | { kind: 'skipped' }
+    | { kind: 'pushed'; previewProjectUuids: string[] }
+    | { kind: 'failed'; error: unknown };
+
+export type BoundExplore = {
+    explore: Explore | ExploreError;
+    warehouseConnectionUuid: string | null;
+};
+
+export type MultiConnectionCarry =
+    | {
+          kind: 'connections';
+          warehouseConnectionUuids: string[];
+          dbtSourceUuids?: string[];
+      }
+    | { kind: 'dbtSources'; dbtSourceUuids: string[] }
+    | {
+          kind: 'otherDbtSourceSet';
+          dbtSourceUuids: string[];
+          packageSources: Record<string, string>;
+          sourceAliases: Record<string, string>;
+      }
+    | {
+          kind: 'otherDbtSources';
+          dbtSourceUuid: string;
+          warehouseConnectionUuid: string | null;
+      };
+
+export type ExploreWriteCheck = (
+    trx: Knex.Transaction,
+    explores: (Explore | ExploreError)[],
+) => Promise<void>;
+
+export type StagedExploreWriteCheck = (
+    trx: Knex.Transaction,
+    saveUuid: string,
+) => Promise<void>;
 
 export type ProjectModelArguments = {
     database: Knex;
     lightdashConfig: LightdashConfig;
     encryptionUtil: EncryptionUtil;
-    changesetModel: ChangesetModel;
+    googleIdentityTokenSource?: GoogleIdentityTokenSource;
 };
 
 const CACHED_EXPLORES_PG_LOCK_NAMESPACE = 1;
+
+type CachedWarehouseCredentials = {
+    credentials: CreateWarehouseCredentials;
+    sourceVersions: readonly string[];
+};
 
 // Initialize cache for warehouse credentials with 30 seconds TTL
 const warehouseCredentialsCache =
@@ -141,7 +344,32 @@ const warehouseCredentialsCache =
           })
         : undefined;
 
+type SharedSignInSubjectLookup = {
+    provider: PersonSignIn['provider'];
+    subject: SignInSubject | null;
+    basis: SignInSubjectBasis | null;
+};
+
+const legacySignInSubjects = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+const pendingLegacySignInSubjects = new Map<
+    string,
+    Promise<SharedSignInSubjectLookup | null>
+>();
+
 const INSERT_BATCH_SIZE = 1000;
+
+const DELETE_CONTENT_BATCH_SIZE = 100;
+
+export const ORIGINAL_TYPE_LOCKED_MESSAGE =
+    'The warehouse type cannot change while this project has extra connections. Remove the extra connections first.';
+
+const getMotherduckConnectionString = (
+    credentials: CreateWarehouseCredentials,
+): string | undefined =>
+    credentials.type === WarehouseTypes.DUCKDB &&
+    credentials.connectionType === DuckdbConnectionType.MOTHERDUCK
+        ? buildMotherduckConnectionString(credentials)
+        : undefined;
 
 async function chunkedInsertReturning<T extends Record<string, unknown>>(
     trx: Transaction,
@@ -166,45 +394,274 @@ type RawSummaryRow = {
     groups: Explore['groups'] | null;
     type: Explore['type'] | null;
     preAggregateSource: Explore['preAggregateSource'] | null;
+    externalSource: Explore['externalSource'] | null;
     errors: ExploreError['errors'] | null; // Fatal errors from ExploreError
     warnings: Explore['warnings'] | null; // Non-fatal warnings from partial compilation
     baseTable: Explore['baseTable'];
     baseTableDatabase: Explore['tables'][string]['database'];
     baseTableSchema: Explore['tables'][string]['schema'];
     baseTableDescription: Explore['tables'][string]['description'] | null;
+    warehouseConnectionUuid: string | null;
     baseTableRequiredAttributes:
         | Explore['tables'][string]['requiredAttributes']
         | null;
     baseTableAnyAttributes: Explore['tables'][string]['anyAttributes'] | null;
     aiHint: Explore['aiHint'] | null;
+    customMeta: Explore['customMeta'] | null;
+};
+
+export type ExploreTableSummary = Pick<
+    CompiledTable,
+    | 'name'
+    | 'originalName'
+    | 'database'
+    | 'schema'
+    | 'description'
+    | 'sqlTable'
+    | 'ymlPath'
+    | 'dbtSourceUuid'
+>;
+
+export type ExploreTableSummaryRecord = {
+    name: string;
+    type: ExploreType | undefined;
+    baseTable: string;
+    tables: Record<string, ExploreTableSummary>;
+} & ({ errors: true } | { errors?: never });
+
+type RawExploreTableSummaryRow = {
+    exploreName: string;
+    exploreType: ExploreType | null;
+    baseTable: string | null;
+    hasErrors: boolean;
+    tableKey: string | null;
+    tableName: unknown;
+    originalName: unknown;
+    database: unknown;
+    schema: unknown;
+    description: unknown;
+    hasDescription: boolean;
+    sqlTable: unknown;
+    ymlPath: unknown;
+    dbtSourceUuid: unknown;
+};
+
+type CachedExploreStorageStats = {
+    exploreCount: number;
+    totalBytes: number;
+};
+
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const toOptionalJsonScalarText = (value: unknown): string | undefined =>
+    value == null ? undefined : String(value);
+
+export const toExploreTableSummaryRecord = (
+    explore: unknown,
+): ExploreTableSummaryRecord | undefined => {
+    if (!isJsonObject(explore) || typeof explore.name !== 'string') {
+        return undefined;
+    }
+
+    const tables = Object.create(null) as Record<string, ExploreTableSummary>;
+    if (isJsonObject(explore.tables)) {
+        Object.entries(explore.tables).forEach(([tableKey, table]) => {
+            if (!isJsonObject(table)) {
+                return;
+            }
+            tables[tableKey] = {
+                name: (table.name ?? null) as string,
+                database: (table.database ?? null) as string,
+                schema: (table.schema ?? null) as string,
+                sqlTable: (table.sqlTable ?? null) as string,
+                ...(table.originalName
+                    ? { originalName: table.originalName as string }
+                    : {}),
+                ...(Object.hasOwn(table, 'description')
+                    ? { description: table.description as string }
+                    : {}),
+                ...(table.ymlPath ? { ymlPath: table.ymlPath as string } : {}),
+                ...(table.dbtSourceUuid == null
+                    ? {}
+                    : { dbtSourceUuid: table.dbtSourceUuid as string }),
+            };
+        });
+    }
+
+    return {
+        name: explore.name,
+        type: toOptionalJsonScalarText(explore.type) as ExploreType | undefined,
+        baseTable: toOptionalJsonScalarText(explore.baseTable) ?? '',
+        tables,
+        ...(Object.hasOwn(explore, 'errors') ? { errors: true as const } : {}),
+    };
+};
+
+export const reduceExploreTableSummaryRows = (
+    rows: RawExploreTableSummaryRow[],
+): Record<string, ExploreTableSummaryRecord> =>
+    rows.reduce<Record<string, ExploreTableSummaryRecord>>(
+        (acc, row) => {
+            const explore = acc[row.exploreName] ?? {
+                name: row.exploreName,
+                type: row.exploreType ?? undefined,
+                baseTable: row.baseTable ?? '',
+                tables: Object.create(null) as Record<
+                    string,
+                    ExploreTableSummary
+                >,
+                ...(row.hasErrors ? { errors: true as const } : {}),
+            };
+
+            if (row.tableKey !== null) {
+                explore.tables[row.tableKey] = {
+                    name: row.tableName as string,
+                    database: row.database as string,
+                    schema: row.schema as string,
+                    sqlTable: row.sqlTable as string,
+                    ...(row.originalName
+                        ? { originalName: row.originalName as string }
+                        : {}),
+                    ...(row.hasDescription
+                        ? { description: row.description as string }
+                        : {}),
+                    ...(row.ymlPath ? { ymlPath: row.ymlPath as string } : {}),
+                    ...(row.dbtSourceUuid === null
+                        ? {}
+                        : { dbtSourceUuid: row.dbtSourceUuid as string }),
+                };
+            }
+
+            acc[row.exploreName] = explore;
+            return acc;
+        },
+        Object.create(null) as Record<string, ExploreTableSummaryRecord>,
+    );
+
+type PreviewChartUuidMapping = {
+    sourceChartUuid: string;
+    previewChartUuid: string;
 };
 
 export class ProjectModel {
+    /** Serializes create-or-get across API pods without relying on a slug. */
+    async runInAnalyticsProvisioningLock<T>(
+        organizationUuid: string,
+        callback: () => Promise<T>,
+    ): Promise<T> {
+        return this.database.transaction(async (trx) => {
+            const organization = await trx(OrganizationTableName)
+                .where('organization_uuid', organizationUuid)
+                .select('organization_id')
+                .first();
+            if (!organization)
+                throw new NotFoundError('Cannot find organization');
+            await trx.raw('SELECT pg_advisory_xact_lock(?, ?)', [
+                19350431,
+                organization.organization_id,
+            ]);
+            return callback();
+        });
+    }
+
     protected database: Knex;
 
     protected lightdashConfig: LightdashConfig;
 
-    protected changesetModel: ChangesetModel;
-
     private encryptionUtil: EncryptionUtil;
+
+    private connectionRouter: WarehouseConnectionRouter;
+
+    readonly awsWebIdentity: AwsWebIdentityResolver;
 
     constructor(args: ProjectModelArguments) {
         this.database = args.database;
         this.lightdashConfig = args.lightdashConfig;
-        this.changesetModel = args.changesetModel;
         this.encryptionUtil = args.encryptionUtil;
+        this.connectionRouter = new WarehouseConnectionRouter({
+            database: args.database,
+        });
+        const featureFlagModel = new FeatureFlagModel({
+            database: args.database,
+            lightdashConfig: args.lightdashConfig,
+        });
+        this.awsWebIdentity = new AwsWebIdentityResolver({
+            isEnabledFor: async (organizationUuid) =>
+                (
+                    await featureFlagModel.get({
+                        user: { organizationUuid },
+                        featureFlagId: FeatureFlags.AthenaWebIdentityAuth,
+                    })
+                ).enabled,
+            audienceModel: new AwsWebIdentityAudienceModel({
+                database: args.database,
+            }),
+            tokenSource:
+                args.googleIdentityTokenSource ??
+                defaultGoogleIdentityTokenSource,
+        });
+    }
+
+    async upsertMergedManifest(
+        projectUuid: string,
+        manifest: Buffer,
+    ): Promise<void> {
+        await ProjectMergedManifestsTable(this.database)
+            .insert({
+                project_uuid: projectUuid,
+                manifest,
+                created_at: this.database.fn.now() as unknown as Date,
+            })
+            .onConflict('project_uuid')
+            .merge({
+                manifest,
+                created_at: this.database.fn.now() as unknown as Date,
+            });
+    }
+
+    async getMergedManifest(projectUuid: string): Promise<Buffer> {
+        const artifact = await ProjectMergedManifestsTable(this.database)
+            .select('manifest')
+            .where('project_uuid', projectUuid)
+            .first();
+        if (!artifact) {
+            throw new NotFoundError(
+                'No merged dbt manifest has been persisted for this project',
+            );
+        }
+        return artifact.manifest;
+    }
+
+    async deleteMergedManifest(projectUuid: string): Promise<void> {
+        await ProjectMergedManifestsTable(this.database)
+            .where('project_uuid', projectUuid)
+            .delete();
     }
 
     static mergeMissingDbtConfigSecrets(
         incompleteConfig: DbtProjectConfig,
         completeConfig: DbtProjectConfig,
     ): DbtProjectConfig {
-        if (incompleteConfig.type !== completeConfig.type) {
+        if (
+            !hasSameDbtCredentialDestination(incompleteConfig, completeConfig)
+        ) {
             return incompleteConfig;
         }
+        // A PAT belongs to a personal_access_token connection. Carrying it
+        // into a GitHub App connection lets the adapter quietly fall back to
+        // it when the installation is missing (PROD-11711).
+        const restorableSecretKeys = sensitiveDbtCredentialsFieldNames.filter(
+            (secretKey) =>
+                !(
+                    secretKey === 'personal_access_token' &&
+                    incompleteConfig.type === DbtProjectType.GITHUB &&
+                    incompleteConfig.authorization_method === 'installation_id'
+                ),
+        );
         return {
             ...incompleteConfig,
-            ...sensitiveDbtCredentialsFieldNames.reduce(
+            ...restorableSecretKeys.reduce(
                 (sum, secretKey) =>
                     !(incompleteConfig as AnyType)[secretKey] &&
                     (completeConfig as AnyType)[secretKey]
@@ -221,24 +678,82 @@ export class ProjectModel {
     }
 
     static mergeMissingWarehouseSecrets<
-        T extends CreateWarehouseCredentials = CreateWarehouseCredentials,
+        T extends CreateWarehouseCredentialsWithOptionalSecrets =
+            CreateWarehouseCredentials,
     >(incompleteConfig: T, completeConfig: CreateWarehouseCredentials): T {
         if (
-            incompleteConfig.type !== completeConfig.type ||
+            !hasSameWarehouseCredentialDestination(
+                incompleteConfig,
+                completeConfig,
+            ) ||
             // BigQuery ADC authentication does not require credentials to be set
             (incompleteConfig.type === WarehouseTypes.BIGQUERY &&
                 incompleteConfig.authenticationType ===
                     BigqueryAuthenticationType.ADC) ||
-            // Athena IAM role authentication should not merge old access keys
+            // Athena IAM role and web identity authentication should not merge old access keys
             (incompleteConfig.type === WarehouseTypes.ATHENA &&
-                incompleteConfig.authenticationType ===
-                    AthenaAuthenticationType.IAM_ROLE)
+                (incompleteConfig.authenticationType ===
+                    AthenaAuthenticationType.IAM_ROLE ||
+                    incompleteConfig.authenticationType ===
+                        AthenaAuthenticationType.WEB_IDENTITY))
         ) {
             return incompleteConfig;
         }
+        // DuckLake nests secrets inside catalog/dataPath — see stripDucklakeNestedSensitive.
+        if (
+            incompleteConfig.type === WarehouseTypes.DUCKDB &&
+            completeConfig.type === WarehouseTypes.DUCKDB &&
+            incompleteConfig.connectionType === DuckdbConnectionType.DUCKLAKE &&
+            completeConfig.connectionType === DuckdbConnectionType.DUCKLAKE
+        ) {
+            const mergeNested = (
+                incomplete: Record<string, AnyType>,
+                complete: Record<string, AnyType>,
+                fields: readonly string[],
+            ): Record<string, AnyType> => {
+                if (incomplete.type !== complete.type) return incomplete;
+                const result = { ...incomplete };
+                fields.forEach((f) => {
+                    const cur = result[f];
+                    if ((cur === undefined || cur === '') && complete[f]) {
+                        result[f] = complete[f];
+                    }
+                });
+                return result;
+            };
+            const mergedCatalog = mergeNested(
+                incompleteConfig.catalog as Record<string, AnyType>,
+                completeConfig.catalog as Record<string, AnyType>,
+                ['user', 'password'],
+            );
+            const mergedDataPath = mergeNested(
+                incompleteConfig.dataPath as Record<string, AnyType>,
+                completeConfig.dataPath as Record<string, AnyType>,
+                [
+                    'accessKeyId',
+                    'secretAccessKey',
+                    'hmacKeyId',
+                    'hmacSecret',
+                    'connectionString',
+                    'accountKey',
+                ],
+            );
+            return {
+                ...incompleteConfig,
+                catalog: mergedCatalog,
+                dataPath: mergedDataPath,
+            } as T;
+        }
+        // A saved SSH private key only pairs with the saved public key.
+        const sshKeyUnchanged =
+            (incompleteConfig as AnyType).sshTunnelPublicKey ===
+            (completeConfig as AnyType).sshTunnelPublicKey;
         return {
             ...incompleteConfig,
             ...sensitiveCredentialsFieldNames.reduce((sum, secretKey) => {
+                if (secretKey === 'sshTunnelPrivateKey' && !sshKeyUnchanged) {
+                    return sum;
+                }
                 const newConfigSecretValue = (incompleteConfig as AnyType)[
                     secretKey
                 ];
@@ -269,18 +784,32 @@ export class ProjectModel {
             warehouseConnection?: CreateWarehouseCredentials;
         },
     ): UpdateProject {
+        const incomingWarehouse = incompleteProjectConfig.warehouseConnection;
+        const savedWarehouse = completeProjectConfig.warehouseConnection;
+        // CLI credential refreshes omit project-only settings. Preserve the
+        // opt-in unless the update explicitly enables or disables it.
+        const warehouseConnection =
+            incomingWarehouse.type === WarehouseTypes.BIGQUERY &&
+            savedWarehouse?.type === WarehouseTypes.BIGQUERY
+                ? {
+                      ...incomingWarehouse,
+                      allowUserCredentials:
+                          incomingWarehouse.allowUserCredentials ??
+                          savedWarehouse.allowUserCredentials,
+                  }
+                : incomingWarehouse;
         return {
             ...incompleteProjectConfig,
             dbtConnection: ProjectModel.mergeMissingDbtConfigSecrets(
                 incompleteProjectConfig.dbtConnection,
                 completeProjectConfig.dbtConnection,
             ),
-            warehouseConnection: completeProjectConfig.warehouseConnection
+            warehouseConnection: savedWarehouse
                 ? ProjectModel.mergeMissingWarehouseSecrets(
-                      incompleteProjectConfig.warehouseConnection,
-                      completeProjectConfig.warehouseConnection,
+                      warehouseConnection,
+                      savedWarehouse,
                   )
-                : incompleteProjectConfig.warehouseConnection,
+                : warehouseConnection,
         };
     }
 
@@ -295,6 +824,49 @@ export class ProjectModel {
             );
         }
         return projects[0].project_uuid;
+    }
+
+    async hasExploreNameAllocations(projectUuid: string): Promise<boolean> {
+        return (
+            (await this.database('explore_name_allocations')
+                .where('project_uuid', projectUuid)
+                .select('name')
+                .first()) !== undefined
+        );
+    }
+
+    async getDbtSourceIdentity(projectUuid: string): Promise<{
+        dbtSourceUuid: string;
+        dbtSourceName: string;
+    }> {
+        const [project] = await this.database(ProjectTableName)
+            .select('project_uuid', 'dbt_source_uuid', 'dbt_source_name')
+            .where('project_uuid', projectUuid);
+
+        if (!project) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
+
+        return {
+            dbtSourceUuid: project.dbt_source_uuid ?? project.project_uuid,
+            dbtSourceName: project.dbt_source_name,
+        };
+    }
+
+    async updateDbtSourceName(
+        projectUuid: string,
+        dbtSourceName: string,
+    ): Promise<void> {
+        const updatedProjects = await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .update({ dbt_source_name: dbtSourceName })
+            .returning('project_uuid');
+
+        if (updatedProjects.length === 0) {
+            throw new NotFoundError('Project not found');
+        }
     }
 
     async getAllByOrganizationUuid(
@@ -362,18 +934,20 @@ export class ProjectModel {
             )
             .select(
                 'projects.project_uuid',
+                'projects.slug',
                 'projects.name',
                 'projects.project_type',
                 'projects.created_at',
                 `projects.copied_from_project_uuid`,
                 `projects.created_by_user_uuid`,
                 'projects.expires_at',
+                'projects.provisioning_source',
                 `${WarehouseCredentialTableName}.warehouse_type`,
                 this.database.raw(
                     "TRIM(CONCAT(users.first_name, ' ', users.last_name)) as created_by_user_name",
                 ),
                 this.database.raw(
-                    '(agg_project_group_access_counts.member_count + agg_project_membership_counts.member_count) as member_count',
+                    '(COALESCE(agg_project_group_access_counts.member_count, 0) + COALESCE(agg_project_membership_counts.member_count, 0)) as member_count',
                 ),
             )
             .leftJoin(
@@ -402,6 +976,7 @@ export class ProjectModel {
             ({
                 name,
                 project_uuid,
+                slug,
                 project_type,
                 created_at,
                 created_by_user_uuid,
@@ -409,9 +984,11 @@ export class ProjectModel {
                 copied_from_project_uuid,
                 warehouse_type,
                 expires_at,
+                provisioning_source,
             }) => ({
                 name,
                 projectUuid: project_uuid,
+                slug,
                 type: project_type,
                 createdByUserUuid: created_by_user_uuid,
                 createdByUserName: created_by_user_name ?? null,
@@ -422,19 +999,94 @@ export class ProjectModel {
                         ? (warehouse_type as WarehouseTypes)
                         : undefined,
                 expiresAt: expires_at ?? null,
+                provisioningSource: provisioning_source ?? null,
             }),
         );
+    }
+
+    async setProvisioningSource(
+        projectUuid: string,
+        provisioningSource: string,
+    ): Promise<void> {
+        await this.database('projects')
+            .where('project_uuid', projectUuid)
+            .update({ provisioning_source: provisioningSource });
+    }
+
+    private async getStoredSignInSubjects(
+        trx: Transaction,
+        projectIds: number[],
+    ): Promise<StoredSignInSubject[]> {
+        if (projectIds.length === 0) return [];
+        const rows = await trx('warehouse_credentials')
+            .whereIn('project_id', projectIds)
+            .select('encrypted_credentials', 'credential_subject_user_uuid');
+        return rows.map((row) => {
+            const credentials = this.decryptWarehouseCredentials(
+                row.encrypted_credentials,
+            );
+            return {
+                refreshToken: credentials
+                    ? (getPersonSignIn(credentials)?.refreshToken ?? null)
+                    : null,
+                subjectUserUuid: row.credential_subject_user_uuid,
+            };
+        });
     }
 
     private async upsertWarehouseConnection(
         trx: Transaction,
         projectId: number,
         data: CreateWarehouseCredentials,
+        subjectSource: {
+            actorUserUuid: string | null;
+            inheritFromProjectId: number | null;
+        },
     ): Promise<void> {
+        // Normalize on write too, so stored blobs never hold legacy values
+        // that violate the credentials types
+        const existing = await trx('warehouse_credentials')
+            .where('project_id', projectId)
+            .forUpdate()
+            .first();
+        let storedCredentials: CreateWarehouseCredentials | null = null;
+        if (existing?.encrypted_credentials) {
+            try {
+                storedCredentials = withWarehouseCredentialVersion(
+                    normalizeWarehouseCredentials(
+                        JSON.parse(
+                            this.encryptionUtil.decrypt(
+                                existing.encrypted_credentials,
+                            ),
+                        ) as CreateWarehouseCredentials,
+                    ),
+                    `warehouse_credentials:${existing.warehouse_credentials_id}`,
+                );
+            } catch {
+                throw new UnexpectedServerError('Could not load credentials.');
+            }
+        }
+        const credentials = withNewWarehouseCredentialVersion(
+            normalizeWarehouseCredentials(data),
+            storedCredentials,
+        );
+        const signIn = getPersonSignIn(credentials);
+        const subjectUserUuid = resolveSignInSubject({
+            signIn,
+            actorUserUuid: subjectSource.actorUserUuid,
+            stored: signIn
+                ? await this.getStoredSignInSubjects(
+                      trx,
+                      [projectId, subjectSource.inheritFromProjectId].filter(
+                          (id): id is number => id !== null,
+                      ),
+                  )
+                : [],
+        });
         let encryptedCredentials: Buffer;
         try {
             encryptedCredentials = this.encryptionUtil.encrypt(
-                JSON.stringify(data),
+                JSON.stringify(credentials),
             );
         } catch (e) {
             throw new UnexpectedServerError('Could not save credentials.');
@@ -443,11 +1095,284 @@ export class ProjectModel {
         await trx('warehouse_credentials')
             .insert({
                 project_id: projectId,
-                warehouse_type: data.type,
+                warehouse_type: credentials.type,
                 encrypted_credentials: encryptedCredentials,
+                credential_subject_user_uuid: subjectUserUuid,
             })
             .onConflict('project_id')
-            .merge();
+            .merge({
+                warehouse_type: credentials.type,
+                encrypted_credentials: encryptedCredentials,
+                credential_subject_user_uuid: subjectUserUuid,
+                ...(existing &&
+                (existing.warehouse_type !== credentials.type ||
+                    existing.credential_subject_user_uuid !== subjectUserUuid ||
+                    !warehouseCredentialsEqual(
+                        this.decryptWarehouseCredentials(
+                            existing.encrypted_credentials,
+                        ),
+                        credentials,
+                    ))
+                    ? {
+                          warehouse_credential_generation: trx.raw(
+                              '??.?? + 1',
+                              [
+                                  'warehouse_credentials',
+                                  'warehouse_credential_generation',
+                              ],
+                          ),
+                      }
+                    : {}),
+            });
+    }
+
+    async getSharedSignInSubjectForToken(
+        projectUuid: string,
+        refreshToken: string,
+    ): Promise<SharedSignInSubjectLookup | null> {
+        const row = await this.database('warehouse_credentials')
+            .innerJoin(
+                'projects',
+                'projects.project_id',
+                'warehouse_credentials.project_id',
+            )
+            .leftJoin(
+                'users as subject_user',
+                'subject_user.user_uuid',
+                'warehouse_credentials.credential_subject_user_uuid',
+            )
+            .where('projects.project_uuid', projectUuid)
+            .whereNull('projects.organization_warehouse_credentials_uuid')
+            .first<
+                | {
+                      project_id: number;
+                      organization_id: number;
+                      created_by_user_uuid: string | null;
+                      encrypted_credentials: Buffer;
+                      credential_subject_user_uuid: string | null;
+                      first_name: string | null;
+                      last_name: string | null;
+                  }
+                | undefined
+            >(
+                'projects.project_id',
+                'projects.organization_id',
+                'projects.created_by_user_uuid',
+                'warehouse_credentials.encrypted_credentials',
+                'warehouse_credentials.credential_subject_user_uuid',
+                'subject_user.first_name',
+                'subject_user.last_name',
+            );
+        if (!row) return null;
+        const credentials = this.decryptWarehouseCredentials(
+            row.encrypted_credentials,
+        );
+        const signIn = credentials ? getPersonSignIn(credentials) : null;
+        if (!signIn || signIn.refreshToken !== refreshToken) return null;
+        const creatorFallback = async () => {
+            const creator = row.created_by_user_uuid
+                ? await this.database('organization_memberships')
+                      .innerJoin(
+                          'users',
+                          'users.user_id',
+                          'organization_memberships.user_id',
+                      )
+                      .where(
+                          'organization_memberships.organization_id',
+                          row.organization_id,
+                      )
+                      .where('users.user_uuid', row.created_by_user_uuid)
+                      .first<
+                          | {
+                                user_uuid: string;
+                                first_name: string | null;
+                                last_name: string | null;
+                            }
+                          | undefined
+                      >(
+                          'users.user_uuid',
+                          'users.first_name',
+                          'users.last_name',
+                      )
+                : null;
+            return {
+                provider: signIn.provider,
+                subject: creator
+                    ? {
+                          userUuid: creator.user_uuid,
+                          name: [creator.first_name, creator.last_name]
+                              .filter(Boolean)
+                              .join(' ')
+                              .trim(),
+                      }
+                    : null,
+                basis: creator ? SignInSubjectBasis.PROJECT_CREATOR : null,
+            };
+        };
+        if (row.credential_subject_user_uuid) {
+            return {
+                provider: signIn.provider,
+                subject: {
+                    userUuid: row.credential_subject_user_uuid,
+                    name: [row.first_name, row.last_name]
+                        .filter(Boolean)
+                        .join(' ')
+                        .trim(),
+                },
+                basis: SignInSubjectBasis.RECORDED,
+            };
+        }
+        const cacheKey = `${projectUuid}:${createHash('sha256')
+            .update(refreshToken)
+            .digest('hex')}`;
+        const cached =
+            legacySignInSubjects.get<SharedSignInSubjectLookup>(cacheKey);
+        if (cached) return cached;
+        const pending = pendingLegacySignInSubjects.get(cacheKey);
+        if (pending) return pending;
+        const lookup = async (): Promise<SharedSignInSubjectLookup | null> => {
+            if (signIn.provider === PersonSignInProvider.DATABRICKS) {
+                return creatorFallback();
+            }
+            const members = await this.database('organization_memberships')
+                .innerJoin(
+                    'users',
+                    'users.user_id',
+                    'organization_memberships.user_id',
+                )
+                .leftJoin('user_oauth_grants', function joinGrants() {
+                    this.on(
+                        'user_oauth_grants.user_uuid',
+                        '=',
+                        'users.user_uuid',
+                    ).andOnVal(
+                        'user_oauth_grants.provider',
+                        '=',
+                        signIn.provider,
+                    );
+                })
+                .leftJoin('openid_identities', function joinIdentities() {
+                    this.on(
+                        'openid_identities.user_id',
+                        '=',
+                        'users.user_id',
+                    ).andOnVal(
+                        'openid_identities.issuer_type',
+                        '=',
+                        signIn.provider,
+                    );
+                })
+                .where(
+                    'organization_memberships.organization_id',
+                    row.organization_id,
+                )
+                .select(
+                    'users.user_uuid',
+                    'users.first_name',
+                    'users.last_name',
+                    'user_oauth_grants.encrypted_refresh_token',
+                    'openid_identities.refresh_token',
+                );
+            const matchingUserUuids = new Set<string>();
+            for (const member of members) {
+                let grantToken: string | null = null;
+                try {
+                    grantToken = member.encrypted_refresh_token
+                        ? this.encryptionUtil.decrypt(
+                              member.encrypted_refresh_token,
+                          )
+                        : null;
+                } catch {
+                    grantToken = null;
+                }
+                if (
+                    grantToken === refreshToken ||
+                    member.refresh_token === refreshToken
+                ) {
+                    matchingUserUuids.add(member.user_uuid);
+                }
+            }
+            if (matchingUserUuids.size !== 1) {
+                return creatorFallback();
+            }
+            const subjectUserUuid = [...matchingUserUuids][0];
+            const member = members.find(
+                (candidate) => candidate.user_uuid === subjectUserUuid,
+            );
+            const updated = await this.database('warehouse_credentials')
+                .where('project_id', row.project_id)
+                .whereNull('credential_subject_user_uuid')
+                .where('encrypted_credentials', row.encrypted_credentials)
+                .update({ credential_subject_user_uuid: subjectUserUuid });
+            if (updated === 0) {
+                const current = await this.database('warehouse_credentials')
+                    .leftJoin(
+                        'users as subject_user',
+                        'subject_user.user_uuid',
+                        'warehouse_credentials.credential_subject_user_uuid',
+                    )
+                    .where('warehouse_credentials.project_id', row.project_id)
+                    .first<
+                        | {
+                              encrypted_credentials: Buffer;
+                              credential_subject_user_uuid: string | null;
+                              first_name: string | null;
+                              last_name: string | null;
+                          }
+                        | undefined
+                    >(
+                        'warehouse_credentials.encrypted_credentials',
+                        'warehouse_credentials.credential_subject_user_uuid',
+                        'subject_user.first_name',
+                        'subject_user.last_name',
+                    );
+                const currentCredentials = current
+                    ? this.decryptWarehouseCredentials(
+                          current.encrypted_credentials,
+                      )
+                    : null;
+                const currentSignIn = currentCredentials
+                    ? getPersonSignIn(currentCredentials)
+                    : null;
+                if (currentSignIn?.refreshToken !== refreshToken) return null;
+                if (current?.credential_subject_user_uuid) {
+                    return {
+                        provider: currentSignIn.provider,
+                        subject: {
+                            userUuid: current.credential_subject_user_uuid,
+                            name: [current.first_name, current.last_name]
+                                .filter(Boolean)
+                                .join(' ')
+                                .trim(),
+                        },
+                        basis: SignInSubjectBasis.RECORDED,
+                    };
+                }
+                return null;
+            }
+            return {
+                provider: signIn.provider,
+                subject: {
+                    userUuid: subjectUserUuid,
+                    name: [member?.first_name, member?.last_name]
+                        .filter(Boolean)
+                        .join(' ')
+                        .trim(),
+                },
+                basis: SignInSubjectBasis.RECORDED,
+            };
+        };
+        const resultPromise = lookup();
+        pendingLegacySignInSubjects.set(cacheKey, resultPromise);
+        try {
+            const result = await resultPromise;
+            if (result && result.basis !== SignInSubjectBasis.RECORDED) {
+                legacySignInSubjects.set(cacheKey, result);
+            }
+            return result;
+        } finally {
+            pendingLegacySignInSubjects.delete(cacheKey);
+        }
     }
 
     async hasAnyProjects(): Promise<boolean> {
@@ -505,6 +1430,7 @@ export class ProjectModel {
         organizationUuid: string,
         data: CreateProjectOptionalCredentials,
         expiresAt?: Date | null,
+        provisioningSource?: string,
     ): Promise<string> {
         const orgs = await this.database('organizations')
             .where('organization_uuid', organizationUuid)
@@ -513,6 +1439,11 @@ export class ProjectModel {
             throw new NotFoundError('Cannot find organization');
         }
         return this.database.transaction(async (trx) => {
+            const projectSlug = await generateUniqueProjectSlug(
+                trx,
+                orgs[0].organization_id,
+                data.name,
+            );
             let encryptedCredentials: Buffer;
             try {
                 encryptedCredentials = this.encryptionUtil.encrypt(
@@ -531,6 +1462,7 @@ export class ProjectModel {
             const [project] = await trx('projects')
                 .insert({
                     name: data.name,
+                    slug: projectSlug,
                     project_type: data.type,
                     organization_id: orgs[0].organization_id,
                     dbt_connection_type: data.dbtConnection.type,
@@ -553,6 +1485,7 @@ export class ProjectModel {
                     created_by_user_uuid: userUuid,
                     organization_warehouse_credentials_uuid:
                         data.organizationWarehouseCredentialsUuid ?? null,
+                    provisioning_source: provisioningSource ?? null,
                     ...(expiresAt !== undefined
                         ? { expires_at: expiresAt }
                         : {}),
@@ -564,16 +1497,22 @@ export class ProjectModel {
                     trx,
                     project.project_id,
                     data.warehouseConnection,
+                    {
+                        actorUserUuid: userUuid,
+                        inheritFromProjectId:
+                            copiedProjects.length === 1
+                                ? copiedProjects[0].project_id
+                                : null,
+                    },
                 );
             }
 
             if (data.type !== ProjectType.PREVIEW) {
-                const slug = await generateUniqueSpaceSlug(
-                    'Shared',
+                const slug = await generateUniqueSlugScopedToProject(
+                    trx,
                     project.project_id,
-                    {
-                        trx,
-                    },
+                    SpaceTableName,
+                    'Shared',
                 );
 
                 const path = getLtreePathFromSlug(slug);
@@ -615,6 +1554,15 @@ export class ProjectModel {
             .where('project_uuid', projectUuid);
     }
 
+    async findProjectDefaults(
+        projectUuid: string,
+    ): Promise<ProjectDefaults | null> {
+        const [row] = await this.database(ProjectTableName)
+            .select('project_defaults')
+            .where('project_uuid', projectUuid);
+        return row?.project_defaults ?? null;
+    }
+
     async getTableGroups(
         projectUuid: string,
     ): Promise<Record<string, GroupType>> {
@@ -638,11 +1586,152 @@ export class ProjectModel {
             .where('project_uuid', projectUuid);
     }
 
-    async update(projectUuid: string, data: UpdateProject): Promise<void> {
+    async getPreviewExpirationSettings(projectUuid: string): Promise<{
+        defaultPreviewExpirationHours: number;
+        maxPreviewExpirationHours: number;
+    }> {
+        const row = await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .select(
+                'default_preview_expiration_hours',
+                'max_preview_expiration_hours',
+            )
+            .first();
+
+        if (!row) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
+
+        return {
+            defaultPreviewExpirationHours: row.default_preview_expiration_hours,
+            maxPreviewExpirationHours: row.max_preview_expiration_hours,
+        };
+    }
+
+    async updatePreviewExpirationSettings(
+        projectUuid: string,
+        settings: {
+            defaultPreviewExpirationHours: number;
+            maxPreviewExpirationHours: number;
+        },
+    ): Promise<void> {
+        await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .update({
+                default_preview_expiration_hours:
+                    settings.defaultPreviewExpirationHours,
+                max_preview_expiration_hours:
+                    settings.maxPreviewExpirationHours,
+            });
+    }
+
+    async getResultsCacheSettings(
+        projectUuid: string,
+    ): Promise<{ cacheTtlSeconds: number | null }> {
+        const row = await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .select('results_cache_ttl_seconds')
+            .first();
+
+        if (!row) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
+
+        return { cacheTtlSeconds: row.results_cache_ttl_seconds };
+    }
+
+    async updateResultsCacheSettings(
+        projectUuid: string,
+        settings: { cacheTtlSeconds: number | null },
+    ): Promise<void> {
+        const affectedRows = await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .update({ results_cache_ttl_seconds: settings.cacheTtlSeconds });
+        if (affectedRows === 0) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
+    }
+
+    async getEffectiveResultsCacheTtlSeconds(
+        projectUuid: string,
+    ): Promise<number> {
+        const { cacheTtlSeconds } =
+            await this.getResultsCacheSettings(projectUuid);
+        return (
+            cacheTtlSeconds ??
+            this.lightdashConfig.results.cacheStateTimeSeconds
+        );
+    }
+
+    async updateExpiresAt(projectUuid: string, expiresAt: Date): Promise<void> {
+        await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .update({ expires_at: expiresAt });
+    }
+
+    async update(
+        projectUuid: string,
+        data: UpdateProject,
+        actorUserUuid: string | null,
+    ): Promise<void> {
+        await this.updateProject(projectUuid, data, null, actorUserUuid);
+    }
+
+    /** Saves a project and, in the same transaction, rewrites each preview's credentials where `pushToPreview` returns new ones. The project's previous credentials are read under a row lock, so concurrent saves see each other's writes. */
+    async updateAndPushToPreviews(
+        projectUuid: string,
+        data: UpdateProject,
+        pushToPreview: PushToPreview,
+        actorUserUuid: string | null,
+    ): Promise<PreviewCredentialsPush> {
+        const push = await this.updateProject(
+            projectUuid,
+            data,
+            pushToPreview,
+            actorUserUuid,
+        );
+        warehouseCredentialsCache?.del(projectUuid);
+        if (push.kind === 'pushed') {
+            push.previewProjectUuids.forEach((previewProjectUuid) =>
+                warehouseCredentialsCache?.del(previewProjectUuid),
+            );
+        }
+        return push;
+    }
+
+    private async updateProject(
+        projectUuid: string,
+        data: UpdateProject,
+        pushToPreview: PushToPreview | null,
+        actorUserUuid: string | null,
+    ): Promise<PreviewCredentialsPush> {
+        let previousConnectionString: string | undefined;
+        try {
+            previousConnectionString = getMotherduckConnectionString(
+                await this.getWarehouseCredentialsForProject(projectUuid),
+            );
+        } catch (e) {
+            // Projects created without warehouse credentials have none to invalidate
+            if (!(e instanceof NotFoundError)) throw e;
+        }
+        const nextConnectionString = getMotherduckConnectionString(
+            data.warehouseConnection,
+        );
+
         // Invalidate warehouse credentials cache
         warehouseCredentialsCache?.del(projectUuid);
 
-        await this.database.transaction(async (trx) => {
+        const push = await this.database.transaction(async (trx) => {
+            const previousUpstreamCredentials = pushToPreview
+                ? await this.lockStoredWarehouseCredentials(trx, projectUuid)
+                : null;
+
             let encryptedCredentials: Buffer;
             try {
                 encryptedCredentials = this.encryptionUtil.encrypt(
@@ -669,12 +1758,134 @@ export class ProjectModel {
             }
             const [project] = projects;
 
+            const extra = await trx('warehouse_connections')
+                .where('project_uuid', projectUuid)
+                .where('is_original', false)
+                .first('warehouse_type');
+            if (extra) {
+                const storedOriginal = await trx(WarehouseCredentialTableName)
+                    .where('project_id', project.project_id)
+                    .forUpdate()
+                    .first('warehouse_type');
+                if (
+                    (storedOriginal?.warehouse_type ?? extra.warehouse_type) !==
+                    data.warehouseConnection.type
+                ) {
+                    throw new ConflictError(ORIGINAL_TYPE_LOCKED_MESSAGE);
+                }
+            }
+
             await this.upsertWarehouseConnection(
                 trx,
                 project.project_id,
                 data.warehouseConnection,
+                { actorUserUuid, inheritFromProjectId: null },
             );
+
+            if (!pushToPreview || !previousUpstreamCredentials) {
+                return { kind: 'skipped' } satisfies PreviewCredentialsPush;
+            }
+            const upstreamSubject = await trx(WarehouseCredentialTableName)
+                .where('project_id', project.project_id)
+                .first('credential_subject_user_uuid');
+            try {
+                const previewProjectUuids = await trx.transaction((savepoint) =>
+                    this.rewritePreviewWarehouseCredentials(
+                        savepoint,
+                        projectUuid,
+                        {
+                            signIn: getPersonSignIn(data.warehouseConnection),
+                            subjectUserUuid:
+                                upstreamSubject?.credential_subject_user_uuid ??
+                                null,
+                        },
+                        (previewCredentials) =>
+                            pushToPreview({
+                                previewCredentials,
+                                previousUpstreamCredentials,
+                            }),
+                    ),
+                );
+                return {
+                    kind: 'pushed',
+                    previewProjectUuids,
+                } satisfies PreviewCredentialsPush;
+            } catch (error) {
+                return {
+                    kind: 'failed',
+                    error,
+                } satisfies PreviewCredentialsPush;
+            }
         });
+
+        if (
+            previousConnectionString &&
+            previousConnectionString !== nextConnectionString
+        ) {
+            MotherduckInstanceCache.invalidateByConnectionString(
+                previousConnectionString,
+                'credentials_updated',
+            );
+        }
+        return push;
+    }
+
+    private async lockStoredWarehouseCredentials(
+        trx: Transaction,
+        projectUuid: string,
+    ): Promise<CreateWarehouseCredentials | null> {
+        const project = await trx(ProjectTableName)
+            .innerJoin(
+                OrganizationTableName,
+                `${OrganizationTableName}.organization_id`,
+                `${ProjectTableName}.organization_id`,
+            )
+            .where(`${ProjectTableName}.project_uuid`, projectUuid)
+            .select<
+                {
+                    project_id: number;
+                    organization_warehouse_credentials_uuid: string | null;
+                    organization_uuid: string;
+                }[]
+            >([
+                `${ProjectTableName}.project_id`,
+                `${ProjectTableName}.organization_warehouse_credentials_uuid`,
+                `${OrganizationTableName}.organization_uuid`,
+            ])
+            .forUpdate(ProjectTableName)
+            .first();
+        if (!project) return null;
+        const row = await trx(WarehouseCredentialTableName)
+            .where('project_id', project.project_id)
+            .select<{ encrypted_credentials: Buffer }[]>(
+                'encrypted_credentials',
+            )
+            .forUpdate()
+            .first();
+        if (project.organization_warehouse_credentials_uuid) {
+            return this.getOrganizationWarehouseCredentials(
+                project.organization_warehouse_credentials_uuid,
+                project.organization_uuid,
+                trx,
+            );
+        }
+        return row
+            ? this.decryptWarehouseCredentials(row.encrypted_credentials)
+            : null;
+    }
+
+    async updateDetails(
+        projectUuid: string,
+        details: UpdateProjectDetails,
+    ): Promise<void> {
+        const updatedProjects = await this.database(ProjectTableName)
+            .where('project_uuid', projectUuid)
+            .update(details)
+            .returning('project_uuid');
+
+        if (updatedProjects.length === 0) {
+            throw new NotFoundError('Project not found');
+        }
     }
 
     async getExpiredPreviewProjects(): Promise<
@@ -697,11 +1908,330 @@ export class ProjectModel {
         }));
     }
 
-    async delete(projectUuid: string): Promise<void> {
+    /**
+     * Give a training copy the seeded deep research, as the learner's own:
+     * a run lives in a thread, and a thread belongs to the person who asked,
+     * so the copy's thread, prompt and run are owned by the learner (the
+     * source's stay with the seed user). The copy's agent is found by slug.
+     */
+    async copyDeepResearchForTrainingCopy(
+        sourceProjectUuid: string,
+        previewProjectUuid: string,
+        learnerUserUuid: string,
+        seedUserUuid: string | null,
+    ): Promise<void> {
+        await this.database.transaction(async (trx) => {
+            // Deep research is an Enterprise Edition feature. The table may not
+            // exist on self-hosted instances without an EE license.
+            if (!(await trx.schema.hasTable(AiDeepResearchRunsTableName))) {
+                return;
+            }
+            // Only the seed's runs (made by whoever enabled Learn) travel
+            // into copies; nothing another learner or admin ran afterwards.
+            const runs = await trx(AiDeepResearchRunsTableName)
+                .where('project_uuid', sourceProjectUuid)
+                .where('created_by_user_uuid', seedUserUuid ?? '')
+                .where('status', 'completed');
+            // eslint-disable-next-line no-restricted-syntax
+            for (const run of runs) {
+                // eslint-disable-next-line no-await-in-loop
+                const sourceAgent = await trx(AiAgentTableName)
+                    .where('ai_agent_uuid', run.agent_uuid)
+                    .first();
+                if (!sourceAgent) continue; // eslint-disable-line no-continue
+                // eslint-disable-next-line no-await-in-loop
+                const agent = await trx(AiAgentTableName)
+                    .where({
+                        project_uuid: previewProjectUuid,
+                        slug: sourceAgent.slug,
+                    })
+                    .first();
+                if (!agent) continue; // eslint-disable-line no-continue
+                // eslint-disable-next-line no-await-in-loop
+                const thread = await trx(AiThreadTableName)
+                    .where('ai_thread_uuid', run.ai_thread_uuid)
+                    .first();
+                // eslint-disable-next-line no-await-in-loop
+                const prompt = await trx(AiPromptTableName)
+                    .where('ai_prompt_uuid', run.prompt_uuid)
+                    .first();
+                if (!thread || !prompt) continue; // eslint-disable-line no-continue
+                const runUuid = uuidv4();
+                // eslint-disable-next-line no-await-in-loop
+                const [{ ai_thread_uuid: threadUuid }] = await trx(
+                    AiThreadTableName,
+                )
+                    .insert({
+                        organization_uuid: thread.organization_uuid,
+                        project_uuid: previewProjectUuid,
+                        created_from: thread.created_from,
+                        agent_uuid: agent.ai_agent_uuid,
+                    })
+                    .returning('ai_thread_uuid');
+                // eslint-disable-next-line no-await-in-loop
+                await trx(AiThreadTableName)
+                    .where('ai_thread_uuid', threadUuid)
+                    .update({
+                        title: thread.title,
+                        title_generated_at: thread.title_generated_at,
+                    });
+                // eslint-disable-next-line no-await-in-loop
+                await trx(AiWebAppThreadTableName).insert({
+                    ai_thread_uuid: threadUuid,
+                    user_uuid: learnerUserUuid,
+                });
+                // eslint-disable-next-line no-await-in-loop
+                const [{ ai_prompt_uuid: promptUuid }] = await trx(
+                    AiPromptTableName,
+                )
+                    .insert({
+                        ai_thread_uuid: threadUuid,
+                        created_by_user_uuid: learnerUserUuid,
+                        prompt: prompt.prompt,
+                        execution_mode: prompt.execution_mode,
+                    })
+                    .returning('ai_prompt_uuid');
+                const {
+                    ai_deep_research_run_uuid: _sourceRunUuid,
+                    created_at: _createdAt,
+                    updated_at: _updatedAt,
+                    ...runColumns
+                } = run;
+                // eslint-disable-next-line no-await-in-loop
+                await trx(AiDeepResearchRunsTableName).insert({
+                    ...runColumns,
+                    ai_deep_research_run_uuid: runUuid,
+                    project_uuid: previewProjectUuid,
+                    created_by_user_uuid: learnerUserUuid,
+                    agent_uuid: agent.ai_agent_uuid,
+                    ai_thread_uuid: threadUuid,
+                    prompt_uuid: promptUuid,
+                    // A copy is a finished report, never a resumable run.
+                    resume_from_run_uuid: null,
+                    budget_snapshot: JSON.stringify(run.budget_snapshot),
+                    execution_context_snapshot: JSON.stringify(
+                        run.execution_context_snapshot,
+                    ),
+                });
+                // eslint-disable-next-line no-await-in-loop
+                const events = await trx(AiDeepResearchEventsTableName)
+                    .where(
+                        'ai_deep_research_run_uuid',
+                        run.ai_deep_research_run_uuid,
+                    )
+                    .orderBy('created_at', 'asc');
+                if (events.length > 0) {
+                    // eslint-disable-next-line no-await-in-loop
+                    await trx(AiDeepResearchEventsTableName).insert(
+                        events.map((event) => ({
+                            ai_deep_research_run_uuid: runUuid,
+                            event_type: event.event_type,
+                            payload: JSON.stringify(event.payload),
+                            created_at: event.created_at,
+                        })),
+                    );
+                }
+            }
+        });
+    }
+
+    /**
+     * Give a training copy its own dashboard tile uuids, and its own copies
+     * of the comments on those tiles. A preview normally keeps the source's
+     * tile uuids, and tile comments are keyed by tile uuid alone, so a
+     * comment posted or resolved in one learner's copy would show in the
+     * shared training project and in every other copy. With their own
+     * uuids, a copy's comments start as clones of the seeded ones and stay
+     * its own; they go with the copy's charts when it is removed.
+     */
+    async giveTrainingCopyOwnTiles(
+        previewProjectUuid: string,
+        seedUserUuid: string | null,
+    ): Promise<void> {
+        await this.database.transaction(async (trx) => {
+            const versions = await trx(DashboardVersionsTableName)
+                .join(
+                    DashboardsTableName,
+                    `${DashboardsTableName}.dashboard_id`,
+                    `${DashboardVersionsTableName}.dashboard_id`,
+                )
+                .join(
+                    SpaceTableName,
+                    `${SpaceTableName}.space_id`,
+                    `${DashboardsTableName}.space_id`,
+                )
+                .join(
+                    ProjectTableName,
+                    `${ProjectTableName}.project_id`,
+                    `${SpaceTableName}.project_id`,
+                )
+                .where(`${ProjectTableName}.project_uuid`, previewProjectUuid)
+                .select<{ dashboard_version_id: number; config: unknown }[]>(
+                    `${DashboardVersionsTableName}.dashboard_version_id`,
+                    `${DashboardVersionsTableName}.config`,
+                );
+            if (versions.length === 0) return;
+            const versionIds = versions.map((v) => v.dashboard_version_id);
+            const tiles = await trx(DashboardTilesTableName)
+                .whereIn('dashboard_version_id', versionIds)
+                .select('*');
+            const renamed = new Map<string, string>();
+            const childTables = [
+                DashboardTileChartTableName,
+                DashboardTileSqlChartTableName,
+                DashboardTileMarkdownsTableName,
+                DashboardTileLoomsTableName,
+                DashboardTileHeadingsTableName,
+                DashboardTileDataAppsTableName,
+            ];
+            // Child rows reference the tile by (version, uuid) without ON
+            // UPDATE, so the tile is re-inserted under the new uuid, the
+            // children moved across, and the old row removed last.
+            await tiles.reduce(async (previous, tile) => {
+                await previous;
+                const to = renamed.get(tile.dashboard_tile_uuid) ?? uuidv4();
+                renamed.set(tile.dashboard_tile_uuid, to);
+                await trx(DashboardTilesTableName).insert({
+                    ...tile,
+                    dashboard_tile_uuid: to,
+                });
+                await childTables.reduce(async (prev, table) => {
+                    await prev;
+                    await trx(table)
+                        .where({
+                            dashboard_version_id: tile.dashboard_version_id,
+                            dashboard_tile_uuid: tile.dashboard_tile_uuid,
+                        })
+                        .update({ dashboard_tile_uuid: to });
+                }, Promise.resolve());
+                await trx(DashboardTilesTableName)
+                    .where({
+                        dashboard_version_id: tile.dashboard_version_id,
+                        dashboard_tile_uuid: tile.dashboard_tile_uuid,
+                    })
+                    .delete();
+            }, Promise.resolve());
+            // Filters and date zoom target tiles by uuid inside the
+            // version's config; rewrite those references in place.
+            await versions.reduce(async (previous, version) => {
+                await previous;
+                if (!version.config) return;
+                let text = JSON.stringify(version.config);
+                renamed.forEach((to, from) => {
+                    text = text.split(from).join(to);
+                });
+                await trx(DashboardVersionsTableName)
+                    .where('dashboard_version_id', version.dashboard_version_id)
+                    .update({ config: JSON.parse(text) });
+            }, Promise.resolve());
+            // The copy's own comments: clones of the seeded ones, attached
+            // to the copy's charts so they are removed with the copy.
+            const chartOfTile = new Map<string, string>(
+                (
+                    await trx(DashboardTileChartTableName)
+                        .join(
+                            SavedChartsTableName,
+                            `${SavedChartsTableName}.saved_query_id`,
+                            `${DashboardTileChartTableName}.saved_chart_id`,
+                        )
+                        .whereIn(
+                            `${DashboardTileChartTableName}.dashboard_version_id`,
+                            versionIds,
+                        )
+                        .select<
+                            { dashboard_tile_uuid: string; uuid: string }[]
+                        >(
+                            `${DashboardTileChartTableName}.dashboard_tile_uuid`,
+                            `${SavedChartsTableName}.saved_query_uuid as uuid`,
+                        )
+                ).map((row) => [row.dashboard_tile_uuid, row.uuid]),
+            );
+            // Only the seed's comments (made by whoever enabled Learn) come
+            // along; nothing anyone wrote on the shared project afterwards.
+            const comments = await trx(DashboardTileCommentsTableName)
+                .whereIn('dashboard_tile_uuid', [...renamed.keys()])
+                .where('user_uuid', seedUserUuid ?? '')
+                .orderBy('created_at', 'asc')
+                .select('*');
+            const clonedIds = new Map<string, string>();
+            await comments.reduce(async (previous, comment) => {
+                await previous;
+                const to = renamed.get(comment.dashboard_tile_uuid);
+                if (!to) return;
+                const [clone] = await trx(DashboardTileCommentsTableName)
+                    .insert({
+                        text: comment.text,
+                        text_html: comment.text_html,
+                        dashboard_tile_uuid: to,
+                        reply_to: comment.reply_to
+                            ? (clonedIds.get(comment.reply_to) ?? null)
+                            : null,
+                        user_uuid: comment.user_uuid,
+                        saved_chart_uuid: chartOfTile.get(to) ?? null,
+                        mentions: comment.mentions,
+                        resolved: comment.resolved,
+                        created_at: comment.created_at,
+                    })
+                    .returning('comment_id');
+                clonedIds.set(comment.comment_id, clone.comment_id);
+            }, Promise.resolve());
+        });
+    }
+
+    private async deleteRowsInBatches(
+        table: string,
+        idColumn: string,
+        scope: Record<string, string | number>,
+    ): Promise<void> {
+        const deleted = await this.database(table)
+            .whereIn(
+                idColumn,
+                this.database(table)
+                    .select(idColumn)
+                    .where(scope)
+                    .limit(DELETE_CONTENT_BATCH_SIZE),
+            )
+            .delete();
+        if (deleted > 0) {
+            await this.deleteRowsInBatches(table, idColumn, scope);
+        }
+    }
+
+    // Deleting spaces locks `apps` until commit; short batches keep slow
+    // content cascades out of that lock so `apps` migrations are not blocked.
+    async deleteContentInBatches(projectUuid: string): Promise<void> {
+        const project = await this.database('projects')
+            .select('project_id')
+            .where('project_uuid', projectUuid)
+            .first<{ project_id: number } | undefined>();
+        if (!project) return;
+
+        await this.deleteRowsInBatches(SavedChartsTableName, 'saved_query_id', {
+            project_uuid: projectUuid,
+        });
+        await this.deleteRowsInBatches(SavedSqlTableName, 'saved_sql_uuid', {
+            project_uuid: projectUuid,
+        });
+        await this.deleteRowsInBatches(DashboardsTableName, 'dashboard_id', {
+            project_uuid: projectUuid,
+        });
+        await this.deleteRowsInBatches(SpaceTableName, 'space_id', {
+            project_id: project.project_id,
+        });
+    }
+
+    async delete(
+        projectUuid: string,
+        transaction?: Transaction,
+    ): Promise<void> {
         // Invalidate warehouse credentials cache
         warehouseCredentialsCache?.del(projectUuid);
 
-        await this.database.transaction(async (trx) => {
+        if (!transaction) {
+            await this.deleteContentInBatches(projectUuid);
+        }
+
+        const deleteInTransaction = async (trx: Transaction): Promise<void> => {
             const [project] = await trx('projects')
                 .select('project_id')
                 .where('project_uuid', projectUuid);
@@ -732,15 +2262,22 @@ export class ProjectModel {
 
             // Finally, delete the project and everything else in cascade
             await trx('projects').where('project_uuid', projectUuid).delete();
-        });
+        };
+
+        if (transaction) {
+            await deleteInTransaction(transaction);
+        } else {
+            await this.database.transaction(deleteInTransaction);
+        }
     }
 
     async getWithSensitiveFields(
         projectUuid: string,
     ): Promise<Project & { warehouseConnection?: CreateWarehouseCredentials }> {
-        type QueryResult = (
+        type QueryResult = ((
             | {
                   name: string;
+                  slug: string;
                   project_type: ProjectType;
                   dbt_connection: Buffer | null;
                   encrypted_credentials: null;
@@ -761,9 +2298,12 @@ export class ProjectModel {
                   project_defaults: ProjectDefaults | null;
                   color_palette_uuid: string | null;
                   expires_at: Date | null;
+                  provisioning_source: string | null;
+                  agent_sql_scope: AgentSqlScope | null;
               }
             | {
                   name: string;
+                  slug: string;
                   project_type: ProjectType;
                   dbt_connection: Buffer | null;
                   encrypted_credentials: Buffer;
@@ -784,93 +2324,118 @@ export class ProjectModel {
                   project_defaults: ProjectDefaults | null;
                   color_palette_uuid: string | null;
                   expires_at: Date | null;
+                  provisioning_source: string | null;
+                  agent_sql_scope: AgentSqlScope | null;
               }
-        )[];
+        ) & { connection_mode?: string })[];
         return wrapSentryTransaction(
             'ProjectModel.getWithSensitiveFields',
             {},
             async () => {
-                const projects = await this.database('projects')
-                    .leftJoin(
-                        WarehouseCredentialTableName,
-                        'warehouse_credentials.project_id',
-                        'projects.project_id',
-                    )
-                    .leftJoin(
-                        OrganizationTableName,
-                        'organizations.organization_id',
-                        'projects.organization_id',
-                    )
-                    .leftJoin(
-                        PinnedListTableName,
-                        'pinned_list.project_uuid',
-                        'projects.project_uuid',
-                    )
-                    .column([
-                        this.database.ref('name').withSchema(ProjectTableName),
-                        this.database
-                            .ref('project_type')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('dbt_connection')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('encrypted_credentials')
-                            .withSchema(WarehouseCredentialTableName),
-                        this.database
-                            .ref('warehouse_type')
-                            .withSchema(WarehouseCredentialTableName),
-                        this.database
-                            .ref('organization_uuid')
-                            .withSchema(OrganizationTableName),
-                        this.database
-                            .ref('pinned_list_uuid')
-                            .withSchema(PinnedListTableName),
-                        this.database
-                            .ref('dbt_version')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('copied_from_project_uuid')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('scheduler_timezone')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('query_timezone')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('use_project_timezone_in_filters')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('scheduler_failure_notify_recipients')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('scheduler_failure_include_contact')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('scheduler_failure_contact_override')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('created_by_user_uuid')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('organization_warehouse_credentials_uuid')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('has_default_user_spaces')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('project_defaults')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('color_palette_uuid')
-                            .withSchema(ProjectTableName),
-                        this.database
-                            .ref('expires_at')
-                            .withSchema(ProjectTableName),
-                    ])
-                    .select<QueryResult>()
-                    .where('projects.project_uuid', projectUuid);
+                const selectProjects = (includeConnectionMode: boolean) =>
+                    this.database('projects')
+                        .leftJoin(
+                            WarehouseCredentialTableName,
+                            'warehouse_credentials.project_id',
+                            'projects.project_id',
+                        )
+                        .leftJoin(
+                            OrganizationTableName,
+                            'organizations.organization_id',
+                            'projects.organization_id',
+                        )
+                        .leftJoin(
+                            PinnedListTableName,
+                            'pinned_list.project_uuid',
+                            'projects.project_uuid',
+                        )
+                        .column([
+                            this.database
+                                .ref('name')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('slug')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('project_type')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('dbt_connection')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('encrypted_credentials')
+                                .withSchema(WarehouseCredentialTableName),
+                            this.database
+                                .ref('warehouse_type')
+                                .withSchema(WarehouseCredentialTableName),
+                            this.database
+                                .ref('organization_uuid')
+                                .withSchema(OrganizationTableName),
+                            this.database
+                                .ref('pinned_list_uuid')
+                                .withSchema(PinnedListTableName),
+                            this.database
+                                .ref('dbt_version')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('copied_from_project_uuid')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('scheduler_timezone')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('query_timezone')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('use_project_timezone_in_filters')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('scheduler_failure_notify_recipients')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('scheduler_failure_include_contact')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('scheduler_failure_contact_override')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('created_by_user_uuid')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('organization_warehouse_credentials_uuid')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('has_default_user_spaces')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('project_defaults')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('color_palette_uuid')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('expires_at')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('provisioning_source')
+                                .withSchema(ProjectTableName),
+                            this.database
+                                .ref('agent_sql_scope')
+                                .withSchema(ProjectTableName),
+                            ...(includeConnectionMode
+                                ? [
+                                      this.database
+                                          .ref('connection_mode')
+                                          .withSchema(ProjectTableName),
+                                  ]
+                                : []),
+                        ])
+                        .select<QueryResult>()
+                        .where('projects.project_uuid', projectUuid);
+                const projects =
+                    await this.connectionRouter.withConnectionModeColumn(
+                        selectProjects,
+                    );
                 if (projects.length === 0) {
                     throw new NotFoundError(
                         `Cannot find project with id: ${projectUuid}`,
@@ -884,9 +2449,11 @@ export class ProjectModel {
                 }
                 let dbtSensitiveCredentials: DbtProjectConfig;
                 try {
-                    dbtSensitiveCredentials = JSON.parse(
-                        this.encryptionUtil.decrypt(project.dbt_connection),
-                    ) as DbtProjectConfig;
+                    dbtSensitiveCredentials = normalizeStoredDbtConnection(
+                        JSON.parse(
+                            this.encryptionUtil.decrypt(project.dbt_connection),
+                        ) as DbtProjectConfig,
+                    );
                 } catch (e) {
                     throw new UnexpectedServerError(
                         'Failed to load dbt credentials',
@@ -896,6 +2463,7 @@ export class ProjectModel {
                 const result: Omit<Project, 'warehouseConnection'> = {
                     organizationUuid: project.organization_uuid,
                     projectUuid,
+                    slug: project.slug,
                     name: project.name,
                     type: project.project_type,
                     dbtConnection: dbtSensitiveCredentials,
@@ -920,6 +2488,12 @@ export class ProjectModel {
                     projectDefaults: project.project_defaults ?? undefined,
                     colorPaletteUuid: project.color_palette_uuid ?? null,
                     expiresAt: project.expires_at ?? null,
+                    provisioningSource: project.provisioning_source ?? null,
+                    agentSqlScope: project.agent_sql_scope ?? null,
+                    connectionRoute: await this.connectionRouter.routeFor(
+                        projectUuid,
+                        project.connection_mode,
+                    ),
                 };
 
                 // If project uses organization warehouse credentials, load them
@@ -941,11 +2515,13 @@ export class ProjectModel {
                 }
                 let sensitiveCredentials: CreateWarehouseCredentials;
                 try {
-                    sensitiveCredentials = JSON.parse(
-                        this.encryptionUtil.decrypt(
-                            project.encrypted_credentials,
-                        ),
-                    ) as CreateWarehouseCredentials;
+                    sensitiveCredentials = normalizeWarehouseCredentials(
+                        JSON.parse(
+                            this.encryptionUtil.decrypt(
+                                project.encrypted_credentials,
+                            ),
+                        ) as CreateWarehouseCredentials,
+                    );
                 } catch (e) {
                     throw new UnexpectedServerError(
                         'Failed to load warehouse credentials',
@@ -953,7 +2529,10 @@ export class ProjectModel {
                 }
                 return {
                     ...result,
-                    warehouseConnection: sensitiveCredentials,
+                    warehouseConnection: copyWarehouseCredentialVersions(
+                        sensitiveCredentials,
+                        sensitiveCredentials,
+                    ),
                 };
             },
         );
@@ -971,16 +2550,22 @@ export class ProjectModel {
                     DbProject,
                     | 'name'
                     | 'project_uuid'
+                    | 'slug'
                     | 'project_type'
                     | 'copied_from_project_uuid'
+                    | 'created_by_user_uuid'
+                    | 'provisioning_source'
                 > &
                     Pick<DbOrganization, 'organization_uuid'>
             >([
                 `${ProjectTableName}.name`,
                 `${ProjectTableName}.project_uuid`,
+                `${ProjectTableName}.slug`,
                 `${OrganizationTableName}.organization_uuid`,
                 `${ProjectTableName}.copied_from_project_uuid`,
                 `${ProjectTableName}.project_type`,
+                `${ProjectTableName}.created_by_user_uuid`,
+                `${ProjectTableName}.provisioning_source`,
             ])
             .where('projects.project_uuid', projectUuid)
             .first();
@@ -992,10 +2577,82 @@ export class ProjectModel {
         return {
             organizationUuid: project.organization_uuid,
             projectUuid: project.project_uuid,
+            slug: project.slug,
             name: project.name,
             type: project.project_type,
             upstreamProjectUuid: project.copied_from_project_uuid || undefined,
+            createdByUserUuid: project.created_by_user_uuid,
+            provisioningSource: project.provisioning_source,
         };
+    }
+
+    async getSummaries(projectUuids: string[]): Promise<ProjectSummary[]> {
+        const projects = await this.database(ProjectTableName)
+            .leftJoin(
+                OrganizationTableName,
+                'projects.organization_id',
+                'organizations.organization_id',
+            )
+            .select<
+                (Pick<
+                    DbProject,
+                    | 'name'
+                    | 'project_uuid'
+                    | 'slug'
+                    | 'project_type'
+                    | 'copied_from_project_uuid'
+                    | 'created_by_user_uuid'
+                    | 'provisioning_source'
+                > &
+                    Pick<DbOrganization, 'organization_uuid'>)[]
+            >([
+                `${ProjectTableName}.name`,
+                `${ProjectTableName}.project_uuid`,
+                `${ProjectTableName}.slug`,
+                `${OrganizationTableName}.organization_uuid`,
+                `${ProjectTableName}.copied_from_project_uuid`,
+                `${ProjectTableName}.project_type`,
+                `${ProjectTableName}.created_by_user_uuid`,
+                `${ProjectTableName}.provisioning_source`,
+            ])
+            .whereIn('projects.project_uuid', projectUuids);
+        return projects.map((project) => ({
+            organizationUuid: project.organization_uuid,
+            projectUuid: project.project_uuid,
+            slug: project.slug,
+            name: project.name,
+            type: project.project_type,
+            upstreamProjectUuid: project.copied_from_project_uuid || undefined,
+            createdByUserUuid: project.created_by_user_uuid,
+            provisioningSource: project.provisioning_source,
+        }));
+    }
+
+    async getUuidBySlug(
+        organizationUuid: string,
+        projectSlug: string,
+    ): Promise<string> {
+        const project = await this.database(ProjectTableName)
+            .innerJoin(
+                OrganizationTableName,
+                `${ProjectTableName}.organization_id`,
+                `${OrganizationTableName}.organization_id`,
+            )
+            .select(`${ProjectTableName}.project_uuid`)
+            .where(
+                `${OrganizationTableName}.organization_uuid`,
+                organizationUuid,
+            )
+            .where(`${ProjectTableName}.slug`, projectSlug)
+            .first();
+
+        if (!project) {
+            throw new NotFoundError(
+                `Cannot find project with slug: ${projectSlug}`,
+            );
+        }
+
+        return project.project_uuid;
     }
 
     /*
@@ -1047,8 +2704,9 @@ export class ProjectModel {
     private async getOrganizationWarehouseCredentials(
         organizationWarehouseCredentialsUuid: string,
         organizationUuid: string, // Extra filter value to ensure we are getting the credentials from the correct organization
+        database: Knex = this.database,
     ): Promise<CreateWarehouseCredentials> {
-        const [orgCredentials] = await this.database(
+        const [orgCredentials] = await database(
             'organization_warehouse_credentials',
         )
             .where(
@@ -1065,11 +2723,16 @@ export class ProjectModel {
         }
 
         try {
-            return JSON.parse(
-                this.encryptionUtil.decrypt(
-                    orgCredentials.warehouse_connection,
+            return withWarehouseCredentialVersion(
+                normalizeWarehouseCredentials(
+                    JSON.parse(
+                        this.encryptionUtil.decrypt(
+                            orgCredentials.warehouse_connection,
+                        ),
+                    ) as CreateWarehouseCredentials,
                 ),
-            ) as CreateWarehouseCredentials;
+                `organization:${organizationWarehouseCredentialsUuid}`,
+            );
         } catch (e) {
             throw new UnexpectedServerError(
                 'Failed to load organization warehouse credentials',
@@ -1099,15 +2762,27 @@ export class ProjectModel {
               ) as WarehouseCredentials)
             : undefined;
 
+        const scrubbedCredentials =
+            nonSensitiveCredentials &&
+            sensitiveCredentials &&
+            sensitiveCredentials.type === WarehouseTypes.DUCKDB &&
+            sensitiveCredentials.connectionType ===
+                DuckdbConnectionType.DUCKLAKE
+                ? (stripDucklakeNestedSensitive(
+                      sensitiveCredentials,
+                  ) as WarehouseCredentials)
+                : nonSensitiveCredentials;
+
         const nonSensitiveCredentialsWithDefaults =
             ProjectModel.getConnectionWithDefaults(
                 sensitiveCredentials,
-                nonSensitiveCredentials,
+                scrubbedCredentials,
             );
 
         return {
             organizationUuid: project.organizationUuid,
             projectUuid,
+            slug: project.slug,
             name: project.name,
             type: project.type,
             dbtConnection: nonSensitiveDbtCredentials,
@@ -1128,8 +2803,12 @@ export class ProjectModel {
             organizationWarehouseCredentialsUuid:
                 project.organizationWarehouseCredentialsUuid,
             hasDefaultUserSpaces: project.hasDefaultUserSpaces,
+            projectDefaults: project.projectDefaults,
             colorPaletteUuid: project.colorPaletteUuid ?? null,
             expiresAt: project.expiresAt,
+            provisioningSource: project.provisioningSource ?? null,
+            agentSqlScope: project.agentSqlScope ?? null,
+            connectionRoute: project.connectionRoute,
         };
     }
 
@@ -1171,6 +2850,9 @@ export class ProjectModel {
         const convertedExplore = { ...explore };
         if (convertedExplore.tables) {
             Object.values(convertedExplore.tables).forEach((table) => {
+                if (!isJsonObject(table)) {
+                    return;
+                }
                 if (table.metrics) {
                     Object.values(table.metrics).forEach((metric) => {
                         if (metric.filters) {
@@ -1204,7 +2886,6 @@ export class ProjectModel {
         projectUuid: string,
         key: 'name' | 'uuid',
         exploreNamesWithDuplicates?: string[],
-        { applyChangeset = true }: { applyChangeset?: boolean } = {},
     ): Promise<{ [exploreNameOrUuid: string]: Explore | ExploreError }> {
         // dedupe values
         const exploreNames = exploreNamesWithDuplicates
@@ -1217,11 +2898,6 @@ export class ProjectModel {
                 exploreNames,
             },
             async (span) => {
-                const changeset =
-                    await this.changesetModel.findActiveChangesetWithChangesByProjectUuid(
-                        projectUuid,
-                    );
-
                 const query = this.database(CachedExploreTableName)
                     .select('explore', 'cached_explore_uuid')
                     .where('project_uuid', projectUuid);
@@ -1231,36 +2907,247 @@ export class ProjectModel {
                 const explores = await query;
                 span.setAttribute('foundExplores', !!explores.length);
 
-                let finalExplores = wrapSentryTransactionSync(
+                const finalExplores = wrapSentryTransactionSync(
                     'ProjectModel.findExploresFromCache.convertExplores',
                     { exploresCount: explores.length },
                     () =>
                         explores.reduce<Record<string, Explore | ExploreError>>(
                             (acc, { explore, cached_explore_uuid }) => {
+                                if (
+                                    !isJsonObject(explore) ||
+                                    typeof explore.name !== 'string'
+                                ) {
+                                    return acc;
+                                }
                                 const exploreKey =
                                     key === 'name'
                                         ? explore.name
                                         : cached_explore_uuid;
                                 acc[exploreKey] =
                                     ProjectModel.convertMetricFiltersFieldIdsToFieldRef(
-                                        explore,
+                                        explore as Explore | ExploreError,
                                     );
                                 return acc;
                             },
-                            {},
+                            Object.create(null) as Record<
+                                string,
+                                Explore | ExploreError
+                            >,
                         ),
                 );
-
-                if (changeset && applyChangeset) {
-                    finalExplores = ChangesetUtils.applyChangeset(
-                        changeset,
-                        finalExplores,
-                    );
-                }
 
                 return finalExplores;
             },
         );
+    }
+
+    /**
+     * Sums the on-disk (TOAST) byte size of the `explore` column for the
+     * matched rows via `pg_column_size`, which reads the stored/compressed
+     * size from the TOAST pointer rather than detoasting the full JSONB
+     * value. Used for cache-read telemetry and to select the explore-summary
+     * read strategy.
+     */
+    async getCachedExploreStorageBytes(
+        projectUuid: string,
+        exploreNamesWithDuplicates?: string[],
+    ): Promise<number> {
+        const { totalBytes } = await this.getCachedExploreStorageStats(
+            projectUuid,
+            exploreNamesWithDuplicates,
+        );
+        return totalBytes;
+    }
+
+    async getCachedExploreStorageStats(
+        projectUuid: string,
+        exploreNamesWithDuplicates?: string[],
+    ): Promise<CachedExploreStorageStats> {
+        const exploreNames = exploreNamesWithDuplicates
+            ? [...new Set(exploreNamesWithDuplicates)]
+            : undefined;
+        const query = this.database(CachedExploreTableName)
+            .select<{ exploreCount: string; totalBytes: string }[]>(
+                this.database.raw(
+                    'COUNT(*)::bigint as "exploreCount", COALESCE(SUM(pg_column_size("explore")), 0)::bigint as "totalBytes"',
+                ),
+            )
+            .where('project_uuid', projectUuid);
+        if (exploreNames) {
+            void query.whereIn('name', exploreNames);
+        }
+        const [row] = await query;
+        return {
+            exploreCount: Number(row?.exploreCount ?? 0),
+            totalBytes: Number(row?.totalBytes ?? 0),
+        };
+    }
+
+    async findExploreTableSummariesFromCache(
+        projectUuid: string,
+        exploreNamesWithDuplicates?: string[],
+        readContext?: ExploreCacheReadContext,
+    ): Promise<Record<string, ExploreTableSummaryRecord>> {
+        const exploreNames = exploreNamesWithDuplicates
+            ? [...new Set(exploreNamesWithDuplicates)]
+            : undefined;
+
+        return wrapSentryTransaction(
+            'ProjectModel.findExploreTableSummariesFromCache',
+            { projectUuid, exploreNames },
+            async (span) => {
+                const { exploreCount, totalBytes } =
+                    await this.getCachedExploreStorageStats(
+                        projectUuid,
+                        exploreNames,
+                    );
+                const storedBytesPerExplore =
+                    exploreCount === 0 ? undefined : totalBytes / exploreCount;
+                const projectionThresholdBytesPerExplore =
+                    this.lightdashConfig.query
+                        .exploreSummaryProjectionMinStoredBytesPerExplore;
+                const shouldReadFullExplores =
+                    exploreCount > 0 &&
+                    projectionThresholdBytesPerExplore > 0 &&
+                    storedBytesPerExplore !== undefined &&
+                    storedBytesPerExplore < projectionThresholdBytesPerExplore;
+
+                if (readContext) {
+                    Object.assign(readContext, {
+                        readStrategy: shouldReadFullExplores
+                            ? ('full-explore-read' as const)
+                            : ('table-summary-projection' as const),
+                        storedExploreBytes: totalBytes,
+                        storedBytesPerExplore,
+                        projectionThresholdBytesPerExplore,
+                    });
+                }
+
+                if (exploreCount === 0) {
+                    span.setAttribute('foundExplores', false);
+                    return Object.create(null) as Record<
+                        string,
+                        ExploreTableSummaryRecord
+                    >;
+                }
+
+                if (shouldReadFullExplores) {
+                    const fullExplores = await this.findExploresFromCache(
+                        projectUuid,
+                        'name',
+                        exploreNames,
+                    );
+                    const summaries = Object.values(fullExplores).reduce<
+                        Record<string, ExploreTableSummaryRecord>
+                    >((acc, explore) => {
+                        const summary = toExploreTableSummaryRecord(explore);
+                        if (summary) {
+                            acc[summary.name] = summary;
+                        }
+                        return acc;
+                    }, Object.create(null));
+                    span.setAttribute(
+                        'foundExplores',
+                        !!Object.keys(summaries).length,
+                    );
+                    return summaries;
+                }
+
+                const query = this.database(CachedExploreTableName)
+                    .select<RawExploreTableSummaryRow[]>(
+                        this.database.raw(`
+                            explore_summary.name as "exploreName",
+                            explore_summary.type as "exploreType",
+                            explore_summary."baseTable" as "baseTable",
+                            explore_summary."hasErrors" as "hasErrors",
+                            table_entry.key as "tableKey",
+                            table_entry.value->'name' as "tableName",
+                            table_entry.value->'originalName' as "originalName",
+                            table_entry.value->'database' as "database",
+                            table_entry.value->'schema' as "schema",
+                            table_entry.value->'description' as "description",
+                            jsonb_exists(table_entry.value, 'description') as "hasDescription",
+                            table_entry.value->'sqlTable' as "sqlTable",
+                            table_entry.value->'ymlPath' as "ymlPath",
+                            table_entry.value->'dbtSourceUuid' as "dbtSourceUuid"
+                        `),
+                    )
+                    .joinRaw(
+                        `LEFT JOIN LATERAL (
+                            SELECT
+                                explore_fields.name,
+                                explore_fields.type,
+                                explore_fields."baseTable",
+                                explore_fields.tables,
+                                jsonb_exists(${CachedExploreTableName}.explore, 'errors') as "hasErrors"
+                            FROM jsonb_to_record(
+                                CASE
+                                    WHEN jsonb_typeof(${CachedExploreTableName}.explore) = 'object'
+                                        THEN ${CachedExploreTableName}.explore
+                                    ELSE '{}'::jsonb
+                                END
+                            ) AS explore_fields(
+                                name text,
+                                type text,
+                                "baseTable" text,
+                                tables jsonb
+                            )
+                            OFFSET 0
+                        ) AS explore_summary ON TRUE
+                        LEFT JOIN LATERAL jsonb_each(
+                            CASE
+                                WHEN jsonb_typeof(explore_summary.tables) = 'object' THEN explore_summary.tables
+                                ELSE '{}'::jsonb
+                            END
+                        ) AS table_entry(key, value)
+                            ON jsonb_typeof(table_entry.value) = 'object'`,
+                    )
+                    .where(
+                        `${CachedExploreTableName}.project_uuid`,
+                        projectUuid,
+                    )
+                    .whereRaw(
+                        `jsonb_typeof(${CachedExploreTableName}.explore->'name') = 'string'`,
+                    )
+                    .whereNotNull('explore_summary.name');
+
+                if (exploreNames) {
+                    void query.whereIn(
+                        `${CachedExploreTableName}.name`,
+                        exploreNames,
+                    );
+                }
+
+                const rows = await query;
+                const explores = reduceExploreTableSummaryRows(rows);
+
+                span.setAttribute(
+                    'foundExplores',
+                    !!Object.keys(explores).length,
+                );
+                return explores;
+            },
+        );
+    }
+
+    async getAnalyticsModelCounts(
+        projectUuid: string,
+        names: readonly string[],
+    ) {
+        return this.database(CachedExploreTableName)
+            .select<{ name: string; fields: number; hiddenJoins: number }[]>([
+                'name',
+                this.database.raw(
+                    `
+                    jsonb_array_length(jsonb_path_query_array(explore, '$.tables.*.dimensions.*'))
+                    + jsonb_array_length(jsonb_path_query_array(explore, '$.tables.*.metrics.*')) AS fields,
+                    jsonb_array_length(jsonb_path_query_array(explore, ?)) AS "hiddenJoins"
+                `,
+                    ['$.joinedTables[*] ? (@.hidden == true)'],
+                ),
+            ])
+            .where('project_uuid', projectUuid)
+            .whereIn('name', [...names]);
     }
 
     async getCachedExploreNames(projectUuid: string): Promise<string[]> {
@@ -1287,6 +3174,75 @@ export class ProjectModel {
         );
     }
 
+    async getPreAggregateRefreshSummary(
+        projectUuid: string,
+        trx?: Knex.Transaction,
+    ): Promise<StoredPreAggregateRefresh> {
+        const database = trx ?? this.database;
+        return ProjectModel.queryPreAggregateRefreshSummary(
+            database,
+            database(CachedExploreTableName)
+                .select('explore')
+                .where('project_uuid', projectUuid),
+            database.raw(
+                `EXISTS (
+                SELECT 1 FROM pre_aggregate_definitions
+                WHERE project_uuid = ? AND refresh_cron IS NOT NULL
+            )`,
+                [projectUuid],
+            ),
+        );
+    }
+
+    async getStagedPreAggregateRefreshSummary(
+        projectUuid: string,
+        saveUuid: string,
+        trx: Knex.Transaction,
+    ): Promise<StoredPreAggregateRefresh> {
+        return ProjectModel.queryPreAggregateRefreshSummary(
+            trx,
+            trx(CachedExploreStagingTableName).select('explore').where({
+                project_uuid: projectUuid,
+                save_uuid: saveUuid,
+            }),
+            trx.raw('false'),
+        );
+    }
+
+    private static async queryPreAggregateRefreshSummary(
+        database: Knex,
+        source: Knex.QueryBuilder,
+        scheduledDefinition: Knex.Raw,
+    ): Promise<StoredPreAggregateRefresh> {
+        const result = await database.raw<{
+            rows: StoredPreAggregateRefresh[];
+        }>(
+            `WITH stored AS MATERIALIZED (
+                SELECT explore -> 'preAggregates' AS definitions,
+                       jsonb_typeof(explore) AS explore_type
+                FROM (?) AS explores
+            )
+            SELECT ? AS "hasScheduledDefinition",
+            COALESCE(bool_or(
+                definition -> 'refresh' -> 'cron' IS NOT NULL
+                AND definition -> 'refresh' -> 'cron' <> 'null'::jsonb
+            ), false) AS "hasScheduledRefresh",
+            COALESCE(bool_or(
+                explore_type NOT IN ('object', 'array')
+                OR (definitions IS NOT NULL AND definitions <> 'null'::jsonb
+                    AND jsonb_typeof(definitions) <> 'array')
+                OR jsonb_typeof(definition) = 'null'
+            ), false) AS "hasMalformedPreAggregates"
+            FROM stored
+            LEFT JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(definitions) = 'array'
+                     THEN definitions ELSE '[]'::jsonb END
+            ) AS elements(definition) ON true`,
+            [source, scheduledDefinition],
+        );
+        return result.rows[0];
+    }
+
     async getAllExploresFromCache(
         projectUuid: string,
     ): Promise<{ [exploreUuid: string]: Explore | ExploreError }> {
@@ -1310,7 +3266,8 @@ export class ProjectModel {
 
     /**
      * Get all explore summaries with only the fields needed for the summary view.
-     * This is optimized to avoid fetching the full explore JSON by using PostgreSQL JSON operators.
+     * This is optimized to avoid detoasting the full explore JSON per projected field by
+     * extracting every field once per row with a single lateral jsonb_to_record.
      * @param projectUuid - The project uuid.
      * @returns An array of lightweight explore summary objects.
      */
@@ -1325,23 +3282,53 @@ export class ProjectModel {
         const summaries = await this.database(CachedExploreTableName)
             .select<RawSummaryRow[]>(
                 this.database.raw(`
-                    explore->'name' as name,
-                    explore->'label' as label,
-                    explore->'tags' as tags,
-                    explore->'groupLabel' as "groupLabel",
-                    explore->'groups' as "groups",
-                    explore->'type' as type,
-                    explore->'preAggregateSource' as "preAggregateSource",
-                    explore->'errors' as errors,
-                    explore->'warnings' as warnings,
-                    explore->'baseTable' as "baseTable",
-                    explore->'tables'->(explore->>'baseTable')->>'database' as "baseTableDatabase",
-                    explore->'tables'->(explore->>'baseTable')->>'schema' as "baseTableSchema",
-                    explore->'tables'->(explore->>'baseTable')->>'description' as "baseTableDescription",
-                    explore->'tables'->(explore->>'baseTable')->'requiredAttributes' as "baseTableRequiredAttributes",
-                    explore->'tables'->(explore->>'baseTable')->'anyAttributes' as "baseTableAnyAttributes",
-                    explore->'aiHint' as "aiHint"
+                    explore_summary."name" as "name",
+                    explore_summary."label" as "label",
+                    explore_summary."tags" as "tags",
+                    explore_summary."groupLabel" as "groupLabel",
+                    explore_summary."groups" as "groups",
+                    explore_summary."type" as "type",
+                    explore_summary."preAggregateSource" as "preAggregateSource",
+                    explore_summary."externalSource" as "externalSource",
+                    explore_summary."errors" as "errors",
+                    explore_summary."warnings" as "warnings",
+                    explore_summary."baseTable" as "baseTable",
+                    base_table.value->>'database' as "baseTableDatabase",
+                    base_table.value->>'schema' as "baseTableSchema",
+                    base_table.value->>'description' as "baseTableDescription",
+                    ${CachedExploreTableName}.warehouse_connection_uuid as "warehouseConnectionUuid",
+                    base_table.value->'requiredAttributes' as "baseTableRequiredAttributes",
+                    base_table.value->'anyAttributes' as "baseTableAnyAttributes",
+                    explore_summary."aiHint" as "aiHint",
+                    explore_summary."customMeta" as "customMeta"
                 `),
+            )
+            .joinRaw(
+                `LEFT JOIN LATERAL jsonb_to_record(
+                    CASE
+                        WHEN jsonb_typeof(${CachedExploreTableName}.explore) = 'object'
+                            THEN ${CachedExploreTableName}.explore
+                        ELSE '{}'::jsonb
+                    END
+                ) AS explore_summary(
+                    "name" jsonb,
+                    "label" jsonb,
+                    "tags" jsonb,
+                    "groupLabel" jsonb,
+                    "groups" jsonb,
+                    "type" jsonb,
+                    "preAggregateSource" jsonb,
+                    "externalSource" jsonb,
+                    "errors" jsonb,
+                    "warnings" jsonb,
+                    "baseTable" text,
+                    "tables" jsonb,
+                    "aiHint" jsonb,
+                    "customMeta" jsonb
+                ) ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT explore_summary."tables" -> explore_summary."baseTable" AS value
+                ) AS base_table ON TRUE`,
             )
             .where('project_uuid', projectUuid);
 
@@ -1354,15 +3341,50 @@ export class ProjectModel {
             databaseName: row.baseTableDatabase,
             schemaName: row.baseTableSchema,
             description: row.baseTableDescription ?? undefined,
+            warehouseConnectionUuid: row.warehouseConnectionUuid,
             aiHint: row.aiHint ?? undefined,
+            customMeta: row.customMeta ?? undefined,
             type: row.type ?? undefined,
             preAggregateSource: row.preAggregateSource ?? undefined,
+            externalSource: row.externalSource ?? undefined,
             baseTableRequiredAttributes:
                 row.baseTableRequiredAttributes ?? undefined,
             baseTableAnyAttributes: row.baseTableAnyAttributes ?? undefined,
             ...(row.errors ? { errors: row.errors } : {}), // Fatal errors from ExploreError
             ...(row.warnings ? { warnings: row.warnings } : {}), // Non-fatal warnings from partial compilation
         }));
+    }
+
+    async findExploreWarehouseConnectionUuids(
+        projectUuid: string,
+        exploreNames: string[],
+    ): Promise<Record<string, string | null>> {
+        const rows = await this.database(CachedExploreTableName)
+            .select<
+                { name: string; warehouse_connection_uuid: string | null }[]
+            >('name', 'warehouse_connection_uuid')
+            .where('project_uuid', projectUuid)
+            .whereIn('name', exploreNames);
+        const bindings = new Map(
+            rows.map((row) => [row.name, row.warehouse_connection_uuid]),
+        );
+        return Object.fromEntries(
+            exploreNames.map((name) => [name, bindings.get(name) ?? null]),
+        );
+    }
+
+    async getExploreWarehouseConnectionUuid(
+        projectUuid: string,
+        exploreName: string,
+    ): Promise<string | null> {
+        const row = await this.database(CachedExploreTableName)
+            .select<{ warehouse_connection_uuid: string | null }[]>(
+                'warehouse_connection_uuid',
+            )
+            .where('project_uuid', projectUuid)
+            .where('name', exploreName)
+            .first();
+        return row?.warehouse_connection_uuid ?? null;
     }
 
     async getExploreFromCache(
@@ -1376,9 +3398,46 @@ export class ProjectModel {
         );
         const cachedExplore = cachedExplores[exploreName];
         if (cachedExplore === undefined) {
+            const candidateExploreNames = await this.findExploreSplitCandidates(
+                projectUuid,
+                exploreName,
+            );
+            if (candidateExploreNames.length >= 2) {
+                throw new ExploreSplitError(exploreName, candidateExploreNames);
+            }
             throw new NotFoundError(`Explore "${exploreName}" does not exist.`);
         }
         return cachedExplore;
+    }
+
+    async findExploreSplitCandidates(
+        projectUuid: string,
+        exploreName: string,
+    ): Promise<string[]> {
+        const splitLookupReadContext = newExploreCacheReadContext(
+            'split-lookup',
+            undefined,
+        );
+        const { result: allCachedExplores } = await measureTime(
+            async () => {
+                const explores = await this.findExploreTableSummariesFromCache(
+                    projectUuid,
+                    undefined,
+                    splitLookupReadContext,
+                );
+                Object.assign(splitLookupReadContext, {
+                    ...summarizeExploreCacheRead(explores),
+                });
+                return explores;
+            },
+            'ProjectModel.findExploreSplitCandidates.cachedExploreRead',
+            Logger,
+            splitLookupReadContext,
+        );
+        return getExploreSplitCandidates(
+            exploreName,
+            Object.values(allCachedExplores),
+        );
     }
 
     async findExploreByTableName(
@@ -1393,6 +3452,72 @@ export class ProjectModel {
         return cachedExplores[tableName];
     }
 
+    async findExploreNamesContainingTables(
+        projectUuid: string,
+        tableNames: string[],
+    ): Promise<string[]> {
+        if (tableNames.length === 0) return [];
+        const query = this.database(CachedExploreTableName)
+            .select<{ name: string }[]>('name')
+            .where('project_uuid', projectUuid);
+        for (const tableName of new Set(tableNames)) {
+            query.andWhereRaw('? = ANY(table_names)', [tableName]);
+        }
+        return (await query).map(({ name }) => name);
+    }
+
+    private async findExploreCacheContainingTable(
+        projectUuid: string,
+        tableName: string,
+    ): Promise<
+        | {
+              explore: Explore | ExploreError;
+              baseMatch: boolean;
+          }
+        | undefined
+    > {
+        return this.database(CachedExploreTableName)
+            .columns({
+                explore: 'explore',
+                baseMatch: this.database.raw("? = explore->>'baseTable'", [
+                    tableName,
+                ]),
+            })
+            .select<{
+                explore: Explore | ExploreError;
+                baseMatch: boolean;
+            }>()
+            .whereRaw('? = ANY(table_names)', tableName)
+            .andWhere('project_uuid', projectUuid)
+            .orderBy('baseMatch', 'desc')
+            .first();
+    }
+
+    async findExploreContainingTable(
+        projectUuid: string,
+        tableName: string,
+    ): Promise<Explore | ExploreError | undefined> {
+        return wrapSentryTransaction(
+            'ProjectModel.findExploreContainingTable',
+            {},
+            async (span) => {
+                const exploreCache = await this.findExploreCacheContainingTable(
+                    projectUuid,
+                    tableName,
+                );
+                span.setAttribute(
+                    'foundExploreContainingTable',
+                    !!exploreCache,
+                );
+                return exploreCache
+                    ? ProjectModel.convertMetricFiltersFieldIdsToFieldRef(
+                          exploreCache.explore,
+                      )
+                    : undefined;
+            },
+        );
+    }
+
     // Returns explore based on the join original name rather than the explore with the join.
     async findJoinAliasExplore(
         projectUuid: string,
@@ -1402,24 +3527,11 @@ export class ProjectModel {
             'ProjectModel.findExploreFromJoinAlias',
             {},
             async (span) => {
-                const exploreWithJoinAlias = await this.database(
-                    CachedExploreTableName,
-                )
-                    .columns({
-                        explore: 'explore',
-                        baseMatch: this.database.raw(
-                            "? = explore->>'baseTable'",
-                            [joinAliasName],
-                        ),
-                    })
-                    .select<{
-                        explore: Explore | ExploreError;
-                        baseMatch: boolean;
-                    }>()
-                    .whereRaw('? = ANY(table_names)', joinAliasName)
-                    .andWhere('project_uuid', projectUuid)
-                    .orderBy('baseMatch', 'desc')
-                    .first();
+                const exploreWithJoinAlias =
+                    await this.findExploreCacheContainingTable(
+                        projectUuid,
+                        joinAliasName,
+                    );
                 if (exploreWithJoinAlias) {
                     const originalTableName =
                         exploreWithJoinAlias.explore.tables?.[joinAliasName]
@@ -1452,62 +3564,216 @@ export class ProjectModel {
     async saveExploresToCache(
         projectUuid: string,
         explores: (Explore | ExploreError)[],
+        complete = false,
+        dbtModelNames?: string[],
+        playgroundBundleVersion?: string,
+        // Use only statements on the given transaction; no other I/O or connection.
+        beforeWrite?: ExploreWriteCheck,
     ) {
         return wrapSentryTransaction(
             'ProjectModel.saveExploresToCache',
             {},
             async () =>
                 this.database.transaction(async (trx) => {
-                    // Get custom explores/virtual views before deleting them
-                    const virtualViews = await trx(CachedExploreTableName)
-                        .select('explore')
-                        .where('project_uuid', projectUuid)
-                        .whereRaw("explore->>'type' = ?", [
-                            ExploreType.VIRTUAL,
-                        ]);
+                    await ProjectModel.lockAndEnsureCachedExplores(
+                        trx,
+                        projectUuid,
+                    );
+                    if (beforeWrite) await beforeWrite(trx, explores);
+                    const cachedExploresQuery = trx(CachedExploreTableName)
+                        .select<{ explore: Explore | ExploreError }[]>(
+                            'explore',
+                        )
+                        .where('project_uuid', projectUuid);
+                    if (complete) {
+                        cachedExploresQuery.whereRaw(
+                            "explore->>'type' = ANY(?)",
+                            [[...USER_MANAGED_EXPLORE_TYPES]],
+                        );
+                    }
+                    const cachedExplores = await cachedExploresQuery;
+                    const retainedNames = new Set([
+                        ...(dbtModelNames ?? []),
+                        ...explores.map((explore) => explore.name),
+                    ]);
+                    const hasCombinedSources = cachedExplores.some(
+                        ({ explore }) =>
+                            Object.values(explore.tables ?? {}).some(
+                                (table) => table.dbtSourceUuid !== undefined,
+                            ),
+                    );
+                    const deletedNames =
+                        !complete &&
+                        dbtModelNames !== undefined &&
+                        !hasCombinedSources
+                            ? cachedExplores
+                                  .filter(({ explore }) => {
+                                      const sourceName =
+                                          explore.preAggregateSource
+                                              ?.sourceExploreName ??
+                                          explore.tables?.[
+                                              explore.baseTable ?? explore.name
+                                          ]?.nestedFrom?.parentTable ??
+                                          explore.name;
+                                      return (
+                                          !isUserManagedExplore(explore) &&
+                                          !retainedNames.has(sourceName)
+                                      );
+                                  })
+                                  .map(({ explore }) => explore.name)
+                            : [];
+                    if (deletedNames.length > 0) {
+                        await trx(CachedExploreTableName)
+                            .where('project_uuid', projectUuid)
+                            .whereIn('name', deletedNames)
+                            .delete();
+                    }
+                    const deletedNamesSet = new Set(deletedNames);
+                    const userManagedExplores = cachedExplores.filter(
+                        ({ explore }) => isUserManagedExplore(explore),
+                    );
+                    const userManagedExploresByName = new Map(
+                        userManagedExplores.map(({ explore }) => [
+                            explore.name,
+                            explore,
+                        ]),
+                    );
 
-                    // Delete previous individually cached explores
-                    await trx(CachedExploreTableName)
-                        .where('project_uuid', projectUuid)
-                        .delete();
-
-                    // NOTE: virtual views with the same name as explores will override the explore.
+                    // NOTE: user-managed explores (virtual views, external source tables)
+                    // with the same name as explores will override the explore.
                     // This isn't new behavior, but it's still a bit of a bug. However, it's
                     // not clear what a better approach would be at the moment.
                     const exploresMap = new Map(
-                        explores.map((e) => [e.name, e]),
+                        complete
+                            ? []
+                            : cachedExplores
+                                  .filter(
+                                      ({ explore }) =>
+                                          !deletedNamesSet.has(explore.name),
+                                  )
+                                  .map(({ explore }) => [
+                                      explore.name,
+                                      explore,
+                                  ]),
                     );
-                    virtualViews.forEach((e) =>
+                    explores.forEach((explore) =>
+                        exploresMap.set(explore.name, explore),
+                    );
+                    userManagedExplores.forEach((e) =>
                         exploresMap.set(e.explore.name, e.explore),
                     );
                     const uniqueExplores = Array.from(exploresMap.values());
 
-                    if (uniqueExplores.length <= 0) {
+                    if (
+                        uniqueExplores.length <= 0 &&
+                        (complete || dbtModelNames === undefined)
+                    ) {
                         throw new ParameterError('No explores to save');
                     }
 
-                    // Cache explores individually
-                    const individualCachedExplores = await trx
-                        .batchInsert<DbCachedExplore>(
-                            CachedExploreTableName,
-                            uniqueExplores.map((explore) => ({
-                                project_uuid: projectUuid,
-                                name: explore.name,
-                                table_names: Object.keys(explore.tables || {}),
-                                explore: JSON.stringify(explore),
-                            })),
-                        )
-                        .returning('cached_explore_uuid');
+                    const exploresToSave = complete
+                        ? uniqueExplores
+                        : Array.from(
+                              new Map(
+                                  explores.map((explore) => [
+                                      explore.name,
+                                      explore,
+                                  ]),
+                              ).values(),
+                          ).map(
+                              (explore) =>
+                                  userManagedExploresByName.get(explore.name) ??
+                                  explore,
+                          );
 
-                    // Cache explores together
-                    await trx(CachedExploresTableName)
-                        .insert({
-                            project_uuid: projectUuid,
-                            explores: JSON.stringify(uniqueExplores),
-                        })
-                        .onConflict('project_uuid')
-                        .merge()
-                        .returning('*');
+                    if (complete) {
+                        // Drop only explores that are gone; survivors keep their uuid
+                        await trx(CachedExploreTableName)
+                            .where('project_uuid', projectUuid)
+                            .whereNotIn(
+                                'name',
+                                exploresToSave.map((explore) => explore.name),
+                            )
+                            .delete();
+                    }
+
+                    // Serialise one explore at a time so a chunk can be built, inserted and
+                    // released. Building every row up front held the whole set as strings.
+                    let savedBytes = 0;
+                    function* sizedRows() {
+                        // eslint-disable-next-line no-restricted-syntax
+                        for (const explore of exploresToSave) {
+                            const serialised = JSON.stringify(explore);
+                            savedBytes += Buffer.byteLength(serialised);
+                            yield {
+                                row: {
+                                    project_uuid: projectUuid,
+                                    name: explore.name,
+                                    table_names: Object.keys(
+                                        explore.tables || {},
+                                    ),
+                                    explore: serialised,
+                                },
+                                bytes: Buffer.byteLength(serialised),
+                            };
+                        }
+                    }
+
+                    const individualCachedExplores: {
+                        cached_explore_uuid: string;
+                    }[] = [];
+                    let chunkCount = 0;
+                    let largestChunkBytes = 0;
+                    // Sequential, not Promise.all: every chunk statement was alive at once.
+                    // eslint-disable-next-line no-restricted-syntax
+                    for (const { rows, bytes } of chunkRowsByBytes(
+                        sizedRows(),
+                    )) {
+                        chunkCount += 1;
+                        largestChunkBytes = Math.max(largestChunkBytes, bytes);
+                        const insertQuery = trx<DbCachedExplore>(
+                            CachedExploreTableName,
+                        ).insert(rows);
+                        // A complete single-connection save owns every
+                        // explore, so a survivor loses any multi-connection
+                        // binding it had; a partial save leaves it alone
+                        // eslint-disable-next-line no-await-in-loop
+                        const saved = await insertQuery
+                            .onConflict(['name', 'project_uuid'])
+                            .merge(
+                                complete
+                                    ? [
+                                          'table_names',
+                                          'explore',
+                                          'warehouse_connection_uuid',
+                                      ]
+                                    : ['table_names', 'explore'],
+                            )
+                            .returning('cached_explore_uuid');
+                        individualCachedExplores.push(...saved);
+                    }
+
+                    if (playgroundBundleVersion !== undefined) {
+                        await trx(ProjectTableName)
+                            .where('project_uuid', projectUuid)
+                            .update({
+                                playground_bundle_version:
+                                    playgroundBundleVersion,
+                            });
+                        warehouseCredentialsCache?.del(projectUuid);
+                    }
+
+                    Logger.info(
+                        `dbt.compile.saveExplores projectUuid=${projectUuid} explores=${uniqueExplores.length} chunks=${chunkCount} largestChunkBytes=${largestChunkBytes}`,
+                        {
+                            event: 'dbt.compile.saveExplores',
+                            projectUuid,
+                            explores: uniqueExplores.length,
+                            chunks: chunkCount,
+                            largestChunkBytes,
+                            savedBytes,
+                        },
+                    );
 
                     return {
                         cachedExploreUuids: individualCachedExplores.map(
@@ -1518,21 +3784,968 @@ export class ProjectModel {
         );
     }
 
+    private static async cachedExploreSourcesForDbtSources(
+        database: Knex,
+        projectUuid: string,
+        dbtSourceUuids: string[],
+    ): Promise<Map<string, string>> {
+        const [project, sources, packages, explores] = await Promise.all([
+            database(ProjectTableName)
+                .select('dbt_source_uuid')
+                .where('project_uuid', projectUuid)
+                .first(),
+            database(ProjectDbtSourcesTableName)
+                .select('project_dbt_source_uuid')
+                .where('project_uuid', projectUuid),
+            database(DbtSourceRefCatalogsTableName)
+                .select<CachedSourceCatalog[]>(
+                    {
+                        sourceUuid: 'dbt_source_uuid',
+                        packageName: 'project_name',
+                    },
+                    database.raw(
+                        "ARRAY(SELECT DISTINCT node->>'package_name' FROM jsonb_array_elements(??) AS node WHERE node->>'package_name' IS NOT NULL) AS ??",
+                        ['nodes', 'nodePackageNames'],
+                    ),
+                )
+                .where('project_uuid', projectUuid),
+            database(CachedExploreTableName)
+                .select<CachedExploreSource[]>(
+                    'name',
+                    database.raw(
+                        "COALESCE(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtSourceUuid', explore->>'dbtSourceUuid') AS ??",
+                        ['sourceUuid'],
+                    ),
+                    database.raw(
+                        "explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtPackageName' AS ??",
+                        ['packageName'],
+                    ),
+                )
+                .where('project_uuid', projectUuid)
+                .whereRaw("NOT (COALESCE(explore->>'type', '') = ANY(?))", [
+                    [...USER_MANAGED_EXPLORE_TYPES],
+                ]),
+        ]);
+        return cachedExploreSourcesForSources(
+            explores,
+            packages,
+            [
+                project?.dbt_source_uuid ?? projectUuid,
+                ...sources.map((source) => source.project_dbt_source_uuid),
+            ],
+            dbtSourceUuids,
+        );
+    }
+
+    private static async cachedExploreNamesForDbtSources(
+        database: Knex,
+        projectUuid: string,
+        dbtSourceUuids: string[],
+    ): Promise<string[]> {
+        return [
+            ...(
+                await ProjectModel.cachedExploreSourcesForDbtSources(
+                    database,
+                    projectUuid,
+                    dbtSourceUuids,
+                )
+            ).keys(),
+        ];
+    }
+
+    async countCachedExploresForDbtSource(
+        projectUuid: string,
+        dbtSourceUuid: string,
+    ): Promise<number> {
+        return (
+            await ProjectModel.cachedExploreNamesForDbtSources(
+                this.database,
+                projectUuid,
+                [dbtSourceUuid],
+            )
+        ).length;
+    }
+
+    async saveExploreStreamToCache(
+        projectUuid: string,
+        explores: AsyncIterable<Explore | ExploreError>,
+        // Use only statements on the given transaction; no other I/O or connection.
+        beforeWrite?: StagedExploreWriteCheck,
+        failedDbtSourceUuids: string[] = [],
+    ): Promise<{ cachedExploreUuids: string[] }> {
+        async function* boundExplores() {
+            for await (const explore of explores)
+                yield { explore, warehouseConnectionUuid: null };
+        }
+        if (failedDbtSourceUuids.length > 0) {
+            return this.saveMultiConnectionExplores(
+                projectUuid,
+                boundExplores(),
+                { kind: 'dbtSources', dbtSourceUuids: failedDbtSourceUuids },
+                beforeWrite,
+            );
+        }
+        return wrapSentryTransaction(
+            'ProjectModel.saveExploresToCache',
+            {},
+            async () => {
+                const saveUuid = uuidv4();
+                try {
+                    const stageStartedAt = performance.now();
+                    let savedBytes = 0;
+                    const stagedNames = new Set<string>();
+                    const stagedNameOrder: string[] = [];
+                    const sizedRows = async function* sizedRowsGenerator() {
+                        for await (const explore of explores) {
+                            if (!stagedNames.has(explore.name)) {
+                                stagedNames.add(explore.name);
+                                stagedNameOrder.push(explore.name);
+                            }
+                            const serialised = JSON.stringify(explore);
+                            const bytes = Buffer.byteLength(serialised);
+                            savedBytes += bytes;
+                            yield {
+                                row: {
+                                    save_uuid: saveUuid,
+                                    project_uuid: projectUuid,
+                                    name: explore.name,
+                                    table_names: Object.keys(
+                                        explore.tables || {},
+                                    ),
+                                    explore: serialised,
+                                },
+                                bytes,
+                            };
+                        }
+                    };
+
+                    let chunkCount = 0;
+                    let largestChunkBytes = 0;
+                    for await (const { rows, bytes } of chunkAsyncRowsByBytes(
+                        sizedRows(),
+                    )) {
+                        const uniqueRows = Array.from(
+                            new Map(
+                                rows.map((row) => [row.name, row]),
+                            ).values(),
+                        );
+                        await this.database<DbCachedExploreStaging>(
+                            CachedExploreStagingTableName,
+                        )
+                            .insert(uniqueRows)
+                            .onConflict(['save_uuid', 'name', 'project_uuid'])
+                            .merge(['table_names', 'explore']);
+                        chunkCount += 1;
+                        largestChunkBytes = Math.max(largestChunkBytes, bytes);
+                    }
+                    const stageDurationMs = Math.round(
+                        performance.now() - stageStartedAt,
+                    );
+
+                    const swapStartedAt = performance.now();
+                    const { promotedRows, managedNames } =
+                        await this.database.transaction(async (trx) => {
+                            await lockCompilePublication(trx);
+                            await ProjectModel.lockAndEnsureCachedExplores(
+                                trx,
+                                projectUuid,
+                            );
+                            const managedResult = await trx.raw<{
+                                rows: {
+                                    name: string;
+                                    cached_explore_uuid: string;
+                                }[];
+                            }>(
+                                `INSERT INTO ?? (save_uuid, project_uuid, name, table_names, explore)
+                                 SELECT ?, project_uuid, name, table_names, explore
+                                 FROM ??
+                                 WHERE project_uuid = ?
+                                   AND explore->>'type' = ANY(?)
+                                 ON CONFLICT (save_uuid, name, project_uuid) DO UPDATE
+                                 SET table_names = EXCLUDED.table_names,
+                                     explore = EXCLUDED.explore
+                                 RETURNING name, cached_explore_uuid`,
+                                [
+                                    CachedExploreStagingTableName,
+                                    saveUuid,
+                                    CachedExploreTableName,
+                                    projectUuid,
+                                    [...USER_MANAGED_EXPLORE_TYPES],
+                                ],
+                            );
+                            if (beforeWrite) await beforeWrite(trx, saveUuid);
+                            const expectedNames = new Set(stagedNames);
+                            managedResult.rows.forEach(({ name }) =>
+                                expectedNames.add(name),
+                            );
+                            if (expectedNames.size === 0) {
+                                throw new ParameterError('No explores to save');
+                            }
+                            const lockedStagedRows = await trx(
+                                CachedExploreStagingTableName,
+                            )
+                                .select<{ name: string }[]>('name')
+                                .where({
+                                    save_uuid: saveUuid,
+                                    project_uuid: projectUuid,
+                                })
+                                .forUpdate();
+                            if (
+                                lockedStagedRows.length !==
+                                    expectedNames.size ||
+                                lockedStagedRows.some(
+                                    ({ name }) => !expectedNames.has(name),
+                                )
+                            ) {
+                                throw new UnexpectedServerError(
+                                    'Cached explore staging name set mismatch',
+                                );
+                            }
+                            // Explores that survive a compile keep their uuid so rows
+                            // that reference them (pre-aggregate registry and
+                            // materializations, changes) are not cascade-deleted.
+                            await trx(CachedExploreTableName)
+                                .where('project_uuid', projectUuid)
+                                .whereNotExists(
+                                    trx(CachedExploreStagingTableName)
+                                        .select(trx.raw('1'))
+                                        .where({
+                                            save_uuid: saveUuid,
+                                            project_uuid: projectUuid,
+                                        })
+                                        .whereRaw('??.name = ??.name', [
+                                            CachedExploreStagingTableName,
+                                            CachedExploreTableName,
+                                        ]),
+                                )
+                                .delete();
+                            const promotedResult = await trx.raw<{
+                                rows: {
+                                    name: string;
+                                    cached_explore_uuid: string;
+                                }[];
+                            }>(
+                                `INSERT INTO ?? (cached_explore_uuid, project_uuid, name, table_names, explore)
+                                 SELECT cached_explore_uuid, project_uuid, name, table_names, explore
+                                 FROM ??
+                                 WHERE save_uuid = ? AND project_uuid = ?
+                                 ON CONFLICT (name, project_uuid) DO UPDATE
+                                 SET table_names = EXCLUDED.table_names,
+                                     explore = EXCLUDED.explore,
+                                     warehouse_connection_uuid = NULL
+                                 RETURNING name, cached_explore_uuid`,
+                                [
+                                    CachedExploreTableName,
+                                    CachedExploreStagingTableName,
+                                    saveUuid,
+                                    projectUuid,
+                                ],
+                            );
+                            return {
+                                promotedRows: promotedResult.rows,
+                                managedNames: managedResult.rows.map(
+                                    ({ name }) => name,
+                                ),
+                            };
+                        });
+                    markCompilePublished();
+                    const swapDurationMs = Math.round(
+                        performance.now() - swapStartedAt,
+                    );
+                    const cachedExploreUuidsByName = new Map(
+                        promotedRows.map(
+                            ({
+                                name,
+                                cached_explore_uuid: cachedExploreUuid,
+                            }) => [name, cachedExploreUuid],
+                        ),
+                    );
+                    const resultNames = [...stagedNameOrder];
+                    for (const name of managedNames) {
+                        if (!stagedNames.has(name)) resultNames.push(name);
+                    }
+                    Logger.info(
+                        `dbt.compile.saveExplores projectUuid=${projectUuid} explores=${cachedExploreUuidsByName.size} chunks=${chunkCount} largestChunkBytes=${largestChunkBytes} stageDurationMs=${stageDurationMs} swapDurationMs=${swapDurationMs}`,
+                        {
+                            event: 'dbt.compile.saveExplores',
+                            projectUuid,
+                            explores: cachedExploreUuidsByName.size,
+                            chunks: chunkCount,
+                            largestChunkBytes,
+                            savedBytes,
+                            stageDurationMs,
+                            swapDurationMs,
+                        },
+                    );
+                    return {
+                        cachedExploreUuids: resultNames.map((name) => {
+                            const cachedExploreUuid =
+                                cachedExploreUuidsByName.get(name);
+                            if (cachedExploreUuid === undefined) {
+                                throw new UnexpectedServerError(
+                                    `Missing cached explore UUID for ${name}`,
+                                );
+                            }
+                            return cachedExploreUuid;
+                        }),
+                    };
+                } finally {
+                    const cleanupErrors: Error[] = [];
+                    try {
+                        await this.database(CachedExploreStagingTableName)
+                            .where('save_uuid', saveUuid)
+                            .delete();
+                    } catch (error) {
+                        cleanupErrors.push(
+                            error instanceof Error
+                                ? error
+                                : new Error(String(error)),
+                        );
+                    }
+                    try {
+                        await this.database(CachedExploreStagingTableName)
+                            .whereIn(
+                                'save_uuid',
+                                this.database(CachedExploreStagingTableName)
+                                    .select('save_uuid')
+                                    .groupBy('save_uuid')
+                                    .havingRaw(
+                                        "max(created_at) < now() - interval '24 hours'",
+                                    )
+                                    .limit(100),
+                            )
+                            .delete();
+                    } catch (error) {
+                        cleanupErrors.push(
+                            error instanceof Error
+                                ? error
+                                : new Error(String(error)),
+                        );
+                    }
+                    if (cleanupErrors.length > 0) {
+                        Logger.error(
+                            `dbt.compile.saveExplores.cleanupFailed projectUuid=${projectUuid} saveUuid=${saveUuid} errors=${cleanupErrors.length}`,
+                            {
+                                event: 'dbt.compile.saveExplores.cleanupFailed',
+                                projectUuid,
+                                saveUuid,
+                                errors: cleanupErrors.map(
+                                    (error) => error.message,
+                                ),
+                            },
+                        );
+                    }
+                }
+            },
+        );
+    }
+
+    async getLegacyPrimaryExploreNames(projectUuid: string): Promise<string[]> {
+        return getLegacyPrimaryExploreNames(this.database, projectUuid);
+    }
+
+    async assertSourceDeployOwnership(
+        projectUuid: string,
+        sourceUuid: string | null,
+        saveUuid: string,
+        trx: Transaction,
+        allowUnstampedErrors = false,
+        previewMapping?: {
+            sourcesByPackage: ReadonlyMap<string, string>;
+            sourceAliases: ReadonlyMap<string, string>;
+        },
+    ): Promise<void> {
+        const ownerOf = (alias = '') => {
+            const prefix = alias ? `${alias}.` : '';
+            const stamped = `COALESCE(${prefix}explore->'tables'->COALESCE(${prefix}explore->>'baseTable', ${prefix}name)->>'dbtSourceUuid', ${prefix}explore->>'dbtSourceUuid')`;
+            return previewMapping
+                ? trx.raw(
+                      `COALESCE(?::jsonb->>(${stamped}), ${stamped}, ?::jsonb->>(${prefix}explore->'tables'->COALESCE(${prefix}explore->>'baseTable', ${prefix}name)->>'dbtPackageName'))`,
+                      [
+                          JSON.stringify(
+                              Object.fromEntries(previewMapping.sourceAliases),
+                          ),
+                          JSON.stringify(
+                              Object.fromEntries(
+                                  previewMapping.sourcesByPackage,
+                              ),
+                          ),
+                      ],
+                  )
+                : trx.raw(stamped);
+        };
+        const sourceIdentity = ownerOf();
+        const conflicts = await trx(CachedExploreTableName)
+            .select<{ name: string; source_uuid: string | null }[]>(
+                'name',
+                trx.raw('? AS source_uuid', [sourceIdentity]),
+            )
+            .where('project_uuid', projectUuid)
+            .whereRaw("NOT (COALESCE(explore->>'type', '') = ANY(?))", [
+                [...USER_MANAGED_EXPLORE_TYPES],
+            ])
+            .where((query) => {
+                void query
+                    .where((unknown) => {
+                        void unknown.whereRaw('? IS NULL', [sourceIdentity]);
+                        if (allowUnstampedErrors) {
+                            void unknown.whereRaw(
+                                "NOT jsonb_exists(explore, 'errors')",
+                            );
+                        }
+                    })
+                    .orWhere((collision) => {
+                        if (sourceUuid === null) {
+                            void collision.whereExists(
+                                trx(
+                                    `${CachedExploreStagingTableName} AS incoming`,
+                                )
+                                    .select(trx.raw('1'))
+                                    .where({
+                                        'incoming.project_uuid': projectUuid,
+                                        'incoming.save_uuid': saveUuid,
+                                    })
+                                    .whereRaw(
+                                        'incoming.name = cached_explore.name',
+                                    )
+                                    .whereRaw('? IS DISTINCT FROM ?', [
+                                        ownerOf('incoming'),
+                                        ownerOf(CachedExploreTableName),
+                                    ]),
+                            );
+                            return;
+                        }
+                        void collision
+                            .whereRaw('? <> ?', [sourceIdentity, sourceUuid])
+                            .whereIn(
+                                'name',
+                                trx(CachedExploreStagingTableName)
+                                    .select('name')
+                                    .where({
+                                        project_uuid: projectUuid,
+                                        save_uuid: saveUuid,
+                                    })
+                                    .whereRaw('? = ?', [
+                                        sourceIdentity,
+                                        sourceUuid,
+                                    ]),
+                            );
+                    });
+            });
+        if (conflicts.length > 0) {
+            const [primary] = await trx(ProjectTableName)
+                .select('dbt_source_name', 'dbt_source_uuid')
+                .where('project_uuid', projectUuid);
+            const extraSources = await trx(ProjectDbtSourcesTableName)
+                .select('name', 'project_dbt_source_uuid')
+                .where('project_uuid', projectUuid)
+                .orderBy('precedence', 'asc')
+                .orderBy('name', 'asc');
+            const sourceNames = new Map([
+                [
+                    primary.dbt_source_uuid ?? projectUuid,
+                    primary.dbt_source_name,
+                ],
+                ...extraSources.map(
+                    (source) =>
+                        [source.project_dbt_source_uuid, source.name] as const,
+                ),
+            ]);
+            const collisions = conflicts
+                .filter(
+                    (
+                        conflict,
+                    ): conflict is { name: string; source_uuid: string } =>
+                        conflict.source_uuid !== null,
+                )
+                .map((conflict) => ({
+                    exploreName: conflict.name,
+                    sourceName:
+                        sourceNames.get(conflict.source_uuid) ??
+                        'unknown source',
+                }));
+            throw cliDeployConflictError(
+                collisions.length > 0
+                    ? `another deploy or refresh changed the project while this deploy ran; ${cliDeployCollisionReason(collisions)}; deploy again`
+                    : 'another deploy or refresh changed the project while this deploy ran; deploy again',
+                [
+                    primary.dbt_source_name,
+                    ...extraSources.map((source) => source.name),
+                ],
+            );
+        }
+    }
+
+    async saveMultiConnectionExplores(
+        projectUuid: string,
+        explores: AsyncIterable<BoundExplore>,
+        carry: MultiConnectionCarry,
+        // Use only statements on the given transaction; no other I/O or connection.
+        beforeWrite?: StagedExploreWriteCheck,
+        naming?: ExploreNaming,
+    ): Promise<{ cachedExploreUuids: string[] }> {
+        return wrapSentryTransaction(
+            'ProjectModel.saveMultiConnectionExplores',
+            {},
+            async () => {
+                const saveUuid = uuidv4();
+                try {
+                    const stagedBindings = new Map<string, string | null>();
+                    const stagedNameOrder: string[] = [];
+                    const sizedRows = async function* sizedRowsGenerator() {
+                        for await (const {
+                            explore,
+                            warehouseConnectionUuid,
+                        } of explores) {
+                            const stagedBinding = stagedBindings.get(
+                                explore.name,
+                            );
+                            if (
+                                stagedBinding !== undefined &&
+                                stagedBinding !== warehouseConnectionUuid
+                            ) {
+                                throw new ParameterError(
+                                    `Explore "${explore.name}" is produced by more than one connection. Explore names must be unique across connections.`,
+                                );
+                            }
+                            if (stagedBinding === undefined) {
+                                stagedBindings.set(
+                                    explore.name,
+                                    warehouseConnectionUuid,
+                                );
+                                stagedNameOrder.push(explore.name);
+                            }
+                            const serialised = JSON.stringify(explore);
+                            yield {
+                                row: {
+                                    save_uuid: saveUuid,
+                                    project_uuid: projectUuid,
+                                    name: explore.name,
+                                    table_names: Object.keys(
+                                        explore.tables || {},
+                                    ),
+                                    explore: serialised,
+                                    warehouse_connection_uuid:
+                                        warehouseConnectionUuid,
+                                },
+                                bytes: Buffer.byteLength(serialised),
+                            };
+                        }
+                    };
+
+                    for await (const { rows } of chunkAsyncRowsByBytes(
+                        sizedRows(),
+                    )) {
+                        const uniqueRows = Array.from(
+                            new Map(
+                                rows.map((row) => [row.name, row]),
+                            ).values(),
+                        );
+                        await this.database(CachedExploreStagingTableName)
+                            .insert(uniqueRows)
+                            .onConflict(['save_uuid', 'name', 'project_uuid'])
+                            .merge(['table_names', 'explore']);
+                    }
+
+                    const {
+                        promotedRows,
+                        managedNames,
+                        carriedNames,
+                        namedExplores,
+                        namingWarnings,
+                    } = await this.database.transaction(async (trx) => {
+                        await lockCompilePublication(trx);
+                        await ProjectModel.lockAndEnsureCachedExplores(
+                            trx,
+                            projectUuid,
+                        );
+                        const failedSourceUuids =
+                            carry.kind === 'dbtSources' ||
+                            carry.kind === 'connections'
+                                ? (carry.dbtSourceUuids ?? [])
+                                : [];
+                        const carriedSources =
+                            failedSourceUuids.length > 0
+                                ? await ProjectModel.cachedExploreSourcesForDbtSources(
+                                      trx,
+                                      projectUuid,
+                                      failedSourceUuids,
+                                  )
+                                : new Map<string, string>();
+                        const named = naming
+                            ? await allocateStagedExploreNames(
+                                  trx,
+                                  projectUuid,
+                                  saveUuid,
+                                  {
+                                      ...naming,
+                                      cachedExploreSources: carriedSources,
+                                  },
+                              )
+                            : null;
+                        if (named) {
+                            stagedNameOrder.splice(
+                                0,
+                                stagedNameOrder.length,
+                                ...named.names,
+                            );
+                            const bindings = await trx(
+                                CachedExploreStagingTableName,
+                            )
+                                .select('name', 'warehouse_connection_uuid')
+                                .where({
+                                    save_uuid: saveUuid,
+                                    project_uuid: projectUuid,
+                                });
+                            stagedBindings.clear();
+                            bindings.forEach((row) =>
+                                stagedBindings.set(
+                                    row.name,
+                                    row.warehouse_connection_uuid,
+                                ),
+                            );
+                        }
+                        const carriedResult =
+                            await ProjectModel.stageCarriedExplores(
+                                trx,
+                                projectUuid,
+                                saveUuid,
+                                carry,
+                                named?.activeSourceUuids,
+                                [...carriedSources.keys()],
+                            );
+                        const managedResult = await trx.raw<{
+                            rows: { name: string }[];
+                        }>(
+                            `INSERT INTO ?? (save_uuid, project_uuid, name, table_names, explore, warehouse_connection_uuid)
+                                 SELECT ?, project_uuid, name, table_names, explore, warehouse_connection_uuid
+                                 FROM ??
+                                 WHERE project_uuid = ?
+                                   AND explore->>'type' = ANY(?)
+                                 ON CONFLICT (save_uuid, name, project_uuid) DO UPDATE
+                                 SET table_names = EXCLUDED.table_names,
+                                     explore = EXCLUDED.explore,
+                                     warehouse_connection_uuid = EXCLUDED.warehouse_connection_uuid
+                                 RETURNING name`,
+                            [
+                                CachedExploreStagingTableName,
+                                saveUuid,
+                                CachedExploreTableName,
+                                projectUuid,
+                                [...USER_MANAGED_EXPLORE_TYPES],
+                            ],
+                        );
+                        if (beforeWrite) await beforeWrite(trx, saveUuid);
+                        const expectedNames = new Set(stagedBindings.keys());
+                        carriedResult.forEach((name) =>
+                            expectedNames.add(name),
+                        );
+                        managedResult.rows.forEach(({ name }) =>
+                            expectedNames.add(name),
+                        );
+                        if (expectedNames.size === 0) {
+                            throw new ParameterError('No explores to save');
+                        }
+                        const lockedStagedRows = await trx(
+                            CachedExploreStagingTableName,
+                        )
+                            .select<
+                                {
+                                    name: string;
+                                    explore: Explore | ExploreError;
+                                }[]
+                            >('name', 'explore')
+                            .where({
+                                save_uuid: saveUuid,
+                                project_uuid: projectUuid,
+                            })
+                            .forUpdate();
+                        if (
+                            lockedStagedRows.length !== expectedNames.size ||
+                            lockedStagedRows.some(
+                                ({ name }) => !expectedNames.has(name),
+                            )
+                        ) {
+                            throw new UnexpectedServerError(
+                                'Cached explore staging name set mismatch',
+                            );
+                        }
+                        await lockedStagedRows.reduce(async (previous, row) => {
+                            await previous;
+                            const validated = validateExplorePublication(
+                                row.explore,
+                                row.name,
+                            );
+                            if (validated !== row.explore) {
+                                await trx(CachedExploreStagingTableName)
+                                    .where({
+                                        save_uuid: saveUuid,
+                                        project_uuid: projectUuid,
+                                        name: row.name,
+                                    })
+                                    .update({
+                                        explore: JSON.stringify(validated),
+                                        table_names: [],
+                                    });
+                                const index =
+                                    named?.explores.findIndex(
+                                        (explore) => explore.name === row.name,
+                                    ) ?? -1;
+                                if (named && index >= 0)
+                                    named.explores[index] = validated;
+                            }
+                        }, Promise.resolve());
+                        // Explores that survive a compile keep their uuid so rows
+                        // that reference them (pre-aggregate registry and
+                        // materializations, changes) are not cascade-deleted.
+                        await trx(CachedExploreTableName)
+                            .where('project_uuid', projectUuid)
+                            .whereNotExists(
+                                trx(CachedExploreStagingTableName)
+                                    .select(trx.raw('1'))
+                                    .where({
+                                        save_uuid: saveUuid,
+                                        project_uuid: projectUuid,
+                                    })
+                                    .whereRaw('??.name = ??.name', [
+                                        CachedExploreStagingTableName,
+                                        CachedExploreTableName,
+                                    ]),
+                            )
+                            .delete();
+                        const promotedResult = await trx.raw<{
+                            rows: {
+                                name: string;
+                                cached_explore_uuid: string;
+                            }[];
+                        }>(
+                            `INSERT INTO ?? (cached_explore_uuid, project_uuid, name, table_names, explore, warehouse_connection_uuid)
+                                 SELECT cached_explore_uuid, project_uuid, name, table_names, explore, warehouse_connection_uuid
+                                 FROM ??
+                                 WHERE save_uuid = ? AND project_uuid = ?
+                                 ON CONFLICT (name, project_uuid) DO UPDATE
+                                 SET table_names = EXCLUDED.table_names,
+                                     explore = EXCLUDED.explore,
+                                     warehouse_connection_uuid = EXCLUDED.warehouse_connection_uuid
+                                 RETURNING name, cached_explore_uuid`,
+                            [
+                                CachedExploreTableName,
+                                CachedExploreStagingTableName,
+                                saveUuid,
+                                projectUuid,
+                            ],
+                        );
+                        return {
+                            promotedRows: promotedResult.rows,
+                            managedNames: managedResult.rows.map(
+                                ({ name }) => name,
+                            ),
+                            carriedNames: carriedResult,
+                            namedExplores: named?.explores ?? [],
+                            namingWarnings: named?.warnings ?? [],
+                        };
+                    });
+                    if (naming) {
+                        naming.warnings.push(...namingWarnings);
+                        naming.onPublished?.(namedExplores);
+                    }
+                    markCompilePublished();
+                    const cachedExploreUuidsByName = new Map(
+                        promotedRows.map(
+                            ({
+                                name,
+                                cached_explore_uuid: cachedExploreUuid,
+                            }) => [name, cachedExploreUuid],
+                        ),
+                    );
+                    const resultNames = [...stagedNameOrder];
+                    [...carriedNames, ...managedNames].forEach((name) => {
+                        if (!resultNames.includes(name)) resultNames.push(name);
+                    });
+                    Logger.info(
+                        `dbt.compile.saveMultiConnectionExplores projectUuid=${projectUuid} explores=${cachedExploreUuidsByName.size} carried=${carriedNames.length}`,
+                    );
+                    return {
+                        cachedExploreUuids: resultNames.map((name) => {
+                            const cachedExploreUuid =
+                                cachedExploreUuidsByName.get(name);
+                            if (cachedExploreUuid === undefined) {
+                                throw new UnexpectedServerError(
+                                    `Missing cached explore UUID for ${name}`,
+                                );
+                            }
+                            return cachedExploreUuid;
+                        }),
+                    };
+                } finally {
+                    await this.database(CachedExploreStagingTableName)
+                        .where('save_uuid', saveUuid)
+                        .delete()
+                        .catch((error) => {
+                            Logger.error(
+                                `dbt.compile.saveMultiConnectionExplores.cleanupFailed projectUuid=${projectUuid} saveUuid=${saveUuid}: ${getErrorMessage(
+                                    error,
+                                )}`,
+                            );
+                        });
+                }
+            },
+        );
+    }
+
+    private static async stageCarriedExplores(
+        trx: Transaction,
+        projectUuid: string,
+        saveUuid: string,
+        carry: MultiConnectionCarry,
+        activeSourceUuids?: string[],
+        failedSourceNames: string[] = [],
+    ): Promise<string[]> {
+        const carriedQuery = trx(CachedExploreTableName)
+            .select(
+                trx.raw('?', [saveUuid]),
+                'project_uuid',
+                'name',
+                'table_names',
+                'explore',
+                'warehouse_connection_uuid',
+            )
+            .where('project_uuid', projectUuid)
+            .whereRaw("NOT (COALESCE(explore->>'type', '') = ANY(?))", [
+                [...USER_MANAGED_EXPLORE_TYPES],
+            ]);
+        if (activeSourceUuids) {
+            void carriedQuery.where((query) => {
+                query.whereRaw(
+                    "(COALESCE(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtSourceUuid', explore->>'dbtSourceUuid') IS NULL OR COALESCE(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtSourceUuid', explore->>'dbtSourceUuid') = ANY(?))",
+                    [activeSourceUuids],
+                );
+                if (failedSourceNames.length > 0)
+                    query.orWhereIn('name', failedSourceNames);
+            });
+        }
+        switch (carry.kind) {
+            case 'connections':
+                if (
+                    carry.warehouseConnectionUuids.length === 0 &&
+                    !carry.dbtSourceUuids?.length
+                )
+                    return [];
+                void carriedQuery.where((query) => {
+                    query.whereIn(
+                        'warehouse_connection_uuid',
+                        carry.warehouseConnectionUuids,
+                    );
+                    if (carry.dbtSourceUuids?.length)
+                        query.orWhereIn('name', failedSourceNames);
+                });
+                break;
+            case 'dbtSources':
+                if (carry.dbtSourceUuids.length === 0) return [];
+                void carriedQuery.whereIn('name', failedSourceNames);
+                break;
+            case 'otherDbtSourceSet': {
+                const stamped = `COALESCE(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtSourceUuid', explore->>'dbtSourceUuid')`;
+                const owner = trx.raw(
+                    `COALESCE(?::jsonb->>(${stamped}), ${stamped}, ?::jsonb->>(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtPackageName'))`,
+                    [
+                        JSON.stringify(carry.sourceAliases),
+                        JSON.stringify(carry.packageSources),
+                    ],
+                );
+                void carriedQuery
+                    .clearSelect()
+                    .select(
+                        trx.raw('?', [saveUuid]),
+                        'project_uuid',
+                        'name',
+                        'table_names',
+                        trx.raw(
+                            `CASE WHEN ${stamped} IS DISTINCT FROM ? THEN
+                                CASE WHEN explore->'tables'->COALESCE(explore->>'baseTable', name) IS NULL
+                                    THEN jsonb_set(explore, '{dbtSourceUuid}', to_jsonb(?))
+                                    ELSE jsonb_set(explore, ARRAY['tables', COALESCE(explore->>'baseTable', name), 'dbtSourceUuid'], to_jsonb(?))
+                                END
+                            ELSE explore END`,
+                            [owner, owner, owner],
+                        ),
+                        'warehouse_connection_uuid',
+                    )
+                    .whereRaw('? <> ALL(?)', [owner, carry.dbtSourceUuids]);
+                break;
+            }
+            case 'otherDbtSources':
+                void carriedQuery.whereRaw(
+                    `CASE
+                        WHEN COALESCE(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtSourceUuid', explore->>'dbtSourceUuid') IS NOT NULL
+                            THEN COALESCE(explore->'tables'->COALESCE(explore->>'baseTable', name)->>'dbtSourceUuid', explore->>'dbtSourceUuid') <> ?
+                        ELSE warehouse_connection_uuid IS DISTINCT FROM ?::uuid
+                    END`,
+                    [carry.dbtSourceUuid, carry.warehouseConnectionUuid],
+                );
+                break;
+            default:
+                return assertUnreachable(carry, 'Unknown carried explores');
+        }
+        if (
+            carry.kind === 'dbtSources' ||
+            (carry.kind === 'connections' && carry.dbtSourceUuids?.length)
+        ) {
+            const collision = await carriedQuery
+                .clone()
+                .clearSelect()
+                .select('name')
+                .whereIn('name', failedSourceNames)
+                .whereExists(
+                    trx(CachedExploreStagingTableName)
+                        .select(trx.raw('1'))
+                        .where({
+                            save_uuid: saveUuid,
+                            project_uuid: projectUuid,
+                        })
+                        .whereRaw('??.name = ??.name', [
+                            CachedExploreStagingTableName,
+                            CachedExploreTableName,
+                        ]),
+                )
+                .first();
+            if (collision)
+                throw new ParameterError(
+                    `Explore "${collision.name}" conflicts with an explore kept from a failed dbt source. Rename the model before refreshing again.`,
+                );
+        }
+        const result = await trx.raw<{ rows: { name: string }[] }>(
+            `INSERT INTO ?? (save_uuid, project_uuid, name, table_names, explore, warehouse_connection_uuid)
+             ?
+             ON CONFLICT (save_uuid, name, project_uuid) DO NOTHING
+             RETURNING name`,
+            [CachedExploreStagingTableName, carriedQuery],
+        );
+        return result.rows.map(({ name }) => name);
+    }
+
     async tryAcquireProjectLock(
         projectUuid: string,
         onLockAcquired: () => Promise<void>,
         onLockFailed?: () => Promise<void>,
     ): Promise<void> {
+        // Outside the transaction so the long-running onLockAcquired never holds an AccessShareLock on projects.
+        const [project] = await this.database(ProjectTableName)
+            .select('project_id')
+            .where('project_uuid', projectUuid)
+            .limit(1);
+
+        if (!project) return; // No project with uuid in DB
+
         await this.database.transaction(async (trx) => {
             // pg_advisory_xact_lock takes a 64bit integer as key
             // we can't use project_uuid (uuidv4) as key, not even a hash,
             // so we will be using autoinc project_id from DB.
-            const projectLock = await trx.raw(`
-                SELECT pg_try_advisory_xact_lock(${CACHED_EXPLORES_PG_LOCK_NAMESPACE}, project_id)
-                FROM projects
-                WHERE project_uuid = '${projectUuid}' LIMIT 1  `);
+            const projectLock = await trx.raw(
+                `SELECT pg_try_advisory_xact_lock(${CACHED_EXPLORES_PG_LOCK_NAMESPACE}, ?)`,
+                [project.project_id],
+            );
 
-            if (projectLock.rows.length === 0) return; // No project with uuid in DB
             const acquiresLock = projectLock.rows[0].pg_try_advisory_xact_lock;
             if (acquiresLock) {
                 await onLockAcquired();
@@ -1540,6 +4753,42 @@ export class ProjectModel {
                 await onLockFailed();
             }
         });
+    }
+
+    /**
+     * Who holds the compile lock for a project, and for how long.
+     *
+     * A retry blocked by a zombie compile otherwise reads "Compilation is already in progress"
+     * about a job the server has already declared failed, with nothing to identify the holder.
+     */
+    async getProjectLockHolder(projectUuid: string): Promise<{
+        heldForSeconds: number;
+        backendPid: number;
+        applicationName: string | null;
+    } | null> {
+        const result = await this.database.raw(
+            `
+            SELECT a.pid,
+                   a.application_name,
+                   EXTRACT(EPOCH FROM (now() - a.xact_start)) AS held_for_seconds
+            FROM pg_locks l
+            JOIN pg_stat_activity a ON a.pid = l.pid
+            JOIN projects p ON p.project_uuid = ?
+            WHERE l.locktype = 'advisory'
+              AND l.classid = ?
+              AND l.objid = p.project_id
+              AND l.granted
+            ORDER BY a.xact_start ASC
+            LIMIT 1`,
+            [projectUuid, CACHED_EXPLORES_PG_LOCK_NAMESPACE],
+        );
+        const row = result.rows[0];
+        if (!row) return null;
+        return {
+            heldForSeconds: Math.round(Number(row.held_for_seconds ?? 0)),
+            backendPid: Number(row.pid),
+            applicationName: row.application_name ?? null,
+        };
     }
 
     async getWarehouseFromCache(
@@ -1567,6 +4816,86 @@ export class ProjectModel {
             .returning('*');
 
         return cachedWarehouse;
+    }
+
+    /**
+     * The person's highest system role on the project, from their organization
+     * role, direct membership and group access. Custom roles are ignored.
+     */
+    async getHighestSystemProjectRole(
+        projectUuid: string,
+        userUuid: string,
+    ): Promise<ProjectMemberRole | null> {
+        const [organizationRows, projectRows, groupRows] = await Promise.all([
+            this.database(OrganizationMembershipsTableName)
+                .innerJoin(
+                    UserTableName,
+                    `${UserTableName}.user_id`,
+                    `${OrganizationMembershipsTableName}.user_id`,
+                )
+                .innerJoin(
+                    ProjectTableName,
+                    `${ProjectTableName}.organization_id`,
+                    `${OrganizationMembershipsTableName}.organization_id`,
+                )
+                .where(`${UserTableName}.user_uuid`, userUuid)
+                .where(`${ProjectTableName}.project_uuid`, projectUuid)
+                .select<{ role: OrganizationMemberRole }[]>(
+                    `${OrganizationMembershipsTableName}.role`,
+                ),
+            this.database(ProjectMembershipsTableName)
+                .innerJoin(
+                    UserTableName,
+                    `${UserTableName}.user_id`,
+                    `${ProjectMembershipsTableName}.user_id`,
+                )
+                .innerJoin(
+                    ProjectTableName,
+                    `${ProjectTableName}.project_id`,
+                    `${ProjectMembershipsTableName}.project_id`,
+                )
+                .where(`${UserTableName}.user_uuid`, userUuid)
+                .where(`${ProjectTableName}.project_uuid`, projectUuid)
+                .whereNull(`${ProjectMembershipsTableName}.role_uuid`)
+                .select<{ role: ProjectMemberRole | null }[]>(
+                    `${ProjectMembershipsTableName}.role`,
+                ),
+            this.database(ProjectGroupAccessTableName)
+                .innerJoin(
+                    GroupMembershipTableName,
+                    `${GroupMembershipTableName}.group_uuid`,
+                    `${ProjectGroupAccessTableName}.group_uuid`,
+                )
+                .innerJoin(
+                    UserTableName,
+                    `${UserTableName}.user_id`,
+                    `${GroupMembershipTableName}.user_id`,
+                )
+                .where(`${UserTableName}.user_uuid`, userUuid)
+                .where(
+                    `${ProjectGroupAccessTableName}.project_uuid`,
+                    projectUuid,
+                )
+                .whereNull(`${ProjectGroupAccessTableName}.role_uuid`)
+                .select<{ role: ProjectMemberRole }[]>(
+                    `${ProjectGroupAccessTableName}.role`,
+                ),
+        ]);
+        const highest = getHighestProjectRole([
+            ...organizationRows.map(({ role }) => ({
+                type: 'organization' as const,
+                role: convertOrganizationRoleToProjectRole(role),
+            })),
+            ...projectRows.map(({ role }) => ({
+                type: 'project' as const,
+                role: role ?? undefined,
+            })),
+            ...groupRows.map(({ role }) => ({
+                type: 'group' as const,
+                role,
+            })),
+        ]);
+        return highest?.role ?? null;
     }
 
     async getProjectMemberAccess(
@@ -1610,6 +4939,30 @@ export class ProjectModel {
         };
     }
 
+    async hasProjectMembership(
+        projectUuid: string,
+        userUuid: string,
+        { trx = this.database }: { trx?: Knex } = {},
+    ): Promise<boolean> {
+        const membership = await trx(ProjectMembershipsTableName)
+            .innerJoin(
+                ProjectTableName,
+                `${ProjectMembershipsTableName}.project_id`,
+                `${ProjectTableName}.project_id`,
+            )
+            .innerJoin(
+                UserTableName,
+                `${ProjectMembershipsTableName}.user_id`,
+                `${UserTableName}.user_id`,
+            )
+            .where(`${ProjectTableName}.project_uuid`, projectUuid)
+            .where(`${UserTableName}.user_uuid`, userUuid)
+            .first(`${ProjectMembershipsTableName}.user_id`)
+            .forShare();
+
+        return membership !== undefined;
+    }
+
     async getProjectAccess(
         projectUuid: string,
     ): Promise<ProjectMemberProfile[]> {
@@ -1629,7 +4982,16 @@ export class ProjectModel {
                 'project_memberships.project_id',
                 'projects.project_id',
             )
-            .select<QueryResult[]>()
+            .select<(QueryResult & { has_extra_roles: boolean })[]>(
+                'project_memberships.*',
+                'users.*',
+                'emails.*',
+                'projects.*',
+                this.database.raw(
+                    `EXISTS (SELECT 1 FROM ?? AS x WHERE x.project_id = project_memberships.project_id AND x.user_id = project_memberships.user_id) AS has_extra_roles`,
+                    [ProjectMembershipCustomRolesTableName],
+                ),
+            )
             .where('project_uuid', projectUuid)
             .andWhere('is_primary', true);
 
@@ -1641,7 +5003,210 @@ export class ProjectModel {
             projectUuid,
             lastName: membership.last_name,
             roleUuid: membership.role_uuid || undefined,
+            hasMultipleRoles: membership.has_extra_roles,
         }));
+    }
+
+    async copyProjectAccess(
+        upstreamProjectUuid: string,
+        previewProjectUuid: string,
+    ): Promise<{
+        userAccessCount: number;
+        skippedUserAccessCount: number;
+        groupAccessCount: number;
+    }> {
+        return this.database.transaction(async (trx) => {
+            const projects = await trx(ProjectTableName)
+                .select<
+                    Pick<
+                        DbProject,
+                        | 'project_id'
+                        | 'project_uuid'
+                        | 'organization_id'
+                        | 'created_by_user_uuid'
+                    >[]
+                >(
+                    'project_id',
+                    'project_uuid',
+                    'organization_id',
+                    'created_by_user_uuid',
+                )
+                .whereIn('project_uuid', [
+                    upstreamProjectUuid,
+                    previewProjectUuid,
+                ]);
+            const upstreamProject = projects.find(
+                ({ project_uuid }) => project_uuid === upstreamProjectUuid,
+            );
+            const previewProject = projects.find(
+                ({ project_uuid }) => project_uuid === previewProjectUuid,
+            );
+
+            if (!upstreamProject || !previewProject) {
+                throw new NotFoundError(
+                    'Upstream or preview project not found',
+                );
+            }
+            if (
+                upstreamProject.organization_id !==
+                previewProject.organization_id
+            ) {
+                throw new ParameterError(
+                    'Upstream and preview projects must be in the same organization',
+                );
+            }
+
+            type ProjectAccessRow = Pick<
+                DbProjectMembership,
+                'user_id' | 'role' | 'role_uuid'
+            > & {
+                user_uuid: string;
+                is_internal: boolean;
+                organization_id: number | null;
+            };
+            const projectAccesses = await trx(ProjectMembershipsTableName)
+                .innerJoin(
+                    UserTableName,
+                    `${ProjectMembershipsTableName}.user_id`,
+                    `${UserTableName}.user_id`,
+                )
+                .leftJoin(
+                    OrganizationMembershipsTableName,
+                    function joinPreviewOrganizationMembership() {
+                        this.on(
+                            `${OrganizationMembershipsTableName}.user_id`,
+                            '=',
+                            `${ProjectMembershipsTableName}.user_id`,
+                        ).andOnVal(
+                            `${OrganizationMembershipsTableName}.organization_id`,
+                            previewProject.organization_id,
+                        );
+                    },
+                )
+                .select<ProjectAccessRow[]>({
+                    user_id: `${ProjectMembershipsTableName}.user_id`,
+                    role: `${ProjectMembershipsTableName}.role`,
+                    role_uuid: `${ProjectMembershipsTableName}.role_uuid`,
+                    user_uuid: `${UserTableName}.user_uuid`,
+                    is_internal: `${UserTableName}.is_internal`,
+                    organization_id: `${OrganizationMembershipsTableName}.organization_id`,
+                })
+                .where(
+                    `${ProjectMembershipsTableName}.project_id`,
+                    upstreamProject.project_id,
+                );
+            // Service accounts only follow their access into previews they created.
+            const eligibleProjectAccesses = projectAccesses.filter(
+                ({ user_uuid, is_internal, organization_id }) =>
+                    (!is_internal ||
+                        user_uuid === previewProject.created_by_user_uuid) &&
+                    organization_id === previewProject.organization_id,
+            );
+            const groupAccesses = await trx(ProjectGroupAccessTableName)
+                .innerJoin(
+                    GroupTableName,
+                    `${ProjectGroupAccessTableName}.group_uuid`,
+                    `${GroupTableName}.group_uuid`,
+                )
+                .select<
+                    {
+                        group_uuid: string;
+                        role: ProjectMemberRole;
+                        role_uuid: string | null;
+                    }[]
+                >(
+                    `${ProjectGroupAccessTableName}.group_uuid`,
+                    `${ProjectGroupAccessTableName}.role`,
+                    `${ProjectGroupAccessTableName}.role_uuid`,
+                )
+                .where(
+                    `${ProjectGroupAccessTableName}.project_uuid`,
+                    upstreamProjectUuid,
+                )
+                .andWhere(
+                    `${GroupTableName}.organization_id`,
+                    previewProject.organization_id,
+                );
+
+            if (eligibleProjectAccesses.length > 0) {
+                await trx(ProjectMembershipsTableName)
+                    .insert(
+                        eligibleProjectAccesses.map(
+                            ({ user_id, role, role_uuid }) => ({
+                                user_id,
+                                project_id: previewProject.project_id,
+                                role,
+                                role_uuid,
+                            }),
+                        ),
+                    )
+                    .onConflict(['user_id', 'project_id'])
+                    .merge(['role', 'role_uuid']);
+                // Extra custom roles follow their membership into the preview.
+                const eligibleUserIds = eligibleProjectAccesses.map(
+                    ({ user_id }) => user_id,
+                );
+                await trx(ProjectMembershipCustomRolesTableName)
+                    .where('project_id', previewProject.project_id)
+                    .whereIn('user_id', eligibleUserIds)
+                    .delete();
+                await trx.raw(
+                    `INSERT INTO ?? (project_id, user_id, role_uuid)
+                     SELECT ?, user_id, role_uuid FROM ??
+                     WHERE project_id = ? AND user_id = ANY(?)
+                     ON CONFLICT DO NOTHING`,
+                    [
+                        ProjectMembershipCustomRolesTableName,
+                        previewProject.project_id,
+                        ProjectMembershipCustomRolesTableName,
+                        upstreamProject.project_id,
+                        eligibleUserIds,
+                    ],
+                );
+            }
+            if (groupAccesses.length > 0) {
+                await trx(ProjectGroupAccessTableName)
+                    .insert(
+                        groupAccesses.map(
+                            ({ group_uuid, role, role_uuid }) => ({
+                                group_uuid,
+                                project_uuid: previewProjectUuid,
+                                role,
+                                role_uuid,
+                            }),
+                        ),
+                    )
+                    .onConflict(['project_uuid', 'group_uuid'])
+                    .merge(['role', 'role_uuid']);
+                const groupUuids = groupAccesses.map(
+                    ({ group_uuid }) => group_uuid,
+                );
+                await trx(ProjectGroupAccessCustomRolesTableName)
+                    .where('project_uuid', previewProjectUuid)
+                    .whereIn('group_uuid', groupUuids)
+                    .delete();
+                await trx.raw(
+                    `INSERT INTO ?? (project_uuid, group_uuid, role_uuid)
+                     SELECT ?, group_uuid, role_uuid FROM ??
+                     WHERE project_uuid = ? AND group_uuid = ANY(?)
+                     ON CONFLICT DO NOTHING`,
+                    [
+                        ProjectGroupAccessCustomRolesTableName,
+                        previewProjectUuid,
+                        ProjectGroupAccessCustomRolesTableName,
+                        upstreamProjectUuid,
+                        groupUuids,
+                    ],
+                );
+            }
+
+            return {
+                userAccessCount: eligibleProjectAccesses.length,
+                skippedUserAccessCount:
+                    projectAccesses.length - eligibleProjectAccesses.length,
+                groupAccessCount: groupAccesses.length,
+            };
+        });
     }
 
     async createProjectAccess(
@@ -1702,18 +5267,28 @@ export class ProjectModel {
     ): Promise<void> {
         // Clear role_uuid when switching to a system role so that stale FK
         // references don't prevent custom role deletion later (see #20690).
-        await this.database.raw<(DbProjectMembership & DbProject & DbUser)[]>(
-            `
+        // A singular write replaces the whole role set, so extras go too.
+        await this.database.transaction(async (trx) => {
+            const { rows } = await trx.raw<{
+                rows: Pick<DbProjectMembership, 'project_id' | 'user_id'>[];
+            }>(
+                `
                 UPDATE project_memberships AS m
                 SET role = :role, role_uuid = NULL FROM projects AS p, users AS u
                 WHERE p.project_id = m.project_id
                   AND u.user_id = m.user_id
                   AND user_uuid = :userUuid
                   AND p.project_uuid = :projectUuid
-                    RETURNING *
+                    RETURNING m.project_id, m.user_id
             `,
-            { projectUuid, userUuid, role },
-        );
+                { projectUuid, userUuid, role },
+            );
+            await Promise.all(
+                rows.map((row) =>
+                    clearProjectExtraRoles(trx, row.project_id, row.user_id),
+                ),
+            );
+        });
     }
 
     async updateMetadata(
@@ -1761,10 +5336,11 @@ export class ProjectModel {
                 .first();
 
             if (!parentSpace) {
-                const parentSlug = await generateUniqueSpaceSlug(
-                    DEFAULT_USER_SPACES_PARENT_NAME,
+                const parentSlug = await generateUniqueSlugScopedToProject(
+                    trx,
                     project.project_id,
-                    { trx },
+                    SpaceTableName,
+                    DEFAULT_USER_SPACES_PARENT_NAME,
                 );
                 const parentPath = getLtreePathFromSlug(parentSlug);
 
@@ -1857,9 +5433,18 @@ export class ProjectModel {
                 : `User ${user.userUuid.slice(0, 8)}`;
 
         await this.database.transaction(async (trx) => {
-            const slug = await generateUniqueSpaceSlug(spaceName, projectId, {
+            const baseSlug = generateSlug(spaceName);
+            await acquireProjectSlugLock(
                 trx,
-            });
+                String(projectId),
+                `space:${baseSlug}`,
+            );
+            const slug = await generateUniqueSlugScopedToProject(
+                trx,
+                projectId,
+                SpaceTableName,
+                baseSlug,
+            );
             const path = `${parentPath}.${getLtreePathFromSlug(slug)}`;
 
             const insertedSpaces = await trx(SpaceTableName)
@@ -2020,6 +5605,122 @@ export class ProjectModel {
     }
 
     /**
+     * Replace a service account's entire set of project grants in one
+     * transaction. Used by the in-place SA edit path: delete every existing
+     * `project_memberships` row for the SA's dedicated user, then insert the
+     * new set. Wholesale replace (rather than a diff) keeps add / remove /
+     * role-change a single atomic operation.
+     *
+     * Each grant must carry exactly one of `role` (system) or `roleUuid`
+     * (custom); the service layer validates this and that custom roles belong
+     * to the org before calling. Projects are re-validated here to be in the
+     * SA's organization.
+     */
+    async setServiceAccountProjectAccess(
+        serviceAccountUuid: string,
+        grants: ServiceAccountProjectAccessInput[],
+        options: { makeProjectScoped?: boolean } = {},
+    ): Promise<void> {
+        const [sa] = await this.database(ServiceAccountsTableName)
+            .leftJoin(
+                UserTableName,
+                `${UserTableName}.user_uuid`,
+                `${ServiceAccountsTableName}.service_account_user_uuid`,
+            )
+            .select<Array<{ user_id: number; organization_uuid: string }>>(
+                `${UserTableName}.user_id`,
+                `${ServiceAccountsTableName}.organization_uuid`,
+            )
+            .where(
+                `${ServiceAccountsTableName}.service_account_uuid`,
+                serviceAccountUuid,
+            );
+        if (!sa) {
+            throw new NotFoundError(
+                `Service account with uuid ${serviceAccountUuid} not found`,
+            );
+        }
+
+        // Resolve every project to its int id, validating same-org membership
+        // up front so the replace can't partially apply a cross-org grant.
+        const projectUuids = grants.map((g) => g.projectUuid);
+        if (new Set(projectUuids).size !== projectUuids.length) {
+            throw new ParameterError(
+                'A service account can have at most one grant per project',
+            );
+        }
+        const projects = await this.database(ProjectTableName)
+            .leftJoin(
+                OrganizationTableName,
+                `${ProjectTableName}.organization_id`,
+                `${OrganizationTableName}.organization_id`,
+            )
+            .select<
+                { project_uuid: string; project_id: number; org_uuid: string }[]
+            >(
+                `${ProjectTableName}.project_uuid`,
+                `${ProjectTableName}.project_id`,
+                `${OrganizationTableName}.organization_uuid as org_uuid`,
+            )
+            .whereIn(`${ProjectTableName}.project_uuid`, projectUuids);
+        const projectByUuid = new Map(projects.map((p) => [p.project_uuid, p]));
+        for (const projectUuid of projectUuids) {
+            const project = projectByUuid.get(projectUuid);
+            if (!project) {
+                throw new NotFoundError(
+                    `Project with uuid ${projectUuid} not found`,
+                );
+            }
+            if (project.org_uuid !== sa.organization_uuid) {
+                throw new ParameterError(
+                    'Service account and project must be in the same organization',
+                );
+            }
+        }
+
+        await this.database.transaction(async (trx) => {
+            await trx(ProjectMembershipsTableName)
+                .where('user_id', sa.user_id)
+                .delete();
+            if (grants.length > 0) {
+                await trx(ProjectMembershipsTableName).insert(
+                    grants.map((grant) => {
+                        // Legacy `role` column is NOT NULL; when `role_uuid` is
+                        // set, runtime CASL prefers the custom role and `role`
+                        // is a Viewer placeholder (matches create's convention).
+                        const project = projectByUuid.get(grant.projectUuid)!;
+                        return {
+                            project_id: project.project_id,
+                            user_id: sa.user_id,
+                            role: grant.roleUuid
+                                ? ProjectMemberRole.VIEWER
+                                : (grant.role as ProjectMemberRole),
+                            role_uuid: grant.roleUuid ?? null,
+                        };
+                    }),
+                );
+            }
+            if (options.makeProjectScoped) {
+                await trx(ServiceAccountsTableName)
+                    .where('service_account_uuid', serviceAccountUuid)
+                    .update({
+                        scopes: [ServiceAccountScope.SYSTEM_MEMBER],
+                    });
+                await trx(OrganizationMembershipsTableName)
+                    .where('user_id', sa.user_id)
+                    .update({
+                        role: OrganizationMemberRole.MEMBER,
+                        role_uuid: null,
+                    });
+                // A singular write replaces the whole role set, so extras go too.
+                await trx(OrganizationMembershipCustomRolesTableName)
+                    .where('user_id', sa.user_id)
+                    .delete();
+            }
+        });
+    }
+
+    /**
      * Validate that every `roleUuid` in the input exists and belongs to the
      * given organization. Returns the set of `roleUuid`s in the input that
      * are missing or owned by a different org — callers should reject if
@@ -2157,18 +5858,347 @@ export class ProjectModel {
         }));
     }
 
+    async requireSingleConnectionRoute(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ) {
+        return this.connectionRouter.requireSingleRoute(projectUuid, binding);
+    }
+
+    async getConnectionRoute(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<ConnectionRoute> {
+        return this.connectionRouter.getTaggedRoute(projectUuid, binding);
+    }
+
+    async resolveWarehouseCredentialRead(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<CredentialReadTarget> {
+        return this.connectionRouter.resolveCredentialRead(
+            projectUuid,
+            binding,
+        );
+    }
+
+    async resolveWarehouseCredentialReadWithRoute(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<ResolvedCredentialRead> {
+        return this.connectionRouter.resolveCredentialReadWithRoute(
+            projectUuid,
+            binding,
+        );
+    }
+
+    private getWarehouseConnectionModel(): WarehouseConnectionModel {
+        return new WarehouseConnectionModel({
+            database: this.database,
+            encryptionUtil: this.encryptionUtil,
+            organizationWarehouseCredentialsModel:
+                new OrganizationWarehouseCredentialsModel({
+                    database: this.database,
+                    encryptionUtil: this.encryptionUtil,
+                }),
+        });
+    }
+
+    async getWarehouseConnectionForBinding(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<WarehouseCredentials> {
+        const target = await this.resolveWarehouseCredentialRead(
+            projectUuid,
+            binding,
+        );
+        const model = this.getWarehouseConnectionModel();
+        const credentials =
+            target.kind === 'original'
+                ? await this.getWarehouseCredentialsForBinding(
+                      projectUuid,
+                      binding,
+                  )
+                : await model.getCredentials(
+                      await model.getProject(projectUuid),
+                      target.warehouseConnectionUuid,
+                  );
+        return OrganizationWarehouseCredentialsModel.stripSensitiveCredentials(
+            credentials,
+        );
+    }
+
+    private async getDbtSourceWarehouseConnectionUuid(
+        projectUuid: string,
+        sourceUuid: string,
+    ): Promise<string | null> {
+        if (
+            sourceUuid ===
+            (await this.getDbtSourceIdentity(projectUuid)).dbtSourceUuid
+        ) {
+            return null;
+        }
+        const source = await this.database('project_dbt_sources')
+            .select<{ warehouse_connection_uuid: string | null }>(
+                'warehouse_connection_uuid',
+            )
+            .where('project_uuid', projectUuid)
+            .where('project_dbt_source_uuid', sourceUuid)
+            .first();
+        if (!source)
+            throw new ParameterError(
+                'The selected dbt source does not belong to this project.',
+            );
+        return source.warehouse_connection_uuid;
+    }
+
+    async getDbtSourceWarehouseType(
+        projectUuid: string,
+        sourceUuid: string,
+    ): Promise<WarehouseTypes | null> {
+        const warehouseConnectionUuid =
+            await this.getDbtSourceWarehouseConnectionUuid(
+                projectUuid,
+                sourceUuid,
+            );
+        const connections =
+            await this.getWarehouseConnectionsMetadata(projectUuid);
+        return (
+            connections.find(
+                (connection) =>
+                    connection.warehouseConnectionUuid ===
+                    warehouseConnectionUuid,
+            )?.warehouseType ?? null
+        );
+    }
+
+    async getDeployStartOfWeek(
+        projectUuid: string,
+        exploreName: string,
+        sourceUuid: string | null,
+    ): Promise<
+        { kind: 'original' } | { kind: 'extra'; startOfWeek: WeekDay | null }
+    > {
+        const warehouseConnectionUuid =
+            sourceUuid === null
+                ? await this.getExploreWarehouseConnectionUuid(
+                      projectUuid,
+                      exploreName,
+                  )
+                : await this.getDbtSourceWarehouseConnectionUuid(
+                      projectUuid,
+                      sourceUuid,
+                  );
+        if (warehouseConnectionUuid === null) return { kind: 'original' };
+        const credentials = await this.getWarehouseConnectionForBinding(
+            projectUuid,
+            { kind: 'connection', warehouseConnectionUuid },
+        );
+        return { kind: 'extra', startOfWeek: credentials.startOfWeek ?? null };
+    }
+
+    async getWarehouseConnectionsMetadata(projectUuid: string): Promise<
+        {
+            name: string;
+            warehouseConnectionUuid: string | null;
+            warehouseType: WarehouseTypes;
+            isOriginal: boolean;
+        }[]
+    > {
+        const route = await this.getConnectionRoute(projectUuid, {
+            kind: 'original',
+        });
+        if (route === 'single') {
+            const project = await this.get(projectUuid);
+            if (!project.warehouseConnection) return [];
+            return [
+                {
+                    name: project.name,
+                    warehouseConnectionUuid: null,
+                    warehouseType: project.warehouseConnection.type,
+                    isOriginal: true,
+                },
+            ];
+        }
+        const model = this.getWarehouseConnectionModel();
+        return (await model.list(await model.getProject(projectUuid))).map(
+            (connection) => ({
+                name: connection.name,
+                warehouseConnectionUuid: connection.isOriginal
+                    ? null
+                    : connection.warehouseConnectionUuid,
+                warehouseType: connection.warehouseType,
+                isOriginal: connection.isOriginal,
+            }),
+        );
+    }
+
+    async getWarehouseCredentialsForBinding(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<CreateWarehouseCredentials> {
+        const target = await this.resolveWarehouseCredentialRead(
+            projectUuid,
+            binding,
+        );
+        if (target.kind === 'extra') {
+            throw new NotImplementedError(
+                'Extra connection credentials load per user',
+            );
+        }
+        return this.getWarehouseCredentialsForProject(projectUuid);
+    }
+
+    /** The column is the only source; a version copied into stored credentials is ignored. */
+    private static withPlaygroundBundleVersion(
+        credentials: CreateWarehouseCredentials,
+        playgroundBundleVersion: string | null,
+    ): CreateWarehouseCredentials {
+        if (
+            credentials.type !== WarehouseTypes.DUCKDB ||
+            credentials.connectionType !== DuckdbConnectionType.EMBEDDED
+        ) {
+            return credentials;
+        }
+        const { bundleVersion, ...rest } = credentials;
+        return playgroundBundleVersion === null
+            ? rest
+            : { ...rest, bundleVersion: playgroundBundleVersion };
+    }
+
+    async getPlaygroundBundleVersion(
+        projectUuid: string,
+    ): Promise<string | null> {
+        const row = await this.database(ProjectTableName)
+            .select('playground_bundle_version')
+            .where('project_uuid', projectUuid)
+            .first();
+        if (!row) {
+            throw new NotFoundError(`Project ${projectUuid} not found`);
+        }
+        return row.playground_bundle_version;
+    }
+
+    async hasCachedExplores(projectUuid: string): Promise<boolean> {
+        const row = await this.database(CachedExploreTableName)
+            .select('project_uuid')
+            .where('project_uuid', projectUuid)
+            .first();
+        return row !== undefined;
+    }
+
+    /** Projects whose cached explores come from the playground bundle, excluding learner copies. */
+    async getPlaygroundBundleProjectsNotOnVersion(
+        version: string,
+    ): Promise<
+        { projectUuid: string; playgroundBundleVersion: string | null }[]
+    > {
+        const rows = await this.database(ProjectTableName)
+            .select('project_uuid', 'playground_bundle_version')
+            .where((query) =>
+                query
+                    .where('provisioning_source', 'playground')
+                    .orWhere('project_type', ProjectType.TRAINING),
+            )
+            .andWhere((query) =>
+                query
+                    .whereNull('playground_bundle_version')
+                    .orWhereNot('playground_bundle_version', version),
+            )
+            .orderBy('project_id');
+        return rows.map((row) => ({
+            projectUuid: row.project_uuid,
+            playgroundBundleVersion: row.playground_bundle_version,
+        }));
+    }
+
+    /** Records when any server first saw a bundle version and returns that time. */
+    async recordPlaygroundBundleVersionSeen(version: string): Promise<Date> {
+        await this.database(PlaygroundBundleVersionsTableName)
+            .insert({ version })
+            .onConflict('version')
+            .ignore();
+        const row = await this.database(PlaygroundBundleVersionsTableName)
+            .select('first_seen_at')
+            .where('version', version)
+            .first();
+        if (!row) {
+            throw new UnexpectedDatabaseError(
+                `Playground bundle version ${version} was not recorded`,
+            );
+        }
+        return row.first_seen_at;
+    }
+
     async getWarehouseCredentialsForProject(
         projectUuid: string,
     ): Promise<CreateWarehouseCredentials> {
         // Try to get from cache first
         const cachedCredentials =
-            warehouseCredentialsCache?.get<CreateWarehouseCredentials>(
+            warehouseCredentialsCache?.get<CachedWarehouseCredentials>(
                 projectUuid,
             );
         if (cachedCredentials) {
-            return cachedCredentials;
+            return withWarehouseCredentialVersions(
+                cachedCredentials.credentials,
+                cachedCredentials.sourceVersions,
+            );
         }
 
+        const credentials =
+            await this.getWarehouseCredentialsForProjectUncached(projectUuid);
+        warehouseCredentialsCache?.set(projectUuid, {
+            credentials,
+            sourceVersions: getWarehouseCredentialVersions(credentials),
+        } satisfies CachedWarehouseCredentials);
+        return credentials;
+    }
+
+    async getOwnWarehouseCredentialsForProject(
+        projectUuid: string,
+        trx?: Knex,
+    ): Promise<CreateWarehouseCredentials> {
+        const row = await (trx ?? this.database)('warehouse_credentials')
+            .innerJoin(
+                'projects',
+                'warehouse_credentials.project_id',
+                'projects.project_id',
+            )
+            .select<{
+                encrypted_credentials: Buffer | null;
+                organization_warehouse_credentials_uuid: string | null;
+                playground_bundle_version: string | null;
+            }>(
+                'warehouse_credentials.encrypted_credentials',
+                'projects.organization_warehouse_credentials_uuid',
+                'projects.playground_bundle_version',
+            )
+            .where('projects.project_uuid', projectUuid)
+            .first();
+        if (
+            !row ||
+            row.organization_warehouse_credentials_uuid !== null ||
+            !row.encrypted_credentials
+        ) {
+            throw new RefreshTokenSourceChangedError();
+        }
+        const credentials = this.decryptWarehouseCredentials(
+            row.encrypted_credentials,
+        );
+        if (!credentials) {
+            throw new UnexpectedServerError(
+                'Unexpected error: failed to parse warehouse credentials',
+            );
+        }
+        return ProjectModel.withPlaygroundBundleVersion(
+            credentials,
+            row.playground_bundle_version,
+        );
+    }
+
+    async getWarehouseCredentialsForProjectUncached(
+        projectUuid: string,
+    ): Promise<CreateWarehouseCredentials> {
         const [row] = await this.database('warehouse_credentials')
             .innerJoin(
                 'projects',
@@ -2186,11 +6216,15 @@ export class ProjectModel {
                     encrypted_credentials: Buffer;
                     organization_warehouse_credentials_uuid: string;
                     organization_uuid: string;
+                    playground_bundle_version: string | null;
+                    warehouse_credentials_id: number;
                 }[]
             >([
+                'warehouse_credentials_id',
                 'encrypted_credentials',
                 'organization_warehouse_credentials_uuid',
                 'organizations.organization_uuid',
+                'projects.playground_bundle_version',
             ])
             .where('project_uuid', projectUuid);
         if (row === undefined) {
@@ -2205,18 +6239,22 @@ export class ProjectModel {
                     row.organization_warehouse_credentials_uuid,
                     row.organization_uuid,
                 );
-            // Store in cache
-            warehouseCredentialsCache?.set(projectUuid, orgCredentials);
             return orgCredentials;
         }
 
         try {
-            const credentials = JSON.parse(
-                this.encryptionUtil.decrypt(row.encrypted_credentials),
-            ) as CreateWarehouseCredentials;
-            // Store in cache
-            warehouseCredentialsCache?.set(projectUuid, credentials);
-            return credentials;
+            const credentials = ProjectModel.withPlaygroundBundleVersion(
+                normalizeWarehouseCredentials(
+                    JSON.parse(
+                        this.encryptionUtil.decrypt(row.encrypted_credentials),
+                    ) as CreateWarehouseCredentials,
+                ),
+                row.playground_bundle_version,
+            );
+            return withWarehouseCredentialVersion(
+                credentials,
+                `warehouse_credentials:${row.warehouse_credentials_id}`,
+            );
         } catch (e) {
             throw new UnexpectedServerError(
                 'Unexpected error: failed to parse warehouse credentials',
@@ -2229,52 +6267,60 @@ export class ProjectModel {
         projectUuid: string,
         expectedOldRefreshToken: string,
         newRefreshToken: string,
+        trx?: Knex,
     ): Promise<boolean> {
-        const swapped = await this.database.transaction(async (trx) => {
-            const row = await trx('warehouse_credentials')
-                .innerJoin(
-                    'projects',
-                    'warehouse_credentials.project_id',
-                    'projects.project_id',
-                )
-                .where('projects.project_uuid', projectUuid)
-                .select<
-                    { project_id: number; encrypted_credentials: Buffer }[]
-                >([
-                    'warehouse_credentials.project_id',
-                    'warehouse_credentials.encrypted_credentials',
-                ])
-                .forUpdate()
-                .first();
-            if (!row) {
-                return false;
-            }
+        const swapped = await (trx ?? this.database).transaction(
+            async (transaction) => {
+                const row = await transaction('warehouse_credentials')
+                    .innerJoin(
+                        'projects',
+                        'warehouse_credentials.project_id',
+                        'projects.project_id',
+                    )
+                    .where('projects.project_uuid', projectUuid)
+                    .select<
+                        { project_id: number; encrypted_credentials: Buffer }[]
+                    >([
+                        'warehouse_credentials.project_id',
+                        'warehouse_credentials.encrypted_credentials',
+                    ])
+                    .forUpdate()
+                    .first();
+                if (!row) {
+                    return false;
+                }
 
-            let credentials: CreateWarehouseCredentials;
-            try {
-                credentials = JSON.parse(
-                    this.encryptionUtil.decrypt(row.encrypted_credentials),
-                ) as CreateWarehouseCredentials;
-            } catch {
-                return false;
-            }
+                let credentials: CreateWarehouseCredentials;
+                try {
+                    credentials = normalizeWarehouseCredentials(
+                        JSON.parse(
+                            this.encryptionUtil.decrypt(
+                                row.encrypted_credentials,
+                            ),
+                        ) as CreateWarehouseCredentials,
+                    );
+                } catch {
+                    return false;
+                }
 
-            const stored = (credentials as Partial<{ refreshToken: string }>)
-                .refreshToken;
-            if (stored !== expectedOldRefreshToken) {
-                return false;
-            }
+                const stored = (
+                    credentials as Partial<{ refreshToken: string }>
+                ).refreshToken;
+                if (stored !== expectedOldRefreshToken) {
+                    return false;
+                }
 
-            (credentials as { refreshToken: string }).refreshToken =
-                newRefreshToken;
-            const encryptedCredentials = this.encryptionUtil.encrypt(
-                JSON.stringify(credentials),
-            );
-            await trx('warehouse_credentials')
-                .update({ encrypted_credentials: encryptedCredentials })
-                .where('project_id', row.project_id);
-            return true;
-        });
+                (credentials as { refreshToken: string }).refreshToken =
+                    newRefreshToken;
+                const encryptedCredentials = this.encryptionUtil.encrypt(
+                    JSON.stringify(credentials),
+                );
+                await transaction('warehouse_credentials')
+                    .update({ encrypted_credentials: encryptedCredentials })
+                    .where('project_id', row.project_id);
+                return true;
+            },
+        );
 
         if (swapped) {
             warehouseCredentialsCache?.del(projectUuid);
@@ -2283,11 +6329,604 @@ export class ProjectModel {
         return swapped;
     }
 
+    private decryptWarehouseCredentials(
+        encryptedCredentials: Buffer,
+    ): CreateWarehouseCredentials | null {
+        try {
+            const credentials = normalizeWarehouseCredentials(
+                JSON.parse(
+                    this.encryptionUtil.decrypt(encryptedCredentials),
+                ) as CreateWarehouseCredentials,
+            );
+            return copyWarehouseCredentialVersions(credentials, credentials);
+        } catch {
+            return null;
+        }
+    }
+
+    private async rewritePreviewWarehouseCredentials(
+        trx: Transaction,
+        upstreamProjectUuid: string,
+        upstream: {
+            signIn: PersonSignIn | null;
+            subjectUserUuid: string | null;
+        },
+        update: (
+            credentials: CreateWarehouseCredentials,
+        ) => CreateWarehouseCredentials | null,
+    ): Promise<string[]> {
+        const rows = await trx(WarehouseCredentialTableName)
+            .innerJoin(
+                ProjectTableName,
+                `${WarehouseCredentialTableName}.project_id`,
+                `${ProjectTableName}.project_id`,
+            )
+            .where(
+                `${ProjectTableName}.copied_from_project_uuid`,
+                upstreamProjectUuid,
+            )
+            .where(`${ProjectTableName}.project_type`, ProjectType.PREVIEW)
+            .whereNull(
+                `${ProjectTableName}.organization_warehouse_credentials_uuid`,
+            )
+            .select<
+                {
+                    project_uuid: string;
+                    project_id: number;
+                    warehouse_credentials_id: number;
+                    encrypted_credentials: Buffer;
+                    credential_subject_user_uuid: string | null;
+                }[]
+            >([
+                `${ProjectTableName}.project_uuid`,
+                `${WarehouseCredentialTableName}.project_id`,
+                `${WarehouseCredentialTableName}.warehouse_credentials_id`,
+                `${WarehouseCredentialTableName}.encrypted_credentials`,
+                `${WarehouseCredentialTableName}.credential_subject_user_uuid`,
+            ])
+            .forUpdate(WarehouseCredentialTableName);
+        const updated: string[] = [];
+        await rows.reduce<Promise<void>>(async (previous, row) => {
+            await previous;
+            const decrypted = this.decryptWarehouseCredentials(
+                row.encrypted_credentials,
+            );
+            const credentials = decrypted
+                ? withWarehouseCredentialVersion(
+                      decrypted,
+                      `warehouse_credentials:${row.warehouse_credentials_id}`,
+                  )
+                : null;
+            const updatedCredentials = credentials ? update(credentials) : null;
+            if (!updatedCredentials) return;
+            const next = withNewWarehouseCredentialVersion(
+                updatedCredentials,
+                credentials,
+            );
+            const subjectUserUuid = resolveSignInSubject({
+                signIn: getPersonSignIn(next),
+                actorUserUuid: null,
+                stored: [
+                    {
+                        refreshToken: upstream.signIn?.refreshToken ?? null,
+                        subjectUserUuid: upstream.subjectUserUuid,
+                    },
+                    {
+                        refreshToken: credentials
+                            ? (getPersonSignIn(credentials)?.refreshToken ??
+                              null)
+                            : null,
+                        subjectUserUuid: row.credential_subject_user_uuid,
+                    },
+                ],
+            });
+            const bindingChanged =
+                row.credential_subject_user_uuid !== subjectUserUuid ||
+                !warehouseCredentialsEqual(
+                    this.decryptWarehouseCredentials(row.encrypted_credentials),
+                    normalizeWarehouseCredentials(next),
+                );
+            await trx(WarehouseCredentialTableName)
+                .update({
+                    ...(bindingChanged
+                        ? {
+                              warehouse_credential_generation: trx.raw(
+                                  '?? + 1',
+                                  ['warehouse_credential_generation'],
+                              ),
+                          }
+                        : {}),
+                    encrypted_credentials: this.encryptionUtil.encrypt(
+                        JSON.stringify(next),
+                    ),
+                    credential_subject_user_uuid: subjectUserUuid,
+                })
+                .where('project_id', row.project_id);
+            updated.push(row.project_uuid);
+        }, Promise.resolve());
+        return updated;
+    }
+
+    async getPreviewOwnsCredentials(
+        projectUuid: string,
+    ): Promise<boolean | null> {
+        const row = await this.database(WarehouseCredentialTableName)
+            .innerJoin(
+                ProjectTableName,
+                `${WarehouseCredentialTableName}.project_id`,
+                `${ProjectTableName}.project_id`,
+            )
+            .where(`${ProjectTableName}.project_uuid`, projectUuid)
+            .first<{ preview_owns_credentials: boolean | null } | undefined>(
+                `${WarehouseCredentialTableName}.preview_owns_credentials`,
+            );
+        return row?.preview_owns_credentials ?? null;
+    }
+
+    async setPreviewOwnsCredentials(
+        projectUuid: string,
+        previewOwnsCredentials: boolean,
+    ): Promise<void> {
+        await this.database(WarehouseCredentialTableName)
+            .update({ preview_owns_credentials: previewOwnsCredentials })
+            .whereIn(
+                'project_id',
+                this.database(ProjectTableName)
+                    .select('project_id')
+                    .where('project_uuid', projectUuid),
+            );
+    }
+
+    /** Compare-and-swap on a project's stored credentials: `update` sees the locked row and returns null to leave it. */
+    async updateWarehouseCredentialsIf(
+        projectUuid: string,
+        update: (
+            credentials: CreateWarehouseCredentials,
+        ) => CreateWarehouseCredentials | null,
+        change: 'replacement' | 'token_sync' = 'replacement',
+    ): Promise<boolean> {
+        const swapped = await this.database.transaction(async (trx) => {
+            const row = await trx('warehouse_credentials')
+                .innerJoin(
+                    'projects',
+                    'warehouse_credentials.project_id',
+                    'projects.project_id',
+                )
+                .leftJoin(
+                    'projects as upstream',
+                    'upstream.project_uuid',
+                    'projects.copied_from_project_uuid',
+                )
+                .where('projects.project_uuid', projectUuid)
+                .select<
+                    {
+                        project_id: number;
+                        warehouse_credentials_id: number;
+                        encrypted_credentials: Buffer;
+                        credential_subject_user_uuid: string | null;
+                        upstream_project_id: number | null;
+                    }[]
+                >([
+                    'warehouse_credentials.project_id',
+                    'warehouse_credentials.warehouse_credentials_id',
+                    'warehouse_credentials.encrypted_credentials',
+                    'warehouse_credentials.credential_subject_user_uuid',
+                    'upstream.project_id as upstream_project_id',
+                ])
+                .forUpdate('warehouse_credentials')
+                .first();
+            if (!row) return false;
+            const decrypted = this.decryptWarehouseCredentials(
+                row.encrypted_credentials,
+            );
+            const credentials = decrypted
+                ? withWarehouseCredentialVersion(
+                      decrypted,
+                      `warehouse_credentials:${row.warehouse_credentials_id}`,
+                  )
+                : null;
+            const updatedCredentials = credentials ? update(credentials) : null;
+            const next =
+                updatedCredentials && credentials
+                    ? withPreservedWarehouseCredentialVersion(
+                          updatedCredentials,
+                          credentials,
+                      )
+                    : null;
+            if (!next) return false;
+            const stored = await this.getStoredSignInSubjects(
+                trx,
+                row.upstream_project_id ? [row.upstream_project_id] : [],
+            );
+            const subjectUserUuid = resolveSignInSubject({
+                signIn: getPersonSignIn(next),
+                actorUserUuid: null,
+                stored: [
+                    ...stored,
+                    {
+                        refreshToken: credentials
+                            ? (getPersonSignIn(credentials)?.refreshToken ??
+                              null)
+                            : null,
+                        subjectUserUuid: row.credential_subject_user_uuid,
+                    },
+                ],
+            });
+            const bindingChanged =
+                row.credential_subject_user_uuid !== subjectUserUuid ||
+                !warehouseCredentialsEqual(
+                    this.decryptWarehouseCredentials(row.encrypted_credentials),
+                    normalizeWarehouseCredentials(next),
+                );
+            await trx('warehouse_credentials')
+                .update({
+                    ...(change === 'replacement' && bindingChanged
+                        ? {
+                              warehouse_credential_generation: trx.raw(
+                                  '?? + 1',
+                                  ['warehouse_credential_generation'],
+                              ),
+                          }
+                        : {}),
+                    encrypted_credentials: this.encryptionUtil.encrypt(
+                        JSON.stringify(next),
+                    ),
+                    credential_subject_user_uuid: subjectUserUuid,
+                })
+                .where('project_id', row.project_id);
+            return true;
+        });
+        if (swapped) {
+            warehouseCredentialsCache?.del(projectUuid);
+        }
+        return swapped;
+    }
+
+    async reconnectSharedSignIn(
+        projectUuid: string,
+        expectedRefreshToken: string,
+        expectedSubjectUserUuid: string | null,
+        keyfileContents: CreateBigqueryCredentials['keyfileContents'],
+        actorUserUuid: string,
+        createPushToPreview:
+            | ((next: CreateWarehouseCredentials) => PushToPreview)
+            | null,
+    ): Promise<PreviewCredentialsPush> {
+        const push = await this.database.transaction(async (trx) => {
+            const row = await trx(WarehouseCredentialTableName)
+                .innerJoin(
+                    ProjectTableName,
+                    `${WarehouseCredentialTableName}.project_id`,
+                    `${ProjectTableName}.project_id`,
+                )
+                .where(`${ProjectTableName}.project_uuid`, projectUuid)
+                .select<
+                    {
+                        project_id: number;
+                        warehouse_credentials_id: number;
+                        encrypted_credentials: Buffer;
+                        credential_subject_user_uuid: string | null;
+                        organization_warehouse_credentials_uuid: string | null;
+                    }[]
+                >([
+                    `${WarehouseCredentialTableName}.project_id`,
+                    `${WarehouseCredentialTableName}.warehouse_credentials_id`,
+                    `${WarehouseCredentialTableName}.encrypted_credentials`,
+                    `${WarehouseCredentialTableName}.credential_subject_user_uuid`,
+                    `${ProjectTableName}.organization_warehouse_credentials_uuid`,
+                ])
+                .forUpdate(WarehouseCredentialTableName)
+                .first();
+            const decrypted = row
+                ? this.decryptWarehouseCredentials(row.encrypted_credentials)
+                : null;
+            const current =
+                row && decrypted
+                    ? withWarehouseCredentialVersion(
+                          decrypted,
+                          `warehouse_credentials:${row.warehouse_credentials_id}`,
+                      )
+                    : null;
+            if (
+                !row ||
+                row.organization_warehouse_credentials_uuid ||
+                current?.type !== WarehouseTypes.BIGQUERY ||
+                getPersonSignIn(current)?.refreshToken !==
+                    expectedRefreshToken ||
+                row.credential_subject_user_uuid !== expectedSubjectUserUuid
+            ) {
+                throw new ParameterError(
+                    'This connection changed while you were signing in. Reload the page and try again.',
+                );
+            }
+            const next = withNewWarehouseCredentialVersion(
+                {
+                    ...current,
+                    authenticationType: BigqueryAuthenticationType.SSO,
+                    keyfileContents,
+                },
+                current,
+            );
+            await trx(WarehouseCredentialTableName)
+                .where('project_id', row.project_id)
+                .update({
+                    ...(row.credential_subject_user_uuid !== actorUserUuid ||
+                    !warehouseCredentialsEqual(
+                        current,
+                        normalizeWarehouseCredentials(next),
+                    )
+                        ? {
+                              warehouse_credential_generation: trx.raw(
+                                  '?? + 1',
+                                  ['warehouse_credential_generation'],
+                              ),
+                          }
+                        : {}),
+                    encrypted_credentials: this.encryptionUtil.encrypt(
+                        JSON.stringify(next),
+                    ),
+                    credential_subject_user_uuid: actorUserUuid,
+                });
+            if (!createPushToPreview) {
+                return { kind: 'skipped' } satisfies PreviewCredentialsPush;
+            }
+            try {
+                const previewProjectUuids = await trx.transaction((savepoint) =>
+                    this.rewritePreviewWarehouseCredentials(
+                        savepoint,
+                        projectUuid,
+                        {
+                            signIn: getPersonSignIn(next),
+                            subjectUserUuid: actorUserUuid,
+                        },
+                        (previewCredentials) =>
+                            createPushToPreview(next)({
+                                previewCredentials,
+                                previousUpstreamCredentials: current,
+                            }),
+                    ),
+                );
+                return {
+                    kind: 'pushed',
+                    previewProjectUuids,
+                } satisfies PreviewCredentialsPush;
+            } catch (error) {
+                return {
+                    kind: 'failed',
+                    error,
+                } satisfies PreviewCredentialsPush;
+            }
+        });
+        warehouseCredentialsCache?.del(projectUuid);
+        if (push.kind === 'pushed') {
+            push.previewProjectUuids.forEach((previewProjectUuid) =>
+                warehouseCredentialsCache?.del(previewProjectUuid),
+            );
+        }
+        return push;
+    }
+
+    async copyChartSlugMappingsToPreview(
+        trx: Knex,
+        sourceProjectUuid: string,
+        previewProjectUuid: string,
+        chartUuidMapping: PreviewChartUuidMapping[],
+    ): Promise<void> {
+        if (chartUuidMapping.length === 0) return;
+
+        const aliases = await trx(SavedChartSlugMappingsTableName)
+            .where('project_uuid', sourceProjectUuid)
+            .whereRaw('?? = ANY(?::uuid[])', [
+                'saved_query_uuid',
+                chartUuidMapping.map(({ sourceChartUuid }) => sourceChartUuid),
+            ])
+            .select('saved_query_uuid', 'slug');
+        if (aliases.length === 0) return;
+
+        const previewChartUuidBySource = new Map(
+            chartUuidMapping.map(({ sourceChartUuid, previewChartUuid }) => [
+                sourceChartUuid,
+                previewChartUuid,
+            ]),
+        );
+        const previewAliases = aliases.map((alias) => {
+            const previewChartUuid = previewChartUuidBySource.get(
+                alias.saved_query_uuid,
+            );
+            if (!previewChartUuid) {
+                throw new UnexpectedServerError(
+                    `Missing preview chart mapping for ${alias.saved_query_uuid}`,
+                );
+            }
+            return {
+                project_uuid: previewProjectUuid,
+                saved_query_uuid: previewChartUuid,
+                slug: alias.slug,
+            };
+        });
+
+        await trx.batchInsert(
+            SavedChartSlugMappingsTableName,
+            previewAliases,
+            INSERT_BATCH_SIZE,
+        );
+    }
+
+    async copyDashboardSlugMappingsToPreview(
+        trx: Knex,
+        sourceProjectUuid: string,
+        previewProjectUuid: string,
+        dashboardUuidMapping: Array<{
+            sourceDashboardUuid: string;
+            previewDashboardUuid: string;
+        }>,
+    ): Promise<void> {
+        if (dashboardUuidMapping.length === 0) return;
+
+        const aliases = await trx(DashboardSlugMappingsTableName)
+            .where('project_uuid', sourceProjectUuid)
+            .whereRaw('?? = ANY(?::uuid[])', [
+                'dashboard_uuid',
+                dashboardUuidMapping.map(
+                    ({ sourceDashboardUuid }) => sourceDashboardUuid,
+                ),
+            ])
+            .select('dashboard_uuid', 'slug');
+        if (aliases.length === 0) return;
+
+        const previewDashboardUuidBySource = new Map(
+            dashboardUuidMapping.map(
+                ({ sourceDashboardUuid, previewDashboardUuid }) => [
+                    sourceDashboardUuid,
+                    previewDashboardUuid,
+                ],
+            ),
+        );
+        const previewAliases = aliases.map((alias) => {
+            const previewDashboardUuid = previewDashboardUuidBySource.get(
+                alias.dashboard_uuid,
+            );
+            if (!previewDashboardUuid) {
+                throw new UnexpectedServerError(
+                    `Missing preview dashboard mapping for ${alias.dashboard_uuid}`,
+                );
+            }
+            return {
+                project_uuid: previewProjectUuid,
+                dashboard_uuid: previewDashboardUuid,
+                slug: alias.slug,
+            };
+        });
+
+        await trx.batchInsert(
+            DashboardSlugMappingsTableName,
+            previewAliases,
+            INSERT_BATCH_SIZE,
+        );
+    }
+
+    async copyMetricsTreesForTrainingCopy(
+        sourceProjectUuid: string,
+        targetProjectUuid: string,
+        userUuid: string,
+    ): Promise<void> {
+        if (sourceProjectUuid === targetProjectUuid) {
+            throw new ParameterError(
+                'A training copy must be a different project',
+            );
+        }
+        await this.database.transaction(async (trx) => {
+            const trees = await trx(MetricsTreesTableName).where(
+                'project_uuid',
+                sourceProjectUuid,
+            );
+            if (trees.length === 0) return;
+            const sourceMetrics = await trx(CatalogTableName).where({
+                project_uuid: sourceProjectUuid,
+                field_type: 'metric',
+            });
+            const targetMetrics = await trx(CatalogTableName).where({
+                project_uuid: targetProjectUuid,
+                field_type: 'metric',
+            });
+            const metricMapping = new Map(
+                sourceMetrics.map((source) => [
+                    source.catalog_search_uuid,
+                    targetMetrics.find(
+                        (target) =>
+                            target.table_name === source.table_name &&
+                            target.name === source.name &&
+                            target.type === source.type,
+                    )?.catalog_search_uuid,
+                ]),
+            );
+            const remap = (sourceUuid: string): string => {
+                const targetUuid = metricMapping.get(sourceUuid);
+                if (!targetUuid)
+                    throw new ParameterError(
+                        `Training copy is missing a tree metric: ${sourceUuid}`,
+                    );
+                return targetUuid;
+            };
+            const copiedMetricUuids = new Set<string>();
+            await trees.reduce<Promise<void>>(async (previous, tree) => {
+                await previous;
+                const nodes = await trx(MetricsTreeNodesTableName).where(
+                    'metrics_tree_uuid',
+                    tree.metrics_tree_uuid,
+                );
+                const mappedNodes = nodes.map((node) => ({
+                    catalog_search_uuid: remap(node.catalog_search_uuid),
+                    x_position: node.x_position,
+                    y_position: node.y_position,
+                    source: node.source,
+                }));
+                const [created] = await trx(MetricsTreesTableName)
+                    .insert({
+                        project_uuid: targetProjectUuid,
+                        name: tree.name,
+                        slug: tree.slug,
+                        description: tree.description,
+                        source: tree.source,
+                        created_by_user_uuid: userUuid,
+                    })
+                    .returning('*');
+                if (mappedNodes.length > 0) {
+                    await trx(MetricsTreeNodesTableName).insert(
+                        mappedNodes.map((node) => ({
+                            ...node,
+                            metrics_tree_uuid: created.metrics_tree_uuid,
+                        })),
+                    );
+                }
+                nodes.forEach((node) =>
+                    copiedMetricUuids.add(node.catalog_search_uuid),
+                );
+            }, Promise.resolve());
+            // YAML edges already belong to the new catalog; copy published UI edges only.
+            const edges = await trx(MetricsTreeEdgesTableName)
+                .where({
+                    project_uuid: sourceProjectUuid,
+                    source: 'ui',
+                })
+                .whereIn('source_metric_catalog_search_uuid', [
+                    ...copiedMetricUuids,
+                ])
+                .whereIn('target_metric_catalog_search_uuid', [
+                    ...copiedMetricUuids,
+                ]);
+            if (edges.length > 0) {
+                await trx(MetricsTreeEdgesTableName)
+                    .insert(
+                        edges.map((edge) => ({
+                            source_metric_catalog_search_uuid: remap(
+                                edge.source_metric_catalog_search_uuid,
+                            ),
+                            target_metric_catalog_search_uuid: remap(
+                                edge.target_metric_catalog_search_uuid,
+                            ),
+                            project_uuid: targetProjectUuid,
+                            created_by_user_uuid: userUuid,
+                            source: edge.source,
+                        })),
+                    )
+                    .onConflict([
+                        'source_metric_catalog_search_uuid',
+                        'target_metric_catalog_search_uuid',
+                    ])
+                    .ignore();
+            }
+        });
+    }
+
     async duplicateContent(
         projectUuid: string,
         previewProjectUuid: string,
         spaces: Pick<SpaceSummary, 'uuid'>[],
-    ) {
+        warehouseConnectionMap: WarehouseConnectionMap | null,
+    ): Promise<{
+        spaceMapping: { sourceSpaceUuid: string; previewSpaceUuid: string }[];
+    }> {
         Logger.info(
             `Copying content from ${projectUuid} to ${previewProjectUuid}`,
         );
@@ -2303,9 +6942,10 @@ export class ProjectModel {
                 .select('project_id');
             const projectId = project.project_id;
 
-            const dbSpaces = await trx(SpaceTableName).whereIn(
-                'space_uuid',
-                spaces.map((s) => s.uuid),
+            // Bind ID lists as arrays so large copies stay below Postgres's parameter limit.
+            const dbSpaces = await trx(SpaceTableName).whereRaw(
+                '?? = ANY(?::uuid[])',
+                ['space_uuid', spaces.map((s) => s.uuid)],
             );
 
             Logger.info(
@@ -2316,36 +6956,34 @@ export class ProjectModel {
 
             const newSpaces =
                 spaces.length > 0
-                    ? await trx(SpaceTableName)
-                          .insert(
-                              dbSpaces.map((d) => {
-                                  type CloneSpace = Omit<
-                                      DbSpace,
-                                      | 'space_id'
-                                      | 'space_uuid'
-                                      | 'search_vector'
-                                  > & {
-                                      search_vector?: undefined;
-                                      space_id?: number;
-                                      space_uuid?: string;
-                                  };
-                                  const createSpace: CloneSpace = {
-                                      ...d,
-                                      search_vector: undefined,
-                                      space_id: undefined,
-                                      space_uuid: undefined,
-                                      project_id: previewProject.project_id,
-                                      parent_space_uuid: null,
-                                  };
-                                  // Remove the keys for the autogenerated fields
-                                  // Some databases do not support undefined values
-                                  delete createSpace.search_vector;
-                                  delete createSpace.space_id;
-                                  delete createSpace.space_uuid;
-                                  return createSpace;
-                              }),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<DbSpace>(
+                          trx,
+                          SpaceTableName,
+                          dbSpaces.map((d) => {
+                              type CloneSpace = Omit<
+                                  DbSpace,
+                                  'space_id' | 'space_uuid' | 'search_vector'
+                              > & {
+                                  search_vector?: undefined;
+                                  space_id?: number;
+                                  space_uuid?: string;
+                              };
+                              const createSpace: CloneSpace = {
+                                  ...d,
+                                  search_vector: undefined,
+                                  space_id: undefined,
+                                  space_uuid: undefined,
+                                  project_id: previewProject.project_id,
+                                  parent_space_uuid: null,
+                              };
+                              // Remove the keys for the autogenerated fields
+                              // Some databases do not support undefined values
+                              delete createSpace.search_vector;
+                              delete createSpace.space_id;
+                              delete createSpace.space_uuid;
+                              return createSpace;
+                          }),
+                      )
                     : [];
 
             // fix parent_space_uuid based on path for the spaces
@@ -2368,33 +7006,41 @@ export class ProjectModel {
                 newId: newSpaces[i].space_id,
                 newUuid: newSpaces[i].space_uuid,
             }));
+            const previewSpaceIdBySource = new Map(
+                spaceMapping.map((m) => [m.id, m.newId]),
+            );
+            const previewSpaceUuidBySource = new Map(
+                spaceMapping.map((m) => [m.uuid, m.newUuid]),
+            );
 
-            const getNewSpaceId = (oldSpacId: number): number =>
-                spaceMapping.find((s) => s.id === oldSpacId)?.newId!;
+            const getNewSpaceId = (oldSpaceId: number): number =>
+                previewSpaceIdBySource.get(oldSpaceId)!;
 
             const getNewSpaceUuid = (oldSpaceUuid: string): string =>
-                spaceMapping.find((s) => s.uuid === oldSpaceUuid)?.newUuid!;
+                previewSpaceUuidBySource.get(oldSpaceUuid)!;
 
-            const spaceUserAccesses = await trx('space_user_access').whereIn(
-                'space_uuid',
-                spaceUuids,
+            const spaceUserAccesses = await trx('space_user_access').whereRaw(
+                '?? = ANY(?::uuid[])',
+                ['space_uuid', spaceUuids],
             );
 
             const newSpaceUserAccess =
                 spaceUserAccesses.length > 0
-                    ? await trx('space_user_access')
-                          .insert(
-                              spaceUserAccesses.map((d) => ({
-                                  ...d,
-                                  space_uuid: getNewSpaceUuid(d.space_uuid),
-                              })),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<
+                          (typeof spaceUserAccesses)[number]
+                      >(
+                          trx,
+                          'space_user_access',
+                          spaceUserAccesses.map((d) => ({
+                              ...d,
+                              space_uuid: getNewSpaceUuid(d.space_uuid),
+                          })),
+                      )
                     : [];
 
-            const spaceGroupAccesses = await trx('space_group_access').whereIn(
-                'space_uuid',
-                spaceUuids,
+            const spaceGroupAccesses = await trx('space_group_access').whereRaw(
+                '?? = ANY(?::uuid[])',
+                ['space_uuid', spaceUuids],
             );
 
             Logger.info(
@@ -2403,14 +7049,16 @@ export class ProjectModel {
 
             const newSpaceGroupAccesses =
                 spaceGroupAccesses.length > 0
-                    ? await trx('space_group_access')
-                          .insert(
-                              spaceGroupAccesses.map((d) => ({
-                                  ...d,
-                                  space_uuid: getNewSpaceUuid(d.space_uuid),
-                              })),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<
+                          (typeof spaceGroupAccesses)[number]
+                      >(
+                          trx,
+                          'space_group_access',
+                          spaceGroupAccesses.map((d) => ({
+                              ...d,
+                              space_uuid: getNewSpaceUuid(d.space_uuid),
+                          })),
+                      )
                     : [];
 
             const virtualViews = await trx(CachedExploreTableName)
@@ -2427,19 +7075,218 @@ export class ProjectModel {
                     `Copying ${virtualViews.length} virtual views into ${previewProjectUuid}`,
                 );
 
-                await trx(CachedExploreTableName).insert(
-                    virtualViews.map((v) => ({
-                        ...v,
+                await chunkedInsertReturning<(typeof virtualViews)[number]>(
+                    trx,
+                    CachedExploreTableName,
+                    virtualViews.map((v) =>
+                        remapRowBinding(
+                            {
+                                ...v,
+                                project_uuid: previewProjectUuid,
+                                cached_explore_uuid: undefined,
+                            },
+                            warehouseConnectionMap,
+                        ),
+                    ),
+                );
+            }
+
+            const externalSourceExplores = await trx(CachedExploreTableName)
+                .where('project_uuid', projectUuid)
+                .andWhereJsonPath(
+                    'explore',
+                    '$.type',
+                    '=',
+                    ExploreType.EXTERNAL_SOURCE,
+                );
+
+            if (externalSourceExplores.length > 0) {
+                Logger.info(
+                    `Copying ${externalSourceExplores.length} external source tables into ${previewProjectUuid}`,
+                );
+
+                // Copy the source rows with fresh uuids so locator resolution
+                // works inside the preview. Ingested files are shared by URI,
+                // not duplicated.
+                const sources = await trx(ExternalSourcesTableName)
+                    .where('project_uuid', projectUuid)
+                    .andWhere('scope', ExternalSourceScope.CATALOG);
+                const sourceTables = await trx(
+                    ExternalSourceTablesTableName,
+                ).whereRaw('?? = ANY(?::uuid[])', [
+                    'external_source_uuid',
+                    sources.map((source) => source.external_source_uuid),
+                ]);
+                const sourceUuidMap = new Map(
+                    sources.map((s) => [s.external_source_uuid, uuidv4()]),
+                );
+                const tableUuidMap = new Map(
+                    sourceTables.map((t) => [
+                        t.external_source_table_uuid,
+                        uuidv4(),
+                    ]),
+                );
+                if (sources.length > 0) {
+                    await chunkedInsertReturning<(typeof sources)[number]>(
+                        trx,
+                        ExternalSourcesTableName,
+                        sources.map(
+                            ({ created_at, updated_at, ...source }) => ({
+                                ...source,
+                                external_source_uuid: sourceUuidMap.get(
+                                    source.external_source_uuid,
+                                )!,
+                                project_uuid: previewProjectUuid,
+                            }),
+                        ),
+                    );
+                }
+                if (sourceTables.length > 0) {
+                    await chunkedInsertReturning<(typeof sourceTables)[number]>(
+                        trx,
+                        ExternalSourceTablesTableName,
+                        sourceTables.map(
+                            ({ created_at, updated_at, ...table }) => ({
+                                ...table,
+                                external_source_table_uuid: tableUuidMap.get(
+                                    table.external_source_table_uuid,
+                                )!,
+                                external_source_uuid: sourceUuidMap.get(
+                                    table.external_source_uuid,
+                                )!,
+                                project_uuid: previewProjectUuid,
+                            }),
+                        ),
+                    );
+                }
+
+                await chunkedInsertReturning<
+                    (typeof externalSourceExplores)[number]
+                >(
+                    trx,
+                    CachedExploreTableName,
+                    externalSourceExplores.map((v) => ({
+                        ...remapRowBinding(v, warehouseConnectionMap),
                         project_uuid: previewProjectUuid,
                         cached_explore_uuid: undefined,
+                        explore: {
+                            ...v.explore,
+                            externalSource: v.explore.externalSource
+                                ? {
+                                      ...v.explore.externalSource,
+                                      sourceUuid:
+                                          sourceUuidMap.get(
+                                              v.explore.externalSource
+                                                  .sourceUuid,
+                                          ) ??
+                                          v.explore.externalSource.sourceUuid,
+                                      tableUuid:
+                                          tableUuidMap.get(
+                                              v.explore.externalSource
+                                                  .tableUuid,
+                                          ) ??
+                                          v.explore.externalSource.tableUuid,
+                                  }
+                                : undefined,
+                        },
                     })),
                 );
             }
 
-            // .dP"Y8    db    Yb    dP 888888 8888b.      .dP"Y8  dP"Yb  88
-            // `Ybo."   dPYb    Yb  dP  88__    8I  Yb     `Ybo." dP   Yb 88
-            // o.`Y8b  dP__Yb    YbdP   88""    8I  dY     o.`Y8b Yb b dP 88  .o
-            // 8bodP' dP""""Yb    YP    888888 8888Y"      8bodP'  `"YoYo 88ood8
+            // Dashboards
+            const dashboards = await trx(DashboardsTableName)
+                .leftJoin(
+                    SpaceTableName,
+                    `${DashboardsTableName}.space_id`,
+                    `${SpaceTableName}.space_id`,
+                )
+                .whereRaw('?? = ANY(?::int[])', [
+                    `${DashboardsTableName}.space_id`,
+                    spaceIds,
+                ])
+                .andWhere(`${SpaceTableName}.project_id`, projectId)
+                .whereNull(`${DashboardsTableName}.deleted_at`)
+                .whereNull(`${SpaceTableName}.deleted_at`)
+                .select<DbDashboard[]>(`${DashboardsTableName}.*`);
+
+            const dashboardIds = dashboards.map((d) => d.dashboard_id);
+
+            Logger.info(
+                `Copying ${dashboards.length} dashboards on ${previewProjectUuid}`,
+            );
+
+            const newDashboards =
+                dashboards.length > 0
+                    ? await chunkedInsertReturning<DbDashboard>(
+                          trx,
+                          DashboardsTableName,
+                          dashboards.map((d) => {
+                              type CloneDashboard = Omit<
+                                  DbDashboard,
+                                  | 'dashboard_id'
+                                  | 'dashboard_uuid'
+                                  | 'search_vector'
+                              > & {
+                                  search_vector?: string;
+                                  dashboard_id?: number;
+                                  dashboard_uuid?: string;
+                              };
+                              const createDashboard: CloneDashboard = {
+                                  ...replaceProjectUuid(d, previewProjectUuid),
+                                  search_vector: undefined,
+                                  dashboard_id: undefined,
+                                  dashboard_uuid: undefined,
+                                  space_id: getNewSpaceId(d.space_id),
+                              };
+                              delete createDashboard.search_vector;
+                              delete createDashboard.dashboard_id;
+                              delete createDashboard.dashboard_uuid;
+                              return createDashboard;
+                          }),
+                      )
+                    : [];
+
+            const dashboardMapping = dashboards.map((c, i) => ({
+                id: c.dashboard_id,
+                newId: newDashboards[i].dashboard_id,
+                uuid: c.dashboard_uuid,
+                newUuid: newDashboards[i].dashboard_uuid,
+            }));
+            const previewDashboardIdBySource = new Map(
+                dashboardMapping.map((m) => [m.id, m.newId]),
+            );
+            const previewDashboardUuidBySource = new Map(
+                dashboardMapping.map((m) => [m.uuid, m.newUuid]),
+            );
+            await this.copyDashboardSlugMappingsToPreview(
+                trx,
+                projectUuid,
+                previewProjectUuid,
+                dashboardMapping.map((mapping) => ({
+                    sourceDashboardUuid: mapping.uuid,
+                    previewDashboardUuid: mapping.newUuid,
+                })),
+            );
+            // Dashboard content is only copied when its dashboard was
+            const hasCopiedDashboard = <
+                T extends { dashboard_uuid: string | null },
+            >(
+                row: T,
+            ): row is T & { dashboard_uuid: string } =>
+                row.dashboard_uuid !== null &&
+                previewDashboardUuidBySource.has(row.dashboard_uuid);
+            const getPreviewDashboardUuid = (sourceDashboardUuid: string) => {
+                const previewDashboardUuid =
+                    previewDashboardUuidBySource.get(sourceDashboardUuid);
+                if (!previewDashboardUuid) {
+                    throw new UnexpectedServerError(
+                        `Missing preview dashboard mapping for ${sourceDashboardUuid}`,
+                    );
+                }
+                return previewDashboardUuid;
+            };
+
+            // Saved SQL
 
             // Get all the saved SQLs
             const savedSQLs = await trx(SavedSqlTableName)
@@ -2448,7 +7295,10 @@ export class ProjectModel {
                     `${SavedSqlTableName}.space_uuid`,
                     `${SpaceTableName}.space_uuid`,
                 )
-                .whereIn(`${SavedSqlTableName}.space_uuid`, spaceUuids)
+                .whereRaw('?? = ANY(?::uuid[])', [
+                    `${SavedSqlTableName}.space_uuid`,
+                    spaceUuids,
+                ])
                 .andWhere(`${SpaceTableName}.project_id`, projectId)
                 .whereNull(`${SavedSqlTableName}.deleted_at`)
                 .select<DbSavedSql[]>(`${SavedSqlTableName}.*`);
@@ -2475,18 +7325,10 @@ export class ProjectModel {
                             `Chart ${d.saved_sql_uuid} has no space_uuid`,
                         );
                     }
-                    // Generate the slug asynchronously
-                    // const uniqueSlug = await generateUniqueSlug(
-                    //     trx,
-                    //     SavedSqlTableName,
-                    //     d.slug, // using the existing slug as a base - preventing naming duplicates
-                    // );
-                    // Map the saved SQL to the new saved SQL
                     const createSavedSQL: CloneSavedSQL = {
                         ...d,
                         project_uuid: previewProjectUuid,
                         space_uuid: getNewSpaceUuid(d.space_uuid),
-                        // slug: uniqueSlug,
                         search_vector: undefined,
                         saved_sql_uuid: undefined,
                         dashboard_uuid: null,
@@ -2500,17 +7342,17 @@ export class ProjectModel {
                     mappedSavedSQLsPromises,
                 );
                 // Insert all the saved SQLs after they have been mapped and return the result
-                const newSavedSQLs = await trx(SavedSqlTableName)
-                    .insert(mappedSavedSQLs)
-                    .returning('*');
-                return newSavedSQLs;
+                return chunkedInsertReturning<DbSavedSql>(
+                    trx,
+                    SavedSqlTableName,
+                    mappedSavedSQLs,
+                );
             };
 
             // Create the saved SQLs
             const newSavedSQLs = await createSavedSQLs(savedSQLs);
 
-            // Create a mapping of the old saved SQLs to the new saved SQLs
-            const savedSQLInDashboards = await trx(SavedSqlTableName)
+            const sourceSavedSQLInDashboards = await trx(SavedSqlTableName)
                 .leftJoin(
                     DashboardsTableName,
                     function nonDeletedDashboardJoin() {
@@ -2532,34 +7374,36 @@ export class ProjectModel {
                 .whereNull(`${SavedSqlTableName}.deleted_at`)
                 .select<DbSavedSql[]>(`${SavedSqlTableName}.*`);
 
+            const savedSQLInDashboards =
+                sourceSavedSQLInDashboards.filter(hasCopiedDashboard);
+
             Logger.info(
-                `Copying ${savedSQLInDashboards.length} charts in dashboards on ${previewProjectUuid}`,
+                `Copying ${savedSQLInDashboards.length} SQL charts in dashboards on ${previewProjectUuid}, skipping ${
+                    sourceSavedSQLInDashboards.length -
+                    savedSQLInDashboards.length
+                } whose dashboard was not copied`,
             );
 
-            // Create the saved SQLs in the dashboards
             const newSavedSQLInDashboards =
                 savedSQLInDashboards.length > 0
-                    ? await trx(SavedSqlTableName)
-                          .insert(
-                              savedSQLInDashboards.map((d) => {
-                                  if (!d.dashboard_uuid) {
-                                      throw new Error(
-                                          `Chart ${d.saved_sql_uuid} has no dashboard_uuid`,
-                                      );
-                                  }
-                                  const createSavedSQL: CloneSavedSQL = {
-                                      ...d,
-                                      dashboard_uuid: d.dashboard_uuid,
-                                      search_vector: undefined,
-                                      saved_sql_uuid: undefined,
-                                      space_uuid: null,
-                                  };
-                                  delete createSavedSQL.search_vector;
-                                  delete createSavedSQL.saved_sql_uuid;
-                                  return createSavedSQL;
-                              }),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<DbSavedSql>(
+                          trx,
+                          SavedSqlTableName,
+                          savedSQLInDashboards.map((d) => {
+                              const createSavedSQL: CloneSavedSQL = {
+                                  ...replaceProjectUuid(d, previewProjectUuid),
+                                  dashboard_uuid: getPreviewDashboardUuid(
+                                      d.dashboard_uuid,
+                                  ),
+                                  search_vector: undefined,
+                                  saved_sql_uuid: undefined,
+                                  space_uuid: null,
+                              };
+                              delete createSavedSQL.search_vector;
+                              delete createSavedSQL.saved_sql_uuid;
+                              return createSavedSQL;
+                          }),
+                      )
                     : [];
 
             // Create a mapping of the old saved SQLs to the new saved SQLs
@@ -2577,47 +7421,56 @@ export class ProjectModel {
                 ...savedSQLInSpacesMapping,
                 ...savedSQLInDashboardsMapping,
             ];
+            const previewSavedSqlUuidBySource = new Map(
+                savedSQLMapping.map((m) => [m.id, m.newId]),
+            );
 
             const savedSQLUuids = savedSQLMapping.map((c) => c.id);
 
             // Get the last saved SQL version by uuid and created_at
             const lastSavedSQLVersionEntries = await trx('saved_sql_versions')
-                .whereIn('saved_sql_uuid', savedSQLUuids)
+                .whereRaw('?? = ANY(?::uuid[])', [
+                    'saved_sql_uuid',
+                    savedSQLUuids,
+                ])
                 .select('saved_sql_uuid')
                 .max('created_at as latest_created_at')
                 .groupBy('saved_sql_uuid');
 
             // Now query the full records for each saved_sql_uuid where created_at is the latest
             const savedSQLVersions = await trx('saved_sql_versions')
-                .whereIn(
+                .whereRaw('?? = ANY(?::uuid[])', [
                     'saved_sql_uuid',
                     lastSavedSQLVersionEntries.map((d) => d.saved_sql_uuid),
-                )
+                ])
                 .select('*');
 
             const newSavedSQLVersions =
                 savedSQLVersions.length > 0
-                    ? await trx('saved_sql_versions')
-                          .insert(
-                              savedSQLVersions.map((d) => {
-                                  const newSavedSQLUuid = savedSQLMapping.find(
-                                      (m) => m.id === d.saved_sql_uuid,
-                                  )?.newId;
-                                  if (!newSavedSQLUuid) {
-                                      throw new Error(
-                                          `Cannot find new saved SQL uuid for ${d.saved_sql_uuid}`,
-                                      );
-                                  }
-                                  const createSavedSQLVersion = {
-                                      ...d,
-                                      saved_sql_version_uuid: undefined,
-                                      saved_sql_uuid: newSavedSQLUuid,
-                                  };
-                                  delete createSavedSQLVersion.saved_sql_version_uuid;
-                                  return createSavedSQLVersion;
-                              }),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<
+                          (typeof savedSQLVersions)[number]
+                      >(
+                          trx,
+                          'saved_sql_versions',
+                          savedSQLVersions.map((d) => {
+                              const newSavedSQLUuid =
+                                  previewSavedSqlUuidBySource.get(
+                                      d.saved_sql_uuid,
+                                  );
+                              if (!newSavedSQLUuid) {
+                                  throw new Error(
+                                      `Cannot find new saved SQL uuid for ${d.saved_sql_uuid}`,
+                                  );
+                              }
+                              const createSavedSQLVersion = {
+                                  ...remapRowBinding(d, warehouseConnectionMap),
+                                  saved_sql_version_uuid: undefined,
+                                  saved_sql_uuid: newSavedSQLUuid,
+                              };
+                              delete createSavedSQLVersion.saved_sql_version_uuid;
+                              return createSavedSQLVersion;
+                          }),
+                      )
                     : [];
 
             const savedSQLVersionMapping = savedSQLVersions.map((c, i) => ({
@@ -2625,17 +7478,17 @@ export class ProjectModel {
                 newId: newSavedSQLVersions[i].saved_sql_version_uuid,
             }));
 
-            //  dP""b8 88  88    db    88""Yb 888888 .dP"Y8
-            // dP   `" 88  88   dPYb   88__dP   88   `Ybo."
-            // Yb      888888  dP__Yb  88"Yb    88   o.`Y8b
-            //  YboodP 88  88 dP""""Yb 88  Yb   88   8bodP'
+            // Charts
             const charts = await trx(SavedChartsTableName)
                 .leftJoin(
                     SpaceTableName,
                     `${SavedChartsTableName}.space_id`,
                     `${SpaceTableName}.space_id`,
                 )
-                .whereIn(`${SpaceTableName}.space_id`, spaceIds)
+                .whereRaw('?? = ANY(?::int[])', [
+                    `${SpaceTableName}.space_id`,
+                    spaceIds,
+                ])
                 .andWhere(`${SpaceTableName}.project_id`, projectId)
                 .whereNull(`${SpaceTableName}.deleted_at`)
                 .whereNull(`${SavedChartsTableName}.deleted_at`)
@@ -2662,7 +7515,7 @@ export class ProjectModel {
                                   );
                               }
                               const createChart: CloneChart = {
-                                  ...d,
+                                  ...replaceProjectUuid(d, previewProjectUuid),
                                   search_vector: undefined,
                                   saved_query_id: undefined,
                                   saved_query_uuid: undefined,
@@ -2677,7 +7530,7 @@ export class ProjectModel {
                       )
                     : [];
 
-            const chartsInDashboards = await trx(SavedChartsTableName)
+            const sourceChartsInDashboards = await trx(SavedChartsTableName)
                 .leftJoin(
                     DashboardsTableName,
                     function nonDeletedDashboardJoin() {
@@ -2700,27 +7553,28 @@ export class ProjectModel {
                 .whereNull(`${SavedChartsTableName}.deleted_at`)
                 .select<DbSavedChart[]>(`${SavedChartsTableName}.*`);
 
+            const chartsInDashboards =
+                sourceChartsInDashboards.filter(hasCopiedDashboard);
+
             Logger.info(
-                `Copying ${chartsInDashboards.length} charts in dashboards on ${previewProjectUuid}`,
+                `Copying ${chartsInDashboards.length} charts in dashboards on ${previewProjectUuid}, skipping ${
+                    sourceChartsInDashboards.length - chartsInDashboards.length
+                } whose dashboard was not copied`,
             );
 
-            // We also copy charts in dashboards, we will replace the dashboard_uuid later
             const newChartsInDashboards =
                 chartsInDashboards.length > 0
                     ? await chunkedInsertReturning<DbSavedChart>(
                           trx,
                           SavedChartsTableName,
                           chartsInDashboards.map((d) => {
-                              if (!d.dashboard_uuid) {
-                                  throw new Error(
-                                      `Chart in dashboard ${d.saved_query_id} has no dashboard_uuid`,
-                                  );
-                              }
                               const createChart: CloneChart = {
-                                  ...d,
+                                  ...replaceProjectUuid(d, previewProjectUuid),
                                   search_vector: undefined,
                                   space_id: null,
-                                  dashboard_uuid: d.dashboard_uuid,
+                                  dashboard_uuid: getPreviewDashboardUuid(
+                                      d.dashboard_uuid,
+                                  ),
                               };
                               delete createChart.search_vector;
                               delete createChart.saved_query_id;
@@ -2739,24 +7593,52 @@ export class ProjectModel {
                 newId: newChartsInDashboards[i].saved_query_id,
             }));
 
+            const chartUuidMapping = [
+                ...charts.map((chart, index) => ({
+                    sourceChartUuid: chart.saved_query_uuid,
+                    previewChartUuid: newCharts[index].saved_query_uuid,
+                })),
+                ...chartsInDashboards.map((chart, index) => ({
+                    sourceChartUuid: chart.saved_query_uuid,
+                    previewChartUuid:
+                        newChartsInDashboards[index].saved_query_uuid,
+                })),
+            ];
+            const previewChartUuidBySource = new Map(
+                chartUuidMapping.map((m) => [
+                    m.sourceChartUuid,
+                    m.previewChartUuid,
+                ]),
+            );
+
+            await this.copyChartSlugMappingsToPreview(
+                trx,
+                projectUuid,
+                previewProjectUuid,
+                chartUuidMapping,
+            );
+
             const chartMapping = [
                 ...chartInSpacesMapping,
                 ...chartInDashboardsMapping,
             ];
+            const previewChartIdBySource = new Map(
+                chartMapping.map((m) => [m.id, m.newId]),
+            );
 
             const chartIds = chartMapping.map((c) => c.id);
 
             // only get last chart version
             const lastVersionIds = await trx('saved_queries_versions')
-                .whereIn('saved_query_id', chartIds)
+                .whereRaw('?? = ANY(?::int[])', ['saved_query_id', chartIds])
                 .groupBy('saved_query_id')
                 .max('saved_queries_version_id');
 
             const chartVersions = await trx('saved_queries_versions')
-                .whereIn(
+                .whereRaw('?? = ANY(?::int[])', [
                     'saved_queries_version_id',
                     lastVersionIds.map((d) => d.max),
-                )
+                ])
                 .select('*');
 
             const chartVersionIds = chartVersions.map(
@@ -2771,9 +7653,8 @@ export class ProjectModel {
                           trx,
                           'saved_queries_versions',
                           chartVersions.map((d) => {
-                              const newSavedQueryId = chartMapping.find(
-                                  (m) => m.id === d.saved_query_id,
-                              )?.newId;
+                              const newSavedQueryId =
+                                  previewChartIdBySource.get(d.saved_query_id);
                               if (!newSavedQueryId) {
                                   throw new Error(
                                       `Cannot find new chart id for ${d.saved_query_id}`,
@@ -2797,6 +7678,9 @@ export class ProjectModel {
                 id: c.saved_queries_version_id,
                 newId: newChartVersions[i].saved_queries_version_id,
             }));
+            const previewChartVersionIdBySource = new Map(
+                chartVersionMapping.map((m) => [m.id, m.newId]),
+            );
 
             const copyChartVersionContent = async (
                 table: string,
@@ -2806,7 +7690,10 @@ export class ProjectModel {
                 } = {},
             ) => {
                 const content = await trx(table)
-                    .whereIn('saved_queries_version_id', chartVersionIds)
+                    .whereRaw('?? = ANY(?::int[])', [
+                        'saved_queries_version_id',
+                        chartVersionIds,
+                    ])
                     .select(`*`);
 
                 if (content.length === 0) return undefined;
@@ -2822,10 +7709,9 @@ export class ProjectModel {
                             const createContent = {
                                 ...d,
                                 saved_queries_version_id:
-                                    chartVersionMapping.find(
-                                        (m) =>
-                                            m.id === d.saved_queries_version_id,
-                                    )?.newId,
+                                    previewChartVersionIdBySource.get(
+                                        d.saved_queries_version_id,
+                                    ),
                             };
                             excludedFields.forEach((fieldId) => {
                                 delete createContent[fieldId];
@@ -2851,7 +7737,10 @@ export class ProjectModel {
             await copyChartVersionContent(
                 'saved_queries_version_custom_dimensions',
                 ['saved_queries_version_custom_dimension_id'],
-                { custom_range: (value: AnyType) => JSON.stringify(value) },
+                {
+                    custom_range: (value: AnyType) => JSON.stringify(value),
+                    custom_groups: (value: AnyType) => JSON.stringify(value),
+                },
             );
             await copyChartVersionContent(
                 SavedChartCustomSqlDimensionsTableName,
@@ -2868,72 +7757,18 @@ export class ProjectModel {
             await copyChartVersionContent(
                 'saved_queries_version_additional_metrics',
                 ['saved_queries_version_additional_metric_id', 'uuid'],
-                { filters: (value: AnyType) => JSON.stringify(value) },
+                {
+                    filters: (value: AnyType) => JSON.stringify(value),
+                    // jsonb array — without stringify pg serializes it as a
+                    // postgres array literal, which is invalid json
+                    distinct_keys: (value: AnyType) =>
+                        value == null ? null : JSON.stringify(value),
+                },
             );
-
-            // 8888b.     db    .dP"Y8 88  88 88""Yb  dP"Yb     db    88""Yb 8888b.  .dP"Y8
-            //  8I  Yb   dPYb   `Ybo." 88  88 88__dP dP   Yb   dPYb   88__dP  8I  Yb `Ybo."
-            //  8I  dY  dP__Yb  o.`Y8b 888888 88""Yb Yb   dP  dP__Yb  88"Yb   8I  dY o.`Y8b
-            // 8888Y"  dP""""Yb 8bodP' 88  88 88oodP  YbodP  dP""""Yb 88  Yb 8888Y"  8bodP'
-            const dashboards = await trx(DashboardsTableName)
-                .leftJoin(
-                    SpaceTableName,
-                    `${DashboardsTableName}.space_id`,
-                    `${SpaceTableName}.space_id`,
-                )
-                .whereIn(`${DashboardsTableName}.space_id`, spaceIds)
-                .andWhere(`${SpaceTableName}.project_id`, projectId)
-                .whereNull(`${DashboardsTableName}.deleted_at`)
-                .whereNull(`${SpaceTableName}.deleted_at`)
-                .select<DbDashboard[]>(`${DashboardsTableName}.*`);
-
-            const dashboardIds = dashboards.map((d) => d.dashboard_id);
-
-            Logger.info(
-                `Copying ${dashboards.length} dashboards on ${previewProjectUuid}`,
-            );
-
-            const newDashboards =
-                dashboards.length > 0
-                    ? await trx(DashboardsTableName)
-                          .insert(
-                              dashboards.map((d) => {
-                                  type CloneDashboard = Omit<
-                                      DbDashboard,
-                                      | 'dashboard_id'
-                                      | 'dashboard_uuid'
-                                      | 'search_vector'
-                                  > & {
-                                      search_vector?: string;
-                                      dashboard_id?: number;
-                                      dashboard_uuid?: string;
-                                  };
-                                  const createDashboard: CloneDashboard = {
-                                      ...d,
-                                      search_vector: undefined,
-                                      dashboard_id: undefined,
-                                      dashboard_uuid: undefined,
-                                      space_id: getNewSpaceId(d.space_id),
-                                  };
-                                  delete createDashboard.search_vector;
-                                  delete createDashboard.dashboard_id;
-                                  delete createDashboard.dashboard_uuid;
-                                  return createDashboard;
-                              }),
-                          )
-                          .returning('*')
-                    : [];
-
-            const dashboardMapping = dashboards.map((c, i) => ({
-                id: c.dashboard_id,
-                newId: newDashboards[i].dashboard_id,
-                uuid: c.dashboard_uuid,
-                newUuid: newDashboards[i].dashboard_uuid,
-            }));
 
             // Get last version of a dashboard
             const lastDashboardVersionsIds = await trx('dashboard_versions')
-                .whereIn('dashboard_id', dashboardIds)
+                .whereRaw('?? = ANY(?::int[])', ['dashboard_id', dashboardIds])
                 .groupBy('dashboard_id')
                 .max('dashboard_version_id');
 
@@ -2942,38 +7777,46 @@ export class ProjectModel {
             );
 
             const dashboardVersions = await trx('dashboard_versions')
-                .whereIn('dashboard_version_id', dashboardVersionIds)
+                .whereRaw('?? = ANY(?::int[])', [
+                    'dashboard_version_id',
+                    dashboardVersionIds,
+                ])
                 .select('*');
 
             const newDashboardVersions =
                 dashboardVersions.length > 0
-                    ? await trx('dashboard_versions')
-                          .insert(
-                              dashboardVersions.map((d) => {
-                                  const createDashboardVersion = {
-                                      ...d,
-                                      dashboard_version_id: undefined,
-                                      dashboard_version_uuid: undefined,
-                                      dashboard_id: dashboardMapping.find(
-                                          (m) => m.id === d.dashboard_id,
-                                      )?.newId!,
-                                  };
-                                  delete createDashboardVersion.dashboard_version_id;
-                                  delete createDashboardVersion.dashboard_version_uuid;
-                                  return createDashboardVersion;
-                              }),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<
+                          (typeof dashboardVersions)[number]
+                      >(
+                          trx,
+                          'dashboard_versions',
+                          dashboardVersions.map((d) => {
+                              const createDashboardVersion = {
+                                  ...d,
+                                  dashboard_version_id: undefined,
+                                  dashboard_version_uuid: undefined,
+                                  dashboard_id: previewDashboardIdBySource.get(
+                                      d.dashboard_id,
+                                  )!,
+                              };
+                              delete createDashboardVersion.dashboard_version_id;
+                              delete createDashboardVersion.dashboard_version_uuid;
+                              return createDashboardVersion;
+                          }),
+                      )
                     : [];
 
             const dashboardVersionsMapping = dashboardVersions.map((c, i) => ({
                 id: c.dashboard_version_id,
                 newId: newDashboardVersions[i].dashboard_version_id,
             }));
+            const previewDashboardVersionIdBySource = new Map(
+                dashboardVersionsMapping.map((m) => [m.id, m.newId]),
+            );
 
-            const dashboardTabs = await trx(DashboardTabsTableName).whereIn(
-                'dashboard_version_id',
-                dashboardVersionIds,
+            const dashboardTabs = await trx(DashboardTabsTableName).whereRaw(
+                '?? = ANY(?::int[])',
+                ['dashboard_version_id', dashboardVersionIds],
             );
 
             Logger.info(
@@ -2981,30 +7824,38 @@ export class ProjectModel {
             );
             let newDashboardTabs: DbDashboardTabs[] = [];
             if (dashboardTabs.length > 0) {
-                newDashboardTabs = await trx(DashboardTabsTableName)
-                    .insert(
+                newDashboardTabs =
+                    await chunkedInsertReturning<DbDashboardTabs>(
+                        trx,
+                        DashboardTabsTableName,
                         dashboardTabs.map((d) => ({
                             ...d,
                             uuid: uuidv4(), // we need to generate the uuid here: https://github.com/lightdash/lightdash/issues/10408
-                            dashboard_id: dashboardMapping.find(
-                                (m) => m.id === d.dashboard_id,
-                            )?.newId!,
-                            dashboard_version_id: dashboardVersionsMapping.find(
-                                (m) => m.id === d.dashboard_version_id,
-                            )?.newId!,
+                            dashboard_id: previewDashboardIdBySource.get(
+                                d.dashboard_id,
+                            )!,
+                            dashboard_version_id:
+                                previewDashboardVersionIdBySource.get(
+                                    d.dashboard_version_id,
+                                )!,
                         })),
-                    )
-                    .returning('*');
+                    );
             }
             const dashboardTabsMapping = newDashboardTabs.map((c, i) => ({
                 uuid: dashboardTabs[i].uuid,
                 newUuid: c.uuid,
                 dashboardVersionId: dashboardTabs[i].dashboard_version_id,
             }));
+            const previewTabUuidBySource = new Map(
+                dashboardTabsMapping.map((m) => [
+                    `${m.dashboardVersionId}:${m.uuid}`,
+                    m.newUuid,
+                ]),
+            );
 
-            const dashboardViews = await trx(DashboardViewsTableName).whereIn(
-                'dashboard_version_id',
-                dashboardVersionIds,
+            const dashboardViews = await trx(DashboardViewsTableName).whereRaw(
+                '?? = ANY(?::int[])',
+                ['dashboard_version_id', dashboardVersionIds],
             );
 
             Logger.info(
@@ -3012,20 +7863,23 @@ export class ProjectModel {
             );
 
             if (dashboardViews.length > 0) {
-                await trx(DashboardViewsTableName).insert(
+                await chunkedInsertReturning<(typeof dashboardViews)[number]>(
+                    trx,
+                    DashboardViewsTableName,
                     dashboardViews.map((d) => ({
                         ...d,
                         dashboard_view_uuid: undefined,
-                        dashboard_version_id: dashboardVersionsMapping.find(
-                            (m) => m.id === d.dashboard_version_id,
-                        )?.newId!,
+                        dashboard_version_id:
+                            previewDashboardVersionIdBySource.get(
+                                d.dashboard_version_id,
+                            )!,
                     })),
                 );
             }
 
-            const dashboardTiles = await trx('dashboard_tiles').whereIn(
-                'dashboard_version_id',
-                dashboardVersionIds,
+            const dashboardTiles = await trx('dashboard_tiles').whereRaw(
+                '?? = ANY(?::int[])',
+                ['dashboard_version_id', dashboardVersionIds],
             );
 
             Logger.info(
@@ -3036,115 +7890,78 @@ export class ProjectModel {
                 (dv) => dv.dashboard_tile_uuid,
             );
 
-            Logger.info(
-                `Updating ${chartsInDashboards.length} charts in dashboards`,
-            );
-            // Update chart in dashboards with new dashboardUuids
-            const updateChartInDashboards = newChartsInDashboards.map(
-                (chart) => {
-                    const newDashboardUuid = dashboardMapping.find(
-                        (m) => m.uuid === chart.dashboard_uuid,
-                    )?.newUuid;
-
-                    if (!newDashboardUuid) {
-                        // The dashboard was not copied, perhaps becuase it belongs to a space the user doesn't have access to
-                        // We delete this chart in dashboard
-                        return trx(SavedChartsTableName)
-                            .where('saved_query_id', chart.saved_query_id)
-                            .delete();
-                    }
-                    return trx(SavedChartsTableName)
-                        .update({
-                            dashboard_uuid: newDashboardUuid,
-                        })
-                        .where('saved_query_id', chart.saved_query_id);
-                },
-            );
-            await Promise.all(updateChartInDashboards);
-
-            // update saved_sqls in dashboards
-            const updateSavedSQLInDashboards = newSavedSQLInDashboards.map(
-                (chart) => {
-                    const newDashboardUuid = dashboardMapping.find(
-                        (m) => m.uuid === chart.dashboard_uuid,
-                    )?.newUuid;
-
-                    if (!newDashboardUuid) {
-                        // The dashboard was not copied, perhaps becuase it belongs to a space the user doesn't have access to
-                        // We delete this chart in dashboard
-                        return trx(SavedSqlTableName)
-                            .where('saved_sql_uuid', chart.saved_sql_uuid)
-                            .delete();
-                    }
-                    return trx(SavedSqlTableName)
-                        .update({
-                            dashboard_uuid: newDashboardUuid,
-                        })
-                        .where('saved_sql_uuid', chart.saved_sql_uuid)
-                        .whereNull('deleted_at');
-                },
-            );
-            await Promise.all(updateSavedSQLInDashboards);
-
             const newDashboardTiles =
                 dashboardTiles.length > 0
-                    ? await trx('dashboard_tiles')
-                          .insert(
-                              dashboardTiles.map((d) => ({
-                                  ...d,
-                                  // we keep the same dashboard_tile_uuid
-                                  dashboard_version_id:
-                                      dashboardVersionsMapping.find(
-                                          (m) =>
-                                              m.id === d.dashboard_version_id,
-                                      )?.newId!,
-                                  tab_uuid: dashboardTabsMapping.find(
-                                      (m) =>
-                                          m.uuid === d.tab_uuid &&
-                                          m.dashboardVersionId ===
-                                              d.dashboard_version_id,
-                                  )?.newUuid,
-                              })),
-                          )
-                          .returning('*')
+                    ? await chunkedInsertReturning<
+                          (typeof dashboardTiles)[number]
+                      >(
+                          trx,
+                          'dashboard_tiles',
+                          dashboardTiles.map((d) => ({
+                              ...d,
+                              // we keep the same dashboard_tile_uuid
+                              dashboard_version_id:
+                                  previewDashboardVersionIdBySource.get(
+                                      d.dashboard_version_id,
+                                  )!,
+                              tab_uuid: previewTabUuidBySource.get(
+                                  `${d.dashboard_version_id}:${d.tab_uuid}`,
+                              ),
+                          })),
+                      )
                     : [];
 
             const dashboardTilesMapping = dashboardTiles.map((c, i) => ({
                 id: c.dashboard_tile_uuid,
                 newId: newDashboardTiles[i].dashboard_tile_uuid,
             }));
+            const previewDashboardTileUuidBySource = new Map(
+                dashboardTilesMapping.map((m) => [m.id, m.newId]),
+            );
 
             const copyDashboardTileContent = async (table: string) => {
                 const content = await trx(table)
-                    .whereIn('dashboard_tile_uuid', dashboardTileUuids)
-                    .and.whereIn('dashboard_version_id', dashboardVersionIds);
+                    .whereRaw('?? = ANY(?::uuid[])', [
+                        'dashboard_tile_uuid',
+                        dashboardTileUuids,
+                    ])
+                    .and.whereRaw('?? = ANY(?::int[])', [
+                        'dashboard_version_id',
+                        dashboardVersionIds,
+                    ]);
 
                 if (content.length === 0) return undefined;
 
-                const newContent = await trx(table).insert(
+                const newContent = await chunkedInsertReturning<
+                    (typeof content)[number]
+                >(
+                    trx,
+                    table,
                     content.map((d) => ({
                         ...d,
 
                         // only applied to tile charts
                         ...(d.saved_chart_id && {
-                            saved_chart_id: chartMapping.find(
-                                (c) => c.id === d.saved_chart_id,
-                            )?.newId,
+                            saved_chart_id: previewChartIdBySource.get(
+                                d.saved_chart_id,
+                            ),
                         }),
 
                         // only applied to saved sql tiles
                         ...(d.saved_sql_uuid && {
-                            saved_sql_uuid: savedSQLMapping.find(
-                                (c) => c.id === d.saved_sql_uuid,
-                            )?.newId,
+                            saved_sql_uuid: previewSavedSqlUuidBySource.get(
+                                d.saved_sql_uuid,
+                            ),
                         }),
 
-                        dashboard_version_id: dashboardVersionsMapping.find(
-                            (m) => m.id === d.dashboard_version_id,
-                        )?.newId!,
-                        dashboard_tile_uuid: dashboardTilesMapping.find(
-                            (m) => m.id === d.dashboard_tile_uuid,
-                        )?.newId!,
+                        dashboard_version_id:
+                            previewDashboardVersionIdBySource.get(
+                                d.dashboard_version_id,
+                            )!,
+                        dashboard_tile_uuid:
+                            previewDashboardTileUuidBySource.get(
+                                d.dashboard_tile_uuid,
+                            )!,
                     })),
                 );
                 return newContent;
@@ -3188,23 +8005,23 @@ export class ProjectModel {
 
                 const newAiAgents =
                     aiAgents.length > 0
-                        ? await trx(AiAgentTableName)
-                              .insert(
-                                  aiAgents.map((agent) => {
-                                      const createAgent: CloneAiAgent = {
-                                          ...agent,
-                                          ai_agent_uuid: undefined,
-                                          project_uuid: previewProjectUuid,
-                                          created_at: undefined,
-                                          updated_at: undefined,
-                                      };
-                                      delete createAgent.ai_agent_uuid;
-                                      delete createAgent.created_at;
-                                      delete createAgent.updated_at;
-                                      return createAgent;
-                                  }),
-                              )
-                              .returning('*')
+                        ? await chunkedInsertReturning<DbAiAgent>(
+                              trx,
+                              AiAgentTableName,
+                              aiAgents.map((agent) => {
+                                  const createAgent: CloneAiAgent = {
+                                      ...agent,
+                                      ai_agent_uuid: undefined,
+                                      project_uuid: previewProjectUuid,
+                                      created_at: undefined,
+                                      updated_at: undefined,
+                                  };
+                                  delete createAgent.ai_agent_uuid;
+                                  delete createAgent.created_at;
+                                  delete createAgent.updated_at;
+                                  return createAgent;
+                              }),
+                          )
                         : [];
 
                 aiAgentMapping = aiAgents
@@ -3213,6 +8030,9 @@ export class ProjectModel {
                         newId: newAiAgents[i]?.ai_agent_uuid,
                     }))
                     .filter((mapping) => !!mapping.newId);
+                const previewAiAgentUuidBySource = new Map(
+                    aiAgentMapping.map((m) => [m.id, m.newId]),
+                );
 
                 const aiAgentUuids = aiAgents.map(
                     (agent) => agent.ai_agent_uuid,
@@ -3223,7 +8043,10 @@ export class ProjectModel {
                     const aiAgentInstructionVersions = await trx(
                         AiAgentInstructionVersionsTableName,
                     )
-                        .whereIn('ai_agent_uuid', aiAgentUuids)
+                        .whereRaw('?? = ANY(?::uuid[])', [
+                            'ai_agent_uuid',
+                            aiAgentUuids,
+                        ])
                         .select('*');
 
                     Logger.debug(
@@ -3231,11 +8054,16 @@ export class ProjectModel {
                     );
 
                     if (aiAgentInstructionVersions.length > 0) {
-                        await trx(AiAgentInstructionVersionsTableName).insert(
+                        await chunkedInsertReturning<
+                            (typeof aiAgentInstructionVersions)[number]
+                        >(
+                            trx,
+                            AiAgentInstructionVersionsTableName,
                             aiAgentInstructionVersions.map((version) => {
-                                const newAiAgentUuid = aiAgentMapping.find(
-                                    (m) => m.id === version.ai_agent_uuid,
-                                )?.newId;
+                                const newAiAgentUuid =
+                                    previewAiAgentUuidBySource.get(
+                                        version.ai_agent_uuid,
+                                    );
                                 if (!newAiAgentUuid) {
                                     throw new Error(
                                         `Cannot find new AI agent UUID for ${version.ai_agent_uuid}`,
@@ -3265,7 +8093,10 @@ export class ProjectModel {
                     const aiAgentGroupAccesses = await trx(
                         AiAgentGroupAccessTableName,
                     )
-                        .whereIn('ai_agent_uuid', aiAgentUuids)
+                        .whereRaw('?? = ANY(?::uuid[])', [
+                            'ai_agent_uuid',
+                            aiAgentUuids,
+                        ])
                         .select('*');
 
                     Logger.debug(
@@ -3273,11 +8104,16 @@ export class ProjectModel {
                     );
 
                     if (aiAgentGroupAccesses.length > 0) {
-                        await trx(AiAgentGroupAccessTableName).insert(
+                        await chunkedInsertReturning<
+                            (typeof aiAgentGroupAccesses)[number]
+                        >(
+                            trx,
+                            AiAgentGroupAccessTableName,
                             aiAgentGroupAccesses.map((groupAccess) => {
-                                const newAiAgentUuid = aiAgentMapping.find(
-                                    (m) => m.id === groupAccess.ai_agent_uuid,
-                                )?.newId;
+                                const newAiAgentUuid =
+                                    previewAiAgentUuidBySource.get(
+                                        groupAccess.ai_agent_uuid,
+                                    );
                                 if (!newAiAgentUuid) {
                                     throw new Error(
                                         `Cannot find new AI agent UUID for ${groupAccess.ai_agent_uuid}`,
@@ -3298,7 +8134,10 @@ export class ProjectModel {
                     const aiAgentUserAccesses = await trx(
                         AiAgentUserAccessTableName,
                     )
-                        .whereIn('ai_agent_uuid', aiAgentUuids)
+                        .whereRaw('?? = ANY(?::uuid[])', [
+                            'ai_agent_uuid',
+                            aiAgentUuids,
+                        ])
                         .select('*');
 
                     Logger.debug(
@@ -3306,11 +8145,16 @@ export class ProjectModel {
                     );
 
                     if (aiAgentUserAccesses.length > 0) {
-                        await trx(AiAgentUserAccessTableName).insert(
+                        await chunkedInsertReturning<
+                            (typeof aiAgentUserAccesses)[number]
+                        >(
+                            trx,
+                            AiAgentUserAccessTableName,
                             aiAgentUserAccesses.map((userAccess) => {
-                                const newAiAgentUuid = aiAgentMapping.find(
-                                    (m) => m.id === userAccess.ai_agent_uuid,
-                                )?.newId;
+                                const newAiAgentUuid =
+                                    previewAiAgentUuidBySource.get(
+                                        userAccess.ai_agent_uuid,
+                                    );
                                 if (!newAiAgentUuid) {
                                     throw new Error(
                                         `Cannot find new AI agent UUID for ${userAccess.ai_agent_uuid}`,
@@ -3333,6 +8177,126 @@ export class ProjectModel {
                 );
             }
 
+            // Categories (tags) belong to the project, not to content; copy
+            // them so the preview's catalog carries the same ones once it
+            // is indexed. Assignments are rebuilt by that index.
+            const tags = await trx(TagsTableName).where(
+                'project_uuid',
+                projectUuid,
+            );
+            Logger.info(`Copying ${tags.length} tags on ${previewProjectUuid}`);
+            if (tags.length > 0) {
+                await chunkedInsertReturning<(typeof tags)[number]>(
+                    trx,
+                    TagsTableName,
+                    tags.map(({ tag_uuid, created_at, ...tag }) => ({
+                        ...tag,
+                        project_uuid: previewProjectUuid,
+                    })),
+                );
+            }
+
+            // Pinned items: the preview's homepage shows what the project
+            // pins, mapped onto the copied dashboards, charts and spaces.
+            const [pinnedList] = await trx(PinnedListTableName).where(
+                'project_uuid',
+                projectUuid,
+            );
+            if (pinnedList) {
+                const [existingPreviewList] = await trx(
+                    PinnedListTableName,
+                ).where('project_uuid', previewProjectUuid);
+                const previewList =
+                    existingPreviewList ??
+                    (
+                        await trx(PinnedListTableName)
+                            .insert({ project_uuid: previewProjectUuid })
+                            .returning('*')
+                    )[0];
+                const pinnedDashboards = await trx(
+                    PinnedDashboardTableName,
+                ).where('pinned_list_uuid', pinnedList.pinned_list_uuid);
+                const pinnedCharts = await trx(PinnedChartTableName).where(
+                    'pinned_list_uuid',
+                    pinnedList.pinned_list_uuid,
+                );
+                const pinnedSpaces = await trx(PinnedSpaceTableName).where(
+                    'pinned_list_uuid',
+                    pinnedList.pinned_list_uuid,
+                );
+                Logger.info(
+                    `Copying ${
+                        pinnedDashboards.length +
+                        pinnedCharts.length +
+                        pinnedSpaces.length
+                    } pinned items on ${previewProjectUuid}`,
+                );
+                const dashboardInserts = pinnedDashboards.flatMap((pin) => {
+                    const mapped = previewDashboardUuidBySource.get(
+                        pin.dashboard_uuid,
+                    );
+                    return mapped
+                        ? [
+                              {
+                                  pinned_list_uuid:
+                                      previewList.pinned_list_uuid,
+                                  dashboard_uuid: mapped,
+                                  order: pin.order,
+                              },
+                          ]
+                        : [];
+                });
+                if (dashboardInserts.length > 0) {
+                    await chunkedInsertReturning(
+                        trx,
+                        PinnedDashboardTableName,
+                        dashboardInserts,
+                    );
+                }
+                const chartInserts = pinnedCharts.flatMap((pin) => {
+                    const mapped = previewChartUuidBySource.get(
+                        pin.saved_chart_uuid,
+                    );
+                    return mapped
+                        ? [
+                              {
+                                  pinned_list_uuid:
+                                      previewList.pinned_list_uuid,
+                                  saved_chart_uuid: mapped,
+                                  order: pin.order,
+                              },
+                          ]
+                        : [];
+                });
+                if (chartInserts.length > 0) {
+                    await chunkedInsertReturning(
+                        trx,
+                        PinnedChartTableName,
+                        chartInserts,
+                    );
+                }
+                const spaceInserts = pinnedSpaces.flatMap((pin) => {
+                    const mapped = previewSpaceUuidBySource.get(pin.space_uuid);
+                    return mapped
+                        ? [
+                              {
+                                  pinned_list_uuid:
+                                      previewList.pinned_list_uuid,
+                                  space_uuid: mapped,
+                                  order: pin.order,
+                              },
+                          ]
+                        : [];
+                });
+                if (spaceInserts.length > 0) {
+                    await chunkedInsertReturning(
+                        trx,
+                        PinnedSpaceTableName,
+                        spaceInserts,
+                    );
+                }
+            }
+
             const contentMapping: PreviewContentMapping = {
                 charts: chartMapping,
                 chartVersions: chartVersionMapping,
@@ -3349,59 +8313,190 @@ export class ProjectModel {
                 preview_project_uuid: previewProjectUuid,
                 content_mapping: contentMapping,
             });
+
+            // Return the source→preview space mapping so callers (preview data
+            // app duplication) can place copied entities into the mirrored
+            // preview spaces.
+            return {
+                spaceMapping: spaceMapping.map((s) => ({
+                    sourceSpaceUuid: s.uuid,
+                    previewSpaceUuid: s.newUuid,
+                })),
+            };
         });
     }
 
+    async getPreviewAiAgentUuid({
+        projectUuid,
+        previewProjectUuid,
+        aiAgentUuid,
+    }: {
+        projectUuid: string;
+        previewProjectUuid: string;
+        aiAgentUuid: string;
+    }): Promise<string | null> {
+        const row = await this.database('preview_content')
+            .select<{ content_mapping: PreviewContentMapping }[]>(
+                'content_mapping',
+            )
+            .where('project_uuid', projectUuid)
+            .where('preview_project_uuid', previewProjectUuid)
+            .orderBy('created_at', 'desc')
+            .first();
+
+        const match = row?.content_mapping.aiAgents.find(
+            (mapping) => String(mapping.id) === aiAgentUuid,
+        );
+        return typeof match?.newId === 'string' ? match.newId : null;
+    }
+
+    async getUpstreamChartUuidFromPreview(
+        previewProjectUuid: string,
+        previewChartUuid: string,
+    ): Promise<string | null> {
+        const previewChart = await this.database(SavedChartsTableName)
+            .select('saved_query_id')
+            .where('project_uuid', previewProjectUuid)
+            .where('saved_query_uuid', previewChartUuid)
+            .whereNull('deleted_at')
+            .first();
+        if (!previewChart) return null;
+
+        const previewContent = await this.database('preview_content')
+            .select<
+                {
+                    project_uuid: string;
+                    content_mapping: PreviewContentMapping;
+                }[]
+            >('project_uuid', 'content_mapping')
+            .where('preview_project_uuid', previewProjectUuid)
+            .orderBy('created_at', 'desc')
+            .first();
+        const sourceMapping = previewContent?.content_mapping.charts.find(
+            ({ newId }) => Number(newId) === previewChart.saved_query_id,
+        );
+        if (!previewContent || !sourceMapping) return null;
+
+        const upstreamChart = await this.database(SavedChartsTableName)
+            .select('saved_query_uuid')
+            .where('project_uuid', previewContent.project_uuid)
+            .where('saved_query_id', sourceMapping.id)
+            .whereNull('deleted_at')
+            .first();
+
+        return upstreamChart?.saved_query_uuid ?? null;
+    }
+
+    async getUpstreamDashboardUuidFromPreview(
+        previewProjectUuid: string,
+        previewDashboardUuid: string,
+    ): Promise<string | null> {
+        const previewDashboard = await this.database(DashboardsTableName)
+            .select('dashboard_id')
+            .where('project_uuid', previewProjectUuid)
+            .where('dashboard_uuid', previewDashboardUuid)
+            .whereNull('deleted_at')
+            .first();
+        if (!previewDashboard) return null;
+
+        const previewContent = await this.database('preview_content')
+            .select<
+                {
+                    project_uuid: string;
+                    content_mapping: PreviewContentMapping;
+                }[]
+            >('project_uuid', 'content_mapping')
+            .where('preview_project_uuid', previewProjectUuid)
+            .orderBy('created_at', 'desc')
+            .first();
+        const sourceMapping = previewContent?.content_mapping.dashboards.find(
+            ({ newId }) => Number(newId) === previewDashboard.dashboard_id,
+        );
+        if (!previewContent || !sourceMapping) return null;
+
+        const upstreamDashboard = await this.database(DashboardsTableName)
+            .select('dashboard_uuid')
+            .where('project_uuid', previewContent.project_uuid)
+            .where('dashboard_id', sourceMapping.id)
+            .whereNull('deleted_at')
+            .first();
+
+        return upstreamDashboard?.dashboard_uuid ?? null;
+    }
+
+    /**
+     * Identity options for warehouse clients that authenticate as this
+     * instance. A web identity audience is only used for the organization it
+     * was generated for, so a connection can't use another organization's.
+     */
+    async getWarehouseClientIdentityOptions(
+        credentials: CreateWarehouseCredentials | undefined,
+        organizationUuid: string | undefined,
+    ): Promise<Pick<WarehouseClientOptions, 'awsCredentials'>> {
+        const awsCredentials = await this.awsWebIdentity.resolveCredentials(
+            credentials,
+            organizationUuid,
+        );
+        return awsCredentials ? { awsCredentials } : {};
+    }
+
     // Easier to mock in ProjectService
-    // eslint-disable-next-line class-methods-use-this
-    getWarehouseClientFromCredentials(credentials: CreateWarehouseCredentials) {
-        return warehouseClientFromCredentials(credentials);
+    getWarehouseClientFromCredentials(
+        credentials: CreateWarehouseCredentials,
+        options?: Parameters<typeof warehouseClientFromCredentials>[1],
+    ) {
+        return warehouseClientFromCredentials(credentials, {
+            // The client is shared by all concurrent async query jobs
+            maxOpenConnections:
+                this.lightdashConfig.natsWorker.workerConcurrency,
+            ...options,
+        });
     }
 
     async createVirtualView(
         projectUuid: string,
-        { name, sql, columns, parameterValues }: CreateVirtualViewPayload,
-        warehouseClient: WarehouseClient,
+        {
+            name,
+            label,
+            sql,
+            columns,
+            parameterValues,
+        }: CreateVirtualViewPayload,
+        warehouseSqlBuilder: WarehouseSqlBuilder,
+        warehouseConnectionUuid: string | null = null,
+        // Use only statements on the given transaction; no other I/O or connection.
+        beforeWrite?: ExploreWriteCheck,
     ): Promise<Explore> {
         const virtualView = createVirtualView(
             name,
             sql,
             columns,
-            warehouseClient,
-            undefined, // label
+            warehouseSqlBuilder,
+            label,
             parameterValues,
         );
 
-        // insert virtual view into cached_explore
-        await this.database(CachedExploreTableName)
-            .insert({
+        await this.database.transaction(async (trx) => {
+            await ProjectModel.lockAndEnsureCachedExplores(trx, projectUuid);
+            if (beforeWrite) await beforeWrite(trx, [virtualView]);
+            const existing = await trx(CachedExploreTableName)
+                .select('name')
+                .where('project_uuid', projectUuid)
+                .andWhere('name', virtualView.name)
+                .first();
+            if (existing) {
+                throw new AlreadyExistsError(
+                    `Explore "${virtualView.name}" already exists`,
+                );
+            }
+            await trx(CachedExploreTableName).insert({
                 project_uuid: projectUuid,
                 name: virtualView.name,
                 table_names: Object.keys(virtualView.tables || {}),
                 explore: virtualView,
-            })
-            .onConflict(['project_uuid', 'name'])
-            .merge()
-            .returning(['name', 'cached_explore_uuid']);
-
-        // append virtual view to cached_explores
-        await this.database(CachedExploresTableName)
-            .where('project_uuid', projectUuid)
-            .update({
-                explores: this.database.raw(
-                    `
-                CASE
-                    WHEN explores IS NULL THEN ?::jsonb
-                    ELSE explores || ?::jsonb
-                END
-            `,
-                    [
-                        JSON.stringify([virtualView]),
-                        JSON.stringify([virtualView]),
-                    ],
-                ),
-            })
-            .returning('*');
+                warehouse_connection_uuid: warehouseConnectionUuid,
+            });
+        });
 
         return virtualView;
     }
@@ -3410,91 +8505,136 @@ export class ProjectModel {
         projectUuid: string,
         exploreName: string,
         payload: UpdateVirtualViewPayload,
-        warehouseClient: WarehouseClient,
+        warehouseSqlBuilder: WarehouseSqlBuilder,
+        expectedExplore?: Explore,
+        // Use only statements on the given transaction; no other I/O or connection.
+        beforeWrite?: ExploreWriteCheck,
     ) {
         const translatedToExplore = createVirtualView(
             exploreName,
             payload.sql,
             payload.columns,
-            warehouseClient,
+            warehouseSqlBuilder,
             payload.name, // label
             payload.parameterValues,
         );
 
-        // insert into cached_explore
-        await this.database(CachedExploreTableName)
-            .update({
-                project_uuid: projectUuid,
-                name: exploreName,
-                table_names: Object.keys(translatedToExplore.tables || {}),
-                explore: translatedToExplore,
-            })
-            .where('project_uuid', projectUuid)
-            .andWhere('name', exploreName)
-            .returning(['name', 'cached_explore_uuid']);
-
-        // append to cached_explores if it doesn't exist; otherwise, update
-        await this.database(CachedExploresTableName)
-            .where('project_uuid', projectUuid)
-            .update({
-                explores: this.database.raw(
-                    `
-                    CASE
-                        WHEN explores IS NULL THEN ?::jsonb
-                        ELSE (
-                            SELECT jsonb_agg(
-                                CASE
-                                    WHEN (value->>'name') = ? THEN ?::jsonb
-                                    ELSE value
-                                END
-                            )
-                            FROM jsonb_array_elements(
-                                CASE
-                                    WHEN jsonb_typeof(explores) = 'array' THEN explores
-                                    ELSE '[]'::jsonb
-                                END
-                            )
-                        )
-                    END
-                `,
-                    [
-                        JSON.stringify([translatedToExplore]),
-                        translatedToExplore.name,
-                        JSON.stringify(translatedToExplore),
-                    ],
-                ),
-            })
-            .returning('*');
+        await this.database.transaction(async (trx) => {
+            await ProjectModel.lockAndEnsureCachedExplores(trx, projectUuid);
+            if (beforeWrite) await beforeWrite(trx, [translatedToExplore]);
+            const existing = await trx(CachedExploreTableName)
+                .select<{ explore: Explore | ExploreError }[]>('explore')
+                .where('project_uuid', projectUuid)
+                .andWhere('name', exploreName)
+                .first();
+            if (!existing || existing.explore.type !== ExploreType.VIRTUAL) {
+                throw new NotFoundError(
+                    `Virtual view "${exploreName}" does not exist`,
+                );
+            }
+            if (
+                expectedExplore &&
+                !isEqual(existing.explore, expectedExplore)
+            ) {
+                throw new ParameterError(
+                    'Virtual view changed concurrently; download and retry',
+                );
+            }
+            await trx(CachedExploreTableName)
+                .update({
+                    table_names: Object.keys(translatedToExplore.tables || {}),
+                    explore: translatedToExplore,
+                })
+                .where('project_uuid', projectUuid)
+                .andWhere('name', exploreName);
+        });
 
         return translatedToExplore;
     }
 
     async deleteVirtualView(projectUuid: string, name: string) {
-        // remove from cached_explore
-        await this.database(CachedExploreTableName)
-            .where('project_uuid', projectUuid)
-            .whereRaw("explore->>'type' = ?", [ExploreType.VIRTUAL])
-            .andWhere('name', name)
-            .delete();
+        await this.database.transaction(async (trx) => {
+            await ProjectModel.lockAndEnsureCachedExplores(trx, projectUuid);
+            await trx(CachedExploreTableName)
+                .where('project_uuid', projectUuid)
+                .whereRaw("explore->>'type' = ?", [ExploreType.VIRTUAL])
+                .andWhere('name', name)
+                .delete();
+        });
+    }
 
-        // Remove from cached_explores
-        await this.database(CachedExploresTableName)
+    async saveExternalSourceExplore(
+        projectUuid: string,
+        explore: Explore,
+    ): Promise<void> {
+        await this.database.transaction(async (trx) => {
+            await ProjectModel.lockAndEnsureCachedExplores(trx, projectUuid);
+            const existing = await trx(CachedExploreTableName)
+                .select<{ explore: Explore | ExploreError }[]>('explore')
+                .where('project_uuid', projectUuid)
+                .andWhere('name', explore.name)
+                .first();
+            if (
+                existing &&
+                existing.explore.type !== ExploreType.EXTERNAL_SOURCE
+            ) {
+                throw new AlreadyExistsError(
+                    `Explore "${explore.name}" already exists`,
+                );
+            }
+
+            const row = {
+                project_uuid: projectUuid,
+                name: explore.name,
+                table_names: Object.keys(explore.tables || {}),
+                explore,
+            };
+            if (existing) {
+                await trx(CachedExploreTableName)
+                    .where('project_uuid', projectUuid)
+                    .andWhere('name', explore.name)
+                    .update({
+                        table_names: row.table_names,
+                        explore: row.explore,
+                    });
+            } else {
+                await trx(CachedExploreTableName).insert({
+                    project_uuid: row.project_uuid,
+                    name: row.name,
+                    table_names: Object.keys(explore.tables || {}),
+                    explore,
+                });
+            }
+        });
+    }
+
+    async deleteExternalSourceExplores(
+        projectUuid: string,
+        names: string[],
+    ): Promise<void> {
+        if (names.length === 0) return;
+        await this.database.transaction(async (trx) => {
+            await ProjectModel.lockAndEnsureCachedExplores(trx, projectUuid);
+            await trx(CachedExploreTableName)
+                .where('project_uuid', projectUuid)
+                .whereRaw("explore->>'type' = ?", [ExploreType.EXTERNAL_SOURCE])
+                .whereIn('name', names)
+                .delete();
+        });
+    }
+
+    static async lockAndEnsureCachedExplores(
+        trx: Transaction,
+        projectUuid: string,
+    ): Promise<void> {
+        await trx(CachedExploresTableName)
+            .insert({ project_uuid: projectUuid, explores: [] })
+            .onConflict('project_uuid')
+            .ignore();
+        await trx(CachedExploresTableName)
             .where('project_uuid', projectUuid)
-            .update({
-                explores: this.database.raw(
-                    `
-                    (
-                        SELECT COALESCE(
-                            jsonb_agg(explore_obj),
-                            '[]'::jsonb
-                        )
-                        FROM jsonb_array_elements(explores) AS explore_obj
-                        WHERE explore_obj->>'name' != ?
-                    )
-                `,
-                    [name],
-                ),
-            });
+            .forUpdate()
+            .first();
     }
 
     async updateSchedulerSettings(
@@ -3536,6 +8676,80 @@ export class ProjectModel {
             .returning('*');
 
         return updatedProject;
+    }
+
+    async getProjectWarehouseConfig(projectUuid: string): Promise<{
+        organizationWarehouseCredentialsUuid: string | null;
+        queryTimezone: string | null;
+    }> {
+        const [project] = await this.database(ProjectTableName)
+            .select('organization_warehouse_credentials_uuid', 'query_timezone')
+            .where('project_uuid', projectUuid);
+
+        if (!project) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
+
+        return {
+            organizationWarehouseCredentialsUuid:
+                project.organization_warehouse_credentials_uuid,
+            queryTimezone: project.query_timezone,
+        };
+    }
+
+    async getAgentSqlScope(projectUuid: string): Promise<AgentSqlScope | null> {
+        const [project] = await this.database(ProjectTableName)
+            .select('agent_sql_scope')
+            .where('project_uuid', projectUuid);
+
+        if (!project) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
+
+        return project.agent_sql_scope ?? null;
+    }
+
+    async updateAgentSqlScope(
+        projectUuid: string,
+        agentSqlScope: AgentSqlScope | null,
+    ): Promise<void> {
+        // Empty everywhere means "unrestricted", stored as NULL so there is
+        // exactly one representation of the default. An allow list is not
+        // required: a scope may consist only of exclusions.
+        const isEmpty =
+            !agentSqlScope ||
+            (agentSqlScope.schemas.length === 0 &&
+                !agentSqlScope.catalogs?.length &&
+                !agentSqlScope.deniedSchemas?.length &&
+                !agentSqlScope.deniedCatalogs?.length);
+        const normalised = isEmpty
+            ? null
+            : {
+                  schemas: agentSqlScope!.schemas,
+                  ...(agentSqlScope!.catalogs?.length
+                      ? { catalogs: agentSqlScope!.catalogs }
+                      : {}),
+                  ...(agentSqlScope!.deniedSchemas?.length
+                      ? { deniedSchemas: agentSqlScope!.deniedSchemas }
+                      : {}),
+                  ...(agentSqlScope!.deniedCatalogs?.length
+                      ? { deniedCatalogs: agentSqlScope!.deniedCatalogs }
+                      : {}),
+              };
+
+        const updated = await this.database(ProjectTableName)
+            .update({ agent_sql_scope: normalised })
+            .where('project_uuid', projectUuid);
+
+        if (updated === 0) {
+            throw new NotFoundError(
+                `Cannot find project with id: ${projectUuid}`,
+            );
+        }
     }
 
     async getQueryTimezone(projectUuid: string): Promise<string | null> {

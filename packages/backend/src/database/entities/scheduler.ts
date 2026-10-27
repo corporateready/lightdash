@@ -9,6 +9,13 @@ import {
     SchedulerGoogleChatTarget,
     SchedulerMsTeamsTarget,
     SchedulerSlackTarget,
+    type DashboardFilterRule,
+    type Filters,
+    type NotificationFrequency,
+    type ParametersValuesMap,
+    type SchedulerAppState,
+    type SchedulerFormat,
+    type ThresholdOptions,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 
@@ -23,9 +30,11 @@ export const SchedulerLogTableName = 'scheduler_log';
 
 export type SchedulerDb = {
     scheduler_uuid: string;
+    project_uuid: string | null;
+    slug: string | null;
     name: string;
     message?: string;
-    format: string;
+    format: SchedulerFormat;
     created_at: Date;
     updated_at: Date;
     created_by: string;
@@ -36,14 +45,16 @@ export type SchedulerDb = {
     saved_sql_uuid: string | null;
     app_uuid: string | null;
     options: Record<string, AnyType>;
-    filters: string | null;
-    parameters: string | null;
+    filters: DashboardFilterRule[] | Filters | null;
+    parameters: ParametersValuesMap | null;
+    app_state: SchedulerAppState | null;
     custom_viewport_width: number | null;
-    thresholds: string | null;
+    thresholds: ThresholdOptions[] | null;
     enabled: boolean;
-    notification_frequency: string | null;
+    notification_frequency: NotificationFrequency | null;
     selected_tabs: string[] | null;
     include_links: boolean;
+    plain_text_email: boolean;
     deleted_at: Date | null;
     deleted_by_user_uuid: string | null;
 };
@@ -53,25 +64,50 @@ export type ChartSchedulerDb = SchedulerDb & {
     dashboard_uuid: null;
     saved_sql_uuid: null;
     app_uuid: null;
+    filters: Filters | null;
+    app_state: null;
 };
 export type DashboardSchedulerDB = SchedulerDb & {
     saved_chart_uuid: null;
     dashboard_uuid: string;
     saved_sql_uuid: null;
     app_uuid: null;
+    filters: DashboardFilterRule[] | null;
+    app_state: null;
 };
 export type SqlChartSchedulerDb = SchedulerDb & {
     saved_chart_uuid: null;
     dashboard_uuid: null;
     saved_sql_uuid: string;
     app_uuid: null;
+    app_state: null;
 };
 export type AppSchedulerDb = SchedulerDb & {
     saved_chart_uuid: null;
     dashboard_uuid: null;
     saved_sql_uuid: null;
     app_uuid: string;
+    filters: null;
 };
+
+// Discriminate a scheduler row by its resource FK. Generic so callers keep the
+// extra columns of richer row types (e.g. SelectScheduler) while narrowing the
+// `filters` column to the shape stored for that resource type.
+export const isChartSchedulerDb = <T extends SchedulerDb>(
+    row: T,
+): row is T & ChartSchedulerDb => row.saved_chart_uuid !== null;
+
+export const isDashboardSchedulerDb = <T extends SchedulerDb>(
+    row: T,
+): row is T & DashboardSchedulerDB => row.dashboard_uuid !== null;
+
+export const isSqlChartSchedulerDb = <T extends SchedulerDb>(
+    row: T,
+): row is T & SqlChartSchedulerDb => row.saved_sql_uuid !== null;
+
+export const isAppSchedulerDb = <T extends SchedulerDb>(
+    row: T,
+): row is T & AppSchedulerDb => row.app_uuid !== null;
 
 export type SchedulerSlackTargetDb = {
     scheduler_slack_target_uuid: string;
@@ -103,16 +139,35 @@ export type SchedulerEmailTargetDb = {
     recipient: string; // email address
 };
 
+// Written as stringified JSON: a JS array would otherwise be coerced to a
+// Postgres array literal and rejected by the JSONB column.
+type SchedulerJsonWrite = {
+    filters: string | null;
+    parameters: string | null;
+    thresholds: string | null;
+    app_state: string | null;
+};
+
+export type SchedulerInsert = Omit<
+    | ChartSchedulerDb
+    | DashboardSchedulerDB
+    | SqlChartSchedulerDb
+    | AppSchedulerDb,
+    | 'scheduler_uuid'
+    | 'created_at'
+    | 'deleted_at'
+    | 'deleted_by_user_uuid'
+    | 'filters'
+    | 'parameters'
+    | 'thresholds'
+    | 'app_state'
+> &
+    SchedulerJsonWrite;
+
 export type SchedulerTable = Knex.CompositeTableType<
     SchedulerDb,
-    Omit<
-        | ChartSchedulerDb
-        | DashboardSchedulerDB
-        | SqlChartSchedulerDb
-        | AppSchedulerDb,
-        'scheduler_uuid' | 'created_at' | 'deleted_at' | 'deleted_by_user_uuid'
-    >,
-    | Pick<
+    SchedulerInsert,
+    | (Pick<
           SchedulerDb,
           | 'name'
           | 'message'
@@ -121,14 +176,13 @@ export type SchedulerTable = Knex.CompositeTableType<
           | 'timezone'
           | 'format'
           | 'options'
-          | 'filters'
-          | 'parameters'
           | 'custom_viewport_width'
-          | 'thresholds'
           | 'notification_frequency'
           | 'selected_tabs'
           | 'include_links'
-      >
+          | 'plain_text_email'
+      > &
+          SchedulerJsonWrite)
     | Pick<SchedulerDb, 'updated_at' | 'enabled'>
     | Pick<SchedulerDb, 'created_by' | 'updated_at'>
     | Pick<SchedulerDb, 'cron'>

@@ -1,0 +1,1431 @@
+import { Ability, type RawRuleOf } from '@casl/ability';
+import {
+    ContentReviewContentType,
+    ContentReviewRequestStatus,
+    ContentReviewRequestView,
+    ContentType,
+    DashboardTileTypes,
+    DirectAccessPrincipalType,
+    DirectAccessResourceType,
+    ForbiddenError,
+    MergeJoinType,
+    OrganizationMemberRole,
+    SpaceMemberRole,
+    type ChartSimilarityContext,
+    type ContentReviewRequest,
+    type ContentReviewSettings,
+    type PossibleAbilities,
+    type SessionUser,
+} from '@lightdash/common';
+import { type LightdashAnalytics } from '../../../analytics/LightdashAnalytics';
+import {
+    type ContentReviewContentLocation,
+    type ContentReviewRequestModel,
+    type ContentReviewSpaceInfo,
+} from '../../../models/ContentReviewRequestModel';
+import { type ContentReviewSettingsModel } from '../../../models/ContentReviewSettingsModel';
+import { type ContentVerificationModel } from '../../../models/ContentVerificationModel';
+import { type DashboardModel } from '../../../models/DashboardModel/DashboardModel';
+import { type DirectAccessModel } from '../../../models/DirectAccessModel';
+import { type GroupsModel } from '../../../models/GroupsModel';
+import { type ProjectModel } from '../../../models/ProjectModel/ProjectModel';
+import { type SavedChartModel } from '../../../models/SavedChartModel';
+import { type SpaceModel } from '../../../models/SpaceModel';
+import { type DashboardService } from '../../../services/DashboardService/DashboardService';
+import { type DirectAccessFeatureGate } from '../../../services/DirectAccess/DirectAccessFeatureGate';
+import { type DocumentService } from '../../../services/DocumentService/DocumentService';
+import { type SavedChartService } from '../../../services/SavedChartsService/SavedChartService';
+import { type SavedSqlService } from '../../../services/SavedSqlService/SavedSqlService';
+import { type SpacePermissionService } from '../../../services/SpaceService/SpacePermissionService';
+import { type AiService } from '../AiService/AiService';
+import { type ContentReviewNotificationService } from '../ContentReviewNotificationService/ContentReviewNotificationService';
+import { ContentReviewRequestService } from './ContentReviewRequestService';
+
+const ORG = 'org-uuid';
+const PROJECT = 'project-uuid';
+const PERSONAL_SPACE = 'personal-space-uuid';
+const SHARED_SPACE = 'shared-space-uuid';
+const CHART = 'chart-uuid';
+const REQUESTER = 'requester-uuid';
+const REVIEWER = 'reviewer-uuid';
+
+const buildUser = (
+    userUuid: string,
+    rules: RawRuleOf<Ability<PossibleAbilities>>[] = [],
+): SessionUser => ({
+    userUuid,
+    email: `${userUuid}@test.com`,
+    firstName: 'Test',
+    lastName: 'User',
+    organizationUuid: ORG,
+    organizationName: 'Test Org',
+    organizationCreatedAt: new Date(),
+    isTrackingAnonymized: false,
+    isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
+    isSetupComplete: true,
+    userId: 1,
+    role: OrganizationMemberRole.EDITOR,
+    ability: new Ability<PossibleAbilities>([
+        { subject: 'Project', action: 'view' },
+        ...rules,
+    ]),
+    isActive: true,
+    abilityRules: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+});
+
+const requester = buildUser(REQUESTER);
+const reviewer = buildUser(REVIEWER);
+const verifier = buildUser(REVIEWER, [
+    { subject: 'ContentVerification', action: 'manage' },
+]);
+
+const chartLocation: ContentReviewContentLocation = {
+    uuid: CHART,
+    name: 'Weekly revenue',
+    slug: 'weekly-revenue',
+    spaceUuid: PERSONAL_SPACE,
+    dashboardUuid: null,
+    deleted: false,
+};
+
+const spaces = new Map<string, ContentReviewSpaceInfo>([
+    [
+        PERSONAL_SPACE,
+        {
+            uuid: PERSONAL_SPACE,
+            name: 'Personal',
+            projectUuid: PROJECT,
+            isDefaultUserSpace: true,
+            deleted: false,
+        },
+    ],
+    [
+        SHARED_SPACE,
+        {
+            uuid: SHARED_SPACE,
+            name: 'Finance',
+            projectUuid: PROJECT,
+            isDefaultUserSpace: false,
+            deleted: false,
+        },
+    ],
+]);
+
+const defaultSettings: ContentReviewSettings = {
+    projectUuid: PROJECT,
+    reviewerGroupUuid: null,
+    verifyOnApproveDefault: true,
+    slackChannelId: null,
+};
+
+const pendingRequest: ContentReviewRequest = {
+    uuid: 'request-uuid',
+    projectUuid: PROJECT,
+    contentType: ContentReviewContentType.CHART,
+    contentUuid: CHART,
+    sourceSpaceUuid: PERSONAL_SPACE,
+    targetSpaceUuid: SHARED_SPACE,
+    requestedBy: { userUuid: REQUESTER, firstName: 'Test', lastName: 'User' },
+    requestNote: null,
+    similarContent: [],
+    status: ContentReviewRequestStatus.PENDING,
+    reviewedBy: null,
+    reviewedAt: null,
+    reviewNote: null,
+    verifiedOnApprove: null,
+    movedContent: [],
+    grantedPrincipals: [
+        {
+            resourceType: DirectAccessResourceType.CHART,
+            resourceUuid: CHART,
+            principal: { type: DirectAccessPrincipalType.USER, uuid: REVIEWER },
+        },
+    ],
+    createdAt: new Date('2026-09-01T10:00:00Z'),
+    updatedAt: new Date('2026-09-01T10:00:00Z'),
+};
+
+let dashboardModelMock: { getByIdOrSlug: ReturnType<typeof vi.fn> };
+
+const buildService = () => {
+    const contentReviewRequestModel = {
+        findSimilarByName: vi.fn().mockResolvedValue([]),
+        findChartSimilarityCandidates: vi.fn().mockResolvedValue([]),
+        findChartLocations: vi.fn().mockResolvedValue([chartLocation]),
+        findDashboardLocations: vi.fn().mockResolvedValue([]),
+        findSqlChartLocations: vi.fn().mockResolvedValue([]),
+        findDocumentLocations: vi.fn().mockResolvedValue([]),
+        findSpaceInfo: vi.fn().mockResolvedValue(spaces),
+        findPendingByContentUuids: vi.fn().mockResolvedValue(new Map()),
+        findPendingByContent: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(pendingRequest),
+        getByUuid: vi.fn().mockResolvedValue(pendingRequest),
+        list: vi.fn().mockResolvedValue({ data: [pendingRequest] }),
+        approve: vi.fn().mockResolvedValue({
+            ...pendingRequest,
+            status: ContentReviewRequestStatus.APPROVED,
+        }),
+        reject: vi.fn().mockResolvedValue({
+            ...pendingRequest,
+            status: ContentReviewRequestStatus.REJECTED,
+        }),
+        cancel: vi.fn().mockResolvedValue({
+            ...pendingRequest,
+            status: ContentReviewRequestStatus.CANCELLED,
+        }),
+        clearGrantedPrincipals: vi.fn().mockResolvedValue(undefined),
+        transaction: vi.fn(
+            async (callback: (tx: unknown) => Promise<unknown>) =>
+                callback('tx'),
+        ),
+    };
+    const contentReviewSettingsModel = {
+        get: vi.fn().mockResolvedValue(defaultSettings),
+        upsert: vi.fn(),
+    };
+    const contentVerificationModel = {
+        getByContentUuids: vi.fn().mockResolvedValue(new Map()),
+        verify: vi.fn().mockResolvedValue(undefined),
+    };
+    const dashboardModel = { getByIdOrSlug: vi.fn() };
+    dashboardModelMock = dashboardModel;
+    const dashboardService = { moveToSpace: vi.fn() };
+    const directAccessFeatureGate = {
+        isEnabledForUser: vi.fn().mockResolvedValue(true),
+    };
+    const directAccessModel = {
+        listUsers: vi
+            .fn()
+            .mockResolvedValue([
+                { userUuid: REVIEWER },
+                { userUuid: 'viewer-uuid' },
+                { userUuid: REQUESTER },
+            ]),
+        upsertAccess: vi.fn().mockResolvedValue({}),
+        revokeAccess: vi.fn().mockResolvedValue({}),
+    };
+    const documentService = {
+        get: vi.fn(),
+        moveApprovedToSpace: vi.fn().mockResolvedValue(undefined),
+    };
+    const groupsModel = {
+        findUserInGroups: vi.fn().mockResolvedValue([]),
+        getGroup: vi.fn(),
+    };
+    const projectModel = {
+        getSummary: vi.fn().mockResolvedValue({ organizationUuid: ORG }),
+    };
+    const aiService = {
+        isAmbientAiEnabled: vi.fn().mockResolvedValue(true),
+        compareCharts: vi.fn().mockResolvedValue(undefined),
+    };
+    const savedChartModel = { getSimilarityContexts: vi.fn() };
+    const savedChartService = {
+        get: vi.fn().mockResolvedValue({ name: chartLocation.name }),
+        moveToSpace: vi.fn().mockResolvedValue(undefined),
+    };
+    const savedSqlService = {
+        moveToSpace: vi.fn().mockResolvedValue(undefined),
+    };
+    const spaceModel = {
+        getSpacesByProjectUuid: vi
+            .fn()
+            .mockResolvedValue([
+                { uuid: SHARED_SPACE },
+                { uuid: PERSONAL_SPACE },
+            ]),
+        findPersonalSpace: vi.fn().mockResolvedValue({
+            uuid: PERSONAL_SPACE,
+            name: 'Personal',
+            slug: 'personal',
+        }),
+    };
+    const spacePermissionService = {
+        can: vi.fn().mockResolvedValue(true),
+        getAccessibleSpaceUuids: vi.fn().mockResolvedValue([SHARED_SPACE]),
+        getPaginatedSpaceAccess: vi.fn().mockResolvedValue({
+            data: [
+                { userUuid: REVIEWER, role: SpaceMemberRole.EDITOR },
+                { userUuid: 'viewer-uuid', role: SpaceMemberRole.VIEWER },
+                { userUuid: REQUESTER, role: SpaceMemberRole.ADMIN },
+            ],
+        }),
+    };
+    const analytics = { track: vi.fn() };
+    const contentReviewNotificationService = {
+        notifySubmitted: vi.fn().mockResolvedValue(undefined),
+        notifyDecided: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const service = new ContentReviewRequestService({
+        analytics: analytics as unknown as LightdashAnalytics,
+        aiService: aiService as unknown as AiService,
+        savedChartModel: savedChartModel as unknown as SavedChartModel,
+        contentReviewNotificationService:
+            contentReviewNotificationService as unknown as ContentReviewNotificationService,
+        contentReviewRequestModel:
+            contentReviewRequestModel as unknown as ContentReviewRequestModel,
+        contentReviewSettingsModel:
+            contentReviewSettingsModel as unknown as ContentReviewSettingsModel,
+        contentVerificationModel:
+            contentVerificationModel as unknown as ContentVerificationModel,
+        dashboardModel: dashboardModel as unknown as DashboardModel,
+        dashboardService: dashboardService as unknown as DashboardService,
+        directAccessFeatureGate:
+            directAccessFeatureGate as unknown as DirectAccessFeatureGate,
+        directAccessModel: directAccessModel as unknown as DirectAccessModel,
+        documentService: documentService as unknown as DocumentService,
+        groupsModel: groupsModel as unknown as GroupsModel,
+        projectModel: projectModel as unknown as ProjectModel,
+        savedChartService: savedChartService as unknown as SavedChartService,
+        savedSqlService: savedSqlService as unknown as SavedSqlService,
+        spaceModel: spaceModel as unknown as SpaceModel,
+        spacePermissionService:
+            spacePermissionService as unknown as SpacePermissionService,
+    });
+
+    return {
+        service,
+        aiService,
+        savedChartModel,
+        contentReviewRequestModel,
+        savedSqlService,
+        dashboardService,
+        contentReviewSettingsModel,
+        contentVerificationModel,
+        directAccessFeatureGate,
+        directAccessModel,
+        documentService,
+        groupsModel,
+        savedChartService,
+        spacePermissionService,
+        analytics,
+        contentReviewNotificationService,
+    };
+};
+
+const submitBody = {
+    contentType: ContentReviewContentType.CHART as const,
+    contentUuid: CHART,
+    targetSpaceUuid: SHARED_SPACE,
+    note: 'Useful for the weekly review',
+    similarContent: [],
+};
+
+describe('ContentReviewRequestService', () => {
+    describe('submit', () => {
+        test('grants viewer access to target-space editors and creates the request', async () => {
+            const { service, directAccessModel, contentReviewRequestModel } =
+                buildService();
+
+            const detail = await service.submit(requester, PROJECT, submitBody);
+
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledTimes(1);
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    resourceType: DirectAccessResourceType.CHART,
+                    resourceUuid: CHART,
+                    principal: {
+                        type: DirectAccessPrincipalType.USER,
+                        uuid: REVIEWER,
+                    },
+                    role: SpaceMemberRole.VIEWER,
+                    grantedByUserUuid: REQUESTER,
+                }),
+            );
+            expect(contentReviewRequestModel.create).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    contentUuid: CHART,
+                    sourceSpaceUuid: PERSONAL_SPACE,
+                    targetSpaceUuid: SHARED_SPACE,
+                    requestedByUserUuid: REQUESTER,
+                    grantedPrincipals: [
+                        expect.objectContaining({ resourceUuid: CHART }),
+                    ],
+                }),
+            );
+            expect(detail.content).toEqual({
+                name: 'Weekly revenue',
+                slug: 'weekly-revenue',
+            });
+            expect(detail.targetSpaceName).toBe('Finance');
+        });
+
+        test('skips space admins who cannot receive a grant instead of failing the request', async () => {
+            const {
+                service,
+                directAccessModel,
+                spacePermissionService,
+                contentReviewRequestModel,
+            } = buildService();
+            spacePermissionService.getPaginatedSpaceAccess.mockResolvedValue({
+                data: [
+                    { userUuid: REVIEWER, role: SpaceMemberRole.EDITOR },
+                    {
+                        userUuid: 'service-account-admin',
+                        role: SpaceMemberRole.ADMIN,
+                    },
+                    { userUuid: REQUESTER, role: SpaceMemberRole.ADMIN },
+                ],
+            });
+
+            await service.submit(requester, PROJECT, submitBody);
+
+            expect(directAccessModel.listUsers).toHaveBeenCalledWith({
+                organizationUuid: ORG,
+                projectUuid: PROJECT,
+            });
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledTimes(1);
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    principal: {
+                        type: DirectAccessPrincipalType.USER,
+                        uuid: REVIEWER,
+                    },
+                }),
+            );
+            expect(contentReviewRequestModel.create).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    grantedPrincipals: [
+                        expect.objectContaining({
+                            principal: {
+                                type: DirectAccessPrincipalType.USER,
+                                uuid: REVIEWER,
+                            },
+                        }),
+                    ],
+                }),
+            );
+        });
+
+        test('routes to the reviewer group when one is configured', async () => {
+            const { service, directAccessModel, contentReviewSettingsModel } =
+                buildService();
+            contentReviewSettingsModel.get.mockResolvedValue({
+                ...defaultSettings,
+                reviewerGroupUuid: 'group-uuid',
+            });
+
+            await service.submit(requester, PROJECT, submitBody);
+
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledTimes(1);
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    principal: {
+                        type: DirectAccessPrincipalType.GROUP,
+                        uuid: 'group-uuid',
+                    },
+                }),
+            );
+        });
+
+        test('rejects content that is not in the requester personal space', async () => {
+            const { service, contentReviewRequestModel } = buildService();
+            contentReviewRequestModel.findChartLocations.mockResolvedValue([
+                { ...chartLocation, spaceUuid: SHARED_SPACE },
+            ]);
+
+            await expect(
+                service.submit(requester, PROJECT, submitBody),
+            ).rejects.toThrow('Only content in your personal space');
+        });
+
+        test('rejects a personal space as the target', async () => {
+            const { service } = buildService();
+
+            await expect(
+                service.submit(requester, PROJECT, {
+                    ...submitBody,
+                    targetSpaceUuid: PERSONAL_SPACE,
+                }),
+            ).rejects.toThrow('Choose a shared space');
+        });
+
+        test('conflicts when the content already has a pending request', async () => {
+            const { service, contentReviewRequestModel } = buildService();
+            contentReviewRequestModel.findPendingByContentUuids.mockResolvedValue(
+                new Map([[CHART, pendingRequest]]),
+            );
+
+            await expect(
+                service.submit(requester, PROJECT, submitBody),
+            ).rejects.toThrow('already waiting for review');
+        });
+
+        test('revokes grants when the request row cannot be created', async () => {
+            const { service, contentReviewRequestModel, directAccessModel } =
+                buildService();
+            contentReviewRequestModel.create.mockRejectedValue(
+                new Error('boom'),
+            );
+
+            await expect(
+                service.submit(requester, PROJECT, submitBody),
+            ).rejects.toThrow('boom');
+            expect(directAccessModel.revokeAccess).toHaveBeenCalledTimes(1);
+        });
+
+        test('is forbidden when direct access is off', async () => {
+            const { service, directAccessFeatureGate } = buildService();
+            directAccessFeatureGate.isEnabledForUser.mockResolvedValue(false);
+
+            await expect(
+                service.submit(requester, PROJECT, submitBody),
+            ).rejects.toThrow('not enabled');
+        });
+    });
+
+    describe('approve', () => {
+        test('moves without re-checking source access, verifies, and releases grants', async () => {
+            const {
+                service,
+                savedChartService,
+                contentVerificationModel,
+                directAccessModel,
+                contentReviewRequestModel,
+            } = buildService();
+
+            await service.approve(verifier, PROJECT, pendingRequest.uuid, {
+                verify: true,
+                note: null,
+            });
+
+            expect(savedChartService.moveToSpace).toHaveBeenCalledWith(
+                verifier,
+                {
+                    projectUuid: PROJECT,
+                    itemUuid: CHART,
+                    targetSpaceUuid: SHARED_SPACE,
+                },
+                { tx: 'tx', checkForAccess: false, trackEvent: true },
+            );
+            expect(contentReviewRequestModel.approve).toHaveBeenCalledWith(
+                pendingRequest.uuid,
+                expect.objectContaining({
+                    reviewedByUserUuid: REVIEWER,
+                    verifiedOnApprove: true,
+                    movedContent: [
+                        {
+                            contentType: ContentReviewContentType.CHART,
+                            contentUuid: CHART,
+                            name: 'Weekly revenue',
+                        },
+                    ],
+                }),
+                { tx: 'tx' },
+            );
+            expect(contentVerificationModel.verify).toHaveBeenCalledWith(
+                ContentReviewContentType.CHART,
+                CHART,
+                PROJECT,
+                REVIEWER,
+            );
+            expect(directAccessModel.revokeAccess).toHaveBeenCalledWith(
+                expect.objectContaining({ resourceUuid: CHART }),
+            );
+            expect(
+                contentReviewRequestModel.clearGrantedPrincipals,
+            ).toHaveBeenCalledWith(pendingRequest.uuid);
+        });
+
+        test('refuses to verify without the verification permission', async () => {
+            const { service, savedChartService } = buildService();
+
+            await expect(
+                service.approve(reviewer, PROJECT, pendingRequest.uuid, {
+                    verify: true,
+                    note: null,
+                }),
+            ).rejects.toThrow('permission to verify');
+            expect(savedChartService.moveToSpace).not.toHaveBeenCalled();
+        });
+
+        test('requires update rights on the target space', async () => {
+            const { service, spacePermissionService } = buildService();
+            spacePermissionService.can.mockResolvedValue(false);
+
+            await expect(
+                service.approve(reviewer, PROJECT, pendingRequest.uuid, {
+                    verify: false,
+                    note: null,
+                }),
+            ).rejects.toThrow('permission to review');
+        });
+
+        test('requires reviewer group membership when a group is configured', async () => {
+            const { service, contentReviewSettingsModel, groupsModel } =
+                buildService();
+            contentReviewSettingsModel.get.mockResolvedValue({
+                ...defaultSettings,
+                reviewerGroupUuid: 'group-uuid',
+            });
+            groupsModel.findUserInGroups.mockResolvedValue([]);
+
+            await expect(
+                service.approve(reviewer, PROJECT, pendingRequest.uuid, {
+                    verify: false,
+                    note: null,
+                }),
+            ).rejects.toThrow('permission to review');
+        });
+
+        test('conflicts when the request is no longer pending', async () => {
+            const { service, contentReviewRequestModel } = buildService();
+            contentReviewRequestModel.getByUuid.mockResolvedValue({
+                ...pendingRequest,
+                status: ContentReviewRequestStatus.REJECTED,
+            });
+
+            await expect(
+                service.approve(reviewer, PROJECT, pendingRequest.uuid, {
+                    verify: false,
+                    note: null,
+                }),
+            ).rejects.toThrow('already been decided');
+        });
+    });
+
+    describe('reject and cancel', () => {
+        test('reject needs a note for the requester', async () => {
+            const { service } = buildService();
+
+            await expect(
+                service.reject(reviewer, PROJECT, pendingRequest.uuid, {
+                    note: '   ',
+                }),
+            ).rejects.toThrow('why the request was rejected');
+        });
+
+        test('reject records the note and releases grants', async () => {
+            const { service, contentReviewRequestModel, directAccessModel } =
+                buildService();
+
+            const detail = await service.reject(
+                reviewer,
+                PROJECT,
+                pendingRequest.uuid,
+                { note: 'Duplicate of the finance dashboard' },
+            );
+
+            expect(contentReviewRequestModel.reject).toHaveBeenCalledWith(
+                pendingRequest.uuid,
+                {
+                    reviewedByUserUuid: REVIEWER,
+                    reviewNote: 'Duplicate of the finance dashboard',
+                },
+            );
+            expect(directAccessModel.revokeAccess).toHaveBeenCalledTimes(1);
+            expect(detail.status).toBe(ContentReviewRequestStatus.REJECTED);
+        });
+
+        test('only the requester can cancel', async () => {
+            const { service, contentReviewRequestModel } = buildService();
+
+            await expect(
+                service.cancel(reviewer, PROJECT, pendingRequest.uuid),
+            ).rejects.toThrow('Only the requester');
+
+            await service.cancel(requester, PROJECT, pendingRequest.uuid);
+            expect(contentReviewRequestModel.cancel).toHaveBeenCalledWith(
+                pendingRequest.uuid,
+            );
+        });
+    });
+
+    describe('list and get', () => {
+        test('to-review only shows requests whose target the caller can update', async () => {
+            const { service, spacePermissionService } = buildService();
+            spacePermissionService.getAccessibleSpaceUuids.mockResolvedValue(
+                [],
+            );
+
+            const result = await service.list(
+                reviewer,
+                PROJECT,
+                { view: ContentReviewRequestView.TO_REVIEW, status: null },
+                { page: 1, pageSize: 10 },
+            );
+
+            expect(result.data).toEqual([]);
+            expect(result.pagination?.totalResults).toBe(0);
+        });
+
+        test('mine lists the caller requests with content and space names', async () => {
+            const { service, contentReviewRequestModel } = buildService();
+
+            const result = await service.list(
+                requester,
+                PROJECT,
+                { view: ContentReviewRequestView.MINE, status: null },
+                { page: 1, pageSize: 10 },
+            );
+
+            expect(contentReviewRequestModel.list).toHaveBeenCalledWith(
+                expect.objectContaining({ requestedByUserUuid: REQUESTER }),
+            );
+            expect(result.data[0].sourceSpaceName).toBe('Personal');
+            expect(result.data[0].targetSpaceName).toBe('Finance');
+        });
+
+        test('get is forbidden for someone who is neither requester nor reviewer', async () => {
+            const { service, spacePermissionService } = buildService();
+            spacePermissionService.can.mockResolvedValue(false);
+
+            await expect(
+                service.get(
+                    buildUser('stranger'),
+                    PROJECT,
+                    pendingRequest.uuid,
+                ),
+            ).rejects.toThrow('permission to view');
+        });
+
+        test('get reports what approval would move and whether the caller can verify', async () => {
+            const { service } = buildService();
+
+            const detail = await service.get(
+                verifier,
+                PROJECT,
+                pendingRequest.uuid,
+            );
+
+            expect(detail.canReview).toBe(true);
+            expect(detail.canVerify).toBe(true);
+            expect(detail.verifyByDefault).toBe(true);
+            expect(detail.moveSet).toEqual([
+                {
+                    contentType: ContentReviewContentType.CHART,
+                    contentUuid: CHART,
+                    name: 'Weekly revenue',
+                },
+            ]);
+        });
+    });
+
+    describe('SQL runner charts', () => {
+        const DASHBOARD = 'dashboard-uuid';
+        const SQL_CHART = 'sql-chart-uuid';
+        const dashboardLocation = {
+            uuid: DASHBOARD,
+            name: 'Ops board',
+            slug: 'ops-board',
+            spaceUuid: PERSONAL_SPACE,
+            dashboardUuid: null,
+            deleted: false,
+        };
+        const sqlChartLocation = {
+            uuid: SQL_CHART,
+            name: 'Raw orders',
+            slug: 'raw-orders',
+            spaceUuid: PERSONAL_SPACE,
+            dashboardUuid: null,
+            deleted: false,
+        };
+
+        test('a dashboard takes its personal-space SQL tiles along', async () => {
+            const {
+                service,
+                contentReviewRequestModel,
+                savedSqlService,
+                dashboardService,
+                contentVerificationModel,
+            } = buildService();
+            contentReviewRequestModel.getByUuid.mockResolvedValue({
+                ...pendingRequest,
+                contentType: ContentReviewContentType.DASHBOARD,
+                contentUuid: DASHBOARD,
+            });
+            contentReviewRequestModel.findDashboardLocations.mockResolvedValue([
+                dashboardLocation,
+            ]);
+            contentReviewRequestModel.findChartLocations.mockResolvedValue([]);
+            contentReviewRequestModel.findSqlChartLocations.mockResolvedValue([
+                sqlChartLocation,
+            ]);
+            dashboardModelMock.getByIdOrSlug.mockResolvedValue({
+                tiles: [
+                    {
+                        type: DashboardTileTypes.SQL_CHART,
+                        properties: { savedSqlUuid: SQL_CHART },
+                    },
+                ],
+            });
+
+            await service.approve(verifier, PROJECT, pendingRequest.uuid, {
+                verify: true,
+                note: null,
+            });
+
+            expect(dashboardService.moveToSpace).toHaveBeenCalledWith(
+                verifier,
+                expect.objectContaining({ itemUuid: DASHBOARD }),
+                expect.anything(),
+            );
+            expect(savedSqlService.moveToSpace).toHaveBeenCalledWith(
+                verifier,
+                expect.objectContaining({ itemUuid: SQL_CHART }),
+                expect.anything(),
+            );
+            expect(contentVerificationModel.verify).toHaveBeenCalledWith(
+                ContentType.DASHBOARD,
+                DASHBOARD,
+                PROJECT,
+                REVIEWER,
+            );
+        });
+
+        test('a SQL chart moves through the SQL service and is never verified', async () => {
+            const {
+                service,
+                contentReviewRequestModel,
+                savedSqlService,
+                savedChartService,
+                contentVerificationModel,
+            } = buildService();
+            contentReviewRequestModel.getByUuid.mockResolvedValue({
+                ...pendingRequest,
+                contentType: ContentReviewContentType.SQL_CHART,
+                contentUuid: SQL_CHART,
+            });
+            contentReviewRequestModel.findSqlChartLocations.mockResolvedValue([
+                sqlChartLocation,
+            ]);
+
+            const detail = await service.get(
+                verifier,
+                PROJECT,
+                pendingRequest.uuid,
+            );
+            expect(detail.canVerify).toBe(false);
+
+            await service.approve(verifier, PROJECT, pendingRequest.uuid, {
+                verify: false,
+                note: null,
+            });
+
+            expect(savedSqlService.moveToSpace).toHaveBeenCalledWith(
+                verifier,
+                expect.objectContaining({ itemUuid: SQL_CHART }),
+                expect.anything(),
+            );
+            expect(savedChartService.moveToSpace).not.toHaveBeenCalled();
+            expect(contentVerificationModel.verify).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('Documents', () => {
+        const DOCUMENT = 'document-uuid';
+        const documentLocation = {
+            uuid: DOCUMENT,
+            name: 'Q3 review',
+            slug: 'q3-review',
+            spaceUuid: PERSONAL_SPACE,
+            dashboardUuid: null,
+            deleted: false,
+        };
+        const documentRequest: ContentReviewRequest = {
+            ...pendingRequest,
+            contentType: ContentReviewContentType.DOCUMENT,
+            contentUuid: DOCUMENT,
+        };
+        const documentBody = {
+            ...submitBody,
+            contentType: ContentReviewContentType.DOCUMENT,
+            contentUuid: DOCUMENT,
+        };
+
+        const buildDocumentService = () => {
+            const built = buildService();
+            built.contentReviewRequestModel.findDocumentLocations.mockResolvedValue(
+                [documentLocation],
+            );
+            built.contentReviewRequestModel.getByUuid.mockResolvedValue(
+                documentRequest,
+            );
+            built.documentService.get.mockResolvedValue({
+                documentUuid: DOCUMENT,
+            });
+            return built;
+        };
+
+        test('submit shares the Document with reviewers', async () => {
+            const { service, contentReviewRequestModel, directAccessModel } =
+                buildDocumentService();
+
+            await service.submit(requester, PROJECT, documentBody);
+
+            expect(contentReviewRequestModel.create).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    contentType: ContentReviewContentType.DOCUMENT,
+                    contentUuid: DOCUMENT,
+                }),
+            );
+            expect(directAccessModel.upsertAccess).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    resourceType: DirectAccessResourceType.DOCUMENT,
+                    resourceUuid: DOCUMENT,
+                }),
+            );
+        });
+
+        test('submit fails without creating a request when Documents are off', async () => {
+            const {
+                service,
+                contentReviewRequestModel,
+                directAccessModel,
+                documentService,
+            } = buildDocumentService();
+            documentService.get.mockRejectedValue(
+                new ForbiddenError('Documents are not enabled'),
+            );
+
+            await expect(
+                service.submit(requester, PROJECT, documentBody),
+            ).rejects.toThrow('Documents are not enabled');
+            expect(directAccessModel.upsertAccess).not.toHaveBeenCalled();
+            expect(contentReviewRequestModel.create).not.toHaveBeenCalled();
+        });
+
+        test('approve moves the Document through its approved-move path and can verify it', async () => {
+            const {
+                service,
+                contentReviewRequestModel,
+                documentService,
+                contentVerificationModel,
+            } = buildDocumentService();
+
+            const detail = await service.get(
+                verifier,
+                PROJECT,
+                pendingRequest.uuid,
+            );
+            expect(detail.canVerify).toBe(true);
+
+            await service.approve(verifier, PROJECT, pendingRequest.uuid, {
+                verify: true,
+                note: null,
+            });
+
+            expect(documentService.moveApprovedToSpace).toHaveBeenCalledWith(
+                expect.anything(),
+                {
+                    projectUuid: PROJECT,
+                    documentUuid: DOCUMENT,
+                    targetSpaceUuid: SHARED_SPACE,
+                },
+                { tx: 'tx' },
+            );
+            expect(contentReviewRequestModel.approve).toHaveBeenCalledWith(
+                pendingRequest.uuid,
+                expect.objectContaining({ reviewedByUserUuid: REVIEWER }),
+                expect.anything(),
+            );
+            expect(contentVerificationModel.verify).toHaveBeenCalledWith(
+                ContentType.DOCUMENT,
+                DOCUMENT,
+                PROJECT,
+                REVIEWER,
+            );
+        });
+    });
+
+    describe('settings', () => {
+        const admin = buildUser('admin-uuid', [
+            { subject: 'Project', action: 'manage' },
+        ]);
+
+        it('tracks how reviews are routed when settings change', async () => {
+            const {
+                service,
+                contentReviewSettingsModel,
+                groupsModel,
+                analytics,
+            } = buildService();
+            groupsModel.getGroup.mockResolvedValue({ organizationUuid: ORG });
+            contentReviewSettingsModel.upsert.mockResolvedValue({
+                projectUuid: PROJECT,
+                reviewerGroupUuid: 'group-uuid',
+                verifyOnApproveDefault: true,
+                slackChannelId: 'C123',
+            });
+
+            await service.updateSettings(admin, PROJECT, {
+                reviewerGroupUuid: 'group-uuid',
+            });
+
+            expect(analytics.track).toHaveBeenCalledWith({
+                event: 'content_review_settings.updated',
+                userId: 'admin-uuid',
+                properties: {
+                    organizationId: ORG,
+                    projectId: PROJECT,
+                    routedTo: 'group',
+                    verifyOnApproveDefault: true,
+                    slackNotificationsEnabled: true,
+                },
+            });
+        });
+    });
+});
+
+describe('Ambient AI content similarity', () => {
+    const chart: ChartSimilarityContext = {
+        metricQuery: {
+            exploreName: 'orders',
+            metrics: ['orders_revenue'],
+            dimensions: [],
+            filters: {},
+            sorts: [],
+            limit: 500,
+            tableCalculations: [],
+        },
+    };
+    const params = {
+        contentType: ContentReviewContentType.CHART,
+        name: 'Renamed analysis',
+        excludeContentUuid: null,
+        chart,
+    };
+    const candidate = {
+        uuid: 'existing',
+        name: 'Revenue',
+        slug: 'revenue',
+        contentType: ContentReviewContentType.CHART,
+        spaceUuid: SHARED_SPACE,
+        spaceName: 'Finance',
+    };
+    const setup = () => {
+        const deps = buildService();
+        deps.contentReviewRequestModel.findChartSimilarityCandidates.mockResolvedValue(
+            [candidate],
+        );
+        deps.savedChartModel.getSimilarityContexts.mockResolvedValue([
+            { ...candidate, ...chart },
+        ]);
+        deps.savedChartService.get.mockResolvedValue({
+            name: 'Authoritative saved name',
+            ...chart,
+        });
+        deps.aiService.compareCharts.mockResolvedValue([
+            {
+                uuid: 'existing',
+                relationship: 'potential_duplicate',
+                explanation: 'Same revenue metric and query settings.',
+            },
+        ]);
+        return deps;
+    };
+    it('uses AI verdicts without running the deterministic similarity scorer', async () => {
+        const deps = setup();
+        const result = await deps.service.findSimilarContentWithAi(
+            requester,
+            PROJECT,
+            params,
+        );
+        expect(result).toMatchObject([
+            {
+                contentUuid: 'existing',
+                matchReason: 'potential_duplicate',
+                explanation: 'Same revenue metric and query settings.',
+            },
+        ]);
+        expect(deps.aiService.compareCharts).toHaveBeenCalledWith(
+            requester,
+            PROJECT,
+            {
+                source: { name: params.name, ...chart },
+                candidates: [
+                    { uuid: candidate.uuid, name: candidate.name, ...chart },
+                ],
+            },
+            false,
+        );
+    });
+    it('scopes candidate retrieval to accessible spaces before limiting', async () => {
+        const deps = setup();
+        await deps.service.findSimilarContentWithAi(requester, PROJECT, params);
+        expect(
+            deps.contentReviewRequestModel.findChartSimilarityCandidates,
+        ).toHaveBeenCalledWith(
+            expect.objectContaining({ accessibleSpaceUuids: [SHARED_SPACE] }),
+        );
+    });
+    it('uses server matches instead of fabricated browser matches', async () => {
+        const deps = setup();
+        await deps.service.submit(requester, PROJECT, {
+            ...submitBody,
+            note: null,
+            similarContent: [
+                {
+                    ...candidate,
+                    contentUuid: 'fabricated',
+                    isVerified: true,
+                    score: 100,
+                },
+            ],
+        });
+        expect(deps.contentReviewRequestModel.create).toHaveBeenCalledWith(
+            expect.objectContaining({
+                requestNote: null,
+                similarContent: [
+                    expect.objectContaining({
+                        contentUuid: 'existing',
+                        isVerified: false,
+                    }),
+                ],
+            }),
+        );
+    });
+    it('keeps filter differences in the comparison and its explanation', async () => {
+        const deps = setup();
+        const filtered = { ...chart, parameters: { period: 'last_year' } };
+        deps.savedChartModel.getSimilarityContexts.mockResolvedValue([
+            { ...candidate, ...filtered },
+        ]);
+        deps.aiService.compareCharts.mockResolvedValue([
+            {
+                uuid: 'existing',
+                relationship: 'related',
+                explanation: 'Same metric, different period parameter.',
+            },
+        ]);
+        expect(
+            await deps.service.findSimilarContentWithAi(
+                requester,
+                PROJECT,
+                params,
+            ),
+        ).toMatchObject([
+            {
+                matchReason: 'related',
+                explanation: 'Same metric, different period parameter.',
+            },
+        ]);
+        expect(
+            deps.aiService.compareCharts.mock.calls[0][2].candidates[0]
+                .parameters,
+        ).toEqual(filtered.parameters);
+    });
+    it('does not resurrect name matches rejected by AI', async () => {
+        const deps = setup();
+        deps.aiService.compareCharts.mockResolvedValue([]);
+        expect(
+            await deps.service.findSimilarContentWithAi(
+                requester,
+                PROJECT,
+                params,
+            ),
+        ).toEqual([]);
+    });
+    it('omits suggestions on provider failure or timeout', async () => {
+        const deps = setup();
+        deps.aiService.compareCharts.mockRejectedValue(new Error('Timeout'));
+        expect(
+            await deps.service.findSimilarContentWithAi(
+                requester,
+                PROJECT,
+                params,
+            ),
+        ).toEqual([]);
+    });
+    it('does not read any chart definitions or candidates when AI is disabled', async () => {
+        const deps = setup();
+        deps.aiService.isAmbientAiEnabled.mockResolvedValue(false);
+        expect(
+            await deps.service.findSimilarContentWithAi(requester, PROJECT, {
+                ...params,
+                excludeContentUuid: CHART,
+            }),
+        ).toEqual([]);
+        expect(
+            deps.contentReviewRequestModel.findChartSimilarityCandidates,
+        ).not.toHaveBeenCalled();
+        expect(deps.savedChartService.get).not.toHaveBeenCalled();
+        expect(
+            deps.savedChartModel.getSimilarityContexts,
+        ).not.toHaveBeenCalled();
+        expect(deps.aiService.compareCharts).not.toHaveBeenCalled();
+    });
+    it.each([
+        ContentReviewContentType.SQL_CHART,
+        ContentReviewContentType.DASHBOARD,
+    ])('does not check unsupported content: %s', async (contentType) => {
+        const deps = setup();
+        expect(
+            await deps.service.findSimilarContentWithAi(requester, PROJECT, {
+                ...params,
+                contentType,
+            }),
+        ).toEqual([]);
+        expect(
+            deps.contentReviewRequestModel.findChartSimilarityCandidates,
+        ).not.toHaveBeenCalled();
+        expect(deps.aiService.compareCharts).not.toHaveBeenCalled();
+    });
+    it('does not run a name-only request through AI', async () => {
+        const deps = setup();
+        expect(
+            await deps.service.findSimilarContentWithAi(requester, PROJECT, {
+                ...params,
+                chart: undefined,
+            }),
+        ).toEqual([]);
+        expect(deps.aiService.isAmbientAiEnabled).not.toHaveBeenCalled();
+        expect(
+            deps.contentReviewRequestModel.findChartSimilarityCandidates,
+        ).not.toHaveBeenCalled();
+    });
+    it.each(['disabled', 'cache-miss', 'failed'] as const)(
+        'allows review submission without suggestions when AI is %s',
+        async (mode) => {
+            const deps = setup();
+            if (mode === 'disabled')
+                deps.aiService.isAmbientAiEnabled.mockResolvedValue(false);
+            if (mode === 'cache-miss')
+                deps.aiService.compareCharts.mockResolvedValue(undefined);
+            if (mode === 'failed')
+                deps.aiService.compareCharts.mockRejectedValue(
+                    new Error('Unavailable'),
+                );
+            await deps.service.submit(requester, PROJECT, {
+                ...submitBody,
+                similarContent: [
+                    {
+                        ...candidate,
+                        contentUuid: 'fabricated',
+                        isVerified: true,
+                        score: 100,
+                    },
+                ],
+            });
+            expect(deps.contentReviewRequestModel.create).toHaveBeenCalledWith(
+                expect.objectContaining({ similarContent: [] }),
+            );
+        },
+    );
+    it('rechecks moved candidates before sending their queries to AI', async () => {
+        const deps = setup();
+        deps.savedChartModel.getSimilarityContexts.mockResolvedValue([
+            { ...candidate, ...chart, spaceUuid: PERSONAL_SPACE },
+        ]);
+        expect(
+            await deps.service.findSimilarContentWithAi(
+                requester,
+                PROJECT,
+                params,
+            ),
+        ).toEqual([]);
+        expect(deps.aiService.compareCharts).not.toHaveBeenCalled();
+    });
+    it('normalizes legacy merge requests before comparing charts', async () => {
+        const deps = setup();
+        await deps.service.findSimilarContentWithAi(requester, PROJECT, {
+            ...params,
+            chart: {
+                ...chart,
+                merge: {
+                    primarySourceId: 'a',
+                    sources: [
+                        { id: 'a', kind: 'chart' },
+                        {
+                            id: 'b',
+                            kind: 'query',
+                            metricQuery: chart.metricQuery,
+                        },
+                    ],
+                    joinKey: [],
+                    joinType: MergeJoinType.FULL,
+                    tableCalculations: [],
+                },
+            },
+        });
+        expect(
+            deps.aiService.compareCharts.mock.calls[0][2].source.merge,
+        ).toEqual({
+            chartAs: 'a',
+            queries: {
+                b: {
+                    explore: 'orders',
+                    dimensions: [],
+                    metrics: ['orders_revenue'],
+                },
+            },
+            join: MergeJoinType.FULL,
+            keys: {},
+            limit: 500,
+        });
+    });
+    it('ignores a client replacement query for an existing chart', async () => {
+        const deps = setup();
+        await deps.service.findSimilarContentWithAi(requester, PROJECT, {
+            ...params,
+            chart: { ...chart, parameters: { malicious: 'replacement' } },
+            excludeContentUuid: CHART,
+        });
+        expect(deps.aiService.compareCharts.mock.calls[0][2].source).toEqual({
+            name: 'Authoritative saved name',
+            ...chart,
+        });
+    });
+    it('rejects a saved source without chart access before any AI call', async () => {
+        const deps = setup();
+        deps.savedChartService.get.mockRejectedValue(new Error('Forbidden'));
+        await expect(
+            deps.service.findSimilarContentWithAi(requester, PROJECT, {
+                ...params,
+                excludeContentUuid: CHART,
+            }),
+        ).rejects.toThrow('Forbidden');
+        expect(deps.aiService.compareCharts).not.toHaveBeenCalled();
+    });
+    it('snapshots a completed server verdict without waiting for a model on submit', async () => {
+        const deps = setup();
+        await deps.service.submit(requester, PROJECT, submitBody);
+        expect(deps.aiService.compareCharts.mock.calls[0][3]).toBe(true);
+        expect(deps.contentReviewRequestModel.create).toHaveBeenCalledWith(
+            expect.objectContaining({
+                similarContent: [
+                    expect.objectContaining({
+                        contentUuid: 'existing',
+                        matchReason: 'potential_duplicate',
+                    }),
+                ],
+            }),
+        );
+    });
+    it('enforces the feature gate before reading queries', async () => {
+        const deps = setup();
+        deps.directAccessFeatureGate.isEnabledForUser.mockResolvedValue(false);
+        await expect(
+            deps.service.findSimilarContentWithAi(requester, PROJECT, params),
+        ).rejects.toThrow('not enabled');
+        expect(
+            deps.savedChartModel.getSimilarityContexts,
+        ).not.toHaveBeenCalled();
+        expect(deps.aiService.compareCharts).not.toHaveBeenCalled();
+    });
+});
+
+describe('legacy GET similarity compatibility', () => {
+    const candidate = {
+        contentType: ContentReviewContentType.CHART,
+        uuid: 'existing',
+        name: 'Weekly revenue',
+        slug: 'weekly-revenue',
+        spaceUuid: SHARED_SPACE,
+        spaceName: 'Finance',
+        score: 100,
+        matchReason: 'same_name' as const,
+    };
+    const params = {
+        contentType: ContentReviewContentType.CHART,
+        name: 'Weekly revenue',
+        excludeContentUuid: CHART,
+    };
+
+    it('passes accessible spaces into matching before limiting candidates', async () => {
+        const { service, contentReviewRequestModel, spacePermissionService } =
+            buildService();
+        contentReviewRequestModel.findSimilarByName.mockResolvedValue([
+            candidate,
+        ]);
+        const results = await service.findSimilarContent(
+            requester,
+            PROJECT,
+            params,
+        );
+        expect(
+            spacePermissionService.getAccessibleSpaceUuids,
+        ).toHaveBeenCalledWith('view', requester, [
+            SHARED_SPACE,
+            PERSONAL_SPACE,
+        ]);
+        expect(
+            contentReviewRequestModel.findSimilarByName,
+        ).toHaveBeenCalledWith(
+            expect.objectContaining({ accessibleSpaceUuids: [SHARED_SPACE] }),
+        );
+        expect(results[0]).toMatchObject({
+            contentUuid: 'existing',
+            matchReason: 'same_name',
+            isVerified: false,
+        });
+    });
+
+    it('prefers verified content without letting a weaker name match outrank an exact name', async () => {
+        const { service, contentReviewRequestModel, contentVerificationModel } =
+            buildService();
+        contentReviewRequestModel.findSimilarByName.mockResolvedValue([
+            candidate,
+            {
+                ...candidate,
+                uuid: 'verified-related',
+                score: 90,
+                matchReason: 'similar_name',
+            },
+        ]);
+        contentVerificationModel.getByContentUuids.mockResolvedValue(
+            new Map([['verified-related', {}]]),
+        );
+        const results = await service.findSimilarContent(
+            requester,
+            PROJECT,
+            params,
+        );
+        expect(results.map((item) => item.contentUuid)).toEqual([
+            'existing',
+            'verified-related',
+        ]);
+        expect(results[1].isVerified).toBe(true);
+    });
+
+    it.each(Object.values(ContentReviewContentType))(
+        'keeps legacy %s matching available without AI',
+        async (contentType) => {
+            const { service, contentReviewRequestModel, aiService } =
+                buildService();
+            aiService.isAmbientAiEnabled.mockResolvedValue(false);
+            contentReviewRequestModel.findSimilarByName.mockResolvedValue([
+                { ...candidate, contentType },
+            ]);
+            const results = await service.findSimilarContent(
+                requester,
+                PROJECT,
+                {
+                    ...params,
+                    contentType,
+                    excludeContentUuid: null,
+                },
+            );
+            expect(results).toEqual([
+                expect.objectContaining({
+                    contentUuid: candidate.uuid,
+                    contentType,
+                    matchReason: 'same_name',
+                }),
+            ]);
+            expect(aiService.isAmbientAiEnabled).not.toHaveBeenCalled();
+            expect(aiService.compareCharts).not.toHaveBeenCalled();
+            expect(
+                contentReviewRequestModel.findChartSimilarityCandidates,
+            ).not.toHaveBeenCalled();
+        },
+    );
+
+    it('enforces the feature gate before searching', async () => {
+        const { service, contentReviewRequestModel, directAccessFeatureGate } =
+            buildService();
+        directAccessFeatureGate.isEnabledForUser.mockResolvedValue(false);
+        await expect(
+            service.findSimilarContent(requester, PROJECT, params),
+        ).rejects.toThrow('not enabled');
+        expect(
+            contentReviewRequestModel.findSimilarByName,
+        ).not.toHaveBeenCalled();
+    });
+});

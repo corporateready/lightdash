@@ -33,6 +33,7 @@ import fs from 'fs';
 import path from 'path';
 import { Readable } from 'stream';
 import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import Logger from '../logging/logger';
 import {
     allowApiKeyAuthentication,
@@ -50,7 +51,11 @@ export class SlackController extends BaseController {
      * @summary Get Slack channels
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('SlackController.get'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/channels')
     @OperationId('getSlackChannels')
@@ -89,7 +94,11 @@ export class SlackController extends BaseController {
      * @param req express request
      * @param channelId Slack channel ID (e.g., C01234567)
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('SlackController.getChannelById'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/channels/{channelId}')
     @OperationId('getSlackChannelById')
@@ -116,6 +125,7 @@ export class SlackController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SlackController.updateCustomSettings'),
     ])
     @SuccessResponse('200', 'Success')
     @Put('/custom-settings')
@@ -259,6 +269,65 @@ export class SlackController extends BaseController {
                 });
             }
             await SlackController.sendPlaceholder(req.res!);
+        }
+    }
+
+    /**
+     * Get a Slack AI agent card image.
+     * Falls back to a placeholder image if the image is not found.
+     *
+     * Intentionally public (no auth): Slack's unfurl bot fetches preview images
+     * without user credentials. Access is guarded by an unguessable 21-char
+     * nanoid (only minted server-side and shared with Slack during the unfurl of
+     * a resource the user already has access to), strict `{id}` validation, and
+     * no-store / noindex response headers.
+     * @summary Get Slack card image
+     */
+    @SuccessResponse('200', 'Success')
+    @Get('/card-image/{id}')
+    @OperationId('getSlackCardImage')
+    async getCardImage(
+        @Path() id: string,
+        @Request() req: express.Request,
+    ): Promise<Readable | void> {
+        const NANOID_REGEX = /^[\w-]{21}$/;
+
+        this.setHeader('Cache-Control', 'no-store');
+        this.setHeader('X-Robots-Tag', 'noindex, nofollow');
+
+        if (!NANOID_REGEX.test(id)) {
+            return SlackController.sendPlaceholder(req.res!);
+        }
+
+        try {
+            const stream = await this.services
+                .getUnfurlService()
+                .getPreviewImageStream(id);
+
+            this.setStatus(200);
+            this.setHeader('Content-Type', 'image/png');
+            this.setHeader(
+                'Content-Disposition',
+                `inline; filename="${id}.png"`,
+            );
+            return stream;
+        } catch (e) {
+            if (e instanceof NotFoundError) {
+                Logger.info(
+                    `Slack card image miss, serving placeholder: ${id}`,
+                );
+            } else {
+                Logger.error(
+                    `Slack card image failed, serving placeholder: ${id} ${getErrorMessage(
+                        e,
+                    )}`,
+                );
+                Sentry.captureException(e, {
+                    tags: { feature: 'slack-card-image' },
+                    extra: { previewId: id },
+                });
+            }
+            return SlackController.sendPlaceholder(req.res!);
         }
     }
 

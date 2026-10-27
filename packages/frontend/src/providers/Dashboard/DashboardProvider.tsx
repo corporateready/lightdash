@@ -1,92 +1,126 @@
 import {
     applyDimensionOverrides,
-    compressDashboardFiltersToParam,
-    convertDashboardFiltersParamToDashboardFilters,
-    DashboardTileTypes,
-    DateGranularity,
-    FilterInteractivityValues,
-    getFilterInteractivityValue,
     getItemId,
-    isDashboardChartTileType,
-    isFilterLockedOnTab,
     isStandardDateGranularity,
-    isSubDayGranularity,
-    stripOverridesForLockedFiltersOnTab,
+    type AdditionalMetric,
+    type ChartZoomableField,
     type Dashboard,
     type DashboardFilterableField,
     type DashboardFilterRule,
     type DashboardFilters,
+    type DashboardConfig,
     type DashboardParameters,
+    type DateGranularity,
+    type DateZoomConfig,
     type FilterableDimension,
     type InteractivityOptions,
+    type LanguageMap,
     type Metric,
     type ParameterDefinitions,
     type ParametersValuesMap,
     type ParameterValue,
-    type SavedChartsInfoForDashboardAvailableFilters,
     type SortField,
 } from '@lightdash/common';
-import clone from 'lodash/clone';
-import isEqual from 'lodash/isEqual';
-import sortBy from 'lodash/sortBy';
 import React, {
     useCallback,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
+    useSyncExternalStore,
+    type ComponentProps,
 } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router';
-import { useDeepCompareEffect, useMount } from 'react-use';
-import { getConditionalRuleLabelFromItem } from '../../components/common/Filters/FilterInputs/utils';
+import { Provider } from 'react-redux';
+import { useLocation, useParams } from 'react-router';
+import { useMount } from 'react-use';
 import { type SdkFilter } from '../../ee/features/embed/EmbedDashboard/types';
-import {
-    convertSdkFilterToDashboardFilter,
-    shouldDeferSdkFilters,
-} from '../../ee/features/embed/EmbedDashboard/utils';
-import { LightdashEventType } from '../../ee/features/embed/events/types';
-import { useEmbedEventEmitter } from '../../ee/features/embed/hooks/useEmbedEventEmitter';
-import useEmbed from '../../ee/providers/Embed/useEmbed';
 import {
     useGetComments,
     type useDashboardCommentsCheck,
 } from '../../features/comments';
-import { hasSavedFilterValueChanged } from '../../features/dashboardFilters/FilterConfiguration/utils';
-import { useParameters } from '../../features/parameters';
+import {
+    buildInitialDashboardState,
+    createDashboardStore,
+    dashboardChartSortActions,
+    dashboardDateZoomActions,
+    dashboardEditActions,
+    dashboardFiltersActions,
+    dashboardParametersActions,
+    DashboardStoreContext,
+    emptyDashboardFilters,
+    getSavedDateZoomSettings,
+    selectActiveTab,
+    selectDashboardCustomMetrics,
+    selectDashboardFilters,
+    selectDashboardTabs,
+    selectDashboardTiles,
+    selectDateZoomConfig,
+    selectDateZoomGranularities,
+    selectDefaultDateZoomGranularity,
+    selectHasDateZoomConfigChanged,
+    selectHasDefaultDateZoomGranularityChanged,
+    selectHasTilesThatSupportFilters,
+    selectHaveCustomMetricsChanged,
+    selectHaveDateZoomGranularitiesChanged,
+    selectHaveTabsChanged,
+    selectHaveTilesChanged,
+    selectEditedRequiredFiltersNote,
+    selectIsAddFilterDisabled,
+    selectIsDateZoomDisabled,
+    selectSavedChartUuidsAndTileUuids,
+    selectSavedChartUuidsAndTileUuidsKey,
+    selectTileUuidsKey,
+    useDashboardDateZoomGranularities,
+    useDefaultDateZoomGranularity,
+    selectDateZoomGranularity,
+    selectHasParameterOrderChanged,
+    selectHaveFiltersChanged,
+    selectHavePinnedParametersChanged,
+    selectRawTemporaryFilters,
+    selectAvailableCustomGranularities,
+    selectSavedParameters,
+    selectTilesWithDateZoomApplied,
+    useAreAllChartsLoaded,
+    useDashboardSelector,
+    type DashboardStore,
+    type TemporaryFilterLocks,
+} from '../../features/dashboard/store';
 import {
     useDashboardQuery,
     useDashboardsAvailableFilters,
     useDashboardVersionRefresh,
 } from '../../hooks/dashboard/useDashboard';
 import useToaster from '../../hooks/toaster/useToaster';
-import {
-    hasSavedFiltersOverrides,
-    useSavedDashboardFiltersOverrides,
-} from '../../hooks/useSavedDashboardFiltersOverrides';
 import DashboardContext from './context';
+import DashboardDateZoomSync from './DashboardDateZoomSync';
+import DashboardFiltersSync from './DashboardFiltersSync';
+import DashboardParametersSync from './DashboardParametersSync';
 import DashboardTileStatusProvider from './DashboardTileStatusProvider';
+import { applyEmbedFilterInteractivity } from './embedFilterInteractivity';
+import { getActiveTabForTabs } from './getActiveTabForTabs';
 import useDashboardContext from './useDashboardContext';
-import useDashboardTileStatusContext from './useDashboardTileStatusContext';
-
-const emptyFilters: DashboardFilters = {
-    dimensions: [],
-    metrics: [],
-    tableCalculations: [],
-};
 
 type DashboardProviderProps = React.PropsWithChildren<{
+    schedulerDashboardFilters?: DashboardFilters | undefined;
     schedulerFilters?: DashboardFilterRule[] | undefined;
     schedulerParameters?: ParametersValuesMap | undefined;
-    schedulerTabsSelected?: string[] | undefined;
+    schedulerTabsSelected?: (string | null)[] | undefined;
     dateZoom?: DateGranularity | string | undefined;
     projectUuid?: string;
     embedToken?: string;
     dashboardCommentsCheck?: ReturnType<typeof useDashboardCommentsCheck>;
     defaultInvalidateCache?: boolean;
     sdkFilters?: SdkFilter[];
+    parameterLabelOverrides?: LanguageMap['parameters'];
+    // Interactive dashboard page only. The /minimal render used for exports
+    // and scheduled deliveries must leave this off so a viewer's unpublished
+    // draft never reaches a delivered image, PDF or spreadsheet.
+    includeUnpublishedDraft?: boolean;
 }>;
 
 const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
+    schedulerDashboardFilters,
     schedulerFilters,
     schedulerParameters,
     schedulerTabsSelected,
@@ -95,14 +129,18 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     embedToken,
     dashboardCommentsCheck,
     defaultInvalidateCache,
+    includeUnpublishedDraft = false,
+    parameterLabelOverrides,
     children,
 }) => {
-    const { search, pathname } = useLocation();
-    const navigate = useNavigate();
-    const { showToastWarning, showToastInfo } = useToaster();
-    const hasNotifiedLockedOverrideRef = useRef(false);
+    const { search } = useLocation();
+    const { showToastWarning } = useToaster();
 
-    const { dashboardUuid, tabUuid, mode } = useParams<{
+    const {
+        dashboardUuid: dashboardIdentifier,
+        tabUuid,
+        mode,
+    } = useParams<{
         dashboardUuid: string;
         tabUuid?: string;
         mode?: string;
@@ -112,17 +150,7 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         mode?: string;
     };
 
-    // Reset the "locked filter override" toast guard on dashboard navigation
-    // so each dashboard gets a fresh chance to notify the viewer.
-    useEffect(() => {
-        hasNotifiedLockedOverrideRef.current = false;
-    }, [dashboardUuid]);
     const isEditMode = mode === 'edit';
-
-    const {
-        mutateAsync: versionRefresh,
-        isLoading: isRefreshingDashboardVersion,
-    } = useDashboardVersionRefresh(dashboardUuid, projectUuid);
 
     // Embedded dashboards will not be using this query hook to load the dashboard,
     // so we need to set the dashboard manually
@@ -134,10 +162,18 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         isInitialLoading: isDashboardLoading,
         error: dashboardError,
     } = useDashboardQuery({
-        uuidOrSlug: dashboardUuid,
+        uuidOrSlug: dashboardIdentifier,
         projectUuid,
+        includeUnpublishedDraft,
         useQueryOptions: {
             select: (d) => {
+                if (schedulerDashboardFilters) {
+                    return {
+                        ...d,
+                        filters: schedulerDashboardFilters,
+                    };
+                }
+
                 if (schedulerFilters) {
                     const overriddenDimensions = applyDimensionOverrides(
                         d.filters,
@@ -156,6 +192,18 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             },
         },
     });
+    const dashboardUuid = (dashboard ?? embedDashboard)?.uuid;
+    const {
+        mutateAsync: versionRefresh,
+        isLoading: isRefreshingDashboardVersion,
+    } = useDashboardVersionRefresh(dashboardUuid, projectUuid);
+
+    // Embedded dashboards populate `embedDashboard` instead of the query hook,
+    // so config-derived state must read from whichever holds the dashboard.
+    const currentDashboardConfig = useMemo(
+        () => (dashboard ?? embedDashboard)?.config,
+        [dashboard, embedDashboard],
+    );
 
     const { data: dashboardComments } = useGetComments(
         dashboardUuid,
@@ -173,174 +221,164 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         [dashboardComments],
     );
 
-    const [dashboardTiles, setDashboardTiles] = useState<Dashboard['tiles']>();
-    const [haveTilesChanged, setHaveTilesChanged] = useState<boolean>(false);
-    const [haveTabsChanged, setHaveTabsChanged] = useState<boolean>(false);
-    const [dashboardTabs, setDashboardTabsInternal] = useState<
-        Dashboard['tabs']
-    >([]);
-    const setDashboardTabs = useCallback<
-        React.Dispatch<React.SetStateAction<Dashboard['tabs']>>
-    >((tabs) => {
-        setDashboardTabsInternal((prevTabs) => {
-            const newTabs = typeof tabs === 'function' ? tabs(prevTabs) : tabs;
-            return sortBy(newTabs, 'order');
+    // Filter, parameter, date zoom and edit state lives in a per-mount store so
+    // edits only re-render the components that select it, not every context consumer.
+    const [{ store, urlRestoreErrors }] = useState(() => {
+        const initial = buildInitialDashboardState({
+            search,
+            isEditMode,
+            parameterLabelOverrides,
+            dateZoom,
+            invalidateCache: defaultInvalidateCache === true,
         });
-    }, []);
-    const [activeTab, setActiveTab] = useState<
-        Dashboard['tabs'][number] | undefined
-    >();
-    const [dashboardTemporaryFilters, setDashboardTemporaryFilters] =
-        useState<DashboardFilters>(emptyFilters);
-    const [dashboardFilters, setDashboardFilters] =
-        useState<DashboardFilters>(emptyFilters);
-    const [originalDashboardFilters, setOriginalDashboardFilters] =
-        useState<DashboardFilters>(emptyFilters);
-    const [haveFiltersChanged, setHaveFiltersChanged] =
-        useState<boolean>(false);
-    // Event system for filter change tracking
-    const { dispatchEmbedEvent } = useEmbedEventEmitter();
-    const embed = useEmbed();
-    const previousFiltersRef = useRef<DashboardFilters | null>(null);
+        return {
+            store: createDashboardStore(initial.state),
+            urlRestoreErrors: initial.urlRestoreErrors,
+        };
+    });
 
-    const [chartSort, setChartSort] = useState<Record<string, SortField[]>>({});
+    const setTileChartSorts = useCallback(
+        (tileUuid: string, sorts: SortField[]) => {
+            store.dispatch(
+                dashboardChartSortActions.setTileSorts({ tileUuid, sorts }),
+            );
+        },
+        [store],
+    );
 
-    const [dateZoomGranularity, setDateZoomGranularity] = useState<
-        DateGranularity | string | undefined
-    >(dateZoom);
+    const setDateZoomGranularity = useCallback<
+        React.Dispatch<
+            React.SetStateAction<DateGranularity | string | undefined>
+        >
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardDateZoomActions.setGranularity(
+                    typeof value === 'function'
+                        ? value(selectDateZoomGranularity(store.getState()))
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
 
-    // Allows users to disable date zoom on view mode,
-    // by default it is enabled
-    const [isDateZoomDisabled, setIsDateZoomDisabled] =
-        useState<boolean>(false);
+    const editSetters = useEditSetters(store, currentDashboardConfig);
+
+    // Allows users to disable date zoom and the add filter button on view mode;
+    // config can switch them on, never back off
     useEffect(() => {
         if (dashboard?.config?.isDateZoomDisabled === true) {
-            setIsDateZoomDisabled(true);
+            store.dispatch(dashboardEditActions.setIsDateZoomDisabled(true));
         }
-    }, [dashboard]);
-
-    // Allows users to disable add filter button on view mode,
-    // by default it is enabled
-    const [isAddFilterDisabled, setIsAddFilterDisabled] =
-        useState<boolean>(false);
-    useEffect(() => {
         if (dashboard?.config?.isAddFilterDisabled === true) {
-            setIsAddFilterDisabled(true);
+            store.dispatch(dashboardEditActions.setIsAddFilterDisabled(true));
         }
-    }, [dashboard]);
+    }, [store, dashboard]);
 
-    const [parameterDefinitions, setParameterDefinitions] =
-        useState<ParameterDefinitions>({});
+    useEffect(() => {
+        store.dispatch(
+            dashboardParametersActions.setParameterLabelOverrides(
+                parameterLabelOverrides,
+            ),
+        );
+    }, [store, parameterLabelOverrides]);
 
     const addParameterDefinitions = useCallback(
         (parameters: ParameterDefinitions) => {
-            setParameterDefinitions((prev) => ({
-                ...prev,
-                ...parameters,
-            }));
+            store.dispatch(
+                dashboardParametersActions.addParameterDefinitions(parameters),
+            );
         },
-        [],
+        [store],
     );
 
-    // Saved parameters are the parameters that are saved on the server
-    const [savedParameters, setSavedParameters] = useState<DashboardParameters>(
-        {},
-    );
-    // parameters that are currently applied to the dashboard
-    const [parameters, setParameters] = useState<DashboardParameters>({});
-    const [parametersHaveChanged, setParametersHaveChanged] =
-        useState<boolean>(false);
-
-    // Pinned parameters state
-    const [pinnedParameters, setPinnedParametersState] = useState<string[]>([]);
-    const [havePinnedParametersChanged, setHavePinnedParametersChanged] =
-        useState<boolean>(false);
-
-    // Parameter order state
-    const [parameterOrder, setParameterOrderState] = useState<string[]>([]);
-    const [hasParameterOrderChanged, setHasParameterOrderChanged] =
-        useState<boolean>(false);
-
-    // Date zoom granularities state
-    const allStandardGranularities = useMemo(
-        () => Object.values(DateGranularity),
-        [],
+    // Per-control runtime grain overrides only; an absent entry means "use the
+    // control's persisted default" (the resolver applies `?? control.granularity`).
+    const setControlGranularity = useCallback(
+        (
+            controlUuid: string,
+            granularity: DateGranularity | string | undefined,
+        ) => {
+            store.dispatch(
+                dashboardDateZoomActions.setControlGranularity({
+                    controlUuid,
+                    granularity,
+                }),
+            );
+        },
+        [store],
     );
 
-    const [dateZoomGranularities, setDateZoomGranularitiesState] = useState<
-        (DateGranularity | string)[]
-    >(allStandardGranularities);
-    const [
-        haveDateZoomGranularitiesChanged,
-        setHaveDateZoomGranularitiesChanged,
-    ] = useState<boolean>(false);
-
-    const [defaultDateZoomGranularity, setDefaultDateZoomGranularityState] =
-        useState<DateGranularity | string | undefined>(undefined);
-    const [
-        hasDefaultDateZoomGranularityChanged,
-        setHasDefaultDateZoomGranularityChanged,
-    ] = useState<boolean>(false);
-
-    // Set parameters to saved parameters when they are loaded
     useEffect(() => {
-        if (savedParameters) {
-            setParameters(savedParameters);
+        store.dispatch(dashboardParametersActions.setIsEditMode(isEditMode));
+    }, [store, isEditMode]);
+
+    useEffect(() => {
+        if (urlRestoreErrors.parameters) {
+            showToastWarning({
+                title: 'Could not restore parameters from URL',
+                subtitle:
+                    'The link appears to be incomplete. Please ask for it to be shared again.',
+            });
         }
-    }, [savedParameters]);
+    }, [showToastWarning, urlRestoreErrors]);
 
     // Set pinned parameters when dashboard is loaded
     useEffect(() => {
         if (dashboard?.config?.pinnedParameters !== undefined) {
-            setPinnedParametersState(dashboard.config.pinnedParameters);
+            store.dispatch(
+                dashboardParametersActions.syncPinnedParameters(
+                    dashboard.config.pinnedParameters,
+                ),
+            );
         } else if (dashboard?.config !== undefined) {
             // Initialize empty array if dashboard has config but no pinnedParameters
-            setPinnedParametersState([]);
+            store.dispatch(dashboardParametersActions.syncPinnedParameters([]));
         }
-    }, [dashboard?.config?.pinnedParameters, dashboard?.config]);
+    }, [store, dashboard?.config?.pinnedParameters, dashboard?.config]);
 
     // Set parameter order when dashboard is loaded
     useEffect(() => {
         if (dashboard?.config?.parameterOrder !== undefined) {
-            setParameterOrderState(dashboard.config.parameterOrder);
-        } else if (dashboard?.config !== undefined) {
-            setParameterOrderState([]);
-        }
-    }, [dashboard?.config?.parameterOrder, dashboard?.config]);
-
-    // Sync date zoom granularities from dashboard config
-    // Note: Custom granularities from explores are added by DashboardGranularitySync
-    useEffect(() => {
-        if (dashboard?.config?.dateZoomGranularities !== undefined) {
-            setDateZoomGranularitiesState(
-                dashboard.config.dateZoomGranularities,
+            store.dispatch(
+                dashboardParametersActions.syncParameterOrder(
+                    dashboard.config.parameterOrder,
+                ),
             );
-        } else {
-            setDateZoomGranularitiesState(allStandardGranularities);
+        } else if (dashboard?.config !== undefined) {
+            store.dispatch(dashboardParametersActions.syncParameterOrder([]));
         }
-    }, [dashboard?.config?.dateZoomGranularities, allStandardGranularities]);
+    }, [store, dashboard?.config?.parameterOrder, dashboard?.config]);
 
-    // Sync default date zoom granularity from dashboard config
+    const isDashboardLoaded = dashboard !== undefined;
+    const savedControlSections = dashboard?.config?.controlSections;
     useEffect(() => {
-        setDefaultDateZoomGranularityState(
-            dashboard?.config?.defaultDateZoomGranularity,
+        if (!isDashboardLoaded) return;
+        store.dispatch(
+            dashboardEditActions.syncControlSections(
+                savedControlSections ?? [],
+            ),
         );
-    }, [dashboard?.config?.defaultDateZoomGranularity]);
+    }, [store, isDashboardLoaded, savedControlSections]);
 
-    // Set active tab when dashboard and tabs are loaded.
-    // In view mode, hidden tabs are not selectable — fall back to the first
-    // visible tab if the URL points at a hidden tab. In edit mode all tabs are selectable.
+    // Seed the staged custom-metrics registry from config; keep user edits
+    // until save/cancel resets the changed flag.
+    const haveCustomMetricsChanged = useStoreValue(
+        store,
+        selectHaveCustomMetricsChanged,
+    );
     useEffect(() => {
-        if (dashboardTabs && dashboardTabs.length > 0) {
-            const selectableTabs = isEditMode
-                ? dashboardTabs
-                : dashboardTabs.filter((tab) => !tab.hidden);
-            const tabsForFallback =
-                selectableTabs.length > 0 ? selectableTabs : dashboardTabs;
-            const urlMatch = selectableTabs.find((tab) => tab.uuid === tabUuid);
-            setActiveTab(urlMatch ?? tabsForFallback[0]);
-        }
-    }, [dashboardTabs, tabUuid, isEditMode]);
+        store.dispatch(
+            dashboardEditActions.syncCustomMetrics(
+                currentDashboardConfig?.customMetrics ?? [],
+            ),
+        );
+    }, [
+        store,
+        currentDashboardConfig?.customMetrics,
+        haveCustomMetricsChanged,
+    ]);
 
     // Apply scheduler parameters when provided (for scheduled deliveries)
     useEffect(() => {
@@ -355,254 +393,191 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
                     },
                 ]),
             );
-            setSavedParameters(dashboardParams);
+            store.dispatch(
+                dashboardParametersActions.setSavedParameters(dashboardParams),
+            );
         }
-    }, [schedulerParameters]);
+    }, [store, schedulerParameters]);
 
-    // Set parametersHaveChanged to true if parameters have changed
-    useEffect(() => {
-        if (!isEqual(parameters, savedParameters)) {
-            setParametersHaveChanged(true);
-        }
-    }, [parameters, savedParameters]);
+    const setSavedParameters = useCallback<
+        React.Dispatch<React.SetStateAction<DashboardParameters>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardParametersActions.setSavedParameters(
+                    typeof value === 'function'
+                        ? value(selectSavedParameters(store.getState()))
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
 
     const setParameter = useCallback(
         (key: string, value: ParameterValue | null) => {
-            const isEmpty =
-                value === null ||
-                value === undefined ||
-                value === '' ||
-                (Array.isArray(value) && value.length === 0);
-
-            if (isEmpty) {
-                // In view mode, reverting to "no value" should fall back to the
-                // dashboard-saved default (which the tile queries also use), keeping
-                // the widget and queries in sync. In edit mode, clearing fully removes
-                // the override so authors can drop it.
-                const savedParam = savedParameters[key];
-                if (!isEditMode && savedParam) {
-                    setParameters((prev) => ({
-                        ...prev,
-                        [key]: savedParam,
-                    }));
-                } else {
-                    setParameters((prev) => {
-                        const newParams = { ...prev };
-                        delete newParams[key];
-                        return newParams;
-                    });
-                }
-            } else {
-                setParameters((prev) => ({
-                    ...prev,
-                    [key]: {
-                        parameterName: key,
-                        value,
-                    },
-                }));
-            }
+            store.dispatch(
+                dashboardParametersActions.setParameter({ key, value }),
+            );
         },
-        [isEditMode, savedParameters],
+        [store],
     );
 
     const clearAllParameters = useCallback(() => {
-        setParameters({});
-    }, []);
+        store.dispatch(dashboardParametersActions.clearAllParameters());
+    }, [store]);
 
-    const setPinnedParameters = useCallback((pinnedParams: string[]) => {
-        setPinnedParametersState(pinnedParams);
-        setHavePinnedParametersChanged(true);
-    }, []);
-
-    const toggleParameterPin = useCallback((parameterKey: string) => {
-        setPinnedParametersState((prev) => {
-            const isCurrentlyPinned = prev.includes(parameterKey);
-            const newPinnedParams = isCurrentlyPinned
-                ? prev.filter((key) => key !== parameterKey)
-                : [...prev, parameterKey];
-            return newPinnedParams;
-        });
-        setHavePinnedParametersChanged(true);
-    }, []);
-
-    const setParameterOrder = useCallback((order: string[]) => {
-        setParameterOrderState(order);
-        setHasParameterOrderChanged(true);
-    }, []);
-
-    const setDateZoomGranularities = useCallback(
-        (granularities: (DateGranularity | string)[]) => {
-            setDateZoomGranularitiesState(granularities);
-            setHaveDateZoomGranularitiesChanged(true);
+    const setPinnedParameters = useCallback(
+        (pinnedParams: string[]) => {
+            store.dispatch(
+                dashboardParametersActions.setPinnedParameters(pinnedParams),
+            );
         },
-        [],
+        [store],
     );
 
-    const setDefaultDateZoomGranularity = useCallback(
-        (granularity: DateGranularity | string | undefined) => {
-            setDefaultDateZoomGranularityState(granularity);
-            setHasDefaultDateZoomGranularityChanged(true);
+    const toggleParameterPin = useCallback(
+        (parameterKey: string) => {
+            store.dispatch(
+                dashboardParametersActions.toggleParameterPin(parameterKey),
+            );
         },
-        [],
+        [store],
     );
 
-    // Track parameter references from each tile
-    const [tileParameterReferences, setTileParameterReferences] = useState<
-        Record<string, string[]>
-    >({});
+    const setHavePinnedParametersChanged = useCallback<
+        React.Dispatch<React.SetStateAction<boolean>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardParametersActions.setHavePinnedParametersChanged(
+                    typeof value === 'function'
+                        ? value(
+                              selectHavePinnedParametersChanged(
+                                  store.getState(),
+                              ),
+                          )
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
+
+    const setParameterOrder = useCallback(
+        (order: string[]) => {
+            store.dispatch(dashboardParametersActions.setParameterOrder(order));
+        },
+        [store],
+    );
+
+    const setHasParameterOrderChanged = useCallback<
+        React.Dispatch<React.SetStateAction<boolean>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardParametersActions.setHasParameterOrderChanged(
+                    typeof value === 'function'
+                        ? value(
+                              selectHasParameterOrderChanged(store.getState()),
+                          )
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
 
     const addParameterReferences = useCallback(
         (tileUuid: string, references: string[]) => {
-            setTileParameterReferences((prev) => ({
-                ...prev,
-                [tileUuid]: references,
-            }));
+            store.dispatch(
+                dashboardParametersActions.addParameterReferences({
+                    tileUuid,
+                    references,
+                }),
+            );
         },
-        [],
+        [store],
     );
 
-    // Remove parameter references for tiles that are no longer in the dashboard
+    const setTileChartSavedParameters = useCallback(
+        (tileUuid: string, values: ParametersValuesMap) => {
+            store.dispatch(
+                dashboardParametersActions.setTileChartSavedParameters({
+                    tileUuid,
+                    values,
+                }),
+            );
+        },
+        [store],
+    );
+
+    // Remove parameter references and zoomable fields for tiles that are no
+    // longer in the dashboard
+    const tileUuidsKey = useStoreValue(store, selectTileUuidsKey);
     useEffect(() => {
-        if (dashboardTiles) {
-            setTileParameterReferences((old) => {
-                if (!dashboardTiles) return {};
-                const tileIds = new Set(
-                    dashboardTiles.map((tile) => tile.uuid),
-                );
-                return Object.fromEntries(
-                    Object.entries(old).filter(([tileId]) =>
-                        tileIds.has(tileId),
-                    ),
-                );
+        if (tileUuidsKey === undefined) return;
+        const tileUuids = tileUuidsKey === '' ? [] : tileUuidsKey.split(',');
+        store.dispatch(
+            dashboardParametersActions.keepTileParameterState(tileUuids),
+        );
+        store.dispatch(
+            dashboardDateZoomActions.keepTileDateZoomState(tileUuids),
+        );
+    }, [store, tileUuidsKey]);
+
+    // The date fields each chart tile can actually be zoomed on, reported up
+    // from each tile (it has the explore + metricQuery). The date-zoom control
+    // modal offers exactly these per tile, instead of every filterable date
+    // dimension in the explore.
+    const setChartZoomableFields = useCallback(
+        (tileUuid: string, fields: ChartZoomableField[]) => {
+            store.dispatch(
+                dashboardDateZoomActions.setChartZoomableFields({
+                    tileUuid,
+                    fields,
+                }),
+            );
+        },
+        [store],
+    );
+
+    const setTilesWithDateZoomApplied = useCallback<
+        React.Dispatch<React.SetStateAction<Set<string> | undefined>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardDateZoomActions.setTilesWithDateZoomApplied(
+                    typeof value === 'function'
+                        ? value(
+                              selectTilesWithDateZoomApplied(store.getState()),
+                          )
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
+
+    useEffect(() => {
+        if (urlRestoreErrors.savedFilterOverrides) {
+            showToastWarning({
+                title: 'Could not restore filters from URL',
+                subtitle:
+                    'The link appears to be incomplete. Please ask for it to be shared again.',
             });
         }
-    }, [dashboardTiles]);
+    }, [showToastWarning, urlRestoreErrors]);
 
-    const parameterValues = useMemo(() => {
-        return Object.entries(parameters).reduce((acc, [key, parameter]) => {
-            if (
-                parameter.value !== null &&
-                parameter.value !== undefined &&
-                parameter.value !== ''
-            ) {
-                acc[key] = parameter.value;
-            }
-            return acc;
-        }, {} as ParametersValuesMap);
-    }, [parameters]);
-
-    const selectedParametersCount = useMemo(() => {
-        return Object.values(parameterValues).filter(
-            (value) => value !== null && value !== '' && value !== undefined,
-        ).length;
-    }, [parameterValues]);
-
-    // Calculate aggregated parameter references from all tiles
-    const dashboardParameterReferences = useMemo(() => {
-        const allReferences = Object.values(tileParameterReferences).flat();
-        return new Set(allReferences);
-    }, [tileParameterReferences]);
-
-    const { data: projectParameters } = useParameters(
-        projectUuid,
-        Array.from(dashboardParameterReferences ?? []),
-        {
-            enabled: !!projectUuid && !!dashboardParameterReferences,
-        },
+    // Only changes with the chart-tile mapping, not when tiles move or resize
+    const savedChartUuidsAndTileUuidsKey = useStoreValue(
+        store,
+        selectSavedChartUuidsAndTileUuidsKey,
     );
-
-    useEffect(() => {
-        if (projectParameters) {
-            addParameterDefinitions(projectParameters);
-        }
-    }, [projectParameters, addParameterDefinitions]);
-
-    const missingRequiredParameters = useMemo(() => {
-        // If no parameter references, return empty array
-        if (!dashboardParameterReferences.size) return [];
-
-        // Missing required parameters are the ones that are not set and don't have a default value
-        return Array.from(dashboardParameterReferences).filter(
-            (parameterName) =>
-                !parameters[parameterName] &&
-                !parameterDefinitions[parameterName]?.default,
-        );
-    }, [dashboardParameterReferences, parameters, parameterDefinitions]);
-
-    const [chartsWithDateZoomApplied, setChartsWithDateZoomApplied] =
-        useState<Set<string>>();
-
-    // Update dashboard url date zoom change
-    // Only sync URL in regular dashboards or 'direct' embed mode (not 'sdk' mode)
-    useEffect(() => {
-        if (embed.mode === 'sdk') {
-            return;
-        }
-
-        const currentParams = new URLSearchParams(search);
-        const newParams = new URLSearchParams(search);
-        if (dateZoomGranularity === undefined) {
-            newParams.delete('dateZoom');
-        } else {
-            newParams.set('dateZoom', dateZoomGranularity.toLowerCase());
-        }
-
-        const currentSearch = currentParams.toString();
-        const newSearch = newParams.toString();
-
-        if (currentSearch !== newSearch) {
-            void navigate(
-                {
-                    pathname,
-                    search: newParams.toString(),
-                },
-                { replace: true },
-            );
-        }
-    }, [dateZoomGranularity, search, navigate, pathname, embed.mode]);
-
-    const {
-        overridesForSavedDashboardFilters,
-        addSavedFilterOverride,
-        removeSavedFilterOverride,
-        resetSavedFilterOverrides,
-    } = useSavedDashboardFiltersOverrides();
-
-    // Stable key that only changes when the chart-tile mapping changes,
-    // not when tiles are repositioned/resized (x/y/w/h changes).
-    // This prevents unnecessary re-renders of the entire filter chain
-    // during drag/resize operations.
-    const savedChartUuidsAndTileUuidsKey = useMemo(
-        () =>
-            dashboardTiles
-                ?.filter(isDashboardChartTileType)
-                .map(
-                    (tile) =>
-                        `${tile.uuid}:${tile.properties.savedChartUuid ?? ''}`,
-                )
-                .sort()
-                .join(',') ?? '',
-        [dashboardTiles],
-    );
-
     const savedChartUuidsAndTileUuids = useMemo(
-        () =>
-            dashboardTiles
-                ?.filter(isDashboardChartTileType)
-                .reduce<SavedChartsInfoForDashboardAvailableFilters>(
-                    (acc, tile) => {
-                        if (tile.properties.savedChartUuid) {
-                            acc.push({
-                                tileUuid: tile.uuid,
-                                savedChartUuid: tile.properties.savedChartUuid,
-                            });
-                        }
-                        return acc;
-                    },
-                    [],
-                ),
+        () => selectSavedChartUuidsAndTileUuids(store.getState()),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [savedChartUuidsAndTileUuidsKey],
+        [store, savedChartUuidsAndTileUuidsKey],
     );
 
     const {
@@ -659,455 +634,31 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         embedToken,
     ]);
 
-    /**
-     * Apply interactivity filtering for embedded dashboards
-     */
-    const applyInteractivityFiltering = useCallback(
-        (filters: DashboardFilters): DashboardFilters => {
-            if (!embedDashboard) {
-                return filters;
-            }
-
-            if (!embedDashboard.dashboardFiltersInteractivity) {
-                return emptyFilters;
-            }
-
-            const interactivityOptions =
-                embedDashboard.dashboardFiltersInteractivity;
-            const filterInteractivityValue = getFilterInteractivityValue(
-                interactivityOptions.enabled,
-            );
-
-            if (filterInteractivityValue === FilterInteractivityValues.none) {
-                return emptyFilters;
-            }
-
-            if (filterInteractivityValue === FilterInteractivityValues.some) {
-                return {
-                    ...filters,
-                    dimensions: filters.dimensions.filter((filter) =>
-                        interactivityOptions.allowedFilters?.includes(
-                            filter.id,
-                        ),
-                    ),
-                };
-            }
-
-            // If 'all', return filters as-is
-            return filters;
-        },
-        [embedDashboard],
+    // Temporary filters may not override a filter locked on the active tab;
+    // embeds don't load the dashboard through the query, so nothing is locked.
+    const savedFiltersForLocks = dashboard?.filters;
+    const hasTabsForLocks = (dashboard?.tabs?.length ?? 0) > 0;
+    const temporaryFilterLocks = useMemo<TemporaryFilterLocks | undefined>(
+        () =>
+            savedFiltersForLocks
+                ? {
+                      savedFilters: savedFiltersForLocks,
+                      hasTabs: hasTabsForLocks,
+                  }
+                : undefined,
+        [savedFiltersForLocks, hasTabsForLocks],
     );
 
-    // Apply filters on dashboard load in order of precedence:
-    // 1. Start with base dashboard filters
-    // 2. Apply overrides for iframe embed or replace SDK filters in SDK mode
-    // 3. Apply interactivity filtering (embedded dashboards only)
-    //
-    // This happens on the first load when emptyFilters is the initial value of dashboardFilters
-    useEffect(() => {
-        const currentDashboard = dashboard || embedDashboard;
-
-        if (!currentDashboard) return;
-
-        if (dashboardFilters === emptyFilters) {
-            let overrides = clone(overridesForSavedDashboardFilters);
-
-            // Step 1: Start with base filters
-            let updatedDashboardFilters = clone(currentDashboard.filters);
-
-            let droppedLockedOverrides = 0;
-
-            // Step 2: Apply SDK Filters
-            // For SDK mode, SDK filters replace embedded dashboard filters
-            const sdkFilters =
-                embed.mode === 'sdk' && embed.filters ? embed.filters : [];
-            if (sdkFilters.length > 0) {
-                // Wait until we have the data needed to build cross-explore
-                // tileTargets. `isLoadingDashboardFilters` alone is not
-                // enough because the available-filters query is disabled
-                // until tile metadata loads, and React Query reports a
-                // disabled query as not loading.
-                if (
-                    shouldDeferSdkFilters(
-                        savedChartUuidsAndTileUuids,
-                        filterableFieldsByTileUuid,
-                    )
-                ) {
-                    return;
-                }
-
-                const convertedSdkFilters = sdkFilters.map((sdkFilter) =>
-                    convertSdkFilterToDashboardFilter(
-                        sdkFilter,
-                        filterableFieldsByTileUuid,
-                    ),
-                );
-                const hasTabs = (currentDashboard.tabs?.length ?? 0) > 0;
-                const sdkStripResult = stripOverridesForLockedFiltersOnTab(
-                    currentDashboard.filters,
-                    {
-                        dimensions: convertedSdkFilters,
-                        metrics: [],
-                        tableCalculations: [],
-                    },
-                    activeTab?.uuid,
-                    hasTabs,
-                );
-                droppedLockedOverrides += sdkStripResult.droppedCount;
-                // SDK filters replace embedded dashboard filters, but
-                // locked saved filters must be preserved — otherwise an
-                // SDK consumer could drop a lock by simply not sending
-                // a filter for that field. Mirrors how EmbedService
-                // merges locked saved rules with safe overrides
-                // server-side.
-                const lockedSavedDimensions =
-                    currentDashboard.filters.dimensions.filter((rule) =>
-                        isFilterLockedOnTab(rule, activeTab?.uuid, hasTabs),
-                    );
-                updatedDashboardFilters.dimensions = [
-                    ...lockedSavedDimensions,
-                    ...sdkStripResult.filters.dimensions,
-                ];
-            }
-
-            // Apply overrides from URL — but never override filters locked on
-            // the currently active tab (or dashboard-wide if there are no tabs).
-            if (hasSavedFiltersOverrides(overrides)) {
-                const urlStripResult = stripOverridesForLockedFiltersOnTab(
-                    currentDashboard.filters,
-                    overrides,
-                    activeTab?.uuid,
-                    (currentDashboard.tabs?.length ?? 0) > 0,
-                );
-                overrides = urlStripResult.filters;
-                droppedLockedOverrides += urlStripResult.droppedCount;
-            }
-
-            if (embed.mode === 'direct') {
-                // For direct mode, only read from URL if not SDK mode
-                if (hasSavedFiltersOverrides(overrides)) {
-                    updatedDashboardFilters = {
-                        ...updatedDashboardFilters,
-                        dimensions: applyDimensionOverrides(
-                            updatedDashboardFilters,
-                            overrides,
-                        ),
-                    };
-                    setHaveFiltersChanged(true);
-                } else {
-                    setHaveFiltersChanged(false);
-                }
-            } else {
-                if (overrides && overrides.dimensions.length > 0) {
-                    updatedDashboardFilters = {
-                        ...updatedDashboardFilters,
-                        dimensions: applyDimensionOverrides(
-                            updatedDashboardFilters,
-                            overrides,
-                        ),
-                    };
-                    setHaveFiltersChanged(true);
-                } else {
-                    setHaveFiltersChanged(false);
-                }
-            }
-
-            if (
-                droppedLockedOverrides > 0 &&
-                !hasNotifiedLockedOverrideRef.current
-            ) {
-                hasNotifiedLockedOverrideRef.current = true;
-                showToastInfo({
-                    title: 'Locked dashboard filter',
-                    subtitle:
-                        droppedLockedOverrides === 1
-                            ? 'A filter override was ignored because the dashboard editor locked that filter.'
-                            : `${droppedLockedOverrides} filter overrides were ignored because the dashboard editor locked those filters.`,
-                });
-            }
-
-            // Step 3: Apply interactivity filtering for embedded dashboards
-            updatedDashboardFilters = applyInteractivityFiltering(
-                updatedDashboardFilters,
-            );
-
-            setDashboardFilters(updatedDashboardFilters);
-        }
-
-        setOriginalDashboardFilters(currentDashboard.filters);
-    }, [
-        dashboard,
-        embedDashboard,
-        dashboardFilters,
-        overridesForSavedDashboardFilters,
-        embed,
-        applyInteractivityFiltering,
-        savedChartUuidsAndTileUuids,
-        filterableFieldsByTileUuid,
-        showToastInfo,
-        activeTab,
-    ]);
-
-    // Derive the effective temporary filters by stripping any that would
-    // conflict with a filter locked on the currently active tab. Done at
-    // read time (useMemo) rather than write-back-to-state so the user's
-    // intent is preserved when they switch tabs — temp filters re-appear
-    // on tabs where the saved filter isn't locked.
-    const {
-        filters: safeTemporaryFilters,
-        droppedCount: lockedTemporaryDroppedCount,
-    } = useMemo(() => {
-        if (!dashboard?.filters) {
-            return { filters: dashboardTemporaryFilters, droppedCount: 0 };
-        }
-        return stripOverridesForLockedFiltersOnTab(
-            dashboard.filters,
-            dashboardTemporaryFilters,
-            activeTab?.uuid,
-            (dashboard.tabs?.length ?? 0) > 0,
-        );
-    }, [
-        dashboard?.filters,
-        dashboard?.tabs,
-        dashboardTemporaryFilters,
-        activeTab,
-    ]);
-
-    useEffect(() => {
-        if (lockedTemporaryDroppedCount === 0) return;
-        if (hasNotifiedLockedOverrideRef.current) return;
-        hasNotifiedLockedOverrideRef.current = true;
-        const hasTabs = (dashboard?.tabs?.length ?? 0) > 0;
-        const scopeSuffix = hasTabs ? ' on this tab' : '';
-        showToastInfo({
-            title: 'Locked dashboard filter',
-            subtitle:
-                lockedTemporaryDroppedCount === 1
-                    ? `A temporary filter was ignored because the dashboard editor locked it${scopeSuffix}.`
-                    : `${lockedTemporaryDroppedCount} temporary filters were ignored because the dashboard editor locked them${scopeSuffix}.`,
-        });
-    }, [lockedTemporaryDroppedCount, showToastInfo, dashboard?.tabs]);
-
-    // Updates url with temp and overridden filters and deep compare to avoid unnecessary re-renders for dashboardTemporaryFilters
-    // Only sync URL in regular dashboards or 'direct' embed mode (not 'sdk' mode)
-    useDeepCompareEffect(() => {
-        if (embed.mode === 'sdk') {
-            return;
-        }
-
-        const currentParams = new URLSearchParams(search);
-        const newParams = new URLSearchParams(search);
-
-        if (
-            safeTemporaryFilters?.dimensions?.length === 0 &&
-            safeTemporaryFilters?.metrics?.length === 0
-        ) {
-            newParams.delete('tempFilters');
-        } else {
-            newParams.set(
-                'tempFilters',
-                JSON.stringify(
-                    compressDashboardFiltersToParam(safeTemporaryFilters),
-                ),
-            );
-        }
-
-        if (hasSavedFiltersOverrides(overridesForSavedDashboardFilters)) {
-            newParams.set(
-                'filters',
-                JSON.stringify(
-                    compressDashboardFiltersToParam(
-                        overridesForSavedDashboardFilters,
-                    ),
-                ),
-            );
-        } else {
-            newParams.delete('filters');
-        }
-
-        // Only navigate if search params actually changed
-        const newSearch = newParams.toString();
-        const currentSearch = currentParams.toString();
-        if (newSearch !== currentSearch) {
-            void navigate(
-                {
-                    pathname,
-                    search: newSearch,
-                },
-                { replace: true },
-            );
-        }
-    }, [
-        dashboardFilters,
-        safeTemporaryFilters,
-        navigate,
-        pathname,
-        overridesForSavedDashboardFilters,
-        search,
-        embed.mode,
-    ]);
-
-    useEffect(() => {
-        if (
-            dashboard?.filters &&
-            hasSavedFiltersOverrides(overridesForSavedDashboardFilters)
-        ) {
-            const { filters: safeOverrides } =
-                stripOverridesForLockedFiltersOnTab(
-                    dashboard.filters,
-                    overridesForSavedDashboardFilters,
-                    activeTab?.uuid,
-                    (dashboard.tabs?.length ?? 0) > 0,
-                );
-
-            if (!hasSavedFiltersOverrides(safeOverrides)) {
-                return;
-            }
-
-            setDashboardFilters((prevFilters) => {
-                const updated: DashboardFilters = {
-                    ...prevFilters,
-                    dimensions: applyDimensionOverrides(
-                        prevFilters,
-                        safeOverrides,
-                    ),
-                };
-
-                if (safeOverrides.metrics?.length > 0) {
-                    updated.metrics = prevFilters.metrics.map((metric) => {
-                        const override = safeOverrides.metrics.find(
-                            (m) => m.id === metric.id,
-                        );
-                        return override
-                            ? { ...override, tileTargets: metric.tileTargets }
-                            : metric;
-                    });
-                }
-
-                return updated;
+    useMount(() => {
+        // Temp filters and date zoom are restored when the store is built
+        if (urlRestoreErrors.temporaryFilters) {
+            showToastWarning({
+                title: 'Could not restore filters from URL',
+                subtitle:
+                    'The link appears to be incomplete. Please ask for it to be shared again.',
             });
         }
-    }, [
-        dashboard?.filters,
-        dashboard?.tabs,
-        overridesForSavedDashboardFilters,
-        activeTab,
-    ]);
-
-    // Gets filters and dateZoom from URL and storage after redirect
-    useMount(() => {
-        const searchParams = new URLSearchParams(search);
-
-        // Date zoom
-        const dateZoomParam = searchParams.get('dateZoom');
-        if (dateZoomParam) {
-            const standardMatch = Object.values(DateGranularity).find(
-                (granularity) =>
-                    granularity.toLowerCase() === dateZoomParam.toLowerCase(),
-            );
-            if (standardMatch) {
-                setDateZoomGranularity(standardMatch);
-            } else {
-                // Custom granularity — use the param value directly
-                setDateZoomGranularity(dateZoomParam);
-            }
-        }
-
-        // Temp filters
-        const tempFilterSearchParam = searchParams.get('tempFilters');
-        const filtersStorageKey = dashboardUuid
-            ? `unsavedDashboardFilters:${dashboardUuid}`
-            : null;
-        const unsavedDashboardFiltersRaw = filtersStorageKey
-            ? sessionStorage.getItem(filtersStorageKey)
-            : null;
-
-        if (filtersStorageKey) {
-            sessionStorage.removeItem(filtersStorageKey);
-        }
-        if (unsavedDashboardFiltersRaw) {
-            try {
-                const unsavedDashboardFilters = JSON.parse(
-                    unsavedDashboardFiltersRaw,
-                );
-                // TODO: this should probably merge with the filters
-                // from the database. This will break if they diverge,
-                // meaning there is a subtle race condition here
-                setDashboardFilters(unsavedDashboardFilters);
-            } catch {
-                showToastWarning({
-                    title: 'Could not restore unsaved filters',
-                    subtitle:
-                        'Your previous filter changes could not be loaded',
-                });
-            }
-        }
-        if (tempFilterSearchParam) {
-            try {
-                setDashboardTemporaryFilters(
-                    convertDashboardFiltersParamToDashboardFilters(
-                        JSON.parse(tempFilterSearchParam),
-                    ),
-                );
-            } catch {
-                showToastWarning({
-                    title: 'Could not restore filters from URL',
-                    subtitle:
-                        'The link appears to be incomplete. Please ask for it to be shared again.',
-                });
-            }
-        }
     });
-
-    // Apply default date zoom granularity when dashboard loads (if no URL override).
-    // Uses a ref for `search` so URL changes don't re-trigger this effect —
-    // it should only fire when the configured default changes (initial load + after saves).
-    const searchRef = useRef(search);
-    searchRef.current = search;
-    useEffect(() => {
-        if (isEditMode) return;
-        if (
-            dashboard?.config?.defaultDateZoomGranularity &&
-            !dashboard?.config?.isDateZoomDisabled
-        ) {
-            const searchParams = new URLSearchParams(searchRef.current);
-            const dateZoomParam = searchParams.get('dateZoom');
-            // Only apply default if no URL override is present
-            if (!dateZoomParam) {
-                setDateZoomGranularity(
-                    dashboard.config.defaultDateZoomGranularity,
-                );
-            }
-        }
-    }, [
-        dashboard?.config?.defaultDateZoomGranularity,
-        dashboard?.config?.isDateZoomDisabled,
-        isEditMode,
-        setDateZoomGranularity,
-    ]);
-
-    // Reset dateZoomGranularity if it's not in the allowed list.
-    // Falls back to the validated default state (not the raw config value,
-    // which may reference a stale custom granularity).
-    // Only validates standard granularities here — custom granularities
-    // are validated by DashboardGranularitySync once all charts have loaded
-    // and the full set of available custom granularities is known.
-    useEffect(() => {
-        if (
-            dateZoomGranularity &&
-            dateZoomGranularities.length > 0 &&
-            isStandardDateGranularity(dateZoomGranularity) &&
-            !dateZoomGranularities.includes(dateZoomGranularity)
-        ) {
-            setDateZoomGranularity(defaultDateZoomGranularity ?? undefined);
-        }
-    }, [
-        dateZoomGranularities,
-        dateZoomGranularity,
-        defaultDateZoomGranularity,
-        setDateZoomGranularity,
-    ]);
 
     const allFilterableFieldsMap = useMemo(() => {
         return dashboardAvailableFiltersData?.allFilterableFields &&
@@ -1124,6 +675,11 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             : {};
     }, [dashboardAvailableFiltersData]);
 
+    const hiddenFilterableFieldIds = useMemo(
+        () => new Set(dashboardAvailableFiltersData?.hiddenFilterableFieldIds),
+        [dashboardAvailableFiltersData],
+    );
+
     const allFilterableMetricsMap = useMemo(() => {
         return dashboardAvailableFiltersData?.allFilterableMetrics &&
             dashboardAvailableFiltersData.allFilterableMetrics.length > 0
@@ -1139,293 +695,172 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             : {};
     }, [dashboardAvailableFiltersData]);
 
-    const allFilters = useMemo(() => {
-        return {
-            dimensions: [
-                ...dashboardFilters.dimensions,
-                ...safeTemporaryFilters?.dimensions,
-            ],
-            metrics: [
-                ...dashboardFilters.metrics,
-                ...safeTemporaryFilters?.metrics,
-            ],
-            tableCalculations: [
-                ...dashboardFilters.tableCalculations,
-                ...safeTemporaryFilters?.tableCalculations,
-            ],
-        };
-    }, [dashboardFilters, safeTemporaryFilters]);
-
-    // Watch for filter changes and emit events (skip initial render)
-    useEffect(() => {
-        const previousFilters = previousFiltersRef.current;
-        const hasPreviousFilters =
-            previousFilters &&
-            previousFilters.dimensions.length +
-                previousFilters.metrics.length +
-                previousFilters.tableCalculations.length;
-
-        if (hasPreviousFilters && !isEqual(previousFilters, allFilters)) {
-            const filterCount =
-                allFilters.dimensions.length +
-                allFilters.metrics.length +
-                allFilters.tableCalculations.length;
-
-            dispatchEmbedEvent(LightdashEventType.FilterChanged, {
-                hasFilters: filterCount > 0,
-                filterCount,
-            });
-        }
-
-        previousFiltersRef.current = allFilters;
-    }, [allFilters, dispatchEmbedEvent]);
-
-    // Resets all dashboard filters. There's a bit of a race condition
-    // here because we store filters in memory in two places:
-    //  1. dashboardFilters: in memory
-    //  2. overridesForSavedDashboardFilters: in url
-    // This resets all of them.
-    // TODO: fix up the data flow for filters so that they get set
-    // and read more centrally.
+    // Resets saved filters, temporary filters and the URL overrides of saved filters
     const resetDashboardFilters = useCallback(() => {
-        // reset in memory filters
         const filters =
-            dashboard?.filters ?? embedDashboard?.filters ?? emptyFilters;
-        // Apply interactivity filtering for embedded dashboards
-        const filteredFilters = embedDashboard
-            ? applyInteractivityFiltering(filters)
-            : filters;
-        setDashboardFilters(filteredFilters);
-        // reset temporary filters
-        setDashboardTemporaryFilters(emptyFilters);
-        // reset saved filter overrides which are stored in url
-        resetSavedFilterOverrides();
-    }, [
-        setDashboardFilters,
-        setDashboardTemporaryFilters,
-        dashboard?.filters,
-        embedDashboard,
-        resetSavedFilterOverrides,
-        applyInteractivityFiltering,
-    ]);
-
-    const hasTilesThatSupportFilters = useMemo(() => {
-        const tileTypesThatSupportFilters = [
-            DashboardTileTypes.SQL_CHART,
-            DashboardTileTypes.SAVED_CHART,
-        ];
-        return !!dashboardTiles?.some(({ type }) =>
-            tileTypesThatSupportFilters.includes(type),
+            dashboard?.filters ??
+            embedDashboard?.filters ??
+            emptyDashboardFilters;
+        store.dispatch(
+            dashboardFiltersActions.resetFilters(
+                applyEmbedFilterInteractivity(filters, embedDashboard),
+            ),
         );
-    }, [dashboardTiles]);
+    }, [store, dashboard?.filters, embedDashboard]);
+
+    const hasTilesThatSupportFilters = useStoreValue(
+        store,
+        selectHasTilesThatSupportFilters,
+    );
+
+    const setDashboardFilters = useCallback<
+        React.Dispatch<React.SetStateAction<DashboardFilters>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardFiltersActions.setDashboardFilters(
+                    typeof value === 'function'
+                        ? value(selectDashboardFilters(store.getState()))
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
+
+    const setDashboardTemporaryFilters = useCallback<
+        React.Dispatch<React.SetStateAction<DashboardFilters>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardFiltersActions.setTemporaryFilters(
+                    typeof value === 'function'
+                        ? value(selectRawTemporaryFilters(store.getState()))
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
+
+    const setHaveFiltersChanged = useCallback<
+        React.Dispatch<React.SetStateAction<boolean>>
+    >(
+        (value) => {
+            store.dispatch(
+                dashboardFiltersActions.setHaveFiltersChanged(
+                    typeof value === 'function'
+                        ? value(selectHaveFiltersChanged(store.getState()))
+                        : value,
+                ),
+            );
+        },
+        [store],
+    );
 
     const addDimensionDashboardFilter = useCallback(
         (filter: DashboardFilterRule, isTemporary: boolean) => {
-            const setFunction = isTemporary
-                ? setDashboardTemporaryFilters
-                : setDashboardFilters;
-            setFunction((previousFilters) => ({
-                dimensions: [...previousFilters.dimensions, filter],
-                metrics: previousFilters.metrics,
-                tableCalculations: previousFilters.tableCalculations,
-            }));
-            setHaveFiltersChanged(true);
+            store.dispatch(
+                dashboardFiltersActions.addFilter({
+                    filter,
+                    isTemporary,
+                    category: 'dimensions',
+                }),
+            );
         },
-        [setDashboardFilters],
+        [store],
     );
 
+    const savedDimensionFilters =
+        dashboard?.filters?.dimensions || embedDashboard?.filters?.dimensions;
+    const savedFilters = (dashboard || embedDashboard)?.filters;
     const updateDimensionDashboardFilter = useCallback(
         (
-            item: DashboardFilterRule,
+            filter: DashboardFilterRule,
             index: number,
             isTemporary: boolean,
             isInEditMode: boolean,
         ) => {
-            const setFunction = isTemporary
-                ? setDashboardTemporaryFilters
-                : setDashboardFilters;
-
-            const filters =
-                dashboard?.filters?.dimensions ||
-                embedDashboard?.filters?.dimensions ||
-                [];
-            const isFilterSaved = filters.some(({ id }) => id === item.id);
-
-            setFunction((previousFilters) => {
-                if (!isTemporary) {
-                    if (isInEditMode) {
-                        removeSavedFilterOverride(item);
-                    } else {
-                        const isReverted =
-                            originalDashboardFilters.dimensions[index] &&
-                            !hasSavedFilterValueChanged(
-                                originalDashboardFilters.dimensions[index],
-                                item,
-                            );
-                        if (isReverted) {
-                            removeSavedFilterOverride(item);
-                            setHaveFiltersChanged(false);
-                        } else {
-                            const hasChanged = hasSavedFilterValueChanged(
-                                previousFilters.dimensions[index],
-                                item,
-                            );
-
-                            if (hasChanged && isFilterSaved) {
-                                addSavedFilterOverride(item);
-                            }
-                        }
-                    }
-                }
-                return {
-                    dimensions: [
-                        ...previousFilters.dimensions.slice(0, index),
-                        item,
-                        ...previousFilters.dimensions.slice(index + 1),
-                    ],
-                    metrics: previousFilters.metrics,
-                    tableCalculations: previousFilters.tableCalculations,
-                };
-            });
-            setHaveFiltersChanged(true);
+            store.dispatch(
+                dashboardFiltersActions.updateFilter({
+                    filter,
+                    index,
+                    isTemporary,
+                    isInEditMode,
+                    isFilterSaved: (savedDimensionFilters || []).some(
+                        ({ id }) => id === filter.id,
+                    ),
+                    originalFilter: savedFilters?.dimensions[index],
+                    category: 'dimensions',
+                }),
+            );
         },
-        [
-            addSavedFilterOverride,
-            dashboard?.filters.dimensions,
-            embedDashboard?.filters.dimensions,
-            originalDashboardFilters.dimensions,
-            removeSavedFilterOverride,
-        ],
+        [store, savedDimensionFilters, savedFilters],
     );
 
     const addMetricDashboardFilter = useCallback(
         (filter: DashboardFilterRule, isTemporary: boolean) => {
-            const setFunction = isTemporary
-                ? setDashboardTemporaryFilters
-                : setDashboardFilters;
-            setFunction((previousFilters) => ({
-                dimensions: previousFilters.dimensions,
-                metrics: [...previousFilters.metrics, filter],
-                tableCalculations: previousFilters.tableCalculations,
-            }));
-            setHaveFiltersChanged(true);
+            store.dispatch(
+                dashboardFiltersActions.addFilter({
+                    filter,
+                    isTemporary,
+                    category: 'metrics',
+                }),
+            );
         },
-        [],
+        [store],
     );
 
+    const savedMetricFilters =
+        dashboard?.filters?.metrics || embedDashboard?.filters?.metrics;
     const updateMetricDashboardFilter = useCallback(
         (
-            item: DashboardFilterRule,
+            filter: DashboardFilterRule,
             index: number,
             isTemporary: boolean,
             isInEditMode: boolean,
         ) => {
-            const setFunction = isTemporary
-                ? setDashboardTemporaryFilters
-                : setDashboardFilters;
-
-            const filters =
-                dashboard?.filters?.metrics ||
-                embedDashboard?.filters?.metrics ||
-                [];
-            const isFilterSaved = filters.some(({ id }) => id === item.id);
-
-            setFunction((previousFilters) => {
-                if (!isTemporary) {
-                    if (isInEditMode) {
-                        removeSavedFilterOverride(item, 'metrics');
-                    } else {
-                        const isReverted =
-                            originalDashboardFilters.metrics[index] &&
-                            !hasSavedFilterValueChanged(
-                                originalDashboardFilters.metrics[index],
-                                item,
-                            );
-                        if (isReverted) {
-                            removeSavedFilterOverride(item, 'metrics');
-                            setHaveFiltersChanged(false);
-                        } else {
-                            const hasChanged = hasSavedFilterValueChanged(
-                                previousFilters.metrics[index],
-                                item,
-                            );
-
-                            if (hasChanged && isFilterSaved) {
-                                addSavedFilterOverride(item, 'metrics');
-                            }
-                        }
-                    }
-                }
-                return {
-                    dimensions: previousFilters.dimensions,
-                    metrics: [
-                        ...previousFilters.metrics.slice(0, index),
-                        item,
-                        ...previousFilters.metrics.slice(index + 1),
-                    ],
-                    tableCalculations: previousFilters.tableCalculations,
-                };
-            });
-            setHaveFiltersChanged(true);
+            store.dispatch(
+                dashboardFiltersActions.updateFilter({
+                    filter,
+                    index,
+                    isTemporary,
+                    isInEditMode,
+                    isFilterSaved: (savedMetricFilters || []).some(
+                        ({ id }) => id === filter.id,
+                    ),
+                    originalFilter: savedFilters?.metrics[index],
+                    category: 'metrics',
+                }),
+            );
         },
-        [
-            addSavedFilterOverride,
-            dashboard?.filters.metrics,
-            embedDashboard?.filters.metrics,
-            originalDashboardFilters.metrics,
-            removeSavedFilterOverride,
-        ],
+        [store, savedMetricFilters, savedFilters],
     );
 
     const removeMetricDashboardFilter = useCallback(
         (index: number, isTemporary: boolean) => {
-            const setFunction = isTemporary
-                ? setDashboardTemporaryFilters
-                : setDashboardFilters;
-            setFunction((previousFilters) => {
-                if (!isTemporary) {
-                    removeSavedFilterOverride(
-                        previousFilters.metrics[index],
-                        'metrics',
-                    );
-                }
-                return {
-                    dimensions: previousFilters.dimensions,
-                    metrics: [
-                        ...previousFilters.metrics.slice(0, index),
-                        ...previousFilters.metrics.slice(index + 1),
-                    ],
-                    tableCalculations: previousFilters.tableCalculations,
-                };
-            });
-            setHaveFiltersChanged(true);
+            store.dispatch(
+                dashboardFiltersActions.removeFilter({
+                    index,
+                    isTemporary,
+                    category: 'metrics',
+                }),
+            );
         },
-        [removeSavedFilterOverride],
+        [store],
     );
 
     const removeDimensionDashboardFilter = useCallback(
         (index: number, isTemporary: boolean) => {
-            const setFunction = isTemporary
-                ? setDashboardTemporaryFilters
-                : setDashboardFilters;
-            setFunction((previousFilters) => {
-                if (!isTemporary) {
-                    removeSavedFilterOverride(
-                        previousFilters.dimensions[index],
-                    );
-                }
-                return {
-                    dimensions: [
-                        ...previousFilters.dimensions.slice(0, index),
-                        ...previousFilters.dimensions.slice(index + 1),
-                    ],
-                    metrics: previousFilters.metrics,
-                    tableCalculations: previousFilters.tableCalculations,
-                };
-            });
-            setHaveFiltersChanged(true);
+            store.dispatch(
+                dashboardFiltersActions.removeFilter({
+                    index,
+                    isTemporary,
+                    category: 'dimensions',
+                }),
+            );
         },
-        [removeSavedFilterOverride],
+        [store],
     );
 
     const refreshDashboardVersion = useCallback(async () => {
@@ -1435,82 +870,29 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             // Only update local state if we got fresh data back
             // (null means dashboard was already up-to-date)
             if (freshDashboard) {
-                setDashboardTiles(freshDashboard.tiles);
-                setDashboardTabs(freshDashboard.tabs);
+                store.dispatch(
+                    dashboardEditActions.setTiles(freshDashboard.tiles),
+                );
+                store.dispatch(
+                    dashboardEditActions.setTabs(freshDashboard.tabs),
+                );
                 setSavedParameters(freshDashboard.parameters ?? {});
             }
         } catch (error) {
             console.error('Failed to refresh dashboard:', error);
             // Could optionally show a toast error here
         }
-    }, [
-        versionRefresh,
-        dashboard,
-        setDashboardTiles,
-        setDashboardTabs,
-        setSavedParameters,
-    ]);
-
-    // Filters that are required to have a value set
-    const requiredDashboardFilters = useMemo(
-        () =>
-            [...dashboardFilters.dimensions, ...dashboardFilters.metrics]
-                // Get filters that are required to have a value set (required) and that have no default value set (disabled)
-                .filter((f) => f.required && f.disabled)
-                .reduce<Pick<DashboardFilterRule, 'id' | 'label'>[]>(
-                    (acc, f) => {
-                        const field =
-                            allFilterableFieldsMap[f.target.fieldId] ??
-                            allFilterableMetricsMap[f.target.fieldId];
-
-                        let label = '';
-
-                        if (f.label) {
-                            label = f.label;
-                        } else if (field) {
-                            label = getConditionalRuleLabelFromItem(
-                                f,
-                                field,
-                            ).field;
-                        }
-
-                        return [
-                            ...acc,
-                            {
-                                id: f.id,
-                                label,
-                            },
-                        ];
-                    },
-                    [],
-                ),
-        [
-            dashboardFilters.dimensions,
-            dashboardFilters.metrics,
-            allFilterableFieldsMap,
-            allFilterableMetricsMap,
-        ],
-    );
+    }, [store, versionRefresh, dashboard, setSavedParameters]);
 
     const value = {
         projectUuid,
+        includeUnpublishedDraft,
         isDashboardLoading,
         dashboard: dashboard || embedDashboard,
         setEmbedDashboard,
         dashboardError,
-        dashboardTiles,
-        setDashboardTiles,
-        haveTilesChanged,
-        setHaveTilesChanged,
-        haveTabsChanged,
-        setHaveTabsChanged,
-        dashboardTabs,
-        setDashboardTabs,
-        activeTab,
-        setActiveTab,
+        ...editSetters,
         setDashboardTemporaryFilters,
-        dashboardFilters,
-        dashboardTemporaryFilters: safeTemporaryFilters,
         addDimensionDashboardFilter,
         updateDimensionDashboardFilter,
         removeDimensionDashboardFilter,
@@ -1519,79 +901,80 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         removeMetricDashboardFilter,
         resetDashboardFilters,
         setDashboardFilters,
-        setOriginalDashboardFilters,
-        haveFiltersChanged,
         setHaveFiltersChanged,
         allFilterableFieldsMap,
         allFilterableMetricsMap,
+        hiddenFilterableFieldIds,
         allFilterableFields: dashboardAvailableFiltersData?.allFilterableFields,
         allFilterableMetrics:
             dashboardAvailableFiltersData?.allFilterableMetrics,
         isLoadingDashboardFilters,
         isFetchingDashboardFilters,
         filterableFieldsByTileUuid,
-        allFilters,
+        temporaryFilterLocks,
+        setChartZoomableFields,
         hasTilesThatSupportFilters,
-        chartSort,
-        setChartSort,
-        dateZoomGranularity,
+        setTileChartSorts,
         setDateZoomGranularity,
-        chartsWithDateZoomApplied,
-        setChartsWithDateZoomApplied,
+        setTilesWithDateZoomApplied,
+        setControlGranularity,
         dashboardCommentsCheck,
         dashboardComments,
         hasTileComments,
-        requiredDashboardFilters,
-        isDateZoomDisabled,
-        setIsDateZoomDisabled,
-        isAddFilterDisabled,
-        setIsAddFilterDisabled,
         setSavedParameters,
-        parametersHaveChanged,
-        dashboardParameters: parameters,
-        parameterValues,
-        selectedParametersCount,
         setParameter,
-        parameterDefinitions,
         clearAllParameters,
-        dashboardParameterReferences,
         addParameterReferences,
-        tileParameterReferences,
-        missingRequiredParameters,
-        pinnedParameters,
+        setTileChartSavedParameters,
         setPinnedParameters,
         toggleParameterPin,
-        havePinnedParametersChanged,
         setHavePinnedParametersChanged,
-        parameterOrder,
         setParameterOrder,
-        hasParameterOrderChanged,
         setHasParameterOrderChanged,
-        dateZoomGranularities,
-        setDateZoomGranularities,
-        haveDateZoomGranularitiesChanged,
-        setHaveDateZoomGranularitiesChanged,
-        defaultDateZoomGranularity,
-        setDefaultDateZoomGranularity,
-        hasDefaultDateZoomGranularityChanged,
-        setHasDefaultDateZoomGranularityChanged,
         addParameterDefinitions,
         refreshDashboardVersion,
         isRefreshingDashboardVersion,
     };
     return (
-        <DashboardContext.Provider value={value}>
-            <DashboardTileStatusProvider
-                dashboardTiles={dashboardTiles}
-                dashboardTabs={dashboardTabs}
-                activeTab={activeTab}
-                schedulerTabsSelected={schedulerTabsSelected}
-                defaultInvalidateCache={defaultInvalidateCache}
-            >
-                <DashboardGranularitySync />
-                {children}
-            </DashboardTileStatusProvider>
-        </DashboardContext.Provider>
+        <Provider store={store} context={DashboardStoreContext}>
+            <DashboardContext.Provider value={value}>
+                <ConnectedDashboardTileStatusProvider
+                    schedulerTabsSelected={schedulerTabsSelected}
+                >
+                    <DashboardGranularitySync />
+                    {children}
+                </ConnectedDashboardTileStatusProvider>
+                {/* After children so their effects run after the page's, as when they lived in this provider */}
+                <ConnectedDashboardFiltersSync
+                    dashboardIdentifier={dashboardIdentifier}
+                    dashboard={dashboard}
+                    embedDashboard={embedDashboard}
+                    savedChartUuidsAndTileUuids={savedChartUuidsAndTileUuids}
+                    filterableFieldsByTileUuid={filterableFieldsByTileUuid}
+                    temporaryFilterLocks={temporaryFilterLocks}
+                />
+                <DashboardParametersSync
+                    projectUuid={projectUuid}
+                    isEditMode={isEditMode}
+                />
+                <ConnectedDashboardDateZoomSync
+                    dashboardConfig={currentDashboardConfig}
+                    dashboardUuid={dashboard?.uuid}
+                    isDashboardLoaded={!!(dashboard ?? embedDashboard)}
+                    isEditMode={isEditMode}
+                    configDefaultDateZoomGranularity={
+                        currentDashboardConfig?.defaultDateZoomGranularity
+                    }
+                    isDateZoomDisabledInConfig={
+                        currentDashboardConfig?.isDateZoomDisabled
+                    }
+                />
+                <DashboardActiveTabSync
+                    tabUuid={tabUuid}
+                    isEditMode={isEditMode}
+                />
+            </DashboardContext.Provider>
+        </Provider>
     );
 };
 
@@ -1602,29 +985,20 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
  * (tile status provider is rendered as its child).
  */
 const DashboardGranularitySync: React.FC = () => {
-    const areAllChartsLoaded = useDashboardTileStatusContext(
-        (c) => c.areAllChartsLoaded,
-    );
-    const availableCustomGranularities = useDashboardTileStatusContext(
-        (c) => c.availableCustomGranularities,
-    );
-    const dashboardHasTimestampDimension = useDashboardTileStatusContext(
-        (c) => c.dashboardHasTimestampDimension,
+    const areAllChartsLoaded = useAreAllChartsLoaded();
+    const availableCustomGranularities = useDashboardSelector(
+        selectAvailableCustomGranularities,
     );
 
     // Use refs for values we read but should NOT trigger re-runs of the effect.
     // Reading dateZoomGranularities directly in the dep array would cause an
     // infinite loop: effect filters → setDateZoomGranularities (which also sets
     // haveDateZoomGranularitiesChanged) → new context value → effect re-fires.
-    const dateZoomGranularities = useDashboardContext(
-        (c) => c.dateZoomGranularities,
-    );
+    const dateZoomGranularities = useDashboardDateZoomGranularities();
     const dateZoomGranularitiesRef = useRef(dateZoomGranularities);
     dateZoomGranularitiesRef.current = dateZoomGranularities;
 
-    const defaultDateZoomGranularity = useDashboardContext(
-        (c) => c.defaultDateZoomGranularity,
-    );
+    const defaultDateZoomGranularity = useDefaultDateZoomGranularity();
     const defaultDateZoomGranularityRef = useRef(defaultDateZoomGranularity);
     defaultDateZoomGranularityRef.current = defaultDateZoomGranularity;
 
@@ -1635,9 +1009,7 @@ const DashboardGranularitySync: React.FC = () => {
         (c) => c.setDefaultDateZoomGranularity,
     );
 
-    const dateZoomGranularity = useDashboardContext(
-        (c) => c.dateZoomGranularity,
-    );
+    const dateZoomGranularity = useDashboardSelector(selectDateZoomGranularity);
     const dateZoomGranularityRef = useRef(dateZoomGranularity);
     dateZoomGranularityRef.current = dateZoomGranularity;
 
@@ -1645,9 +1017,9 @@ const DashboardGranularitySync: React.FC = () => {
         (c) => c.setDateZoomGranularity,
     );
 
-    // Once all charts have loaded, clean up stale granularities:
-    // - Custom granularities no longer provided by any explore
-    // - Sub-day granularities when no TIMESTAMP dimensions exist
+    // Once all charts have loaded, clean up stale custom granularities no longer
+    // provided by any explore. Standard granularities (incl. sub-day) are never
+    // pruned — the editor-defined list is preserved across tab switches.
     // Also resets the active dateZoomGranularity if it's a stale custom value
     // (custom granularities are not validated earlier to avoid a race condition
     // where the URL param is cleared before charts finish loading).
@@ -1664,10 +1036,6 @@ const DashboardGranularitySync: React.FC = () => {
         const isAvailable = (g: string) => {
             if (!isStandardDateGranularity(g)) {
                 return availableCustomGranularityKeys.has(g);
-            }
-            // Strip sub-day standard granularities when no timestamp dims
-            if (!dashboardHasTimestampDimension && isSubDayGranularity(g)) {
-                return false;
             }
             return true;
         };
@@ -1695,12 +1063,281 @@ const DashboardGranularitySync: React.FC = () => {
     }, [
         areAllChartsLoaded,
         availableCustomGranularities,
-        dashboardHasTimestampDimension,
         setDateZoomGranularities,
         setDefaultDateZoomGranularity,
         setDateZoomGranularity,
     ]);
 
+    return null;
+};
+
+/** The provider renders the store's Provider, so it subscribes directly */
+const useStoreValue = <T,>(
+    store: DashboardStore,
+    selector: (state: ReturnType<DashboardStore['getState']>) => T,
+) => useSyncExternalStore(store.subscribe, () => selector(store.getState()));
+
+const resolve = <T,>(value: React.SetStateAction<T>, previous: () => T): T =>
+    typeof value === 'function' ? (value as (prev: T) => T)(previous()) : value;
+
+/** Stable context setters for the edit state; they read the store at call time */
+const useEditSetters = (
+    store: DashboardStore,
+    config: DashboardConfig | undefined,
+) => {
+    const savedSettings = useMemo(
+        () => getSavedDateZoomSettings(config),
+        [config],
+    );
+    const savedSettingsRef = useRef(savedSettings);
+    useLayoutEffect(() => {
+        savedSettingsRef.current = savedSettings;
+    }, [savedSettings]);
+
+    // A changed saved config replaces drafts of its settings
+    useEffect(() => {
+        store.dispatch(dashboardEditActions.dropStaleDrafts(savedSettings));
+    }, [store, savedSettings]);
+
+    return useMemo(() => {
+        const { dispatch, getState } = store;
+        const savedDateZoomConfig = () =>
+            savedSettingsRef.current.dateZoomConfig;
+        return {
+            setDashboardTiles: (
+                value: React.SetStateAction<Dashboard['tiles'] | undefined>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setTiles(
+                        resolve(value, () => selectDashboardTiles(getState())),
+                    ),
+                ),
+            setHaveTilesChanged: (value: React.SetStateAction<boolean>) =>
+                dispatch(
+                    dashboardEditActions.setHaveTilesChanged(
+                        resolve(value, () =>
+                            selectHaveTilesChanged(getState()),
+                        ),
+                    ),
+                ),
+            setDashboardTabs: (
+                value: React.SetStateAction<Dashboard['tabs']>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setTabs(
+                        resolve(value, () => selectDashboardTabs(getState())),
+                    ),
+                ),
+            setHaveTabsChanged: (value: React.SetStateAction<boolean>) =>
+                dispatch(
+                    dashboardEditActions.setHaveTabsChanged(
+                        resolve(value, () => selectHaveTabsChanged(getState())),
+                    ),
+                ),
+            setActiveTab: (
+                value: React.SetStateAction<
+                    Dashboard['tabs'][number] | undefined
+                >,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setActiveTab(
+                        resolve(value, () => selectActiveTab(getState())),
+                    ),
+                ),
+            setDashboardCustomMetrics: (
+                value: React.SetStateAction<AdditionalMetric[]>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setCustomMetrics(
+                        resolve(value, () =>
+                            selectDashboardCustomMetrics(getState()),
+                        ),
+                    ),
+                ),
+            setHaveCustomMetricsChanged: (
+                value: React.SetStateAction<boolean>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setHaveCustomMetricsChanged(
+                        resolve(value, () =>
+                            selectHaveCustomMetricsChanged(getState()),
+                        ),
+                    ),
+                ),
+            setIsDateZoomDisabled: (value: React.SetStateAction<boolean>) =>
+                dispatch(
+                    dashboardEditActions.setIsDateZoomDisabled(
+                        resolve(value, () =>
+                            selectIsDateZoomDisabled(getState()),
+                        ),
+                    ),
+                ),
+            setIsAddFilterDisabled: (value: React.SetStateAction<boolean>) =>
+                dispatch(
+                    dashboardEditActions.setIsAddFilterDisabled(
+                        resolve(value, () =>
+                            selectIsAddFilterDisabled(getState()),
+                        ),
+                    ),
+                ),
+            setRequiredFiltersNote: (
+                value: React.SetStateAction<string | undefined>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setRequiredFiltersNote(
+                        resolve(value, () =>
+                            selectEditedRequiredFiltersNote(getState()),
+                        ),
+                    ),
+                ),
+            setDateZoomConfig: (dateZoomConfig: DateZoomConfig) =>
+                dispatch(
+                    dashboardEditActions.setDateZoomConfig({
+                        value: dateZoomConfig,
+                        changed: true,
+                        saved: savedDateZoomConfig(),
+                    }),
+                ),
+            setHasDateZoomConfigChanged: (
+                value: React.SetStateAction<boolean>,
+            ) => {
+                const saved = savedDateZoomConfig();
+                const state = getState();
+                dispatch(
+                    dashboardEditActions.setDateZoomConfig({
+                        value: selectDateZoomConfig(state, saved),
+                        changed: resolve(value, () =>
+                            selectHasDateZoomConfigChanged(state, saved),
+                        ),
+                        saved,
+                    }),
+                );
+            },
+            setDateZoomGranularities: (
+                granularities: (DateGranularity | string)[],
+            ) =>
+                dispatch(
+                    dashboardEditActions.setDateZoomGranularities({
+                        value: granularities,
+                        saved: savedSettingsRef.current.dateZoomGranularities,
+                    }),
+                ),
+            setHaveDateZoomGranularitiesChanged: (
+                value: React.SetStateAction<boolean>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setHaveDateZoomGranularitiesChanged(
+                        resolve(value, () =>
+                            selectHaveDateZoomGranularitiesChanged(getState()),
+                        ),
+                    ),
+                ),
+            setDefaultDateZoomGranularity: (
+                granularity: DateGranularity | string | undefined,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setDefaultDateZoomGranularity({
+                        value: granularity,
+                        saved: savedSettingsRef.current
+                            .defaultDateZoomGranularity,
+                    }),
+                ),
+            setHasDefaultDateZoomGranularityChanged: (
+                value: React.SetStateAction<boolean>,
+            ) =>
+                dispatch(
+                    dashboardEditActions.setHasDefaultDateZoomGranularityChanged(
+                        resolve(value, () =>
+                            selectHasDefaultDateZoomGranularityChanged(
+                                getState(),
+                            ),
+                        ),
+                    ),
+                ),
+        };
+    }, [store]);
+};
+
+// The wrappers below select edit state so the provider itself doesn't
+// re-render when tiles, tabs or the active tab change.
+
+const ConnectedDashboardTileStatusProvider: React.FC<
+    Omit<
+        ComponentProps<typeof DashboardTileStatusProvider>,
+        'dashboardTiles' | 'dashboardTabs' | 'activeTab'
+    >
+> = (props) => (
+    <DashboardTileStatusProvider
+        {...props}
+        dashboardTiles={useDashboardSelector(selectDashboardTiles)}
+        dashboardTabs={useDashboardSelector(selectDashboardTabs)}
+        activeTab={useDashboardSelector(selectActiveTab)}
+    />
+);
+
+const ConnectedDashboardFiltersSync: React.FC<
+    Omit<ComponentProps<typeof DashboardFiltersSync>, 'activeTab'>
+> = (props) => (
+    <DashboardFiltersSync
+        {...props}
+        activeTab={useDashboardSelector(selectActiveTab)}
+    />
+);
+
+// Takes the config by prop, not context, so the allowed list arrives in the
+// same render as `isDashboardLoaded` and a URL value is never checked against
+// the placeholder list
+const ConnectedDashboardDateZoomSync: React.FC<
+    Omit<
+        ComponentProps<typeof DashboardDateZoomSync>,
+        'dateZoomGranularities' | 'defaultDateZoomGranularity'
+    > & { dashboardConfig: DashboardConfig | undefined }
+> = ({ dashboardConfig, ...props }) => {
+    const saved = useMemo(
+        () => getSavedDateZoomSettings(dashboardConfig),
+        [dashboardConfig],
+    );
+    const dateZoomGranularities = useDashboardSelector((state) =>
+        selectDateZoomGranularities(state, saved.dateZoomGranularities),
+    );
+    const defaultDateZoomGranularity = useDashboardSelector((state) =>
+        selectDefaultDateZoomGranularity(
+            state,
+            saved.defaultDateZoomGranularity,
+        ),
+    );
+    return (
+        <DashboardDateZoomSync
+            {...props}
+            dateZoomGranularities={dateZoomGranularities}
+            defaultDateZoomGranularity={defaultDateZoomGranularity}
+        />
+    );
+};
+
+/**
+ * Picks the active tab when the tabs or the URL tab change. In view mode,
+ * hidden tabs are not selectable: a URL pointing at one falls back to the first
+ * visible tab. In edit mode all tabs are selectable.
+ */
+const DashboardActiveTabSync: React.FC<{
+    tabUuid: string | undefined;
+    isEditMode: boolean;
+}> = ({ tabUuid, isEditMode }) => {
+    const dashboardTabs = useDashboardSelector(selectDashboardTabs);
+    const setActiveTab = useDashboardContext((c) => c.setActiveTab);
+    useEffect(() => {
+        if (dashboardTabs && dashboardTabs.length > 0) {
+            setActiveTab((currentActiveTab) =>
+                getActiveTabForTabs(
+                    dashboardTabs,
+                    tabUuid,
+                    isEditMode,
+                    currentActiveTab,
+                ),
+            );
+        }
+    }, [dashboardTabs, tabUuid, isEditMode, setActiveTab]);
     return null;
 };
 

@@ -1,4 +1,4 @@
-import { Button } from '@mantine-8/core';
+import { Button } from '@mantine/core';
 import { IconTrash } from '@tabler/icons-react';
 import { useCallback, useEffect } from 'react';
 import ErrorState from '../../../components/common/ErrorState';
@@ -41,6 +41,7 @@ export const SyncModalDelete = () => {
         <MantineModal
             opened
             onClose={() => setAction(SyncModalAction.VIEW)}
+            role="alertdialog"
             title="Delete"
             icon={IconTrash}
             size="lg"

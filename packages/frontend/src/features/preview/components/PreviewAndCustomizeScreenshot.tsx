@@ -1,4 +1,3 @@
-import { type ApiError, type Dashboard } from '@lightdash/common';
 import {
     ActionIcon,
     Box,
@@ -11,30 +10,20 @@ import {
     Radio,
     Stack,
     Text,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconArrowsDiagonal,
     IconEye,
     IconEyeClosed,
 } from '@tabler/icons-react';
-import { type UseMutationResult } from '@tanstack/react-query';
 import { useState, type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
 import { CUSTOM_WIDTH_OPTIONS } from '../../scheduler/constants';
+import classes from './PreviewAndCustomizeScreenshot.module.css';
 
 type PreviewAndCustomizeScreenshotProps = {
     containerWidth?: number | undefined;
-    exportMutation: UseMutationResult<
-        string,
-        ApiError,
-        {
-            dashboard: Dashboard;
-            gridWidth: number | undefined;
-            queryFilters: string;
-            isPreview?: boolean | undefined;
-            selectedTabs: string[] | null;
-        }
-    >;
+    isLoading: boolean;
     previewChoice: (typeof CUSTOM_WIDTH_OPTIONS)[number]['value'] | undefined;
     setPreviewChoice: (
         prev: (typeof CUSTOM_WIDTH_OPTIONS)[number]['value'] | undefined,
@@ -48,7 +37,7 @@ export const PreviewAndCustomizeScreenshot: FC<
     PreviewAndCustomizeScreenshotProps
 > = ({
     containerWidth,
-    exportMutation,
+    isLoading,
     previewChoice,
     setPreviewChoice,
     onPreviewClick,
@@ -59,7 +48,7 @@ export const PreviewAndCustomizeScreenshot: FC<
 
     return (
         <Box>
-            <LoadingOverlay visible={exportMutation.isLoading} />
+            <LoadingOverlay visible={isLoading} />
 
             <Stack>
                 <Flex align="flex-start" justify="space-between">
@@ -94,7 +83,7 @@ export const PreviewAndCustomizeScreenshot: FC<
                     </Radio.Group>
 
                     <Stack>
-                        <Card withBorder p={0}>
+                        <Card p={0}>
                             <Box pos="relative">
                                 {currentPreview ? (
                                     <Image
@@ -175,7 +164,7 @@ export const PreviewAndCustomizeScreenshot: FC<
                     onClick={() => setIsImageModalOpen(false)}
                     w="100%"
                     h="100%"
-                    style={{ cursor: 'pointer' }}
+                    className={classes.previewImage}
                 />
             </Modal>
         </Box>

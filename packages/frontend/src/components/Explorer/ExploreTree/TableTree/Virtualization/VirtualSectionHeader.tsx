@@ -1,6 +1,5 @@
 import { subject } from '@casl/ability';
-import { FeatureFlags, isCustomSqlDimension } from '@lightdash/common';
-import { ActionIcon, Button, Group, Text, Tooltip } from '@mantine/core';
+import { Button, Group, Text, ActionIcon, Tooltip } from '@mantine/core';
 import { IconCode, IconPlus } from '@tabler/icons-react';
 import { memo, useCallback, useMemo, type FC } from 'react';
 import {
@@ -11,12 +10,12 @@ import {
     useExplorerSelector,
 } from '../../../../../features/explorer/store';
 import { useProjectUuid } from '../../../../../hooks/useProjectUuid';
-import { useServerFeatureFlag } from '../../../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../../../providers/App/useApp';
 import useTracking from '../../../../../providers/Tracking/useTracking';
 import { EventName } from '../../../../../types/Events';
 import MantineIcon from '../../../../common/MantineIcon';
 import DocumentationHelpButton from '../../../../DocumentationHelpButton';
+import { getCustomDimensionsForWriteBack } from '../../../WriteBackModal/writeBackSupport';
 import { TreeSection, type SectionHeaderItem } from './types';
 
 interface VirtualSectionHeaderProps {
@@ -26,6 +25,7 @@ interface VirtualSectionHeaderProps {
 /**
  * Renders a section header (Dimensions, Metrics, etc.) in the virtualized tree
  */
+
 const VirtualSectionHeaderComponent: FC<VirtualSectionHeaderProps> = ({
     item,
 }) => {
@@ -37,15 +37,14 @@ const VirtualSectionHeaderComponent: FC<VirtualSectionHeaderProps> = ({
     const dispatch = useExplorerDispatch();
 
     // Get all custom metrics and dimensions for write-back
-    const allAdditionalMetrics = useExplorerSelector(selectAdditionalMetrics);
+    const additionalMetrics = useExplorerSelector(selectAdditionalMetrics);
     const allCustomDimensions = useExplorerSelector(selectCustomDimensions);
 
-    // Feature flag for bin dimensions write-back
-    const { data: writeBackCustomBinDimensionsFlag } = useServerFeatureFlag(
-        FeatureFlags.WriteBackCustomBinDimensions,
+    // Write-back requires a base dimension column to attach the metric to in YAML
+    const allAdditionalMetrics = useMemo(
+        () => additionalMetrics?.filter((metric) => metric.baseDimensionName),
+        [additionalMetrics],
     );
-    const isWriteBackCustomBinDimensionsEnabled =
-        writeBackCustomBinDimensionsFlag?.enabled ?? false;
 
     const canManageCustomFields = user.data?.ability?.can(
         'manage',
@@ -55,19 +54,14 @@ const VirtualSectionHeaderComponent: FC<VirtualSectionHeaderProps> = ({
         }),
     );
 
-    const customDimensionsToWriteBack = useMemo(() => {
-        if (!allCustomDimensions) return [];
-        const baseList = isWriteBackCustomBinDimensionsEnabled
-            ? allCustomDimensions
-            : allCustomDimensions.filter(isCustomSqlDimension);
-        return canManageCustomFields
-            ? baseList
-            : baseList.filter((dim) => !isCustomSqlDimension(dim));
-    }, [
-        allCustomDimensions,
-        isWriteBackCustomBinDimensionsEnabled,
-        canManageCustomFields,
-    ]);
+    const customDimensionsToWriteBack = useMemo(
+        () =>
+            getCustomDimensionsForWriteBack(
+                allCustomDimensions,
+                !!canManageCustomFields,
+            ),
+        [allCustomDimensions, canManageCustomFields],
+    );
 
     const handleAddCustomDimension = useCallback(() => {
         dispatch(
@@ -139,9 +133,9 @@ const VirtualSectionHeaderComponent: FC<VirtualSectionHeaderProps> = ({
         customDimensionsToWriteBack.length > 0;
 
     return (
-        <Group mt="sm" mb="xs" pl={pl} pr="sm" position="apart">
-            <Group spacing="xs">
-                <Text fw={600} c={color}>
+        <Group mt="sm" mb="xs" pl={pl} pr="sm" justify="space-between">
+            <Group gap="xs">
+                <Text fz="sm" fw={600} c={color}>
                     {label}
                 </Text>
                 {helpButton && (
@@ -155,20 +149,21 @@ const VirtualSectionHeaderComponent: FC<VirtualSectionHeaderProps> = ({
                 )}
             </Group>
 
-            <Group spacing="xs">
+            <Group gap="xs">
                 {showAddButton && (
                     <Tooltip
                         label="Add a custom dimension with SQL"
-                        variant="xs"
                         position="left"
                     >
                         <Button
-                            size="xs"
                             variant="subtle"
-                            compact
-                            leftIcon={<MantineIcon icon={IconPlus} />}
+                            size="compact-xs"
+                            leftSection={<MantineIcon icon={IconPlus} />}
                             onClick={handleAddCustomDimension}
                             data-testid="VirtualSectionHeader/AddCustomDimensionButton"
+                            // Anchor for scope walkthroughs (data-tour-via)
+                            data-tour-anchor="add-custom-dimension"
+                            data-tour-hint="Add a custom dimension"
                         >
                             Add
                         </Button>

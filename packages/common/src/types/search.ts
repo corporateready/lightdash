@@ -1,6 +1,7 @@
 import assertUnreachable from '../utils/assertUnreachable';
 import { type ContentVerificationInfo } from './contentVerification';
 import { type Dashboard } from './dashboard';
+import { type DocumentSummary } from './document';
 import { type Table } from './explore';
 import { type Dimension, type Metric } from './field';
 import { type ChartKind, type SavedChart } from './savedCharts';
@@ -51,11 +52,17 @@ export type DashboardSearchResult = Pick<
     verification: ContentVerificationInfo | null;
 } & RankedItem;
 
+export type DashboardChartSummary = DashboardSearchResult['charts'][number] & {
+    exploreName: string;
+};
+
 export type SavedChartSearchResult = Pick<
     SavedChart,
     'uuid' | 'name' | 'description' | 'spaceUuid' | 'projectUuid' | 'slug'
 > & {
     chartType: ChartKind;
+    /** Owning dashboard for dashboard-owned chart definitions, else null. */
+    dashboardUuid: string | null;
     validationErrors: {
         validationUuid: ValidationErrorChartResponse['validationUuid'];
         /** @deprecated Use validationUuid. Null for post-migration validations. */
@@ -84,6 +91,8 @@ export type SqlChartSearchResult = Pick<
 > & {
     uuid: SqlChart['savedSqlUuid'];
     chartType: ChartKind;
+    /** Owning dashboard for dashboard-owned chart definitions, else null. */
+    dashboardUuid: string | null;
     spaceUuid: SqlChart['space']['uuid'];
     projectUuid: SqlChart['project']['projectUuid'];
     chartSource: 'sql';
@@ -108,6 +117,8 @@ export type AllChartsSearchResult = Pick<
     'uuid' | 'name' | 'description' | 'spaceUuid' | 'projectUuid' | 'slug'
 > & {
     chartType: ChartKind;
+    /** Owning dashboard for dashboard-owned chart definitions, else null. */
+    dashboardUuid: string | null;
     chartSource: 'saved' | 'sql';
     viewsCount: number;
     firstViewedAt: string | null;
@@ -167,8 +178,17 @@ export type FieldSearchResult = Pick<
     regexMatchCount: number;
 };
 
+export type DocumentSearchResult = Pick<
+    DocumentSummary,
+    'slug' | 'name' | 'description' | 'projectUuid' | 'spaceUuid'
+> & {
+    uuid: string;
+    createdBy: { firstName: string; lastName: string; userUuid: string } | null;
+} & RankedItem;
+
 export type DataAppSearchResult = {
     uuid: string;
+    slug: string;
     name: string;
     description: string;
     // Personal apps live outside any space, so spaceUuid is nullable.
@@ -191,6 +211,7 @@ export type DashboardTabResult = {
     uuid: string; // Tab uuid
     name: string; // Tab name
     dashboardUuid: string;
+    dashboardSlug: string;
     dashboardName: string;
     spaceUuid: string;
 };
@@ -205,7 +226,8 @@ export type SearchResult =
     | TableSearchResult
     | FieldSearchResult
     | PageResult
-    | DataAppSearchResult;
+    | DataAppSearchResult
+    | DocumentSearchResult;
 
 export const isExploreSearchResult = (
     value: SearchResult,
@@ -244,6 +266,7 @@ export type SearchResults = {
     pages: PageResult[];
     dashboardTabs: DashboardTabResult[];
     dataApps: DataAppSearchResult[];
+    documents: DocumentSearchResult[];
 };
 
 export const getSearchResultId = (meta: SearchResult | undefined) => {
@@ -269,6 +292,8 @@ export enum SearchItemType {
     FIELD = 'field',
     PAGE = 'page',
     DATA_APP = 'data_app',
+    DOCUMENT = 'document',
+    SETTINGS = 'settings',
 }
 
 export function getSearchItemTypeFromResultKey(
@@ -293,6 +318,8 @@ export function getSearchItemTypeFromResultKey(
             return SearchItemType.DASHBOARD_TAB;
         case 'dataApps':
             return SearchItemType.DATA_APP;
+        case 'documents':
+            return SearchItemType.DOCUMENT;
         default:
             return assertUnreachable(
                 searchResultKey,
@@ -306,4 +333,6 @@ export type SearchFilters = {
     fromDate?: string;
     toDate?: string;
     createdByUuid?: string;
+    /** When true, only verified charts and dashboards are returned. */
+    verifiedOnly?: boolean;
 };

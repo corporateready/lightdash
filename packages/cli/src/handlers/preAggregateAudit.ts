@@ -1,10 +1,29 @@
 import {
+    PreAggregateMissReason,
     preAggregateMissReasonLabels,
     type DashboardPreAggregateAudit,
+    type PreAggregateMatchMiss,
+    type TilePreAggregateAuditHit,
+    type TilePreAggregateAuditMiss,
 } from '@lightdash/common';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
 import { getConfig } from '../config';
 import GlobalState from '../globalState';
+import * as styles from '../styles';
 import { checkLightdashVersion, lightdashApi } from './dbt/apiClient';
+import { resolveProjectFlag } from './resolveProjectFlag';
+
+type EligibleTile = TilePreAggregateAuditHit | TilePreAggregateAuditMiss;
+
+type ExploreGroup = {
+    exploreLabel: string;
+    charts: { chartName: string; tile: EligibleTile }[];
+};
+
+type ExploreGroups = {
+    groups: ExploreGroup[];
+    anyCollapsed: boolean;
+};
 
 type PreAggregateAuditOptions = {
     dashboard?: string;
@@ -16,7 +35,7 @@ type PreAggregateAuditOptions = {
 };
 
 async function resolveProjectUuid(flagValue?: string): Promise<string> {
-    if (flagValue) return flagValue;
+    if (flagValue) return resolveProjectFlag(flagValue);
     if (process.env.LIGHTDASH_PROJECT_UUID) {
         return process.env.LIGHTDASH_PROJECT_UUID;
     }
@@ -24,7 +43,7 @@ async function resolveProjectUuid(flagValue?: string): Promise<string> {
     const projectUuid = config.context?.project;
     if (!projectUuid) {
         console.error(
-            'No project selected. Pass --project <uuid>, set LIGHTDASH_PROJECT_UUID, or run `lightdash login`.',
+            'No project selected. Pass --project <uuid or slug>, set LIGHTDASH_PROJECT_UUID, or run `lightdash login`.',
         );
         process.exit(1);
     }
@@ -44,6 +63,63 @@ async function fetchAudit(
     })) as DashboardPreAggregateAudit;
 }
 
+function formatMissDetail(
+    miss: PreAggregateMatchMiss,
+    missFieldLabel: string | null,
+): string {
+    const base = preAggregateMissReasonLabels[miss.reason];
+    if (
+        miss.reason === PreAggregateMissReason.GRANULARITY_TOO_FINE ||
+        miss.reason === PreAggregateMissReason.TIME_FRAME_NOT_DERIVABLE
+    ) {
+        return `${base} (query ${miss.queryGranularity}, pre-agg ${miss.preAggregateGranularity})`;
+    }
+    if (missFieldLabel) {
+        return `${base} (${missFieldLabel})`;
+    }
+    return base;
+}
+
+function buildExploreGroups(audit: DashboardPreAggregateAudit): ExploreGroups {
+    const eligible = audit.tabs
+        .flatMap((tab) => tab.tiles)
+        .filter(
+            (t): t is EligibleTile => t.status === 'hit' || t.status === 'miss',
+        );
+
+    const byLabel = new Map<string, EligibleTile[]>();
+    for (const tile of eligible) {
+        const label = tile.exploreLabel ?? tile.exploreName;
+        const arr = byLabel.get(label) ?? [];
+        arr.push(tile);
+        byLabel.set(label, arr);
+    }
+
+    let anyCollapsed = false;
+    const groups = [...byLabel.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([exploreLabel, tiles]) => {
+            const byName = new Map<string, EligibleTile[]>();
+            for (const tile of tiles) {
+                const name = tile.chartName ?? tile.tileName;
+                const arr = byName.get(name) ?? [];
+                arr.push(tile);
+                byName.set(name, arr);
+            }
+            const charts = [...byName.entries()]
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([chartName, chartTiles]) => {
+                    const miss = chartTiles.find((t) => t.status === 'miss');
+                    const hasHit = chartTiles.some((t) => t.status === 'hit');
+                    if (miss && hasHit) anyCollapsed = true;
+                    return { chartName, tile: miss ?? chartTiles[0] };
+                });
+            return { exploreLabel, charts };
+        });
+
+    return { groups, anyCollapsed };
+}
+
 function renderSingle(
     audit: DashboardPreAggregateAudit,
     options: { json: boolean; verbose: boolean },
@@ -57,40 +133,57 @@ function renderSingle(
         `Dashboard: ${audit.dashboardName} (${audit.dashboardSlug})  ` +
             `${hitCount} hit  ${missCount} miss  — ${ineligibleCount} ineligible\n`,
     );
-    for (const tab of audit.tabs) {
-        const label = tab.tabName ?? '(untabbed)';
-        process.stdout.write(`  Tab: ${label}\n`);
-        const hits = tab.tiles.filter((t) => t.status === 'hit');
-        const misses = tab.tiles.filter((t) => t.status === 'miss');
-        const ineligible = tab.tiles.filter((t) => t.status === 'ineligible');
-        for (const t of hits) {
-            if (t.status === 'hit') {
+
+    const { groups, anyCollapsed } = buildExploreGroups(audit);
+    const nameWidth = groups
+        .flatMap((g) => g.charts.map((c) => c.chartName.length))
+        .reduce((max, len) => Math.max(max, len), 0);
+
+    for (const group of groups) {
+        process.stdout.write(`${styles.bold(group.exploreLabel)}\n`);
+        for (const { chartName, tile } of group.charts) {
+            const name = chartName.padEnd(nameWidth);
+            if (tile.status === 'hit') {
                 process.stdout.write(
-                    `    HIT  ${t.tileName}  (pre-aggregate: ${t.preAggregateName})\n`,
+                    `  ${styles.success('✓')} ${name}  hit — pre-aggregate: ${
+                        tile.preAggregateName
+                    }\n`,
+                );
+            } else {
+                const detail = formatMissDetail(tile.miss, tile.missFieldLabel);
+                process.stdout.write(
+                    `  ${styles.error('✗')} ${name}  miss — ${detail}\n`,
                 );
             }
         }
-        for (const t of misses) {
-            if (t.status === 'miss') {
-                const reasonLabel = preAggregateMissReasonLabels[t.miss.reason];
-                process.stdout.write(
-                    `    MISS ${t.tileName}  (${reasonLabel})\n`,
-                );
-            }
-        }
-        if (options.verbose) {
+    }
+
+    const ineligible = audit.tabs
+        .flatMap((tab) => tab.tiles)
+        .filter((t) => t.status === 'ineligible');
+    if (options.verbose) {
+        if (ineligible.length > 0) {
+            process.stdout.write('Ineligible\n');
             for (const t of ineligible) {
                 if (t.status === 'ineligible') {
                     process.stdout.write(
-                        `    --   ${t.tileName}  (${t.ineligibleReason})\n`,
+                        `  — ${t.tileName}  (${t.ineligibleReason})\n`,
                     );
                 }
             }
-        } else if (ineligible.length > 0) {
-            process.stdout.write(
-                `    ${ineligible.length} ineligible tile(s) hidden (pass --verbose to show)\n`,
-            );
         }
+    } else if (ineligible.length > 0) {
+        process.stdout.write(
+            `Ineligible (${ineligible.length} hidden — pass --verbose)\n`,
+        );
+    }
+
+    if (anyCollapsed) {
+        process.stdout.write(
+            `${styles.secondary(
+                'Note: charts sharing a name were collapsed to their worst status (miss over hit).',
+            )}\n`,
+        );
     }
 }
 
@@ -136,6 +229,7 @@ async function runAll(args: {
 export const preAggregateAuditHandler = async (
     options: PreAggregateAuditOptions,
 ): Promise<void> => {
+    assertAgentCommandAllowed('pre-aggregate-audit');
     GlobalState.debug(
         `pre-aggregate-audit options: ${JSON.stringify(options)}`,
     );
@@ -169,4 +263,6 @@ export const preAggregateAuditHandler = async (
 export const testHelpers = {
     renderSingle,
     exitIfFailOnMiss,
+    buildExploreGroups,
+    formatMissDetail,
 };

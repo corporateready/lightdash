@@ -1,18 +1,36 @@
+import './tracing/bootstrap'; // Must run before modules that can load Knex
 import { createTerminus } from '@godaddy/terminus';
+import { MotherduckInstanceCache } from '@lightdash/warehouses';
 import * as Sentry from '@sentry/node';
 import { EventEmitter } from 'events';
 import express from 'express';
 import http from 'http';
-import knex, { Knex } from 'knex';
+import { Knex } from 'knex';
+import {
+    createAiUsageLedgerSink,
+    registerAiUsageLedger,
+    registerAiUsageTracker,
+} from './analytics/aiUsage';
+import { BufferedEventStreamWriter } from './analytics/eventStream/BufferedEventStreamWriter';
+import { createEventStreamWriter } from './analytics/eventStream/createEventStreamWriter';
+import { EventStreamSink } from './analytics/eventStream/EventStreamSink';
+import { eventStreamRegistry } from './analytics/eventStream/registry';
 import { LightdashAnalytics } from './analytics/LightdashAnalytics';
 import { registerOAuthRefreshStrategies } from './auth/registerOAuthRefreshStrategies';
 import {
     ClientProviderMap,
     ClientRepository,
 } from './clients/ClientRepository';
+import { setGithubRateLimitObserver } from './clients/github/Github';
 import { LightdashConfig } from './config/parseConfig';
+import { createDatabase } from './database/createDatabase';
 import Logger from './logging/logger';
+import { flush as flushFeatureFlagChecks } from './models/FeatureFlagModel/flagCheckAggregator';
 import { ModelProviderMap, ModelRepository } from './models/ModelRepository';
+import {
+    initOtelHttpMetrics,
+    shouldSelfRegisterHttpInstrumentation,
+} from './prometheus/otelHttpMetrics';
 import PrometheusMetrics from './prometheus/PrometheusMetrics';
 import { SchedulerWorker } from './scheduler/SchedulerWorker';
 import schedulerWorkerEventEmitter, {
@@ -22,15 +40,35 @@ import {
     derivePoolIdFromEnv,
     SchedulerWorkerHealth,
 } from './scheduler/SchedulerWorkerHealth';
-import { IGNORE_ERRORS } from './sentry';
+import { errorsOnlyIntegrations, IGNORE_ERRORS } from './sentry';
 import { createOrganizationNameResolver } from './sentry/organizationNameResolver';
 import {
     OperationContext,
     ServiceProviderMap,
     ServiceRepository,
 } from './services/ServiceRepository';
+import {
+    initOtelTracing,
+    otelTracingEnabled,
+    shutdownOtelTracing,
+} from './tracing/tracing';
 import { UtilProviderMap, UtilRepository } from './utils/UtilRepository';
 import { VERSION } from './version';
+
+const FEATURE_FLAG_CHECK_FLUSH_INTERVAL_MS = 15 * 60 * 1000;
+
+// Delay between the pool-dead latch firing and the fallback process.exit(1).
+// The PRIMARY restart path is the liveness probe: the latch flips
+// /api/v1/health to 503 immediately, the orchestrator SIGTERMs the pod, and
+// terminus runs worker.stop(), which skips the drain on a dead pool and
+// graphile fail_job-releases any in-flight jobs for immediate retry
+// (relevant when a single worker died while siblings still process — the
+// latch also fires there). The hard exit only
+// covers deployments with no liveness probe. It must stay comfortably above
+// the helm chart's scheduler liveness window (~305s: failureThreshold 20 x
+// periodSeconds 15) so the probe path, which shuts down cleanly, always wins
+// where configured.
+const POOL_DEAD_EXIT_DELAY_MS = 10 * 60_000;
 
 type SchedulerAppArguments = {
     lightdashConfig: LightdashConfig;
@@ -55,8 +93,15 @@ const schedulerWorkerFactory = (context: {
     clients: ClientRepository;
     utils: UtilRepository;
     workerHealth: SchedulerWorkerHealth;
+    prometheusMetrics?: PrometheusMetrics;
 }) =>
     new SchedulerWorker({
+        getAgentConnectionGrantService: () =>
+            context.serviceRepository.getAgentConnectionGrantService(),
+        agentActionLogModel: context.models.getAgentActionLogModel(),
+        usageDimensionsModel: context.models.getUsageDimensionsModel(),
+        usageHistoryModel: context.models.getUsageHistoryModel(),
+        featureFlagModel: context.models.getFeatureFlagModel(),
         lightdashConfig: context.lightdashConfig,
         analytics: context.analytics,
         // SlackClient should initialize before UnfurlService and AiAgentService
@@ -66,6 +111,8 @@ const schedulerWorkerFactory = (context: {
         dashboardService: context.serviceRepository.getDashboardService(),
         deployService: context.serviceRepository.getDeployService(),
         projectService: context.serviceRepository.getProjectService(),
+        contentAsCodeWritebackService:
+            context.serviceRepository.getContentAsCodeWritebackService(),
         schedulerService: context.serviceRepository.getSchedulerService(),
         validationService: context.serviceRepository.getValidationService(),
         userService: context.serviceRepository.getUserService(),
@@ -79,16 +126,26 @@ const schedulerWorkerFactory = (context: {
         googleChatClient: context.clients.getGoogleChatClient(),
         renameService: context.serviceRepository.getRenameService(),
         asyncQueryService: context.serviceRepository.getAsyncQueryService(),
-        featureFlagService: context.serviceRepository.getFeatureFlagService(),
         persistentDownloadFileService:
             context.serviceRepository.getPersistentDownloadFileService(),
         preAggregateModel: context.models.getPreAggregateModel(),
         preAggregateMaterializationService:
             context.serviceRepository.getPreAggregateMaterializationService(),
+        organizationSettingsModel:
+            context.models.getOrganizationSettingsModel(),
+        emailWhitelabelService:
+            context.serviceRepository.getEmailWhitelabelService(),
+        warehouseConnectCodeModel:
+            context.models.getWarehouseConnectCodeModel(),
+        agentConnectionApprovalRequestModel:
+            context.models.getAgentConnectionApprovalRequestModel(),
+        aiUsageLedgerModel: context.models.getAiUsageLedgerModel(),
+        learnSandboxService: context.serviceRepository.getLearnSandboxService(),
         workerHealth: context.workerHealth,
         resolveOrganizationName: createOrganizationNameResolver(
             context.models.getOrganizationModel(),
         ),
+        prometheusMetrics: context.prometheusMetrics,
     });
 
 export default class SchedulerApp {
@@ -108,6 +165,8 @@ export default class SchedulerApp {
 
     private readonly prometheusMetrics: PrometheusMetrics;
 
+    private readonly eventStreamWriter: BufferedEventStreamWriter | null;
+
     private readonly models: ModelRepository;
 
     private readonly database: Knex;
@@ -116,11 +175,20 @@ export default class SchedulerApp {
 
     private readonly analyticsEventEmitter: EventEmitter;
 
+    private featureFlagCheckFlushInterval: NodeJS.Timeout | undefined;
+
     constructor(args: SchedulerAppArguments) {
         this.lightdashConfig = args.lightdashConfig;
         this.port = args.port;
         this.environment = args.environment || 'production';
         this.analyticsEventEmitter = new EventEmitter();
+        this.prometheusMetrics = new PrometheusMetrics(
+            this.lightdashConfig.prometheus,
+        );
+        this.eventStreamWriter = createEventStreamWriter(
+            this.lightdashConfig,
+            this.prometheusMetrics,
+        );
         this.analytics = new LightdashAnalytics({
             lightdashConfig: this.lightdashConfig,
             writeKey: this.lightdashConfig.rudder.writeKey || 'notrack',
@@ -133,12 +201,25 @@ export default class SchedulerApp {
                     this.lightdashConfig.rudder.dataPlaneUrl,
             },
             eventEmitter: this.analyticsEventEmitter,
+            eventStreamSink: this.eventStreamWriter
+                ? new EventStreamSink(
+                      eventStreamRegistry,
+                      this.eventStreamWriter,
+                  )
+                : undefined,
         });
+        registerAiUsageTracker((event) => this.analytics.track(event));
 
-        this.database = knex(
+        this.database = createDatabase(
             this.environment === 'production'
                 ? args.knexConfig.production
                 : args.knexConfig.development,
+            {
+                logRollbacks:
+                    this.lightdashConfig.database.logTransactionRollbacks,
+                slowTransactionThresholdMs:
+                    this.lightdashConfig.database.slowTransactionThresholdMs,
+            },
         );
 
         const utils = new UtilRepository({
@@ -151,6 +232,7 @@ export default class SchedulerApp {
             database: this.database,
             utils,
         });
+        registerAiUsageLedger(createAiUsageLedgerSink(this.models));
 
         this.clients = new ClientRepository({
             clientProviders: args.clientProviders,
@@ -161,9 +243,6 @@ export default class SchedulerApp {
             }),
             models: this.models,
         });
-        this.prometheusMetrics = new PrometheusMetrics(
-            this.lightdashConfig.prometheus,
-        );
         this.serviceRepository = new ServiceRepository({
             serviceProviders: args.serviceProviders,
             context: new OperationContext({
@@ -182,9 +261,30 @@ export default class SchedulerApp {
     }
 
     public async start() {
+        this.featureFlagCheckFlushInterval = setInterval(() => {
+            try {
+                this.analytics.trackFeatureFlagChecks(
+                    flushFeatureFlagChecks(),
+                    'scheduler',
+                );
+            } catch {
+                // telemetry must never break the app
+            }
+        }, FEATURE_FLAG_CHECK_FLUSH_INTERVAL_MS);
+        this.featureFlagCheckFlushInterval.unref();
+
         registerOAuthRefreshStrategies();
 
         this.prometheusMetrics.start();
+        MotherduckInstanceCache.configure(
+            this.lightdashConfig.motherduckInstanceCache,
+        );
+        MotherduckInstanceCache.setObserver((event) =>
+            this.prometheusMetrics.observeMotherduckCacheEvent(event),
+        );
+        setGithubRateLimitObserver((rl) =>
+            this.prometheusMetrics.observeGithubRateLimit(rl),
+        );
         this.prometheusMetrics.monitorDatabase(this.database);
         this.prometheusMetrics.monitorPreAggregates(this.database);
         this.prometheusMetrics.monitorEventMetrics(this.analyticsEventEmitter);
@@ -200,6 +300,12 @@ export default class SchedulerApp {
     }
 
     private async initSentry() {
+        initOtelHttpMetrics(this.lightdashConfig.prometheus, {
+            registerHttpInstrumentation: shouldSelfRegisterHttpInstrumentation({
+                hasSentryDsn: !!this.lightdashConfig.sentry.backend.dsn,
+                isOtelTracingEnabled: otelTracingEnabled(),
+            }),
+        });
         Sentry.init({
             release: VERSION,
             dsn: this.lightdashConfig.sentry.backend.dsn,
@@ -207,13 +313,37 @@ export default class SchedulerApp {
                 this.environment === 'development'
                     ? 'development'
                     : this.lightdashConfig.mode,
-            integrations: [],
+            skipOpenTelemetrySetup: otelTracingEnabled(),
+            registerEsmLoaderHooks: !otelTracingEnabled(),
+            // OTel mode owns traces; strip Sentry's span-emitting default
+            // integrations (postgres etc.) so the worker is errors-only.
+            integrations: otelTracingEnabled() ? errorsOnlyIntegrations : [],
             ignoreErrors: IGNORE_ERRORS,
         });
+        initOtelTracing();
     }
 
     private async initWorker() {
         const workerHealth = new SchedulerWorkerHealth(derivePoolIdFromEnv());
+        // Crash-only recovery: a terminated graphile-worker pool cannot be
+        // rebuilt in-process (0.13 never respawns dead workers), and queued
+        // jobs are durable, so the correct move is to get this process
+        // replaced. The probe flips 503 immediately via the poolDead latch and
+        // the liveness probe restarts the pod gracefully; the delayed exit is
+        // the belt-and-braces path for deployments without a liveness probe.
+        // Fires at most once.
+        workerHealth.onPoolDead((reason) => {
+            Logger.error(
+                `[scheduler-health] worker pool is dead (${reason}); health probe now reports 503, fallback exit in ${POOL_DEAD_EXIT_DELAY_MS}ms`,
+            );
+            Sentry.captureException(
+                new Error(`Scheduler worker pool dead: ${reason}`),
+                { extra: { poolId: workerHealth.getPoolId() } },
+            );
+            setTimeout(() => {
+                process.exit(1);
+            }, POOL_DEAD_EXIT_DELAY_MS).unref();
+        });
         wireWorkerHealthEvents(schedulerWorkerEventEmitter, workerHealth);
         const worker = this.schedulerWorkerFactory({
             lightdashConfig: this.lightdashConfig,
@@ -223,6 +353,7 @@ export default class SchedulerApp {
             clients: this.clients,
             utils: this.utils,
             workerHealth,
+            prometheusMetrics: this.prometheusMetrics,
         });
         await worker.run();
         return { worker, workerHealth };
@@ -239,12 +370,21 @@ export default class SchedulerApp {
             );
         }
         const server = http.createServer(app);
+        server.keepAliveTimeout =
+            this.lightdashConfig.httpServer.keepAliveTimeoutMs;
 
         createTerminus(server, {
             signals: ['SIGUSR2', 'SIGTERM', 'SIGINT', 'SIGHUP', 'SIGABRT'],
             healthChecks: {
                 '/api/v1/health': () => {
-                    const status = workerHealth.isHealthy();
+                    const status = worker.isQuiesced
+                        ? workerHealth.isHealthyWhileQuiesced()
+                        : workerHealth.isHealthy();
+                    if (worker.isQuiesced && status.ok) {
+                        return Promise.resolve(
+                            'Scheduler worker is quiesced for migration',
+                        );
+                    }
                     const runnerUp = Boolean(
                         worker?.runner && worker.isRunning,
                     );
@@ -266,11 +406,32 @@ export default class SchedulerApp {
                 Logger.info('Shutting down gracefully');
             },
             onSignal: async () => {
+                if (this.featureFlagCheckFlushInterval) {
+                    clearInterval(this.featureFlagCheckFlushInterval);
+                    this.featureFlagCheckFlushInterval = undefined;
+                }
+                try {
+                    this.analytics.trackFeatureFlagChecks(
+                        flushFeatureFlagChecks(),
+                        'scheduler',
+                    );
+                    await this.analytics.flushEvents();
+                } catch {
+                    // telemetry must never break shutdown
+                }
+                if (this.eventStreamWriter) {
+                    Logger.info('Flushing usage event stream writer');
+                    await this.eventStreamWriter.close();
+                }
+                await MotherduckInstanceCache.closeAll('shutdown');
                 Logger.info('Stopping Prometheus metrics');
-                this.prometheusMetrics.stop();
-                if (worker && worker.runner) {
+                await this.prometheusMetrics.stop();
+                await shutdownOtelTracing();
+                if (worker) {
                     Logger.info('Stopping scheduler worker');
-                    await worker?.runner?.stop();
+                    // worker.stop() (not runner.stop()) so the settling runner
+                    // promise is recognised as graceful, not a pool crash.
+                    await worker.stop();
                 }
             },
             onShutdown: async () => {
@@ -285,5 +446,9 @@ export default class SchedulerApp {
         });
 
         server.listen(this.port);
+    }
+
+    public getEventStreamWriter() {
+        return this.eventStreamWriter;
     }
 }

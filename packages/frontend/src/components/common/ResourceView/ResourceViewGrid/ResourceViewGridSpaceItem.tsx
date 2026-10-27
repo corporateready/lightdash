@@ -1,11 +1,12 @@
 import { FeatureFlags, type ResourceViewSpaceItem } from '@lightdash/common';
-import { Box, Flex, Group, Paper, Stack, Text } from '@mantine-8/core';
+import { Box, Flex, Group, Paper, Stack, Text } from '@mantine/core';
 import { useDisclosure, useHover } from '@mantine/hooks';
 import {
     IconAppWindow,
     IconChartBar,
     IconFolder,
     IconLayoutDashboard,
+    IconFileText,
 } from '@tabler/icons-react';
 import { type FC, type ReactNode } from 'react';
 import { useServerFeatureFlag } from '../../../../hooks/useServerOrClientFeatureFlag';
@@ -41,7 +42,6 @@ const ResourceViewGridSpaceItem: FC<ResourceViewGridSpaceItemProps> = ({
             ref={ref}
             pos="relative"
             p={0}
-            withBorder
             className={classes.gridCard}
             h="100%"
         >
@@ -60,6 +60,13 @@ const ResourceViewGridSpaceItem: FC<ResourceViewGridSpaceItemProps> = ({
                     </Text>
 
                     <Group gap="sm">
+                        {item.data.documentCount !== undefined && (
+                            <AttributeCount
+                                Icon={IconFileText}
+                                count={item.data.documentCount}
+                                name="Documents"
+                            />
+                        )}
                         <AttributeCount
                             Icon={IconLayoutDashboard}
                             count={item.data.dashboardCount}

@@ -18,6 +18,8 @@ jobs:
   # ============================================================================
   build-and-push-images:
     name: Build and Push Images
+    outputs:
+      image-digest: ${{ steps.build-and-push.outputs.digest }}
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -27,7 +29,6 @@ jobs:
         with:
           token: ${{ secrets.CI_GITHUB_TOKEN }}
           persist-credentials: false
-          fetch-depth: 0
           ref: ${{ github.event.release.tag_name }}
 
       # ========================================
@@ -36,7 +37,7 @@ jobs:
       - name: Set version and timestamp
         id: version
         run: |
-          VERSION="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION="${{ github.event.release.tag_name }}"
           TIMESTAMP=$(date +%Y.%m.%d-%H.%M.%S)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
@@ -122,6 +123,58 @@ jobs:
             SENTRY_BACKEND_PROJECT=lightdash-backend
             SENTRY_ENVIRONMENT=cloud_beta
 
+  # Asset retention is opt-in until the regional buckets and writer IAM exist.
+  push-static-assets:
+    name: Retain frontend assets
+    if: vars.STATIC_ASSETS_RETENTION_ENABLED == 'true'
+    needs: build-and-push-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS_IMAGE_DEPLOY }}'
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Set up Depot CLI
+        uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1
+      - name: Authenticate the remote asset export
+        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
+      - name: Report disk space before export
+        run: df -h .
+      - name: Export only the published frontend assets from Depot
+        uses: depot/build-push-action@5f3b3c2e5a00f0093de47f657aeaefcedff27d18 # v1
+        with:
+          project: bgbbt3d0kc
+          token: ${{ secrets.DEPOT_PROJECT_TOKEN }}
+          context: ./docker
+          file: docker/static-assets.Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            RELEASE_IMAGE=us-docker.pkg.dev/lightdash-containers/lightdash/lightdash@${{ needs.build-and-push-images.outputs.image-digest }}
+          outputs: type=local,dest=retained-static-assets
+      - name: Report exported size and disk space
+        run: |
+          du -sh retained-static-assets
+          df -h .
+      - name: Upload the published image assets
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IMAGE_DIGEST: ${{ needs.build-and-push-images.outputs.image-digest }}
+        run: |
+          node .github/scripts/upload-static-assets.mts \
+            --image "us-docker.pkg.dev/lightdash-containers/lightdash/lightdash:${RELEASE_TAG}-commercial" \
+            --image-digest "$IMAGE_DIGEST" \
+            --directory retained-static-assets/assets \
+            --bucket lightdash-static-assets-us \
+            --bucket lightdash-static-assets-eu \
+            --bucket lightdash-static-assets-staging
+
   # ============================================================================
   # Job 2: QA Blast Radius
   # ============================================================================
@@ -196,13 +249,6 @@ jobs:
       - name: Check for CLI-related changes
         id: check
         run: |
-          # For manual triggers, always build
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual trigger - building binaries"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
           # Get the current and previous tags
           CURRENT_TAG="${{ github.event.release.tag_name }}"
           PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -A1 "^${CURRENT_TAG}$" | tail -1)
@@ -243,18 +289,21 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Setup Socket Firewall
-        uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
-        with:
-          mode: firewall-free
+      - name: Read Node pin from checked-out revision
+        id: node-version
+        run: echo "version=$(tr -d '[:space:]' < .nvmrc)" >> "$GITHUB_OUTPUT"
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
-
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
         with:
-          node-version-file: '.nvmrc'
-          cache: 'pnpm'
-          cache-dependency-path: 'pnpm-lock.yaml'
+          runtime: node@${{ steps.node-version.outputs.version }}
+          cache: true
+          install: false
+
+      - name: Read packageManager
+        id: package-manager
+        run: |
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json","utf8")).packageManager.split("+")[0]')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Cache node_modules
         id: cache-node-modules
@@ -263,13 +312,13 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-          key: ${{ runner.os }}-node-modules-cli-binaries-v2-${{ hashFiles('pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-node-modules-cli-binaries-v2-${{ steps.package-manager.outputs.version }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Install dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         # Force reinstall so pnpm includes optional DuckDB native bindings
         # needed to build both macOS pkg targets from a single runner.
-        run: sfw pnpm install --filter @lightdash/cli --filter @lightdash/common --filter @lightdash/warehouses --frozen-lockfile --prefer-offline --prod=false --force
+        run: pnpm install --filter @lightdash/cli --filter @lightdash/common --filter @lightdash/warehouses --frozen-lockfile --prefer-offline --config.production=false --force --network-concurrency=16
 
       - name: Cache common build
         id: cache-common
@@ -372,9 +421,122 @@ jobs:
             security delete-keychain "$KEYCHAIN_PATH" || true
           fi
 
+  build-linux-binary:
+    name: Build Linux x64 CLI Binary
+    needs: check-cli-changes
+    if: needs.check-cli-changes.outputs.should_build == 'true'
+    runs-on: depot-ubuntu-24.04-4
+    permissions:
+      contents: write
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: SocketDev/action@2d3f25590c6ed6ba11a9a14c064d962a3a04698f # v1.3.1
+        with:
+          mode: firewall-free
+
+      - name: Read Node pin from checked-out revision
+        id: node-version
+        run: echo "version=$(tr -d '[:space:]' < .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@${{ steps.node-version.outputs.version }}
+          cache: true
+          install: false
+
+      - name: Read packageManager
+        id: package-manager
+        run: |
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json","utf8")).packageManager.split("+")[0]')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: ${{ runner.os }}-node-modules-cli-binaries-v2-${{ steps.package-manager.outputs.version }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: pnpm install --filter @lightdash/cli --filter @lightdash/common --filter @lightdash/warehouses --frozen-lockfile --prefer-offline --config.production=false --force --network-concurrency=16
+
+      - name: Cache common build
+        id: cache-common
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: packages/common/dist
+          key: ${{ runner.os }}-common-build-${{ hashFiles('packages/common/src/**', 'packages/common/tsconfig*.json') }}
+
+      - name: Build common package
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        run: pnpm common-build
+
+      - name: Cache warehouses build
+        id: cache-warehouses
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: packages/warehouses/dist
+          key: ${{ runner.os }}-warehouses-build-${{ hashFiles('packages/warehouses/src/**', 'packages/warehouses/tsconfig*.json', 'packages/common/src/**') }}
+
+      - name: Build warehouses package
+        if: steps.cache-warehouses.outputs.cache-hit != 'true'
+        run: pnpm warehouses-build
+
+      - name: Build CLI package
+        working-directory: packages/cli
+        run: pnpm build
+
+      - name: Build Linux binary
+        working-directory: packages/cli
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version=$(node -p "require('./package.json').version")
+          test "${tag#v}" = "$version"
+          ./scripts/build-binaries.sh --archive --linux-only
+          sha256sum --check checksums-linux-sha256.txt
+
+      - name: Upload binary to release
+        working-directory: packages/cli
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          gh release upload "$tag" \
+            "lightdash-cli-${tag}-linux-x64.tar.gz" \
+            checksums-linux-sha256.txt \
+            --clobber
+
+      - name: Test published binary without Node.js
+        working-directory: packages/cli
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version=$(node -p "require('./package.json').version")
+          download_dir=$(mktemp -d)
+          trap 'rm -rf "$download_dir"' EXIT
+          gh release download "$tag" \
+            --pattern "lightdash-cli-${tag}-linux-x64.tar.gz" \
+            --pattern checksums-linux-sha256.txt \
+            --dir "$download_dir"
+          (cd "$download_dir" && sha256sum --check checksums-linux-sha256.txt)
+          ./scripts/smoke-test-linux-binary.sh \
+            "$download_dir/lightdash-cli-${tag}-linux-x64.tar.gz" \
+            "$version"
+
   update-homebrew-formula:
     name: Update Homebrew Formula
-    needs: build-macos-binaries
+    needs: [build-macos-binaries, build-linux-binary]
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -397,64 +559,54 @@ jobs:
 
           echo "Updating Homebrew formula for version $VERSION"
 
-          # Download the checksums file from the release
+          # Download the checksum files from the release
           gh release download "$TAG" \
             --repo lightdash/lightdash \
             --pattern "checksums-macos-sha256.txt" \
+            --pattern "checksums-linux-sha256.txt" \
             --dir .
 
-          # Extract SHA256 checksums
-          ARM64_SHA=$(grep "macos-arm64" checksums-macos-sha256.txt | awk '{print $1}')
-          X64_SHA=$(grep "macos-x64" checksums-macos-sha256.txt | awk '{print $1}')
+          # Combined "<sha>  <archive>" lines for every published binary
+          cat checksums-macos-sha256.txt checksums-linux-sha256.txt > checksums-all.txt
+          cat checksums-all.txt
 
-          if [ -z "$ARM64_SHA" ] || [ -z "$X64_SHA" ]; then
-            echo "Error: Failed to extract SHA256 checksums"
-            exit 1
-          fi
-
-          echo "ARM64 SHA: $ARM64_SHA"
-          echo "X64 SHA: $X64_SHA"
+          for asset in macos-arm64 macos-x64 linux-x64; do
+            if ! grep -q "lightdash-cli-${TAG}-${asset}.tar.gz" checksums-all.txt; then
+              echo "Error: missing checksum for ${asset}"
+              exit 1
+            fi
+          done
 
           # Update the formula
           FORMULA_PATH="homebrew-tap/Formula/lightdash.rb"
 
           # Export for Ruby script
-          export VERSION TAG ARM64_SHA X64_SHA
+          export VERSION TAG
 
+          # For each `url` line, rewrite it for the new tag (keeping the
+          # platform suffix, e.g. macos-arm64 / linux-x64) and replace the
+          # following `sha256` line with the checksum for that asset.
           ruby -i -pe '
             version = ENV["VERSION"]
             tag = ENV["TAG"]
-            arm64_sha = ENV["ARM64_SHA"]
-            x64_sha = ENV["X64_SHA"]
+            @shas ||= File.readlines("checksums-all.txt").each_with_object({}) do |line, acc|
+              sha, file = line.split
+              next unless file
+              suffix = file[/lightdash-cli-.+-(macos-arm64|macos-x64|linux-x64)\.tar\.gz\z/, 1]
+              acc[suffix] = sha if suffix
+            end
 
-            # Update version line
             if /^\s*version\s+"/
               gsub(/version\s+"[^"]+"/, "version \"#{version}\"")
             end
 
-            # Update ARM64 URL (in on_arm block)
-            if /on_arm/ .. /end/ and /url\s+".*macos-arm64/
-              gsub(/url\s+"[^"]+"/, "url \"https://github.com/lightdash/lightdash/releases/download/#{tag}/lightdash-cli-#{tag}-macos-arm64.tar.gz\"")
-            end
-
-            # Update ARM64 SHA (line after ARM64 URL)
-            if $_.include?("macos-arm64")
-              @next_sha_is_arm64 = true
-            elsif @next_sha_is_arm64 and /sha256/
-              gsub(/sha256\s+"[^"]+"/, "sha256 \"#{arm64_sha}\"")
-              @next_sha_is_arm64 = false
-            end
-
-            # Update x64 URL (in on_intel block)
-            if /on_intel/ .. /end/ and /url\s+".*macos-x64/
-              gsub(/url\s+"[^"]+"/, "url \"https://github.com/lightdash/lightdash/releases/download/#{tag}/lightdash-cli-#{tag}-macos-x64.tar.gz\"")
-            end
-
-            # Update x64 SHA (line after x64 URL)
-            if $_.include?("macos-x64") and @next_sha_is_x64 = true
-            elsif @next_sha_is_x64 and /sha256/
-              gsub(/sha256\s+"[^"]+"/, "sha256 \"#{x64_sha}\"")
-              @next_sha_is_x64 = false
+            if (m = $_.match(/url\s+".*lightdash-cli-[^"]+-(macos-arm64|macos-x64|linux-x64)\.tar\.gz"/))
+              @pending_suffix = m[1]
+              gsub(/url\s+"[^"]+"/, "url \"https://github.com/lightdash/lightdash/releases/download/#{tag}/lightdash-cli-#{tag}-#{@pending_suffix}.tar.gz\"")
+            elsif @pending_suffix && /sha256\s+"/
+              sha = @shas.fetch(@pending_suffix)
+              gsub(/sha256\s+"[^"]+"/, "sha256 \"#{sha}\"")
+              @pending_suffix = nil
             end
           ' "$FORMULA_PATH"
 
@@ -477,21 +629,164 @@ jobs:
           git push origin main
 
   # ============================================================================
-  # Job 4: Data App E2B template — publish a tag matching this release
+  # Job 4: Update Helm chart default version
   # ============================================================================
-  # Two paths:
-  #   build  — full E2B template rebuild when sandboxes/data-apps/** or
-  #            packages/query-sdk/** changed since the previous release.
-  #   retag  — fast path that re-tags the existing :latest build with the new
-  #            release version, so every released version still has a pinned
-  #            tag without burning E2B build minutes on a no-op rebuild.
-  data-app-template-resolve:
-    name: Resolve E2B template build action
+  update-helm-chart:
+    name: Update Helm Chart Version
+    needs: build-and-push-images
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      # The push must use a PAT (not GITHUB_TOKEN): pushes made with the
+      # default token don't trigger workflows, and the chart is published by
+      # helm-charts' ci-release workflow on push to main.
+      - name: Checkout helm-charts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: lightdash/helm-charts
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: helm-charts
+
+      - name: Check whether chart auto-bump is paused
+        id: pause
+        working-directory: helm-charts
+        run: |
+          if [ -f .chart-bump-paused ]; then
+            echo "paused=true" >> "$GITHUB_OUTPUT"
+            echo "Chart auto-bump is paused by .chart-bump-paused; skipping the version bump."
+          else
+            CURRENT_CHART_VERSION=$(awk '/^version:/{print $2}' charts/lightdash/Chart.yaml)
+            if [[ ! "$CURRENT_CHART_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "paused=true" >> "$GITHUB_OUTPUT"
+              echo "Chart version $CURRENT_CHART_VERSION is not a release version; non-release versions are not auto-bumped."
+            else
+              echo "paused=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Bump chart version and appVersion
+        if: steps.pause.outputs.paused != 'true'
+        working-directory: helm-charts
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          CHART=charts/lightdash/Chart.yaml
+
+          CURRENT_CHART_VERSION=$(awk '/^version:/{print $2}' "$CHART")
+          if [[ ! "$CURRENT_CHART_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Chart version $CURRENT_CHART_VERSION is not a release version; non-release versions are not auto-bumped."
+            exit 0
+          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_CHART_VERSION"
+          NEW_CHART_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+
+          sed -i "s/^version: .*/version: $NEW_CHART_VERSION/" "$CHART"
+          sed -i "s/^appVersion: .*/appVersion: $VERSION/" "$CHART"
+
+          echo "Chart version: $CURRENT_CHART_VERSION -> $NEW_CHART_VERSION, appVersion -> $VERSION"
+
+      # Same helm-docs version as helm-charts' own generate-helm-docs workflow,
+      # which only runs on PRs and so won't cover a direct push to main
+      - name: Regenerate chart README
+        if: steps.pause.outputs.paused != 'true'
+        run: |
+          docker run --rm -v "$PWD/helm-charts:/helm-docs" jnorwood/helm-docs:v1.7.0
+
+      - name: Commit and push to main
+        if: steps.pause.outputs.paused != 'true'
+        working-directory: helm-charts
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add charts/lightdash/Chart.yaml charts/lightdash/README.md
+          git commit -m "chore(release): update Lightdash to $VERSION"
+          git push origin main
+
+  # ============================================================================
+  # Job 5: Publish versioned E2B templates
+  # ============================================================================
+  e2b-templates:
+    name: Publish ${{ matrix.template.display_name }} (${{ matrix.region }})
+    strategy:
+      fail-fast: false
+      matrix:
+        region: [us, eu]
+        template:
+          - display_name: data app E2B template
+            directory: sandboxes/data-apps
+            name: lightdash-data-app
+            name_env: E2B_TEMPLATE_NAME
+            tag_env: E2B_TEMPLATE_TAG
+            extra_tags_env: E2B_TEMPLATE_EXTRA_TAGS
+            source_tag_env: E2B_TEMPLATE_SOURCE_TAG
+            additional_watch_paths: packages/query-sdk
+            install_root_deps: true
+          - display_name: AI writeback E2B template
+            directory: sandboxes/ai-writeback
+            name: lightdash-ai-writeback
+            name_env: E2B_AI_WRITEBACK_TEMPLATE_NAME
+            tag_env: E2B_AI_WRITEBACK_TEMPLATE_TAG
+            extra_tags_env: E2B_AI_WRITEBACK_TEMPLATE_EXTRA_TAGS
+            source_tag_env: E2B_AI_WRITEBACK_TEMPLATE_SOURCE_TAG
+            additional_watch_paths: |
+              packages/cli
+              packages/common
+              packages/warehouses
+              skills
+            install_root_deps: false
+          - display_name: python runner E2B template
+            directory: sandboxes/python-runner
+            name: lightdash-python-runner
+            name_env: E2B_PYTHON_TEMPLATE_NAME
+            tag_env: E2B_PYTHON_TEMPLATE_TAG
+            extra_tags_env: E2B_PYTHON_TEMPLATE_EXTRA_TAGS
+            source_tag_env: E2B_PYTHON_TEMPLATE_SOURCE_TAG
+            additional_watch_paths: ''
+            install_root_deps: false
+          - display_name: agent onboarding E2B template
+            directory: sandboxes/agent-onboarding
+            name: lightdash-agent-onboarding
+            name_env: E2B_AGENT_ONBOARDING_TEMPLATE_NAME
+            tag_env: E2B_AGENT_ONBOARDING_TEMPLATE_TAG
+            extra_tags_env: E2B_AGENT_ONBOARDING_TEMPLATE_EXTRA_TAGS
+            source_tag_env: E2B_AGENT_ONBOARDING_TEMPLATE_SOURCE_TAG
+            additional_watch_paths: |
+              packages/cli
+              packages/common
+              packages/warehouses
+              skills
+            install_root_deps: false
+    uses: ./.github/workflows/publish-e2b-template.yml
+    with:
+      release_tag: ${{ github.event.release.tag_name }}
+      template_directory: ${{ matrix.template.directory }}
+      template_name: ${{ matrix.template.name }}
+      template_name_env: ${{ matrix.template.name_env }}
+      template_tag_env: ${{ matrix.template.tag_env }}
+      template_extra_tags_env: ${{ matrix.template.extra_tags_env }}
+      template_source_tag_env: ${{ matrix.template.source_tag_env }}
+      additional_watch_paths: ${{ matrix.template.additional_watch_paths }}
+      install_root_deps: ${{ matrix.template.install_root_deps }}
+      e2b_domain: ${{ matrix.region == 'eu' && 'e2b-juliett.dev' || '' }}
+    secrets:
+      e2b_api_key: ${{ matrix.region == 'eu' && secrets.E2B_API_KEY_EU || secrets.E2B_API_KEY }}
+
+  # ============================================================================
+  # Job 6: Publish the data-app Cloud Run sandbox gateway image
+  # ============================================================================
+  data-app-sandbox-cloud-run-image:
+    name: Publish data app Cloud Run sandbox image
     runs-on: depot-ubuntu-24.04-4
-    outputs:
-      action: ${{ steps.plan.outputs.action }}
-      primary_tag: ${{ steps.plan.outputs.primary_tag }}
-      source_tag: ${{ steps.plan.outputs.source_tag }}
+    env:
+      IMAGE: lightdash/lightdash-data-app-sandbox-cloud-run
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -500,7 +795,17 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event.release.tag_name }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
 
       - name: Plan build
         id: plan
@@ -508,92 +813,70 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          PRIMARY_TAG="$RELEASE_TAG"
-          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -A1 "^${RELEASE_TAG}$" | tail -1 || true)
-          if [ -z "$PREVIOUS_TAG" ] || [ "$PREVIOUS_TAG" = "$RELEASE_TAG" ]; then
+          ACTION=retag
+          STATUS=0
+          CHANGED=$(.github/scripts/sandbox-image-changes.sh "$RELEASE_TAG" \
+            sandboxes/data-apps packages/query-sdk) || STATUS=$?
+          if ! docker buildx imagetools inspect "$IMAGE:latest" >/dev/null 2>&1; then
+            echo "No published :latest image — performing full build"
+            ACTION=build
+          elif [ "$STATUS" -eq 10 ]; then
             echo "No previous tag found — performing full build"
-            ACTION="build"
-            SOURCE_TAG=""
+            ACTION=build
+          elif [ "$STATUS" -ne 0 ]; then
+            exit "$STATUS"
+          elif [ -n "$CHANGED" ]; then
+            echo "Sandbox changed — performing full build"
+            echo "$CHANGED"
+            ACTION=build
           else
-            CHANGED=$(git diff --name-only "$PREVIOUS_TAG" "$RELEASE_TAG" -- 'sandboxes/data-apps/' 'packages/query-sdk/' || true)
-            if [ -n "$CHANGED" ]; then
-              echo "Template/SDK changed since $PREVIOUS_TAG — performing full build"
-              echo "$CHANGED"
-              ACTION="build"
-              SOURCE_TAG=""
-            else
-              echo "No template/SDK changes since $PREVIOUS_TAG — re-tagging :latest"
-              ACTION="retag"
-              SOURCE_TAG="latest"
-            fi
+            echo "No sandbox changes — re-tagging :latest"
           fi
           echo "action=$ACTION" >> "$GITHUB_OUTPUT"
-          echo "primary_tag=$PRIMARY_TAG" >> "$GITHUB_OUTPUT"
-          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
 
-  data-app-template-build:
-    name: Build E2B template (${{ matrix.region }})
-    needs: data-app-template-resolve
-    if: needs.data-app-template-resolve.outputs.action == 'build'
-    runs-on: depot-ubuntu-24.04-4
-    strategy:
-      fail-fast: false
-      matrix:
-        region: [us, eu]
-    env:
-      E2B_API_KEY: ${{ matrix.region == 'eu' && secrets.E2B_API_KEY_EU || secrets.E2B_API_KEY }}
-      E2B_DOMAIN: ${{ matrix.region == 'eu' && 'e2b-juliett.dev' || '' }}
-      E2B_TEMPLATE_NAME: lightdash-data-app
-      E2B_TEMPLATE_TAG: ${{ needs.data-app-template-resolve.outputs.primary_tag }}
-      E2B_TEMPLATE_EXTRA_TAGS: latest
-    steps:
-      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+      - name: Read Node pin from checked-out revision
+        if: steps.plan.outputs.action == 'build'
+        id: node-version
+        run: echo "version=$(tr -d '[:space:]' < .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        if: steps.plan.outputs.action == 'build'
         with:
-          egress-policy: audit
+          runtime: node@${{ steps.node-version.outputs.version }}
+          cache: true
+          cache-dependency-path: pnpm-lock.yaml
+          install: false
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - name: Setup Socket Firewall
-        uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
-        with:
-          mode: firewall-free
-
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
-
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'pnpm'
-          cache-dependency-path: 'pnpm-lock.yaml'
-
+      # Needed to build and pack the query SDK baked into the image
       - name: Install root deps
-        run: sfw pnpm install --frozen-lockfile --prefer-offline
+        if: steps.plan.outputs.action == 'build'
+        run: pnpm install --frozen-lockfile --prefer-offline --network-concurrency=16
 
-      - name: Install sandbox deps
-        working-directory: sandboxes/data-apps
-        run: sfw pnpm install --frozen-lockfile --prefer-offline
+      - name: Build and push image
+        if: steps.plan.outputs.action == 'build'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          ./sandboxes/data-apps/build-cloud-run-image.sh "$IMAGE:$RELEASE_TAG" \
+            -t "$IMAGE:latest" \
+            --sbom=true \
+            --provenance=mode=max \
+            --push
 
-      - name: Build & publish E2B template
-        working-directory: sandboxes/data-apps
-        run: pnpm run build
+      - name: Re-tag latest image with release version
+        if: steps.plan.outputs.action == 'retag'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" "$IMAGE:latest"
 
-  data-app-template-retag:
-    name: Re-tag existing E2B build (${{ matrix.region }})
-    needs: data-app-template-resolve
-    if: needs.data-app-template-resolve.outputs.action == 'retag'
+  # ============================================================================
+  # Job 7: Publish the python-runner Cloud Run sandbox gateway image
+  # ============================================================================
+  python-sandbox-cloud-run-image:
+    name: Publish python Cloud Run sandbox image
     runs-on: depot-ubuntu-24.04-4
-    strategy:
-      fail-fast: false
-      matrix:
-        region: [us, eu]
     env:
-      E2B_API_KEY: ${{ matrix.region == 'eu' && secrets.E2B_API_KEY_EU || secrets.E2B_API_KEY }}
-      E2B_DOMAIN: ${{ matrix.region == 'eu' && 'e2b-juliett.dev' || '' }}
-      E2B_TEMPLATE_NAME: lightdash-data-app
-      E2B_TEMPLATE_TAG: ${{ needs.data-app-template-resolve.outputs.primary_tag }}
-      E2B_TEMPLATE_SOURCE_TAG: ${{ needs.data-app-template-resolve.outputs.source_tag }}
+      IMAGE: lightdash/lightdash-python-sandbox-cloud-run
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -601,23 +884,70 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Setup Socket Firewall
-        uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+      - name: Login to Docker Hub
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
         with:
-          mode: firewall-free
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
 
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+      - name: Plan build
+        id: plan
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          ACTION=retag
+          STATUS=0
+          CHANGED=$(.github/scripts/sandbox-image-changes.sh "$RELEASE_TAG" \
+            sandboxes/python-runner) || STATUS=$?
+          if ! docker buildx imagetools inspect "$IMAGE:latest" >/dev/null 2>&1; then
+            echo "No published :latest image — performing full build"
+            ACTION=build
+          elif [ "$STATUS" -eq 10 ]; then
+            echo "No previous tag found — performing full build"
+            ACTION=build
+          elif [ "$STATUS" -ne 0 ]; then
+            exit "$STATUS"
+          elif [ -n "$CHANGED" ]; then
+            echo "Sandbox changed — performing full build"
+            echo "$CHANGED"
+            ACTION=build
+          else
+            echo "No sandbox changes — re-tagging :latest"
+          fi
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+
+      - name: Read Node pin from checked-out revision
+        if: steps.plan.outputs.action == 'build'
+        id: node-version
+        run: echo "version=$(tr -d '[:space:]' < .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      # npm is only needed to fetch the ComputeSDK gateway tarball
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.plan.outputs.action == 'build'
         with:
-          node-version-file: '.nvmrc'
+          node-version: ${{ steps.node-version.outputs.version }}
 
-      - name: Install sandbox deps
-        working-directory: sandboxes/data-apps
-        run: sfw pnpm install --frozen-lockfile --prefer-offline
+      - name: Build and push image
+        if: steps.plan.outputs.action == 'build'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          ./sandboxes/python-runner/build-cloud-run-image.sh "$IMAGE:$RELEASE_TAG" \
+            -t "$IMAGE:latest" \
+            --sbom=true \
+            --provenance=mode=max \
+            --push
 
-      - name: Re-tag :latest build with release version
-        working-directory: sandboxes/data-apps
-        run: pnpm exec tsx assign-tag.ts
+      - name: Re-tag latest image with release version
+        if: steps.plan.outputs.action == 'retag'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" "$IMAGE:latest"

@@ -1,12 +1,12 @@
 import {
+    TextInput,
+    Stack,
+    Title,
     Button,
-    Card,
     SegmentedControl,
     Select,
-    Stack,
     Switch,
-    TextInput,
-    Title,
+    Card,
 } from '@mantine/core';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 
@@ -18,7 +18,7 @@ export function FormCard({ hasError = false }: FormCardProps) {
     const errorMessage = hasError ? 'This field is required' : undefined;
 
     return (
-        <Card shadow="subtle" radius="md" p="lg">
+        <Card shadow="subtle" radius="md" p="lg" withBorder={false}>
             <Stack>
                 <Title order={4}>This is a form card</Title>
                 <Stack>
@@ -41,6 +41,7 @@ export function FormCard({ hasError = false }: FormCardProps) {
                         error={errorMessage}
                     />
                     <Select
+                        allowDeselect={false}
                         radius="md"
                         label="Login options"
                         placeholder="Select"
@@ -51,15 +52,14 @@ export function FormCard({ hasError = false }: FormCardProps) {
                     <SegmentedControl
                         radius="md"
                         data={['Option 1', 'Option 2', 'Option 3']}
-                        sx={{
+                        style={{
                             alignSelf: 'flex-start',
                         }}
                     />
                     <Button
                         type="submit"
                         radius="md"
-                        variant="darkPrimary"
-                        sx={{
+                        style={{
                             alignSelf: 'flex-end',
                         }}
                     >

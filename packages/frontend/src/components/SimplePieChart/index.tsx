@@ -15,11 +15,15 @@ import useEchartsPieConfig, {
     type PieSeriesDataPoint,
 } from '../../hooks/echarts/useEchartsPieConfig';
 import { useLegendDoubleClickSelection } from '../../hooks/echarts/useLegendDoubleClickSelection';
+import { useLegendScrollPosition } from '../../hooks/echarts/useLegendScrollPosition';
 import { useContextMenuPermissions } from '../../hooks/useContextMenuPermissions';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
 import EChartsReact from '../EChartsReactWrapper';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationServices,
+    useVisualizationInputs,
+} from '../LightdashVisualization/useVisualizationContext';
 import PieChartContextMenu, {
     type PieChartContextMenuProps,
 } from './PieChartContextMenu';
@@ -40,14 +44,20 @@ type SimplePieChartProps = Omit<EChartsReactProps, 'option'> & {
     className?: string;
     onScreenshotReady?: () => void;
     onScreenshotError?: () => void;
+    enableContextMenu?: boolean;
 };
 
 const EchartOptions: Opts = { renderer: 'svg' };
 
 const SimplePieChart: FC<SimplePieChartProps> = memo(
-    ({ onScreenshotReady, onScreenshotError, ...props }) => {
-        const { chartRef, isLoading, resultsData, minimal } =
-            useVisualizationContext();
+    ({
+        onScreenshotReady,
+        onScreenshotError,
+        enableContextMenu = true,
+        ...props
+    }) => {
+        const { chartRef } = useVisualizationServices();
+        const { isLoading, resultsData, minimal } = useVisualizationInputs();
         const { selectedLegends, onLegendChange } =
             useLegendDoubleClickSelection();
 
@@ -55,6 +65,8 @@ const SimplePieChart: FC<SimplePieChartProps> = memo(
             selectedLegends,
             props.isInDashboard,
         );
+        const { optionWithScrollPosition, onLegendScroll } =
+            useLegendScrollPosition(chartRef, pieChartOptions?.eChartsOption);
         const { shouldShowMenu, canViewUnderlyingData } =
             useContextMenuPermissions({
                 minimal,
@@ -88,7 +100,7 @@ const SimplePieChart: FC<SimplePieChartProps> = memo(
                 chartRef.current?.getEchartsInstance().resize();
             window.addEventListener('resize', listener);
             return () => window.removeEventListener('resize', listener);
-        });
+        }, [chartRef]);
 
         const handleOpenContextMenu = useCallback(
             (e: ECElementEvent) => {
@@ -117,11 +129,21 @@ const SimplePieChart: FC<SimplePieChartProps> = memo(
 
         const onEvents = useMemo(
             () => ({
-                click: handleOpenContextMenu,
-                oncontextmenu: handleOpenContextMenu,
+                ...(enableContextMenu
+                    ? {
+                          click: handleOpenContextMenu,
+                          oncontextmenu: handleOpenContextMenu,
+                      }
+                    : {}),
                 legendselectchanged: onLegendChange,
+                legendscroll: onLegendScroll,
             }),
-            [handleOpenContextMenu, onLegendChange],
+            [
+                enableContextMenu,
+                handleOpenContextMenu,
+                onLegendChange,
+                onLegendScroll,
+            ],
         );
 
         if (isLoading) return <LoadingChart />;
@@ -146,13 +168,16 @@ const SimplePieChart: FC<SimplePieChartProps> = memo(
                               }
                     }
                     opts={EchartOptions}
-                    option={pieChartOptions.eChartsOption}
+                    option={
+                        optionWithScrollPosition ??
+                        pieChartOptions.eChartsOption
+                    }
                     notMerge
                     {...props}
                     onEvents={onEvents}
                 />
 
-                {shouldShowMenu && (
+                {enableContextMenu && shouldShowMenu && (
                     <PieChartContextMenu
                         value={menuProps?.value}
                         menuPosition={menuProps?.position}

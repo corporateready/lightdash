@@ -1,22 +1,29 @@
 import { getFieldQuoteChar } from '@lightdash/common';
-import { ActionIcon, Group, Paper, Stack, Tooltip } from '@mantine/core';
-import { IconLayoutSidebarLeftExpand } from '@tabler/icons-react';
-import { useEffect } from 'react';
+import { Stack } from '@mantine/core';
+import { useEffect, useRef, useState } from 'react';
 import { Provider } from 'react-redux';
 import { useLocation, useNavigate, useParams } from 'react-router';
 import { useMount, useUnmount } from 'react-use';
 import ErrorState from '../components/common/ErrorState';
-import MantineIcon from '../components/common/MantineIcon';
 import Page from '../components/common/Page/Page';
+import SuboptimalState from '../components/common/SuboptimalState/SuboptimalState';
 import {
     resetChartState,
     setChartConfig,
 } from '../components/DataViz/store/actions/commonChartActions';
-import { Sidebar } from '../features/sqlRunner';
+import { SqlRunnerSidebar } from '../features/sqlRunner';
 import { ContentPanel } from '../features/sqlRunner/components/ContentPanel';
 import { Header } from '../features/sqlRunner/components/Header';
+import { HeaderCreate } from '../features/sqlRunner/components/Header/HeaderCreate';
 import { useSavedSqlChart } from '../features/sqlRunner/hooks/useSavedSqlCharts';
 import { useSqlRunnerShareUrl } from '../features/sqlRunner/hooks/useSqlRunnerShareUrl';
+import { SqlRunnerConnectionScope } from '../features/sqlRunner/multiConnection/components/SqlRunnerConnectionScope';
+import { useSqlRunnerConnections } from '../features/sqlRunner/multiConnection/hooks/useConnectionCatalog';
+import {
+    resolveSharedConnection,
+    shareLinkLoadFailedProperties,
+    shareLinkOpenedProperties,
+} from '../features/sqlRunner/multiConnection/utils/connectionAnalytics';
 import { store } from '../features/sqlRunner/store';
 import {
     useAppDispatch,
@@ -30,7 +37,6 @@ import {
     setProjectUuid,
     setQuoteChar,
     setSavedChartData,
-    setSidebarOpen,
     setSql,
     setSqlLimit,
     setState,
@@ -40,7 +46,11 @@ import { HeaderVirtualView } from '../features/virtualView';
 import { type VirtualViewState } from '../features/virtualView/components/HeaderVirtualView';
 import useToaster from '../hooks/toaster/useToaster';
 import { useProject } from '../hooks/useProject';
+import { useProjectUuid } from '../hooks/useProjectUuid';
 import useSearchParams from '../hooks/useSearchParams';
+import useApp from '../providers/App/useApp';
+import useTracking from '../providers/Tracking/useTracking';
+import { EventName } from '../types/Events';
 
 const SqlRunner = ({
     isEditMode,
@@ -52,40 +62,116 @@ const SqlRunner = ({
     const dispatch = useAppDispatch();
     const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
     const mode = useAppSelector((state) => state.sqlRunner.mode);
+    const warehouseConnectionType = useAppSelector(
+        (state) => state.sqlRunner.warehouseConnectionType,
+    );
 
-    const params = useParams<{ projectUuid: string; slug?: string }>();
+    const routeProjectUuid = useProjectUuid();
+    const params = useParams<{ slug?: string }>();
     const share = useSearchParams('share');
     const shareState = useSqlRunnerShareUrl(share || undefined);
 
     const location = useLocation();
     const navigate = useNavigate();
+    const [connectionHint] = useState<string | null | undefined>(() => {
+        const hint = location.state?.warehouseConnectionUuid;
+        return typeof hint === 'string' || hint === null ? hint : undefined;
+    });
 
-    const isLeftSidebarOpen = useAppSelector(
-        (state) => state.sqlRunner.isLeftSidebarOpen,
-    );
     const { data: project } = useProject(projectUuid);
+    const { data: shareConnections, error: shareConnectionsError } =
+        useSqlRunnerConnections(
+            projectUuid,
+            !!share && project?.connectionRoute === 'multi',
+        );
     const { showToastError } = useToaster();
+    const { user } = useApp();
+    const { track } = useTracking();
+    const fallbackOrganizationUuid =
+        project?.organizationUuid ?? user.data?.organizationUuid ?? null;
+    const appliedShareId = useRef<string | null>(null);
+    const trackedShareId = useRef<string | null>(null);
 
     useEffect(() => {
         if (shareState.error) {
+            if (share && trackedShareId.current !== share) {
+                trackedShareId.current = share;
+                track({
+                    name: EventName.SQL_RUNNER_SHARE_LINK_OPENED,
+                    properties: shareLinkLoadFailedProperties({
+                        organizationId: fallbackOrganizationUuid,
+                        projectId: projectUuid || routeProjectUuid || null,
+                        failureReason: shareState.errorReason,
+                    }),
+                });
+            }
             showToastError({
                 title: `Unable to load shared SQL runner state`,
                 subtitle: shareState.error.message,
             });
             return;
         }
-        if (shareState.sqlRunnerState) {
+        if (
+            share &&
+            shareState.sqlRunnerState &&
+            project &&
+            appliedShareId.current !== share
+        ) {
+            if (
+                project.connectionRoute === 'multi' &&
+                !shareConnections &&
+                !shareConnectionsError
+            )
+                return;
+            const routesSingle =
+                project.connectionRoute !== 'multi' ||
+                shareConnectionsError?.error.name ===
+                    'SingleConnectionProjectError';
+            const hintedConnectionExists = shareConnections
+                ? resolveSharedConnection(
+                      shareConnections,
+                      shareState.warehouseConnectionUuid,
+                  ) !== undefined
+                : undefined;
+            appliedShareId.current = share;
+            trackedShareId.current = share;
+            track({
+                name: EventName.SQL_RUNNER_SHARE_LINK_OPENED,
+                properties: shareLinkOpenedProperties({
+                    organizationId: project.organizationUuid,
+                    projectId: project.projectUuid,
+                    routesSingle,
+                    primaryWarehouseType:
+                        project.warehouseConnection?.type ?? null,
+                    sharedConnectionBinding: shareState.warehouseConnectionUuid,
+                    connections: shareConnections,
+                }),
+            });
             dispatch(
                 setState({
                     ...shareState.sqlRunnerState,
-                    fetchResultsOnLoad: true,
+                    connectionRoute: store.getState().sqlRunner.connectionRoute,
+                    fetchResultsOnLoad:
+                        routesSingle || hintedConnectionExists === true,
                 }),
             );
             if (shareState.chartConfig) {
                 dispatch(setChartConfig(shareState.chartConfig));
             }
         }
-    }, [shareState, dispatch, showToastError]);
+    }, [
+        share,
+        shareState,
+        project,
+        shareConnections,
+        shareConnectionsError,
+        dispatch,
+        showToastError,
+        track,
+        fallbackOrganizationUuid,
+        projectUuid,
+        routeProjectUuid,
+    ]);
     useUnmount(() => {
         dispatch(resetState());
         dispatch(resetChartState());
@@ -119,10 +205,10 @@ const SqlRunner = ({
     });
 
     useEffect(() => {
-        if (!projectUuid && params.projectUuid) {
-            dispatch(setProjectUuid(params.projectUuid));
+        if (!projectUuid && routeProjectUuid) {
+            dispatch(setProjectUuid(routeProjectUuid));
         }
-    }, [dispatch, params.projectUuid, projectUuid]);
+    }, [dispatch, routeProjectUuid, projectUuid]);
 
     // Use the SQL string from the location state if available
     useEffect(() => {
@@ -148,80 +234,53 @@ const SqlRunner = ({
         }
     }, [dispatch, data]);
 
+    // Share links replace the whole slice via `setState`, dropping this
+    // project-derived field; re-restore it whenever the store value is missing.
+    const warehouseType = project?.warehouseConnection?.type;
     useEffect(() => {
-        if (project?.warehouseConnection?.type) {
-            dispatch(
-                setWarehouseConnectionType(project.warehouseConnection.type),
-            );
-            dispatch(
-                setQuoteChar(
-                    getFieldQuoteChar(project?.warehouseConnection?.type),
-                ),
-            );
+        if (warehouseType && !warehouseConnectionType) {
+            dispatch(setWarehouseConnectionType(warehouseType));
+            dispatch(setQuoteChar(getFieldQuoteChar(warehouseType)));
         }
-    }, [dispatch, project?.warehouseConnection?.type]);
-
-    const handleSetSidebarOpen = (isOpen: boolean) => {
-        dispatch(setSidebarOpen(isOpen));
-    };
+    }, [dispatch, warehouseType, warehouseConnectionType]);
 
     if (chartError) {
         return <ErrorState error={chartError.error} />;
     }
 
     return (
-        <Page
-            title="SQL Runner"
-            noContentPadding
-            flexContent
-            header={
-                mode === 'virtualView' && virtualViewState ? (
-                    <HeaderVirtualView virtualViewState={virtualViewState} />
-                ) : (
-                    <Header mode={params.slug ? 'edit' : 'create'} />
-                )
-            }
-            isSidebarOpen={isLeftSidebarOpen}
-            sidebar={<Sidebar setSidebarOpen={handleSetSidebarOpen} />}
-            noSidebarPadding
+        <SqlRunnerConnectionScope
+            isEditingSavedChart={!!params.slug}
+            connectionHint={connectionHint}
+            isSharedLink={!!share}
+            sharedConnectionUuid={shareState.warehouseConnectionUuid}
         >
-            <Group
-                align="stretch"
-                grow
-                spacing="none"
-                p={0}
-                style={{ flex: 1 }}
-                w={'100%'}
+            <Page
+                title="SQL Runner"
+                noContentPadding
+                flexContent
+                sidebar={<SqlRunnerSidebar />}
+                sidebarTitle="Tables"
             >
-                {!isLeftSidebarOpen && (
-                    <Paper
-                        shadow="none"
-                        radius={0}
-                        px="sm"
-                        py="lg"
-                        style={{ flexGrow: 0 }}
-                    >
-                        <Stack spacing="xs">
-                            <Tooltip
-                                variant="xs"
-                                label={'Open sidebar'}
-                                position="right"
-                            >
-                                <ActionIcon
-                                    size="sm"
-                                    onClick={() => handleSetSidebarOpen(true)}
-                                >
-                                    <MantineIcon
-                                        icon={IconLayoutSidebarLeftExpand}
-                                    />
-                                </ActionIcon>
-                            </Tooltip>
-                        </Stack>
-                    </Paper>
-                )}
-                <ContentPanel />
-            </Group>
-        </Page>
+                <Stack gap={0} flex={1} miw={0}>
+                    {mode === 'virtualView' && virtualViewState ? (
+                        <HeaderVirtualView
+                            virtualViewState={virtualViewState}
+                        />
+                    ) : (
+                        params.slug && <Header mode="edit" />
+                    )}
+                    <ContentPanel
+                        toolbarActions={
+                            !params.slug &&
+                            !(mode === 'virtualView' && virtualViewState) ? (
+                                <HeaderCreate />
+                            ) : undefined
+                        }
+                    />
+                </Stack>
+            </Page>
+        </SqlRunnerConnectionScope>
     );
 };
 
@@ -232,6 +291,19 @@ const SqlRunnerNewPage = ({
     isEditMode?: boolean;
     virtualViewState?: VirtualViewState;
 }) => {
+    const projectUuid = useProjectUuid();
+    const { data: project, isInitialLoading, error } = useProject(projectUuid);
+
+    if (error) return <ErrorState error={error.error} />;
+    if (isInitialLoading || !project) {
+        return <SuboptimalState title="Loading project" loading />;
+    }
+    if (project.provisioningSource === 'analytics') {
+        return (
+            <SuboptimalState title="SQL Runner is unavailable for managed analytics projects" />
+        );
+    }
+
     return (
         <Provider store={store}>
             <SqlRunner

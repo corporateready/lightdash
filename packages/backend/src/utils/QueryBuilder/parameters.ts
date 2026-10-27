@@ -1,8 +1,11 @@
 import {
+    escapeParameterValue,
     getParameterReferences,
+    isReservedParameterName,
     parameterRegex,
     renderLiquidSql,
     UnexpectedServerError,
+    type EscapedParameterValue,
     type FieldsContext,
     type ParameterDefinitions,
     type ParametersValuesMap,
@@ -62,21 +65,14 @@ const validateAndSanitizeDate = (value: unknown): string => {
 const escapeParameterValues = (
     parameters: ParametersValuesMap,
     escapeString: (value: string) => string,
-): ParametersValuesMap => {
-    const escapedParameters: ParametersValuesMap = {};
+): Record<string, EscapedParameterValue> => {
+    const escapedParameters: Record<string, EscapedParameterValue> = {};
 
     Object.entries(parameters).forEach(([key, value]) => {
-        if (Array.isArray(value)) {
-            // Handle array of strings or numbers
-            const escapedArray = value.map((item) =>
-                typeof item === 'number' ? item : escapeString(item),
-            );
-            escapedParameters[key] = escapedArray as string[] | number[];
-        } else {
-            // Handle single string or number
-            escapedParameters[key] =
-                typeof value === 'number' ? value : escapeString(value);
-        }
+        escapedParameters[key] = escapeParameterValue(value, {
+            escapeString,
+            allowMixedArrayValues: true,
+        });
     });
 
     return escapedParameters;
@@ -89,6 +85,7 @@ export const safeReplaceParameters = ({
     quoteChar,
     wrapChar,
     cast,
+    allowEmptyKeys,
 }: {
     sql: string;
     parameterValuesMap: ParametersValuesMap;
@@ -96,6 +93,7 @@ export const safeReplaceParameters = ({
     quoteChar: string;
     wrapChar?: string;
     cast?: 'DATE';
+    allowEmptyKeys?: Set<string>;
 }) => {
     // Don't allow empty quote char
     if (quoteChar === '') {
@@ -114,6 +112,7 @@ export const safeReplaceParameters = ({
             replacementName: 'parameter',
             throwOnMissing: false,
             cast,
+            allowEmptyKeys,
         },
     );
 };
@@ -180,6 +179,17 @@ export const safeReplaceParametersWithTypes = ({
         sql,
         parameterValuesMap,
         fieldsContext,
+        sqlBuilder.escapeString.bind(sqlBuilder),
+    );
+
+    // An empty reserved value (e.g. no date zoom applied) is a valid value, not missing:
+    // allow-list these keys so an empty string substitutes as a quoted empty value rather
+    // than being treated as missing. Non-reserved empty params stay missing.
+    const allowEmptyKeys = new Set(
+        Object.keys(parameterValuesMap).filter(
+            (key) =>
+                isReservedParameterName(key) && parameterValuesMap[key] === '',
+        ),
     );
 
     // First, get all parameter references from the original SQL using the standard function
@@ -190,6 +200,7 @@ export const safeReplaceParametersWithTypes = ({
         escapeString: sqlBuilder.escapeString.bind(sqlBuilder),
         quoteChar: sqlBuilder.getStringQuoteChar(),
         wrapChar,
+        allowEmptyKeys,
     });
 
     // Liquid blocks (e.g. `{% if ld.parameters.x == "y" %}...{% endif %}`) reference parameters
@@ -244,6 +255,7 @@ export const safeReplaceParametersWithTypes = ({
             escapeString: sqlBuilder.escapeString.bind(sqlBuilder),
             quoteChar: sqlBuilder.getStringQuoteChar(),
             wrapChar,
+            allowEmptyKeys,
         });
         processedSql = stringResult.replacedSql;
     }

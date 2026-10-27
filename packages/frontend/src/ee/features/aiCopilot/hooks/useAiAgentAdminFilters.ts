@@ -2,8 +2,9 @@ import type {
     AiAgentAdminFilters,
     AiAgentAdminSort,
     AiAgentAdminSortField,
+    AiUserThreadCreatedFrom,
 } from '@lightdash/common';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import useSearchParams from '../../../../hooks/useSearchParams';
 
@@ -11,6 +12,7 @@ export interface AiAgentAdminFiltersState {
     search: AiAgentAdminFilters['search'];
     selectedProjectUuids: NonNullable<AiAgentAdminFilters['projectUuids']>;
     selectedAgentUuids: NonNullable<AiAgentAdminFilters['agentUuids']>;
+    selectedUserUuids: NonNullable<AiAgentAdminFilters['userUuids']>;
     selectedSource: 'all' | AiAgentAdminFilters['createdFrom'];
     selectedFeedback: 'all' | 'thumbs_up' | 'thumbs_down';
     sortField: AiAgentAdminSortField;
@@ -21,6 +23,7 @@ const DEFAULT_FILTERS: AiAgentAdminFiltersState = {
     search: undefined,
     selectedProjectUuids: [],
     selectedAgentUuids: [],
+    selectedUserUuids: [],
     selectedSource: 'all',
     selectedFeedback: 'all',
     sortField: 'createdAt',
@@ -37,12 +40,17 @@ export const useAiAgentAdminFilters = () => {
     const searchParam = useSearchParams<string>('search');
     const projectsParam = useSearchParams<string>('projects');
     const agentsParam = useSearchParams<string>('agents');
-    const sourceParam = useSearchParams<'web_app' | 'slack'>('source');
+    const usersParam = useSearchParams<string>('users');
+    const sourceParam = useSearchParams<AiUserThreadCreatedFrom>('source');
     const feedbackParam = useSearchParams<'thumbs_up' | 'thumbs_down'>(
         'feedback',
     );
     const sortByParam = useSearchParams<AiAgentAdminSortField>('sortBy');
     const sortDirectionParam = useSearchParams<'asc' | 'desc'>('sortDirection');
+
+    // View preference for the filter dropdowns, not a thread filter — kept out
+    // of the URL and out of hasActiveFilters
+    const [hidePreviewProjects, setHidePreviewProjects] = useState(true);
 
     const currentFilters = useMemo(
         () => ({
@@ -53,6 +61,9 @@ export const useAiAgentAdminFilters = () => {
             selectedAgentUuids:
                 agentsParam?.split(',').filter(Boolean) ||
                 DEFAULT_FILTERS.selectedAgentUuids,
+            selectedUserUuids:
+                usersParam?.split(',').filter(Boolean) ||
+                DEFAULT_FILTERS.selectedUserUuids,
             selectedSource: sourceParam || DEFAULT_FILTERS.selectedSource,
             selectedFeedback: feedbackParam || DEFAULT_FILTERS.selectedFeedback,
             sortField: sortByParam || DEFAULT_FILTERS.sortField,
@@ -62,6 +73,7 @@ export const useAiAgentAdminFilters = () => {
             searchParam,
             projectsParam,
             agentsParam,
+            usersParam,
             sourceParam,
             feedbackParam,
             sortByParam,
@@ -94,6 +106,13 @@ export const useAiAgentAdminFilters = () => {
                 searchParams.set(
                     'agents',
                     newFilters.selectedAgentUuids.join(','),
+                );
+            }
+
+            if (newFilters.selectedUserUuids.length > 0) {
+                searchParams.set(
+                    'users',
+                    newFilters.selectedUserUuids.join(','),
                 );
             }
 
@@ -158,6 +177,13 @@ export const useAiAgentAdminFilters = () => {
         [updateUrl, currentFilters],
     );
 
+    const setSelectedUserUuids = useCallback(
+        (userUuids: NonNullable<AiAgentAdminFilters['userUuids']>) => {
+            updateUrl({ ...currentFilters, selectedUserUuids: userUuids });
+        },
+        [updateUrl, currentFilters],
+    );
+
     const setSelectedSource = useCallback(
         (source: AiAgentAdminFiltersState['selectedSource']) => {
             updateUrl({ ...currentFilters, selectedSource: source });
@@ -184,6 +210,7 @@ export const useAiAgentAdminFilters = () => {
 
     const resetFilters = useCallback(() => {
         updateUrl(DEFAULT_FILTERS);
+        setHidePreviewProjects(true);
     }, [updateUrl]);
 
     const hasActiveFilters = useMemo(() => {
@@ -195,6 +222,8 @@ export const useAiAgentAdminFilters = () => {
             (currentFilters.selectedAgentUuids &&
                 currentFilters.selectedAgentUuids.length !==
                     DEFAULT_FILTERS.selectedAgentUuids?.length) ||
+            currentFilters.selectedUserUuids.length !==
+                DEFAULT_FILTERS.selectedUserUuids.length ||
             currentFilters.selectedSource !== DEFAULT_FILTERS.selectedSource ||
             currentFilters.selectedFeedback !==
                 DEFAULT_FILTERS.selectedFeedback ||
@@ -224,6 +253,10 @@ export const useAiAgentAdminFilters = () => {
             result.agentUuids = currentFilters.selectedAgentUuids;
         }
 
+        if (currentFilters.selectedUserUuids.length > 0) {
+            result.userUuids = currentFilters.selectedUserUuids;
+        }
+
         if (currentFilters.selectedSource !== 'all') {
             result.createdFrom = currentFilters.selectedSource;
         }
@@ -245,9 +278,13 @@ export const useAiAgentAdminFilters = () => {
         setSearch,
         setSelectedProjectUuids,
         setSelectedAgentUuids,
+        setSelectedUserUuids,
         setSelectedSource,
         setSelectedFeedback,
         setSorting,
+
+        hidePreviewProjects,
+        setHidePreviewProjects,
 
         resetFilters,
         hasActiveFilters,

@@ -1,4 +1,9 @@
-import { getErrorMessage } from '@lightdash/common';
+import {
+    getErrorMessage,
+    QueryExecutionContext,
+    QueryHistoryStatus,
+} from '@lightdash/common';
+import { trace } from '@opentelemetry/api';
 import * as Sentry from '@sentry/node';
 import { StringCodec, type Consumer, type JsMsg } from 'nats';
 import { z } from 'zod';
@@ -10,6 +15,8 @@ import {
     type OrganizationNameResolver,
 } from '../sentry/organizationNameResolver';
 import { type AsyncQueryService } from '../services/AsyncQueryService/AsyncQueryService';
+import { continueTrace, traceSpan } from '../tracing/tracing';
+import { isConnectionProducedQuery } from '../utils/queryResultProducer';
 import {
     STREAM_CONFIGS,
     type AsyncQueryJobPayload,
@@ -18,8 +25,15 @@ import {
     type StreamConfig,
 } from './natsConfig';
 
-const asyncQueryPayloadSchema = z.object({
+const asyncQueryTagsSchema = z
+    .object({
+        query_context: z.enum(QueryExecutionContext),
+    })
+    .catchall(z.string());
+
+const asyncQueryPayloadSchema: z.ZodType<AsyncQueryJobPayload> = z.object({
     queryUuid: z.string().min(1),
+    queryTags: asyncQueryTagsSchema.optional(),
 });
 
 const asyncQueryEnvelopeSchema = z.object({
@@ -27,6 +41,8 @@ const asyncQueryEnvelopeSchema = z.object({
     payload: asyncQueryPayloadSchema,
     traceHeader: z.string().optional(),
     baggageHeader: z.string().optional(),
+    otelTraceparent: z.string().optional(),
+    otelBaggage: z.string().optional(),
     sentryMessageId: z.string().optional(),
 });
 
@@ -146,29 +162,55 @@ export class NatsWorker {
 
     private getQueryRunner(
         subject: string,
-    ): ((queryUuid: string, worker: string) => Promise<boolean>) | null {
+    ):
+        | ((
+              queryUuid: string,
+              worker: string,
+              queryTags?: AsyncQueryJobPayload['queryTags'],
+              onConnectionClaimed?: () => void,
+          ) => Promise<boolean>)
+        | null {
         if (subject === STREAM_CONFIGS.warehouse.subjects.query) {
-            return (queryUuid, worker) =>
+            return (queryUuid, worker, queryTags, onConnectionClaimed) =>
                 this.asyncQueryService.runAsyncWarehouseQueryFromHistory(
                     queryUuid,
                     worker,
+                    queryTags,
+                    onConnectionClaimed,
                 );
         }
 
         const preAgg = STREAM_CONFIGS['pre-aggregate'];
+        if (
+            subject === STREAM_CONFIGS.duckdb.subjects.query ||
+            (preAgg && subject === preAgg.subjects.duckdb)
+        ) {
+            return (queryUuid, worker, queryTags, onConnectionClaimed) =>
+                this.asyncQueryService.runAsyncDuckdbQueryFromHistory(
+                    queryUuid,
+                    worker,
+                    queryTags,
+                    onConnectionClaimed,
+                );
+        }
+
         if (preAgg && subject === preAgg.subjects.query) {
-            return (queryUuid, worker) =>
+            return (queryUuid, worker, queryTags, onConnectionClaimed) =>
                 this.asyncQueryService.runAsyncPreAggregateQueryFromHistory(
                     queryUuid,
                     worker,
+                    queryTags,
+                    onConnectionClaimed,
                 );
         }
 
         if (preAgg && subject === preAgg.subjects.materialization) {
-            return (queryUuid, worker) =>
+            return (queryUuid, worker, queryTags, onConnectionClaimed) =>
                 this.asyncQueryService.runAsyncWarehouseQueryFromHistory(
                     queryUuid,
                     worker,
+                    queryTags,
+                    onConnectionClaimed,
                 );
         }
 
@@ -178,7 +220,12 @@ export class NatsWorker {
     private async handleQueryMessage(
         message: JsMsg,
         workerLabel: string,
-        runQuery: (queryUuid: string, worker: string) => Promise<boolean>,
+        runQuery: (
+            queryUuid: string,
+            worker: string,
+            queryTags?: AsyncQueryJobPayload['queryTags'],
+            onConnectionClaimed?: () => void,
+        ) => Promise<boolean>,
     ): Promise<void> {
         const parsed = this.parseMessage(message);
         if (!parsed) {
@@ -197,16 +244,20 @@ export class NatsWorker {
             jobMetadata,
         );
 
+        let isConnectionQuery = false;
         try {
             const didRun = await NatsWorker.runWithAckProgress(message, () =>
-                Sentry.continueTrace(
+                continueTrace(
                     {
                         sentryTrace: parsed.trace.traceHeader,
-                        baggage: parsed.trace.baggageHeader,
+                        traceparent: parsed.trace.otelTraceparent,
+                        baggage:
+                            parsed.trace.otelBaggage ??
+                            parsed.trace.baggageHeader,
                     },
                     () =>
                         Sentry.withIsolationScope(() =>
-                            Sentry.startSpan(
+                            traceSpan(
                                 {
                                     op: 'queue.process',
                                     name: 'queue_consumer',
@@ -220,12 +271,17 @@ export class NatsWorker {
                                     },
                                 },
                                 async () => {
-                                    await this.applyQuerySentryContext(
-                                        parsed.payload.queryUuid,
-                                    );
+                                    isConnectionQuery =
+                                        await this.applyQuerySentryContext(
+                                            parsed.payload.queryUuid,
+                                        );
                                     return runQuery(
                                         parsed.payload.queryUuid,
                                         workerLabel,
+                                        parsed.payload.queryTags,
+                                        () => {
+                                            isConnectionQuery = true;
+                                        },
                                     );
                                 },
                             ),
@@ -248,7 +304,17 @@ export class NatsWorker {
                 `Worker ${workerLabel} failed query job ${parsed.jobId ?? '<unknown>'} on ${message.subject}: ${getErrorMessage(error)}`,
                 { error, ...jobMetadata },
             );
-            message.nak();
+            const query = isConnectionQuery
+                ? await this.queryHistoryModel
+                      .getByQueryUuid(parsed.payload.queryUuid)
+                      .catch(() => null)
+                : null;
+            if (
+                query?.status === QueryHistoryStatus.ERROR ||
+                query?.status === QueryHistoryStatus.CANCELLED
+            )
+                message.term();
+            else message.nak();
         }
     }
 
@@ -296,6 +362,8 @@ export class NatsWorker {
                     trace: {
                         traceHeader: value.traceHeader,
                         baggageHeader: value.baggageHeader,
+                        otelTraceparent: value.otelTraceparent,
+                        otelBaggage: value.otelBaggage,
                         sentryMessageId: value.sentryMessageId,
                     },
                 };
@@ -315,11 +383,17 @@ export class NatsWorker {
         }
     }
 
-    private async applyQuerySentryContext(queryUuid: string): Promise<void> {
+    private async applyQuerySentryContext(queryUuid: string): Promise<boolean> {
+        let isConnectionQuery = false;
         try {
             const queryHistory =
                 await this.queryHistoryModel.getByQueryUuid(queryUuid);
-            if (!queryHistory) return;
+            if (!queryHistory) return false;
+            try {
+                isConnectionQuery = isConnectionProducedQuery(queryHistory);
+            } catch {
+                isConnectionQuery = true;
+            }
 
             const { organizationUuid, createdByUserUuid } = queryHistory;
 
@@ -344,11 +418,24 @@ export class NatsWorker {
                     'organization.name': organizationName,
                 }),
             });
+
+            // Sentry tags are error-scope only; stamp the same attribution on
+            // the queue_consumer span so it's queryable in the trace backend.
+            trace.getActiveSpan()?.setAttributes({
+                ...(createdByUserUuid && { 'user.uuid': createdByUserUuid }),
+                ...(organizationUuid && {
+                    'organization.uuid': organizationUuid,
+                }),
+                ...(organizationName && {
+                    'organization.name': organizationName,
+                }),
+            });
         } catch (error) {
             Logger.debug(
                 `Failed to enrich Sentry context for query ${queryUuid}: ${getErrorMessage(error)}`,
             );
         }
+        return isConnectionQuery;
     }
 
     static async runWithAckProgress<T>(

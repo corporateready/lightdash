@@ -5,12 +5,12 @@ import {
     type VizTableHeaderSortConfig,
 } from '@lightdash/common';
 import {
-    Badge,
     Flex,
     Group,
+    type FlexProps,
+    Badge,
     Tooltip,
     useMantineTheme,
-    type FlexProps,
 } from '@mantine/core';
 import { IconArrowDown, IconArrowUp } from '@tabler/icons-react';
 import { flexRender } from '@tanstack/react-table';
@@ -21,6 +21,7 @@ import BodyCell from '../../common/Table/ScrollableTable/BodyCell';
 import { VirtualizedArea } from '../../common/Table/ScrollableTable/TableBody';
 import { Table as TableStyled, Tr } from '../../common/Table/Table.styles';
 import { useVirtualTable } from '../hooks/useVirtualTable';
+import { RawResultCellContextMenu } from './RawResultCellContextMenu';
 
 type TableProps = {
     columnNames: string[];
@@ -56,13 +57,13 @@ export const ChartDataTable = ({
             direction="column"
             miw="100%"
             {...flexProps}
-            sx={{
+            style={{
                 overflow: 'auto',
                 fontFeatureSettings: "'tnum'",
                 flexGrow: 1,
-                ...(typeof flexProps?.sx === 'object' &&
-                !Array.isArray(flexProps.sx)
-                    ? flexProps.sx
+                ...(typeof flexProps?.style === 'object' &&
+                !Array.isArray(flexProps.style)
+                    ? flexProps.style
                     : {}),
             }}
             className="sentry-block ph-no-capture"
@@ -104,9 +105,8 @@ export const ChartDataTable = ({
                                                 label="You cannot sort by a group column"
                                                 disabled={!!onClick}
                                                 position="top"
-                                                withinPortal
                                             >
-                                                <Group spacing="two" fz={13}>
+                                                <Group gap="two" fz="sm">
                                                     {columnsConfig?.[header.id]
                                                         ?.aggregation && (
                                                         <Badge
@@ -171,6 +171,9 @@ export const ChartDataTable = ({
                                                 cell={cell}
                                                 isNumericItem={false}
                                                 hasData={!!cellValue}
+                                                cellContextMenu={
+                                                    RawResultCellContextMenu
+                                                }
                                                 isLargeText={
                                                     (
                                                         cellValue?.toString() ||

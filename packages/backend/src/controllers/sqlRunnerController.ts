@@ -26,6 +26,7 @@ import {
 import {
     Body,
     Delete,
+    Deprecated,
     Get,
     Hidden,
     Middlewares,
@@ -44,8 +45,10 @@ import {
 import express from 'express';
 import { getContextFromQueryOrHeader } from '../analytics/LightdashAnalytics';
 import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
@@ -117,15 +120,22 @@ export class SqlRunnerController extends BaseController {
     /**
      * Run a SQL query
      * @summary Run SQL query
+     *
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/sql instead
      */
     @Middlewares([
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/sql instead.',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Post('/run')
     @OperationId('runSql')
+    @Deprecated()
     async runSql(
         @Path() projectUuid: string,
         @Body() body: SqlRunnerBody,
@@ -143,6 +153,8 @@ export class SqlRunnerController extends BaseController {
                     projectUuid,
                     body.sql,
                     body.limit,
+                    QueryExecutionContext.SQL_RUNNER,
+                    req.account,
                 ),
         };
     }
@@ -150,15 +162,22 @@ export class SqlRunnerController extends BaseController {
     /**
      * Run a SQL pivot query
      * @summary Run SQL pivot query
+     *
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/sql with pivotConfiguration instead
      */
     @Middlewares([
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/sql with pivotConfiguration instead.',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Post('/runPivotQuery')
     @OperationId('runSqlPivotQuery')
+    @Deprecated()
     async runSqlPivotQuery(
         @Path() projectUuid: string,
         @Body() body: SqlRunnerPivotQueryBody,
@@ -176,6 +195,7 @@ export class SqlRunnerController extends BaseController {
                     projectUuid,
                     body,
                     getContextFromQueryOrHeader(req),
+                    req.account,
                 ),
         };
     }
@@ -186,11 +206,21 @@ export class SqlRunnerController extends BaseController {
      * @param fileId the fileId for the file
      * @param projectUuid the uuid for the project
      * @param req express request
+     *
+     * @deprecated Use GET /api/v2/projects/{projectUuid}/query/{queryUuid}/results instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use GET /api/v2/projects/{projectUuid}/query/{queryUuid}/results instead.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('results/{fileId}')
     @OperationId('getLocalResults')
+    @Deprecated()
     async getLocalResults(
         @Path() fileId: string,
         @Path() projectUuid: string,
@@ -202,7 +232,12 @@ export class SqlRunnerController extends BaseController {
 
         const readStream = await this.services
             .getProjectService()
-            .getFileStream(toSessionUser(req.account), projectUuid, fileId);
+            .getFileStream(
+                toSessionUser(req.account),
+                projectUuid,
+                fileId,
+                req.account,
+            );
 
         const { res } = req;
         if (res) {
@@ -232,13 +267,12 @@ export class SqlRunnerController extends BaseController {
         @Path() projectUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSqlChart> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSavedSqlService()
-                .getSqlChart(toSessionUser(req.account), projectUuid, uuid),
+                .getSqlChartFromAccount(req.account!, projectUuid, uuid),
         };
     }
 
@@ -258,14 +292,13 @@ export class SqlRunnerController extends BaseController {
         @Path() projectUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSqlChart> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSavedSqlService()
-                .getSqlChart(
-                    toSessionUser(req.account),
+                .getSqlChartFromAccount(
+                    req.account!,
                     projectUuid,
                     undefined,
                     slug,
@@ -279,11 +312,22 @@ export class SqlRunnerController extends BaseController {
      * @param projectUuid - the uuid of the project
      * @param slug - the slug of the saved chart
      * @param req - express request
+     *
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/sql-chart with the chart slug instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/sql-chart with the chart slug instead.',
+        }),
+        requireOAuthScopeOperation('SqlRunnerController.getSavedSqlResultsJob'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('saved/slug/{slug}/results-job')
     @OperationId('getSavedSqlResultsJob')
+    @Deprecated()
     async getSavedSqlResultsJob(
         @Path() slug: string,
         @Path() projectUuid: string,
@@ -301,6 +345,7 @@ export class SqlRunnerController extends BaseController {
                     slug,
                     undefined,
                     getContextFromQueryOrHeader(req),
+                    req.account,
                 ),
         };
     }
@@ -311,11 +356,24 @@ export class SqlRunnerController extends BaseController {
      * @param projectUuid - the uuid of the project
      * @param uuid - the uuid of the saved chart
      * @param req - express request
+     *
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/sql-chart with savedSqlUuid instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/sql-chart with savedSqlUuid instead.',
+        }),
+        requireOAuthScopeOperation(
+            'SqlRunnerController.getSavedSqlResultsJobByUuid',
+        ),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('saved/{uuid}/results-job')
     @OperationId('getSavedSqlResultsJobByUuid')
+    @Deprecated()
     async getSavedSqlResultsJobByUuid(
         @Path() uuid: string,
         @Path() projectUuid: string,
@@ -333,6 +391,7 @@ export class SqlRunnerController extends BaseController {
                     undefined,
                     uuid,
                     getContextFromQueryOrHeader(req),
+                    req.account,
                 ),
         };
     }
@@ -554,16 +613,23 @@ export class SqlRunnerController extends BaseController {
         @Body() body: CreateVirtualViewPayload,
     ): Promise<ApiCreateVirtualView> {
         this.setStatus(200);
-        const { name, sql, columns, parameterValues } = body;
+        const { name, label, sql, columns, parameterValues } = body;
 
         const virtualViewName = await this.services
             .getProjectService()
-            .createVirtualView(req.account!, projectUuid, {
-                name,
-                sql,
-                columns,
-                parameterValues,
-            });
+            .createVirtualView(
+                req.account!,
+                projectUuid,
+                {
+                    name,
+                    label,
+                    sql,
+                    columns,
+                    parameterValues,
+                    warehouseConnectionUuid: body.warehouseConnectionUuid,
+                },
+                true,
+            );
 
         return {
             status: 'ok',
@@ -699,7 +765,11 @@ export class SqlRunnerController extends BaseController {
      * Get all schedulers for a SQL chart
      * @summary List SQL chart schedulers
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('SqlRunnerController.getSqlChartSchedulers'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/saved/{savedSqlUuid}/schedulers')
     @OperationId('getSqlChartSchedulers')

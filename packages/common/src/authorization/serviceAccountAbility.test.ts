@@ -3,7 +3,10 @@ import { ServiceAccountScope } from '../ee/serviceAccounts/types';
 import { ProjectMemberRole } from '../types/projectMemberRole';
 import { projectMemberAbilities } from './projectMemberAbility';
 import { buildAbilityFromScopes } from './scopeAbilityBuilder';
-import { applyServiceAccountAbilities } from './serviceAccountAbility';
+import {
+    applyServiceAccountAbilities,
+    getServiceAccountScopePermissions,
+} from './serviceAccountAbility';
 import { type MemberAbility } from './types';
 
 const ORG = 'org-1';
@@ -21,6 +24,69 @@ const buildAbility = (scopes: ServiceAccountScope[]) => {
     });
     return builder.build();
 };
+
+describe('roadmap management', () => {
+    it('grants legacy org admins management only within their organization', () => {
+        const ability = buildAbility([ServiceAccountScope.ORG_ADMIN]);
+        expect(
+            ability.can(
+                'manage',
+                subject('Roadmap', { organizationUuid: ORG }),
+            ),
+        ).toBe(true);
+        expect(
+            ability.can(
+                'manage',
+                subject('Roadmap', { organizationUuid: 'other-org' }),
+            ),
+        ).toBe(false);
+        expect(
+            buildAbility([ServiceAccountScope.ORG_READ]).can(
+                'manage',
+                subject('Roadmap', { organizationUuid: ORG }),
+            ),
+        ).toBe(false);
+        expect(
+            buildAbility([ServiceAccountScope.ORG_EDIT]).can(
+                'manage',
+                subject('Roadmap', { organizationUuid: ORG }),
+            ),
+        ).toBe(false);
+    });
+});
+
+describe('delegation permission footprints', () => {
+    it.each(Object.values(ServiceAccountScope))(
+        'derives %s from the permissions emitted by the ability builder',
+        (scope) => {
+            const expected = [
+                ...new Set(
+                    buildAbility([scope]).rules.flatMap((rule) => {
+                        const actions = Array.isArray(rule.action)
+                            ? rule.action
+                            : [rule.action];
+                        const subjects = Array.isArray(rule.subject)
+                            ? rule.subject
+                            : [rule.subject];
+                        return actions.flatMap((action) =>
+                            subjects.map(
+                                (ruleSubject) => `${action}:${ruleSubject}`,
+                            ),
+                        );
+                    }),
+                ),
+            ];
+
+            expect(getServiceAccountScopePermissions(scope)).toEqual(expected);
+        },
+    );
+
+    it('includes legacy org-read write permissions', () => {
+        expect(
+            getServiceAccountScopePermissions(ServiceAccountScope.ORG_READ),
+        ).toContain('manage:Dashboard');
+    });
+});
 
 // Mirrors UserModel.applyServiceAccountProjectMemberships:
 // applies org SA scopes first, then per-project grants on the same builder.
@@ -99,6 +165,29 @@ describe('ServiceAccountScope.SYSTEM_MEMBER', () => {
         expect(
             ability.can('view', subject('Project', { organizationUuid: ORG })),
         ).toBe(false);
+    });
+});
+
+describe('content-as-code writes', () => {
+    it('lets system editors create but not manage', () => {
+        const ability = buildAbility([ServiceAccountScope.SYSTEM_EDITOR]);
+        const contentAsCode = subject('ContentAsCode', {
+            organizationUuid: ORG,
+        });
+
+        expect(ability.can('create', contentAsCode)).toBe(true);
+        expect(ability.can('manage', contentAsCode)).toBe(false);
+    });
+
+    it('preserves legacy org edit manage access', () => {
+        const ability = buildAbility([ServiceAccountScope.ORG_EDIT]);
+
+        expect(
+            ability.can(
+                'manage',
+                subject('ContentAsCode', { organizationUuid: ORG }),
+            ),
+        ).toBe(true);
     });
 });
 

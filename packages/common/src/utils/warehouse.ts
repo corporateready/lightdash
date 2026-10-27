@@ -1,12 +1,115 @@
 import { SupportedDbtAdapter } from '../types/dbt';
-import { WarehouseTypes } from '../types/projects';
-import type { WarehouseSqlBuilder } from '../types/warehouse';
+import { ParameterError } from '../types/errors';
+import {
+    DuckdbConnectionType,
+    WarehouseTypes,
+    type WarehouseCredentials,
+} from '../types/projects';
+import type {
+    UnnestSql,
+    UnnestSqlArgs,
+    WarehouseSqlBuilder,
+} from '../types/warehouse';
 import { VizAggregationOptions } from '../visualizations/types';
 import assertUnreachable from './assertUnreachable';
+
+export type ConnectionDefaults = {
+    database: string | undefined;
+    schema: string | undefined;
+};
+
+const nonEmpty = (value: string | undefined): string | undefined =>
+    value || undefined;
+
+export const getConnectionDefaults = (
+    credentials: WarehouseCredentials,
+): ConnectionDefaults => {
+    switch (credentials.type) {
+        case WarehouseTypes.POSTGRES:
+        case WarehouseTypes.REDSHIFT:
+        case WarehouseTypes.TRINO:
+            return {
+                database: nonEmpty(credentials.dbname),
+                schema: nonEmpty(credentials.schema),
+            };
+        case WarehouseTypes.SNOWFLAKE:
+        case WarehouseTypes.ATHENA:
+            return {
+                database: nonEmpty(credentials.database),
+                schema: nonEmpty(credentials.schema),
+            };
+        case WarehouseTypes.BIGQUERY:
+            return {
+                database: nonEmpty(credentials.project),
+                schema: nonEmpty(credentials.dataset),
+            };
+        case WarehouseTypes.DATABRICKS:
+            return {
+                database: nonEmpty(credentials.catalog),
+                schema: nonEmpty(credentials.database),
+            };
+        case WarehouseTypes.CLICKHOUSE:
+            return {
+                database: undefined,
+                schema: nonEmpty(credentials.schema),
+            };
+        case WarehouseTypes.DUCKDB:
+            if (credentials.connectionType === DuckdbConnectionType.DUCKLAKE) {
+                return {
+                    database: nonEmpty(credentials.catalogAlias) ?? 'ducklake',
+                    schema: nonEmpty(credentials.schema),
+                };
+            }
+            if (
+                credentials.connectionType === DuckdbConnectionType.EMBEDDED ||
+                credentials.connectionType === DuckdbConnectionType.ANALYTICS
+            ) {
+                return {
+                    database: undefined,
+                    schema: nonEmpty(credentials.schema),
+                };
+            }
+            return {
+                database: nonEmpty(credentials.database),
+                schema: nonEmpty(credentials.schema),
+            };
+        default:
+            return assertUnreachable(
+                credentials,
+                'Unknown warehouse type when getting connection defaults',
+            );
+    }
+};
 
 // `NULL = NULL` is NULL in standard SQL, which silently drops rows in JOINs.
 export const defaultNullSafeEqualSql = (left: string, right: string): string =>
     `(${left} = ${right} OR (${left} IS NULL AND ${right} IS NULL))`;
+
+// UNNEST yields the element itself, so the alias addresses it directly.
+export const getBigqueryUnnestSql = ({
+    parentElementSql,
+    columnSegment,
+    alias,
+}: UnnestSqlArgs): UnnestSql => ({
+    fromSql: `UNNEST(${parentElementSql}.${columnSegment}) AS \`${alias}\` WITH OFFSET AS \`${alias}__offset\``,
+    elementSql: `\`${alias}\``,
+    offsetSql: `\`${alias}__offset\``,
+    joinCondition: 'TRUE',
+});
+
+// posexplode_outer yields a (pos, col) row; the element lives in `col`. Any
+// ON clause, even ON TRUE, makes Databricks plan the lateral join as a hash
+// join plus shuffle instead of a single generate, so the join carries none.
+export const getDatabricksUnnestSql = ({
+    parentElementSql,
+    columnSegment,
+    alias,
+}: UnnestSqlArgs): UnnestSql => ({
+    fromSql: `LATERAL posexplode_outer(${parentElementSql}.${columnSegment}) AS \`${alias}\`(\`${alias}__offset\`, col)`,
+    elementSql: `\`${alias}\`.col`,
+    offsetSql: `\`${alias}__offset\``,
+    joinCondition: null,
+});
 
 /**
  * @deprecated use WarehouseSqlBuilder.getFieldQuoteChar instead
@@ -38,13 +141,37 @@ export const getFieldQuoteChar = (
     return '"';
 };
 
+export const quoteFieldReference = (
+    reference: string,
+    fieldQuoteChar: string,
+    adapterType?: SupportedDbtAdapter,
+): string => {
+    if (
+        fieldQuoteChar === '`' &&
+        adapterType === SupportedDbtAdapter.BIGQUERY
+    ) {
+        return `\`${reference.replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\``;
+    }
+
+    return `${fieldQuoteChar}${reference
+        .split(fieldQuoteChar)
+        .join(`${fieldQuoteChar}${fieldQuoteChar}`)}${fieldQuoteChar}`;
+};
+
 export const getAggregatedField = (
     warehouseSqlBuilder: WarehouseSqlBuilder,
     aggregation: VizAggregationOptions,
     reference: string,
 ): string => {
-    const q = warehouseSqlBuilder.getFieldQuoteChar();
+    if (!Object.values(VizAggregationOptions).includes(aggregation)) {
+        throw new ParameterError(
+            `Invalid visualization aggregation: ${aggregation}`,
+        );
+    }
+
     const adapterType = warehouseSqlBuilder.getAdapterType();
+    const q = warehouseSqlBuilder.getFieldQuoteChar();
+    const quotedReference = quoteFieldReference(reference, q, adapterType);
     switch (adapterType) {
         case SupportedDbtAdapter.BIGQUERY:
         case SupportedDbtAdapter.DATABRICKS:
@@ -58,18 +185,18 @@ export const getAggregatedField = (
                 aggregation === VizAggregationOptions.ANY
                     ? 'ANY_VALUE'
                     : aggregation;
-            return `${aggregationFunction}(${q}${reference}${q})`;
+            return `${aggregationFunction}(${quotedReference})`;
 
         case SupportedDbtAdapter.POSTGRES:
             if (aggregation === VizAggregationOptions.ANY) {
                 // ANY_VALUE on Postgres is only available from version v16+
-                return `(ARRAY_AGG(${q}${reference}${q}))[1]`;
+                return `(ARRAY_AGG(${quotedReference}))[1]`;
             }
             break;
         case SupportedDbtAdapter.CLICKHOUSE:
             if (aggregation === VizAggregationOptions.ANY) {
                 // ClickHouse uses any() function for ANY_VALUE equivalent
-                return `any(${q}${reference}${q})`;
+                return `any(${quotedReference})`;
             }
             break;
         default:
@@ -78,5 +205,5 @@ export const getAggregatedField = (
                 `Unknown warehouse type ${adapterType}`,
             );
     }
-    return `${aggregation}(${q}${reference}${q})`;
+    return `${aggregation}(${quotedReference})`;
 };

@@ -1,5 +1,6 @@
 import {
     isChartValidationError,
+    isDataAppValidationError,
     isDashboardValidationError,
     isFixableDashboardValidationError,
     isTableValidationError,
@@ -16,32 +17,29 @@ import {
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
-    IconArrowDown,
-    IconArrowsSort,
-    IconArrowUp,
+    IconAppWindow,
     IconLayoutDashboard,
     IconTable,
     IconX,
 } from '@tabler/icons-react';
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    type FC,
-    type UIEvent,
-} from 'react';
+import { useCallback, useMemo, useRef, type FC } from 'react';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
 import { useDeleteValidation } from '../../../hooks/validation/useValidation';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
-    type MRT_Virtualizer,
+    type ContentTableColumnDef,
+    type ContentTableVirtualizer,
 } from '../../common/ContentTable';
 import MantineIcon from '../../common/MantineIcon';
 import { ChartIcon, IconBox } from '../../common/ResourceIcon';
+import {
+    dedupeContentItems,
+    getDeletableContentItem,
+    type ValidationContentItem,
+} from '../utils/deletableContent';
 import { getLinkToResource } from '../utils/utils';
 import { ErrorMessage } from './ErrorMessage';
 import classes from './ValidatorTable.module.css';
@@ -50,20 +48,24 @@ import { ValidatorTableTopToolbar } from './ValidatorTableTopToolbar';
 const isDeleted = (validationError: ValidationResponse) =>
     (isChartValidationError(validationError) && !validationError.chartUuid) ||
     (isDashboardValidationError(validationError) &&
-        !validationError.dashboardUuid);
+        !validationError.dashboardUuid) ||
+    (isDataAppValidationError(validationError) && !validationError.appUuid);
 
 const Icon = ({ validationError }: { validationError: ValidationResponse }) => {
     if (isChartValidationError(validationError))
         return <ChartIcon chartKind={validationError.chartKind} />;
     if (isDashboardValidationError(validationError))
         return <IconBox icon={IconLayoutDashboard} color="green.8" />;
+    if (isDataAppValidationError(validationError))
+        return <IconBox icon={IconAppWindow} color="orange.6" />;
     return <IconBox icon={IconTable} color="indigo.6" />;
 };
 
 const getErrorName = (validationError: ValidationResponse) => {
     if (
         isChartValidationError(validationError) ||
-        isDashboardValidationError(validationError)
+        isDashboardValidationError(validationError) ||
+        isDataAppValidationError(validationError)
     )
         return validationError.name;
     if (isTableValidationError(validationError))
@@ -118,6 +120,10 @@ export type ValidatorTableProps = {
     showConfigWarnings: boolean;
     setShowConfigWarnings: (show: boolean) => void;
     lastValidatedAt: Date | null;
+    flush?: boolean;
+    rowSelection: Record<string, boolean>;
+    setRowSelection: (selection: Record<string, boolean>) => void;
+    onBulkDelete: (items: ValidationContentItem[]) => void;
 };
 
 export const ValidatorTable: FC<ValidatorTableProps> = ({
@@ -138,10 +144,15 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
     showConfigWarnings,
     setShowConfigWarnings,
     lastValidatedAt,
+    flush = false,
+    rowSelection,
+    setRowSelection,
+    onBulkDelete,
 }) => {
-    const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
 
     const { mutate: deleteValidation } = useDeleteValidation(projectUuid);
 
@@ -155,28 +166,35 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
 
     const totalFetched = data.length;
 
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                if (
-                    scrollHeight - scrollTop - clientHeight < 400 &&
-                    !isFetching &&
-                    totalFetched < totalDBRowCount
-                ) {
-                    fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, totalFetched, totalDBRowCount],
+    const selectedCount = useMemo(
+        () => Object.values(rowSelection).filter(Boolean).length,
+        [rowSelection],
     );
 
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
+    const handleDeleteSelected = useCallback(() => {
+        const items = dedupeContentItems(
+            tableData.flatMap((validationError) => {
+                if (!rowSelection[validationError.validationUuid]) return [];
+                const item = getDeletableContentItem(validationError);
+                return item ? [item] : [];
+            }),
+        );
+        if (items.length > 0) onBulkDelete(items);
+    }, [tableData, rowSelection, onBulkDelete]);
 
-    const columns: MRT_ColumnDef<ValidationResponse>[] = useMemo(
+    const handleClearSelection = useCallback(
+        () => setRowSelection({}),
+        [setRowSelection],
+    );
+
+    const { containerRef: tableContainerRef, onScroll } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
+
+    const columns: ContentTableColumnDef<ValidationResponse>[] = useMemo(
         () => [
             {
                 accessorKey: 'name',
@@ -201,19 +219,21 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
                                             validationError,
                                         )) &&
                                         !isDeleted(validationError) && (
-                                            <Text fz={10} c="ldGray.6">
+                                            <Text fz="xs" c="dimmed">
                                                 {getViews(validationError)} view
                                                 {getViews(validationError) === 1
                                                     ? ''
                                                     : 's'}
-                                                {validationError.lastUpdatedBy ? (
+                                                {'lastUpdatedBy' in
+                                                    validationError &&
+                                                validationError.lastUpdatedBy ? (
                                                     <>
                                                         {' • '}
                                                         Last edited by{' '}
                                                         <Text
                                                             span
                                                             fw={500}
-                                                            fz={10}
+                                                            fz="xs"
                                                         >
                                                             {
                                                                 validationError.lastUpdatedBy
@@ -250,7 +270,9 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
                 id: 'actions',
                 header: '',
                 enableSorting: false,
-                size: 70,
+                // Dismiss icon (20) + gap (8) + Fix button (~40) + cell padding (32).
+                size: 120,
+                minSize: 120,
                 Cell: ({ row }) => {
                     const validationError = row.original;
                     const isPinned =
@@ -266,8 +288,6 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
                         >
                             <Tooltip label="Dismiss Error" position="top">
                                 <ActionIcon
-                                    variant="subtle"
-                                    color="gray"
                                     size="xs"
                                     onClick={(
                                         e: React.MouseEvent<HTMLButtonElement>,
@@ -285,7 +305,7 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
                                     <MantineIcon
                                         icon={IconX}
                                         size="lg"
-                                        color="ldGray.6"
+                                        color="dimmed"
                                     />
                                 </ActionIcon>
                             </Tooltip>
@@ -296,6 +316,7 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
                                 <Button
                                     variant="default"
                                     size="compact-xs"
+                                    flex="0 0 auto"
                                     onClick={(
                                         e: React.MouseEvent<HTMLButtonElement>,
                                     ) => {
@@ -326,21 +347,26 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
         columns,
         data: tableData,
         enableColumnResizing: false,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: false,
         enableRowVirtualization: true,
         enableTopToolbar: true,
         enableBottomToolbar: false,
         enableRowActions: false,
+        enableRowSelection: (row) =>
+            getDeletableContentItem(row.original) !== null,
         getRowId: (row) => row.validationUuid,
+        state: {
+            isLoading,
+            showAlertBanner: isError,
+            showProgressBars: isFetching,
+            density: 'md',
+            rowSelection,
+        },
+        onRowSelectionChange: (updater) =>
+            setRowSelection(
+                typeof updater === 'function' ? updater(rowSelection) : updater,
+            ),
         renderTopToolbar: () => (
             <ValidatorTableTopToolbar
                 searchQuery={searchQuery}
@@ -352,11 +378,14 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
                 totalResults={totalDBRowCount}
                 lastValidatedAt={lastValidatedAt}
                 isFetching={isFetching || isLoading}
+                selectedCount={selectedCount}
+                onDeleteSelected={handleDeleteSelected}
+                onClearSelection={handleClearSelection}
             />
         ),
         mantinePaperProps: {
             shadow: undefined,
-            className: classes.paper,
+            className: flush ? classes.paperFlush : classes.paper,
         },
         mantineTableHeadRowProps: {
             className: classes.headerRow,
@@ -364,8 +393,7 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
         mantineTableContainerProps: {
             ref: tableContainerRef,
             className: classes.tableContainer,
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
@@ -387,25 +415,8 @@ export const ValidatorTable: FC<ValidatorTableProps> = ({
         mantineTableBodyCellProps: {
             className: classes.bodyCell,
         },
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
-        },
         rowVirtualizerInstanceRef,
         rowVirtualizerProps: { estimateSize: () => 44, overscan: 10 },
-        state: {
-            isLoading,
-            showAlertBanner: isError,
-            showProgressBars: isFetching,
-            density: 'md',
-        },
     });
 
     return <ContentTable table={table} />;

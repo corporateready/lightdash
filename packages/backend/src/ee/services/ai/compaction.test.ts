@@ -2,10 +2,13 @@ import { type AiAgentToolResult } from '@lightdash/common';
 import { Compaction } from './compaction';
 
 describe('AI context compaction helpers', () => {
-    it('triggers compaction when total tokens exceed the reserved budget', () => {
+    it('triggers compaction when the final step exceeds the reserved budget', () => {
         expect(
             Compaction.shouldCompactPrompt({
-                totalTokens: 184000,
+                tokenUsage: {
+                    totalTokens: 184000,
+                    finalStepTotalTokens: 184000,
+                },
                 contextWindowTokens: 200000,
                 reserveTokens: 16384,
             }),
@@ -13,7 +16,10 @@ describe('AI context compaction helpers', () => {
 
         expect(
             Compaction.shouldCompactPrompt({
-                totalTokens: 180000,
+                tokenUsage: {
+                    totalTokens: 180000,
+                    finalStepTotalTokens: 180000,
+                },
                 contextWindowTokens: 200000,
                 reserveTokens: 30000,
             }),
@@ -21,7 +27,71 @@ describe('AI context compaction helpers', () => {
 
         expect(
             Compaction.shouldCompactPrompt({
-                totalTokens: 150000,
+                tokenUsage: {
+                    totalTokens: 150000,
+                    finalStepTotalTokens: 150000,
+                },
+                contextWindowTokens: 200000,
+                reserveTokens: 16384,
+            }),
+        ).toBe(false);
+    });
+
+    it('ignores the cumulative billing total when a final-step figure exists', () => {
+        // Deep research sums every step into totalTokens; only the final step
+        // reflects resident context.
+        expect(
+            Compaction.shouldCompactPrompt({
+                tokenUsage: {
+                    totalTokens: 1_200_000,
+                    finalStepTotalTokens: 42_000,
+                },
+                contextWindowTokens: 200000,
+                reserveTokens: 16384,
+            }),
+        ).toBe(false);
+    });
+
+    it('falls back to totalTokens on rows persisted without a final-step figure', () => {
+        expect(
+            Compaction.shouldCompactPrompt({
+                tokenUsage: { totalTokens: 184000 },
+                contextWindowTokens: 200000,
+                reserveTokens: 16384,
+            }),
+        ).toBe(true);
+
+        expect(
+            Compaction.shouldCompactPrompt({
+                tokenUsage: { totalTokens: 150000 },
+                contextWindowTokens: 200000,
+                reserveTokens: 16384,
+            }),
+        ).toBe(false);
+    });
+
+    it('never compacts when no usage was persisted', () => {
+        expect(
+            Compaction.shouldCompactPrompt({
+                tokenUsage: null,
+                contextWindowTokens: 200000,
+                reserveTokens: 16384,
+            }),
+        ).toBe(false);
+
+        expect(
+            Compaction.shouldCompactPrompt({
+                tokenUsage: undefined,
+                contextWindowTokens: 200000,
+                reserveTokens: 16384,
+            }),
+        ).toBe(false);
+    });
+
+    it('does not compact when the final step reports zero tokens', () => {
+        expect(
+            Compaction.shouldCompactPrompt({
+                tokenUsage: { totalTokens: 500, finalStepTotalTokens: 0 },
                 contextWindowTokens: 200000,
                 reserveTokens: 16384,
             }),
@@ -48,6 +118,8 @@ describe('AI context compaction helpers', () => {
                         chartKind: null,
                     },
                 ],
+                steers: [],
+                hidden: false,
             },
             {
                 role: 'assistant',
@@ -56,6 +128,7 @@ describe('AI context compaction helpers', () => {
                 threadUuid: 'thread-1',
                 message: 'Running checks',
                 errorMessage: null,
+                interrupted: false,
                 createdAt: new Date().toISOString(),
                 humanScore: null,
                 toolCalls: [
@@ -87,6 +160,10 @@ describe('AI context compaction helpers', () => {
                 artifacts: null,
                 referencedArtifacts: null,
                 modelConfig: null,
+                tokenUsage: null,
+                responseTiming: null,
+                jevDecision: null,
+                loadout: null,
             },
         ]);
 
@@ -95,6 +172,197 @@ describe('AI context compaction helpers', () => {
         expect(serialized).toContain('[Assistant tool calls]:');
         expect(serialized).toContain('[Tool result: findContent]:');
         expect(serialized).toContain('[truncated 500 chars]');
+    });
+
+    it('does not include Deep Research report Markdown in compaction input', () => {
+        const reportSentinel = 'DEEP_RESEARCH_REPORT_SENTINEL';
+        const messages: Parameters<typeof Compaction.serializeConversation>[0] =
+            [
+                {
+                    role: 'assistant',
+                    status: 'idle',
+                    uuid: 'research-prompt',
+                    threadUuid: 'thread-1',
+                    message: null,
+                    errorMessage: null,
+                    interrupted: false,
+                    createdAt: new Date().toISOString(),
+                    humanScore: null,
+                    toolCalls: [],
+                    toolResults: [],
+                    reasoning: [],
+                    savedQueryUuid: null,
+                    artifacts: null,
+                    referencedArtifacts: null,
+                    modelConfig: null,
+                    tokenUsage: null,
+                    responseTiming: null,
+                    jevDecision: null,
+                    loadout: null,
+                },
+            ];
+        const serializeWithLegacyReportOption =
+            Compaction.serializeConversation as unknown as (
+                input: typeof messages,
+                legacyOptions: {
+                    deepResearchReportsByPromptUuid: ReadonlyMap<
+                        string,
+                        string
+                    >;
+                },
+            ) => string;
+
+        const serialized = serializeWithLegacyReportOption(messages, {
+            deepResearchReportsByPromptUuid: new Map([
+                ['research-prompt', reportSentinel],
+            ]),
+        });
+
+        expect(serialized).not.toContain(reportSentinel);
+    });
+
+    it('serializes a same-named file and repository as distinct, unambiguous lines', () => {
+        const serialized = Compaction.serializeConversation([
+            {
+                role: 'user',
+                uuid: 'prompt-1',
+                threadUuid: 'thread-1',
+                message: 'Look at hello/world',
+                createdAt: new Date().toISOString(),
+                user: { uuid: 'user-1', name: 'Test User' },
+                context: [
+                    { type: 'file', path: 'hello/world' },
+                    { type: 'repository', fullName: 'hello/world' },
+                ],
+                steers: [],
+                hidden: false,
+            },
+        ]);
+
+        // The bare text 'hello/world' is ambiguous, but the pinned context
+        // names each one's repo-filesystem mount path so they can't be confused.
+        expect(serialized).toContain('file /dbt/hello/world');
+        expect(serialized).toContain(
+            'repository hello/world (mounted at /hello/world',
+        );
+    });
+
+    it('preserves the active dashboard tab in compacted context', () => {
+        const serialized = Compaction.serializeConversation([
+            {
+                role: 'user',
+                uuid: 'prompt-1',
+                threadUuid: 'thread-1',
+                message: 'Summarize this dashboard',
+                createdAt: new Date().toISOString(),
+                user: { uuid: 'user-1', name: 'Test User' },
+                context: [
+                    {
+                        type: 'dashboard',
+                        dashboardUuid: 'dashboard-1',
+                        dashboardSlug: 'dashboard-1',
+                        displayName: 'Executive dashboard',
+                        pinnedVersionUuid: null,
+                        runtimeOverrides: {
+                            activeTab: {
+                                uuid: 'tab-1',
+                                name: 'Customers',
+                            },
+                        },
+                    },
+                ],
+                steers: [],
+                hidden: false,
+            },
+        ]);
+
+        expect(serialized).toContain('active tab "Customers"');
+    });
+
+    it('serializes an element reference with its wire string and app', () => {
+        const serialized = Compaction.serializeConversation([
+            {
+                role: 'user',
+                uuid: 'prompt-1',
+                threadUuid: 'thread-1',
+                message: 'Make this bigger',
+                createdAt: new Date().toISOString(),
+                user: { uuid: 'user-1', name: 'Test User' },
+                context: [
+                    {
+                        type: 'data_app_element',
+                        appUuid: 'app-1',
+                        version: 3,
+                        tag: 'button',
+                        text: 'Send',
+                        loc: '',
+                        appSlug: 'f1-standings',
+                        displayName: 'F1 standings',
+                    },
+                ],
+                steers: [],
+                hidden: false,
+            },
+        ]);
+
+        expect(serialized).toContain(
+            'element reference [button "Send"] in data app F1 standings (app-1, version 3',
+        );
+    });
+
+    it('serializes a pinned data app by name and slug', () => {
+        const serialized = Compaction.serializeConversation([
+            {
+                role: 'user',
+                uuid: 'prompt-1',
+                threadUuid: 'thread-1',
+                message: 'What data does this app use?',
+                createdAt: new Date().toISOString(),
+                user: { uuid: 'user-1', name: 'Test User' },
+                context: [
+                    {
+                        type: 'data_app',
+                        appUuid: 'app-1',
+                        appSlug: 'f1-standings',
+                        displayName: 'F1 standings',
+                        pinnedVersion: 3,
+                        isPersonal: false,
+                    },
+                ],
+                steers: [],
+                hidden: false,
+            },
+        ]);
+
+        expect(serialized).toContain('data app F1 standings (f1-standings)');
+    });
+
+    it('serializes a pinned Document so the summary keeps its uuid', () => {
+        const serialized = Compaction.serializeConversation([
+            {
+                role: 'user',
+                uuid: 'prompt-1',
+                threadUuid: 'thread-1',
+                message: 'Add a summary paragraph to this.',
+                createdAt: new Date().toISOString(),
+                user: { uuid: 'user-1', name: 'Test User' },
+                context: [
+                    {
+                        type: 'document',
+                        documentUuid: 'doc-1',
+                        documentSlug: 'q3-revenue-review',
+                        displayName: 'Q3 revenue review',
+                        pinnedVersionUuid: null,
+                    },
+                ],
+                steers: [],
+                hidden: false,
+            },
+        ]);
+
+        expect(serialized).toContain(
+            'Document Q3 revenue review (doc-1; read it with readContent)',
+        );
     });
 
     it('filters raw prompt rows after the latest compaction boundary', () => {

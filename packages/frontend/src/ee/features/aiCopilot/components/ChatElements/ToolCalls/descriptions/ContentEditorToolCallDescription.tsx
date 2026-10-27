@@ -1,11 +1,15 @@
-import { rem, Text } from '@mantine-8/core';
+import {
+    READ_CONTENT_TYPE_LABELS,
+    type ReadContentType,
+} from '@lightdash/common';
+import { rem, Text } from '@mantine/core';
 import type { FC } from 'react';
 import { ToolCallChip } from '../ToolCallChip';
 
 type Props = {
-    action: 'read' | 'edit';
+    action: 'read' | 'edit' | 'create';
     slug: string;
-    type: 'dashboard' | 'chart';
+    type: ReadContentType | 'document';
 };
 
 export const ContentEditorToolCallDescription: FC<Props> = ({
@@ -14,7 +18,8 @@ export const ContentEditorToolCallDescription: FC<Props> = ({
     type,
 }) => (
     <Text c="dimmed" size="xs">
-        {action === 'read' ? 'Read' : 'Edited'} {type}{' '}
+        {action === 'read' ? 'Read' : action === 'edit' ? 'Edited' : 'Created'}{' '}
+        {type === 'document' ? 'Document' : READ_CONTENT_TYPE_LABELS[type]}{' '}
         <ToolCallChip mx={rem(2)}>{slug}</ToolCallChip>
     </Text>
 );

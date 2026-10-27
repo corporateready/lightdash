@@ -1,0 +1,166 @@
+import { getTrainingProjectScopes } from '@lightdash/common';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { COMING_SOON_SCOPES } from '../../packages/frontend/src/features/learn/comingSoon';
+import { SCOPE_TOURS } from '../../packages/frontend/src/features/scopeTours/generated';
+
+export type ScopeDisposition = {
+    status: 'pending' | 'excluded' | 'related' | 'coming-soon';
+    reason: string;
+    ticket: string;
+    tour: string | null;
+};
+
+const excluded = (reason: string, ticket = 'CS-212'): ScopeDisposition => ({
+    status: 'excluded',
+    reason,
+    ticket,
+    tour: null,
+});
+// Content obligations outside the training role remain explicitly tracked.
+export const ADDITIONAL_CONTENT_SCOPES = [
+    'view:Analytics',
+    'view:AiAgentSkill',
+    'manage:AiAgentSkill',
+];
+
+export const SCOPE_DISPOSITIONS: Readonly<Record<string, ScopeDisposition>> = {
+    ...Object.fromEntries(
+        COMING_SOON_SCOPES.map((scope) => [
+            scope,
+            {
+                status: 'coming-soon' as const,
+                reason: 'Interactive delivery is not implemented. Reading lessons were removed by the product decision of 2026-09-10; future formats will be separate work.',
+                ticket: 'CS-212',
+                tour: null,
+            },
+        ]),
+    ),
+    'manage:ContentAsCode': {
+        status: 'coming-soon',
+        reason: 'Its siblings are content-as-code lessons. Manage only waives upload checks (custom SQL, custom fields) that a learner already passes in their own copy, so a chart upload cannot show the difference: it needs an outcome of its own.',
+        ticket: 'CS-283',
+        tour: null,
+    },
+    'view:Project': excluded(
+        'Baseline project access has no standalone lesson-sized surface.',
+    ),
+    'view:Job': excluded(
+        'Background job permission has no standalone learner surface.',
+    ),
+    'view:JobStatus': excluded(
+        'Background job status permission has no standalone learner surface.',
+    ),
+    'view:SemanticViewer': excluded(
+        'Catalogue records no product surface for this permission.',
+    ),
+    'manage:SemanticViewer': excluded(
+        'Catalogue records no product surface for this permission.',
+    ),
+    'view:AgentReadDiscover': excluded(
+        'Agent capability ceiling; it limits AI agents, not the learner.',
+    ),
+    'view:AgentQuery': excluded(
+        'Agent capability ceiling; it limits AI agents, not the learner.',
+    ),
+    'view:AgentExport': excluded(
+        'Agent capability ceiling; it limits AI agents, not the learner.',
+    ),
+    'view:AgentRawSql': excluded(
+        'Agent capability ceiling; it limits AI agents, not the learner.',
+    ),
+    'view:AiAgentThreadContext': excluded(
+        'Only reveals context on threads created through the API; a learner cannot create one in the product.',
+    ),
+};
+
+export type CoverageAudit = {
+    ok: boolean;
+    generated: string[];
+    pending: string[];
+    comingSoon: string[];
+    excluded: string[];
+    related: string[];
+    unclassified: string[];
+    staleDispositions: string[];
+    missingTours: { scope: string; tour: string }[];
+    invalidDispositions: string[];
+};
+
+export const auditCoverage = (
+    trainingScopes: readonly string[],
+    availableTours: readonly string[],
+    dispositions: Readonly<Record<string, ScopeDisposition>>,
+    strict = false,
+): CoverageAudit => {
+    const scopes = new Set(
+        trainingScopes.filter((scope) => !scope.includes('@')),
+    );
+    const tours = new Set(availableTours);
+    const result: CoverageAudit = {
+        ok: true,
+        generated: [],
+        pending: [],
+        comingSoon: [],
+        excluded: [],
+        related: [],
+        unclassified: [],
+        staleDispositions: [],
+        missingTours: [],
+        invalidDispositions: [],
+    };
+    for (const [scope, disposition] of Object.entries(dispositions)) {
+        if (!scopes.has(scope) || tours.has(scope))
+            result.staleDispositions.push(scope);
+        if (
+            !disposition.reason.trim() ||
+            !/^CS-\d+$/.test(disposition.ticket) ||
+            !['pending', 'excluded', 'related', 'coming-soon'].includes(
+                disposition.status,
+            ) ||
+            (disposition.status === 'related' && !disposition.tour)
+        ) {
+            result.invalidDispositions.push(scope);
+        }
+        if (disposition.tour !== null && !tours.has(disposition.tour)) {
+            result.missingTours.push({ scope, tour: disposition.tour });
+        }
+    }
+    for (const scope of scopes) {
+        if (tours.has(scope)) result.generated.push(scope);
+        else if (!Object.hasOwn(dispositions, scope))
+            result.unclassified.push(scope);
+        else {
+            const { status } = dispositions[scope];
+            if (status === 'coming-soon') result.comingSoon.push(scope);
+            if (
+                status === 'pending' ||
+                status === 'excluded' ||
+                status === 'related'
+            )
+                result[status].push(scope);
+        }
+    }
+    result.ok =
+        result.unclassified.length === 0 &&
+        result.staleDispositions.length === 0 &&
+        result.missingTours.length === 0 &&
+        result.invalidDispositions.length === 0 &&
+        (!strict ||
+            (result.pending.length === 0 && result.related.length === 0));
+    return result;
+};
+
+if (
+    process.argv[1] &&
+    path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+    const report = auditCoverage(
+        [...getTrainingProjectScopes(), ...ADDITIONAL_CONTENT_SCOPES],
+        Object.keys(SCOPE_TOURS),
+        SCOPE_DISPOSITIONS,
+        process.argv.includes('--release'),
+    );
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.ok ? 0 : 1;
+}

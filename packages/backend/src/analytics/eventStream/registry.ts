@@ -1,0 +1,105 @@
+import type { AiUsageEvent } from '../aiUsage';
+import type {
+    AiAgentPromptCreatedEvent,
+    AiAgentRequestLifecycleEvent,
+    AiAgentStepCompletedEvent,
+    AiAgentToolCallCompletedEvent,
+    DownloadCsv,
+    McpToolCallEvent,
+    QueryCompletedEvent,
+} from '../LightdashAnalytics';
+import {
+    agentRequestEventsColumns,
+    agentRequestEventsProjections,
+} from './agentRequestEventsStream';
+import {
+    agentStepsCompactedColumns,
+    agentStepsProjections,
+} from './agentStepsStream';
+import { aiUsageCompactedColumns, aiUsageProjections } from './aiUsageStream';
+import {
+    contentViewsColumns,
+    contentViewsProjections,
+    type ContentViewEvent,
+} from './contentViewsStream';
+import {
+    dataAppEventsCompactedColumns,
+    dataAppEventsProjections,
+    type DataAppStreamEvent,
+} from './dataAppEventsStream';
+import {
+    exportEventsCompactedColumns,
+    exportEventsProjections,
+} from './exportEventsStream';
+import {
+    mcpToolCallsColumns,
+    mcpToolCallsProjections,
+} from './mcpToolCallsStream';
+import type { ProjectionResult, StreamName } from './projection';
+import {
+    queryEventsCompactedColumns,
+    queryEventsProjections,
+} from './queryEventsStream';
+import type { CompactedStreamColumn } from './types';
+
+/**
+ * Union of every analytics event projected into a usage event stream.
+ * Adding a new stream/event = add the event type here and a projection entry
+ * below; nothing else needs to change.
+ */
+export type ProjectedEvent =
+    | ContentViewEvent
+    | QueryCompletedEvent
+    | AiUsageEvent
+    | AiAgentPromptCreatedEvent
+    | AiAgentRequestLifecycleEvent
+    | AiAgentStepCompletedEvent
+    | AiAgentToolCallCompletedEvent
+    | DataAppStreamEvent
+    | DownloadCsv
+    | McpToolCallEvent;
+
+export type EventStreamRegistry = {
+    [E in ProjectedEvent as E['event']]: (payload: E) => ProjectionResult;
+};
+
+/**
+ * Allowlist of analytics events pushed into the usage event stream. Events
+ * not present here are ignored by the sink.
+ */
+export const eventStreamRegistry: EventStreamRegistry = {
+    ...agentRequestEventsProjections,
+    ...contentViewsProjections,
+    ...queryEventsProjections,
+    ...aiUsageProjections,
+    ...agentStepsProjections,
+    ...dataAppEventsProjections,
+    ...exportEventsProjections,
+    ...mcpToolCallsProjections,
+};
+
+/**
+ * Typed parquet schema per stream, used by the nightly compaction job.
+ * Streams found in the raw zone without an entry here are skipped (their raw
+ * files are never deleted).
+ */
+export const compactedStreamSchemas: Record<
+    StreamName,
+    CompactedStreamColumn[]
+> = {
+    agent_request_events: agentRequestEventsColumns,
+    content_views: contentViewsColumns,
+    query_events: queryEventsCompactedColumns,
+    ai_usage: aiUsageCompactedColumns,
+    agent_steps: agentStepsCompactedColumns,
+    data_app_events: dataAppEventsCompactedColumns,
+    export_events: exportEventsCompactedColumns,
+    mcp_tool_calls: mcpToolCallsColumns,
+};
+
+export const getCompactedStreamColumns = (
+    stream: string,
+): CompactedStreamColumn[] | null =>
+    stream in compactedStreamSchemas
+        ? compactedStreamSchemas[stream as StreamName]
+        : null;

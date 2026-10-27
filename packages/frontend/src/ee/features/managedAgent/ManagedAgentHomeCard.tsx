@@ -4,19 +4,12 @@ import {
     FeatureFlags,
     ManagedAgentScheduleOption,
 } from '@lightdash/common';
-import {
-    Box,
-    Button,
-    Group,
-    Stack,
-    Text,
-    UnstyledButton,
-} from '@mantine-8/core';
+import { Box, Button, Group, Stack, Text, UnstyledButton } from '@mantine/core';
 import {
     IconArrowRight,
-    IconBolt,
     IconChartBar,
     IconShieldCheck,
+    IconTarget,
     IconTrendingUp,
 } from '@tabler/icons-react';
 import {
@@ -189,11 +182,11 @@ export const ManagedAgentHomeCard: FC<{ projectUuid: string }> = ({
                 <Stack gap="md">
                     <Group gap="md" align="center">
                         <Box className={classes.orbActive}>
-                            <IconBolt size={18} />
+                            <IconTarget size={18} />
                         </Box>
                         <Stack gap={4}>
                             <Group gap={8} align="center">
-                                <Text fz="lg" fw={700}>
+                                <Text fz="lg" fw={600}>
                                     Autopilot
                                 </Text>
                                 <BetaBadge />
@@ -241,11 +234,11 @@ export const ManagedAgentHomeCard: FC<{ projectUuid: string }> = ({
                 <Stack gap="md">
                     <Group gap="md" align="center">
                         <Box className={classes.orb}>
-                            <IconBolt size={18} />
+                            <IconTarget size={18} />
                         </Box>
                         <Stack gap={4}>
                             <Group gap={8} align="center">
-                                <Text fz="lg" fw={700}>
+                                <Text fz="lg" fw={600}>
                                     Autopilot
                                 </Text>
                                 <BetaBadge />
@@ -269,8 +262,6 @@ export const ManagedAgentHomeCard: FC<{ projectUuid: string }> = ({
 
                     <Box ml={52}>
                         <Button
-                            variant="filled"
-                            color="dark"
                             size="sm"
                             rightSection={<IconArrowRight size={14} />}
                         >

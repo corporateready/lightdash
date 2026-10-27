@@ -1,8 +1,8 @@
-import { type SavedChart } from '@lightdash/common';
+import { type UiStringKey } from '@lightdash/common';
 import { useContext } from 'react';
 import { useParams } from 'react-router';
 import EmbedProviderContext from './context';
-import { type EmbedContext } from './types';
+import { type EmbedContext, type EmbedExploreChart } from './types';
 
 function useEmbed(): EmbedContext {
     const context = useContext(EmbedProviderContext);
@@ -27,11 +27,17 @@ function useEmbed(): EmbedContext {
             projectUuid: undefined,
             paletteUuid: undefined,
             languageMap: undefined,
-            onExplore: (_options: { chart: SavedChart }) => {},
-            t: (_input: string) => undefined,
+            onExplore: (_options: { chart: EmbedExploreChart }) => {},
+            t: (_input: UiStringKey) => undefined,
+            backDestination: 'dashboard',
+            dispatchEmbedEvent: () => false,
+            isEmbedEventReady: false,
             mode: 'direct',
             theme: 'light',
             backgroundColor: null,
+            timezone: null,
+            aiAgentThreadSetup: null,
+            aiAgentNavigationDisabled: false,
         };
     }
 

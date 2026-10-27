@@ -1,16 +1,42 @@
 import { subject } from '@casl/ability';
-import { ProjectType, type DashboardDataAppTile } from '@lightdash/common';
-import { Box, Loader, Stack, Text } from '@mantine-8/core';
-import { IconAppsOff, IconPencil } from '@tabler/icons-react';
-import React, { useMemo, useState, type FC } from 'react';
-import { useParams } from 'react-router';
-import AppIframePreview from '../../features/apps/AppIframePreview';
+import {
+    DimensionType,
+    getConditionalRuleLabel,
+    getConditionalRuleLabelFromItem,
+    getFilterTypeFromItemType,
+    getDashboardFilterField,
+    hashStringToBase36,
+    ProjectType,
+    type DashboardDataAppTile,
+    type DashboardFilterRule,
+    type FilterableItem,
+} from '@lightdash/common';
+import {
+    ActionIcon,
+    Badge,
+    Box,
+    Popover,
+    Loader,
+    Stack,
+    Text,
+} from '@mantine/core';
+import { IconAppsOff, IconCode, IconFilter } from '@tabler/icons-react';
+import React, { useEffect, useMemo, useState, type FC } from 'react';
+import { useLocation } from 'react-router';
+import { AskAiAgentButton } from '../../ee/features/aiCopilot/components/AskAiAgentMenuItem/AskAiAgentButton';
+import { getVisiblePreviewTokenError } from '../../features/apps/hooks/previewTokenQueryOptions';
 import { useAppPreviewToken } from '../../features/apps/hooks/useAppPreviewToken';
 import { useGetApp } from '../../features/apps/hooks/useGetApp';
 import { usePreviewOrigin } from '../../features/apps/previewOrigin';
 import { DashboardTileComments } from '../../features/comments';
+import {
+    selectInvalidateCache,
+    selectRefreshCounter,
+    useDashboardSelector,
+} from '../../features/dashboard/store';
 import useDashboardFiltersForTile from '../../hooks/dashboard/useDashboardFiltersForTile';
 import { useProject } from '../../hooks/useProject';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import { useSpaceSummaries } from '../../hooks/useSpaces';
 import useApp from '../../providers/App/useApp';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
@@ -19,21 +45,111 @@ import { convertDateDashboardFilters } from '../../utils/dateFilter';
 import LinkMenuItem from '../common/LinkMenuItem';
 import MantineIcon from '../common/MantineIcon';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
+import DashboardDataAppIframe from './DashboardDataAppIframe';
 import TileBase from './TileBase/index';
+import { TileHeaderPopover } from './TileBase/TileHeaderPopover';
 
 type Props = Pick<
     React.ComponentProps<typeof TileBase>,
     'tile' | 'onEdit' | 'onDelete' | 'isEditMode'
 > & { tile: DashboardDataAppTile };
 
+const DashboardFiltersIndicator: FC<{
+    filterRules: DashboardFilterRule[];
+    filterableItems: Record<string, FilterableItem>;
+}> = ({ filterRules, filterableItems }) => {
+    const fieldsByTile = useDashboardContext(
+        (c) => c.filterableFieldsByTileUuid,
+    );
+    if (filterRules.length === 0) return null;
+
+    const labelledRules = filterRules.map((filterRule) => {
+        const filterableItem = getDashboardFilterField(
+            filterableItems,
+            filterRule,
+            fieldsByTile,
+        );
+        const labels = filterableItem
+            ? getConditionalRuleLabelFromItem(filterRule, filterableItem)
+            : getConditionalRuleLabel(
+                  filterRule,
+                  getFilterTypeFromItemType(
+                      filterRule.target.fallbackType ?? DimensionType.STRING,
+                  ),
+                  filterRule.label ?? filterRule.target.fieldId,
+              );
+
+        return { filterRule, labels };
+    });
+
+    const availableFiltersLabel = `${filterRules.length} dashboard filter${
+        filterRules.length === 1 ? '' : 's'
+    } available to this Data App`;
+
+    return (
+        <TileHeaderPopover>
+            <Popover.Dropdown
+                maw="calc(100vw - 24px)"
+                mah="calc(100dvh - 24px)"
+                style={{ overflowY: 'auto' }}
+            >
+                <Stack gap="xs" align="flex-start">
+                    <Text c="ldGray.7" fw={500} fz="xs">
+                        Dashboard filter{filterRules.length === 1 ? '' : 's'}{' '}
+                        available to this Data App:
+                    </Text>
+                    {labelledRules.map(({ filterRule, labels }) => (
+                        <Badge
+                            maw="100%"
+                            h="auto"
+                            style={{ whiteSpace: 'normal' }}
+                            key={filterRule.id}
+                            variant="outline"
+                            color="ldGray.4"
+                            size="lg"
+                            fz="xs"
+                            fw="normal"
+                        >
+                            <Text fw={600} span inherit c="foreground">
+                                {labels.field}:
+                            </Text>{' '}
+                            {filterRule.disabled ? (
+                                <Text span inherit c="foreground">
+                                    is any value
+                                </Text>
+                            ) : (
+                                <>
+                                    <Text span inherit c="foreground">
+                                        {labels.operator}
+                                    </Text>{' '}
+                                    <Text fw={600} span inherit c="foreground">
+                                        {labels.value}
+                                    </Text>
+                                </>
+                            )}
+                        </Badge>
+                    ))}
+                </Stack>
+            </Popover.Dropdown>
+            <Popover.Target>
+                <ActionIcon aria-label={availableFiltersLabel} size="sm">
+                    <MantineIcon icon={IconFilter} />
+                </ActionIcon>
+            </Popover.Target>
+        </TileHeaderPopover>
+    );
+};
+
 const DataAppTile: FC<Props> = (props) => {
+    const { pathname } = useLocation();
     const {
         tile: {
             properties: { title, appUuid, appDeletedAt },
             uuid,
         },
     } = props;
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
+    const dashboardUuid = useDashboardContext((c) => c.dashboard?.uuid);
 
     const [isCommentsMenuOpen, setIsCommentsMenuOpen] = useState(false);
     const showComments = useDashboardContext(
@@ -58,10 +174,33 @@ const DataAppTile: FC<Props> = (props) => {
     // whose target field isn't in a given query's explore — an app may
     // query multiple explores.
     const tileDashboardFilters = useDashboardFiltersForTile(uuid);
+    const availableDashboardFilterRules = useMemo(
+        () => [
+            ...tileDashboardFilters.dimensions,
+            ...tileDashboardFilters.metrics,
+            ...tileDashboardFilters.tableCalculations,
+        ],
+        [tileDashboardFilters],
+    );
     const dashboardFiltersForApp = useMemo(
         () => convertDateDashboardFilters(tileDashboardFilters),
         [tileDashboardFilters],
     );
+    const allFilterableFieldsMap = useDashboardContext(
+        (c) => c.allFilterableFieldsMap,
+    );
+    const allFilterableMetricsMap = useDashboardContext(
+        (c) => c.allFilterableMetricsMap,
+    );
+    const filterableItems = useMemo(
+        () => ({ ...allFilterableFieldsMap, ...allFilterableMetricsMap }),
+        [allFilterableFieldsMap, allFilterableMetricsMap],
+    );
+    const hasExtraHeaderElement =
+        (!tileHasComments && !!dashboardComments) ||
+        availableDashboardFilterRules.length > 0;
+    const hasNonMenuHeaderContent =
+        !!dashboardComments || availableDashboardFilterRules.length > 0;
 
     // The dashboard refresh button bumps `refreshCounter` and flips
     // `invalidateCache` (both via `clearCacheAndFetch`). Chart tiles re-fetch
@@ -69,12 +208,8 @@ const DataAppTile: FC<Props> = (props) => {
     // reload, so we bake the counter into the URL to force one, and forward
     // invalidateCache so those re-fired queries bypass the warehouse cache —
     // matching how a chart refreshes.
-    const invalidateCache = useDashboardTileStatusContext(
-        (c) => c.invalidateCache,
-    );
-    const refreshCounter = useDashboardTileStatusContext(
-        (c) => c.refreshCounter,
-    );
+    const invalidateCache = useDashboardSelector(selectInvalidateCache);
+    const refreshCounter = useDashboardSelector(selectRefreshCounter);
 
     const previewOrigin = usePreviewOrigin();
     const { data: project } = useProject(projectUuid);
@@ -88,9 +223,10 @@ const DataAppTile: FC<Props> = (props) => {
         shouldFetch ? appUuid : undefined,
     );
 
-    const latestReadyVersion = appQuery.data?.pages[0]?.versions.find(
-        (v) => v.status === 'ready',
-    )?.version;
+    // Authoritative across ALL versions — the ready version may be older than
+    // the fetched page of versions, so never scan `versions` for it.
+    const latestReadyVersion =
+        appQuery.data?.pages[0]?.latestReadyVersion ?? undefined;
 
     // Mirror the "Continue building" affordance from the app preview page
     // (AppPreviewTest.tsx) — same space-aware ability check.
@@ -116,7 +252,7 @@ const DataAppTile: FC<Props> = (props) => {
 
     const editMenuItem = canEditApp ? (
         <LinkMenuItem
-            leftSection={<MantineIcon icon={IconPencil} />}
+            leftSection={<MantineIcon icon={IconCode} />}
             href={`/projects/${projectUuid}/apps/${appUuid}`}
         >
             Continue building
@@ -127,51 +263,96 @@ const DataAppTile: FC<Props> = (props) => {
         data: token,
         isLoading: isTokenLoading,
         error: tokenError,
-    } = useAppPreviewToken(projectUuid, appUuid, latestReadyVersion);
+    } = useAppPreviewToken(
+        projectUuid,
+        appUuid,
+        latestReadyVersion,
+        pathname.startsWith('/minimal')
+            ? 'delivery'
+            : props.isEditMode
+              ? 'builder'
+              : 'dashboard',
+    );
 
     // Bump the iframe URL whenever the active filters change so the app
     // reloads and its mount-time metric queries re-fire — by then the bridge
     // is stamping the new filters onto every outgoing call. Without this the
     // bridge sees no new traffic until the user manually refreshes.
+    //
+    // Hash rather than serialize the filters: the app reads them from the
+    // bridge, not this URL, and embedding the full object made the URL grow
+    // with filters × tiles and 502 on large dashboards.
     const filtersKey = useMemo(
-        () => JSON.stringify(dashboardFiltersForApp),
+        () => hashStringToBase36(JSON.stringify(dashboardFiltersForApp)),
         [dashboardFiltersForApp],
     );
 
     const previewUrl =
         token && latestReadyVersion
-            ? `${previewOrigin}/api/apps/${appUuid}/versions/${latestReadyVersion}/t/${token}/?f=${encodeURIComponent(
-                  filtersKey,
-              )}&r=${refreshCounter}#transport=postMessage&projectUuid=${projectUuid}`
+            ? `${previewOrigin}/api/apps/${appUuid}/versions/${latestReadyVersion}/t/${token}/?f=${filtersKey}&r=${refreshCounter}#transport=postMessage&projectUuid=${projectUuid}`
             : undefined;
+    const visibleTokenError = getVisiblePreviewTokenError(tokenError, !!token);
 
     const isForbidden =
         appQuery.error?.error?.statusCode === 403 ||
-        tokenError?.error?.statusCode === 403;
+        visibleTokenError?.error?.statusCode === 403;
     const isNotFound =
         appDeletedAt ||
         appQuery.error?.error?.statusCode === 404 ||
-        tokenError?.error?.statusCode === 404;
+        visibleTokenError?.error?.statusCode === 404;
     const hasNoReadyVersion =
         !appQuery.isLoading && !appQuery.error && !latestReadyVersion;
     const isLoading =
         appQuery.isLoading ||
         (latestReadyVersion !== undefined && isTokenLoading);
     const otherError =
-        !isForbidden && !isNotFound && (appQuery.error || tokenError);
+        !isForbidden && !isNotFound && (appQuery.error || visibleTokenError);
+    const markTileScreenshotErrored = useDashboardTileStatusContext(
+        (context) => context.markTileScreenshotErrored,
+    );
+    const hasTerminalError = !!(
+        isForbidden ||
+        isNotFound ||
+        hasNoReadyVersion ||
+        otherError
+    );
+    useEffect(() => {
+        if (hasTerminalError) {
+            markTileScreenshotErrored(uuid);
+        }
+    }, [hasTerminalError, markTileScreenshotErrored, uuid]);
 
     return (
         <TileBase
             title={title}
+            titleLeftIcon={
+                <AskAiAgentButton
+                    projectUuid={projectUuid}
+                    dataAppUuid={appUuid}
+                    dashboardUuid={dashboardUuid}
+                    clickedFrom="dashboard_data_app_tile"
+                />
+            }
             lockHeaderVisibility={isCommentsMenuOpen}
             visibleHeaderElement={
                 tileHasComments ? dashboardComments : undefined
             }
-            extraHeaderElement={tileHasComments ? undefined : dashboardComments}
+            hasNonMenuHeaderContent={hasNonMenuHeaderContent}
+            extraHeaderElement={
+                hasExtraHeaderElement ? (
+                    <>
+                        {tileHasComments ? undefined : dashboardComments}
+                        <DashboardFiltersIndicator
+                            filterRules={availableDashboardFilterRules}
+                            filterableItems={filterableItems}
+                        />
+                    </>
+                ) : undefined
+            }
             extraMenuItems={editMenuItem}
             {...props}
         >
-            <Box className="non-draggable" style={{ flex: 1, minHeight: 0 }}>
+            <Box className="non-draggable" flex={1} mih={0}>
                 {isNotFound ? (
                     <SuboptimalState
                         icon={IconAppsOff}
@@ -200,17 +381,23 @@ const DataAppTile: FC<Props> = (props) => {
                             Failed to load app
                         </Text>
                     </Stack>
-                ) : isLoading || !previewUrl ? (
+                ) : isLoading || !previewUrl || !token ? (
                     <Stack align="center" justify="center" h="100%">
                         <Loader size="sm" />
                     </Stack>
                 ) : (
-                    <AppIframePreview
+                    <DashboardDataAppIframe
+                        key={`${appUuid}:${latestReadyVersion}:${filtersKey}:${refreshCounter}`}
+                        tileUuid={uuid}
                         src={previewUrl}
+                        previewToken={token}
                         expectedPreviewOrigin={previewOrigin}
+                        projectUuid={projectUuid ?? ''}
+                        appUuid={appUuid}
                         identityKey={`${appUuid}:${latestReadyVersion}`}
                         dashboardFilters={dashboardFiltersForApp}
                         invalidateCache={invalidateCache}
+                        capabilities={{ gsheetExport: true }}
                     />
                 )}
             </Box>

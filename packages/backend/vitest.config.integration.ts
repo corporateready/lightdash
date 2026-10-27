@@ -5,8 +5,16 @@ import EvalHtmlReporter from './src/ee/services/ai/agents/tests/eval-reporter';
 export default defineConfig({
     test: {
         name: 'integration-tests',
-        include: ['src/ee/**/*integration.test.ts'],
-        exclude: ['node_modules', 'dist'],
+        include: ['src/**/*integration.test.ts'],
+        exclude: [
+            'node_modules',
+            'dist',
+            // Uses an isolated queue via vitest.config.scheduler.integration.ts.
+            'src/scheduler/SchedulerWorker.quiesce.integration.test.ts',
+            'src/ee/services/ai/filterPermutations/*.integration.test.ts',
+            // Opt-in live provider suites, run via vitest.autopilot.config.ts
+            'src/ee/services/ManagedAgentService/*.integration.test.ts',
+        ],
         environment: 'node',
         testTimeout: 120000,
         hookTimeout: 60000,

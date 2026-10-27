@@ -1,0 +1,299 @@
+import dns from 'dns/promises';
+import https from 'https';
+import * as ipaddr from 'ipaddr.js';
+import { LookupFunction } from 'net';
+import fetch, { FetchError } from 'node-fetch';
+import { isPrivateAddress } from '../ssrfProtection';
+
+export type AllowedPrivateHostCidrs = Readonly<
+    Record<string, readonly string[]>
+>;
+
+export type SecureFetchReason =
+    | 'non_https'
+    | 'blocked_ip'
+    | 'invalid_url'
+    | 'redirect'
+    | 'timeout'
+    | 'too_large'
+    | 'disallowed_content_type'
+    | 'request_failed';
+
+export class SecureFetchError extends Error {
+    public readonly reason: SecureFetchReason;
+
+    constructor(reason: SecureFetchReason, message: string) {
+        super(message);
+        this.name = 'SecureFetchError';
+        this.reason = reason;
+        Object.setPrototypeOf(this, SecureFetchError.prototype);
+    }
+}
+
+export type SecureFetchOptions = {
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    body?: string;
+    headers?: Record<string, string>;
+    timeoutMs: number;
+    maxResponseBytes: number;
+    allowedContentTypes: string[];
+    // Operator-approved exceptions to private/internal address blocking.
+    allowedPrivateHostCidrs?: AllowedPrivateHostCidrs;
+};
+
+// Non-2xx responses are returned, not thrown, so callers can forward upstream
+// errors; only security failures and network errors throw SecureFetchError.
+export type SecureFetchResult = {
+    status: number;
+    contentType: string;
+    /** Upstream response headers, normalized to lowercase names. Callers must
+     *  still apply their own exposure policy before returning these to users. */
+    headers: Record<string, string>;
+    bodyText: string;
+    truncated: boolean;
+};
+
+const parseHttpsUrl = (rawUrl: string): URL => {
+    if (!rawUrl) {
+        throw new SecureFetchError('invalid_url', 'URL is required');
+    }
+    let parsedUrl: URL;
+    try {
+        parsedUrl = new URL(rawUrl);
+    } catch {
+        throw new SecureFetchError('invalid_url', 'Invalid URL format');
+    }
+    if (parsedUrl.protocol !== 'https:') {
+        throw new SecureFetchError(
+            'non_https',
+            'Only HTTPS protocol is allowed',
+        );
+    }
+    return parsedUrl;
+};
+
+// Unparseable addresses and all private/special-use ranges fail closed.
+const isNonPublicAddress = (address: string): boolean => {
+    if (!ipaddr.isValid(address)) return true;
+    return isPrivateAddress(address);
+};
+
+const isAllowedPrivateAddress = (
+    address: string,
+    cidrs: readonly string[],
+): boolean =>
+    cidrs.some((cidr) => {
+        try {
+            const parsed = ipaddr.process(address);
+            const [network, prefix] = ipaddr.parseCIDR(cidr);
+            if (
+                parsed instanceof ipaddr.IPv4 &&
+                network instanceof ipaddr.IPv4
+            ) {
+                return parsed.match(network, prefix);
+            }
+            if (
+                parsed instanceof ipaddr.IPv6 &&
+                network instanceof ipaddr.IPv6
+            ) {
+                return parsed.match(network, prefix);
+            }
+            return false;
+        } catch {
+            return false;
+        }
+    });
+
+const resolveAndValidateHost = async (
+    hostname: string,
+    allowedPrivateHostCidrs: AllowedPrivateHostCidrs = {},
+): Promise<{ address: string; family: 4 | 6 }> => {
+    // URL.hostname wraps IPv6 literals in brackets ("[::1]") — strip them.
+    const cleanHost = hostname.replace(/^\[/, '').replace(/\]$/, '');
+    const policyHost = cleanHost.toLowerCase().replace(/\.$/, '');
+    const allowedCidrs = Object.hasOwn(allowedPrivateHostCidrs, policyHost)
+        ? allowedPrivateHostCidrs[policyHost]
+        : [];
+
+    let addresses: Array<{ address: string; family: number }>;
+    try {
+        addresses = await dns.lookup(cleanHost, { all: true, verbatim: true });
+    } catch {
+        throw new SecureFetchError('blocked_ip', 'Unable to resolve hostname');
+    }
+    if (addresses.length === 0) {
+        throw new SecureFetchError('blocked_ip', 'Unable to resolve hostname');
+    }
+    for (const { address } of addresses) {
+        if (
+            isNonPublicAddress(address) &&
+            !isAllowedPrivateAddress(address, allowedCidrs)
+        ) {
+            throw new SecureFetchError(
+                'blocked_ip',
+                'Access to private/internal addresses is not allowed',
+            );
+        }
+    }
+    const { address, family } = addresses[0];
+    return { address, family: family === 6 ? 6 : 4 };
+};
+
+const MAX_TIMEOUT_MS = 30000;
+
+// Identify the proxy to upstreams. Some APIs (e.g. GitHub) reject requests with
+// no User-Agent. Callers can still override it via options.headers.
+const DEFAULT_USER_AGENT = 'Lightdash-DataApp-Proxy';
+
+const normalizeContentType = (contentType: string): string =>
+    contentType.split(';')[0].trim().toLowerCase();
+
+const isAllowedContentType = (
+    contentType: string,
+    allowedContentTypes: string[],
+): boolean => {
+    if (allowedContentTypes.length === 0) {
+        return true;
+    }
+
+    const allowed = allowedContentTypes.map(normalizeContentType);
+    if (allowed.includes(contentType)) {
+        return true;
+    }
+
+    // Treat structured-syntax JSON media types (RFC 6839), like
+    // application/geo+json, as JSON when a connection allows application/json.
+    return (
+        allowed.includes('application/json') && contentType.endsWith('+json')
+    );
+};
+
+// HTTPS agent whose DNS lookup is pinned to a single pre-validated IP. This
+// defeats DNS rebinding between validation and socket open: the kernel never
+// resolves the hostname a second time.
+const createPinnedHttpsAgent = (
+    address: string,
+    family: 4 | 6,
+): https.Agent => {
+    const lookup: LookupFunction = (_hostname, lookupOptions, callback) => {
+        if (lookupOptions && (lookupOptions as { all?: boolean }).all) {
+            (
+                callback as (
+                    err: NodeJS.ErrnoException | null,
+                    addrs: Array<{ address: string; family: number }>,
+                ) => void
+            )(null, [{ address, family }]);
+            return;
+        }
+        callback(null, address, family);
+    };
+    return new https.Agent({ lookup } as https.AgentOptions);
+};
+
+export async function secureFetch(
+    rawUrl: string,
+    options: SecureFetchOptions,
+): Promise<SecureFetchResult> {
+    const parsedUrl = parseHttpsUrl(rawUrl);
+    const { address, family } = await resolveAndValidateHost(
+        parsedUrl.hostname,
+        options.allowedPrivateHostCidrs,
+    );
+    const agent = createPinnedHttpsAgent(address, family);
+
+    const controller = new AbortController();
+    const effectiveTimeout = Math.min(options.timeoutMs, MAX_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+
+    let response: import('node-fetch').Response;
+    try {
+        response = await fetch(rawUrl, {
+            method: options.method,
+            body: options.body,
+            headers: { 'User-Agent': DEFAULT_USER_AGENT, ...options.headers },
+            agent,
+            redirect: 'manual',
+            signal: controller.signal as never,
+            size: options.maxResponseBytes,
+        });
+    } catch (error) {
+        if (
+            controller.signal.aborted ||
+            (error instanceof FetchError && error.type === 'aborted')
+        ) {
+            throw new SecureFetchError('timeout', 'Request timed out');
+        }
+        if (error instanceof FetchError) {
+            throw new SecureFetchError(
+                'request_failed',
+                `Request failed: ${error.message}`,
+            );
+        }
+        throw new SecureFetchError('request_failed', 'Request failed');
+    } finally {
+        clearTimeout(timer);
+    }
+
+    // Validation only covered the initial URL; any redirect target is
+    // unvalidated, so the chain ends here.
+    if (response.status >= 300 && response.status < 400) {
+        throw new SecureFetchError(
+            'redirect',
+            'Redirects are not allowed for security reasons',
+        );
+    }
+    const contentLength = response.headers.get('content-length');
+    if (
+        contentLength &&
+        Number.parseInt(contentLength, 10) > options.maxResponseBytes
+    ) {
+        throw new SecureFetchError(
+            'too_large',
+            `Response too large (max ${options.maxResponseBytes} bytes)`,
+        );
+    }
+
+    const contentType = normalizeContentType(
+        response.headers.get('content-type') ?? '',
+    );
+    // Empty allowlist = no content-type restriction (explicit opt-out; the proxy
+    // always passes a non-empty list). Enforced only on success responses: error
+    // bodies are often text/html (gateway 502 pages) and must survive.
+    if (
+        response.ok &&
+        !isAllowedContentType(contentType, options.allowedContentTypes)
+    ) {
+        throw new SecureFetchError(
+            'disallowed_content_type',
+            `Disallowed content-type: ${contentType || '(none)'}`,
+        );
+    }
+
+    let bodyText: string;
+    try {
+        bodyText = await response.text();
+    } catch (error) {
+        // node-fetch's `size` option throws FetchError type 'max-size' when the
+        // streamed body exceeds the limit.
+        if (error instanceof FetchError && error.type === 'max-size') {
+            throw new SecureFetchError(
+                'too_large',
+                `Response too large (max ${options.maxResponseBytes} bytes)`,
+            );
+        }
+        throw new SecureFetchError('request_failed', 'Failed to read response');
+    }
+
+    const headers = Object.create(null) as Record<string, string>;
+    response.headers.forEach((value, name) => {
+        headers[name.toLowerCase()] = value;
+    });
+
+    return {
+        status: response.status,
+        contentType,
+        headers,
+        bodyText,
+        truncated: false,
+    };
+}

@@ -1,5 +1,4 @@
 import {
-    getItemId,
     getItemLabelWithoutTableName,
     isField,
     type DashboardFilterableField,
@@ -14,15 +13,27 @@ import {
     Text,
     Tooltip,
     useCombobox,
-} from '@mantine-8/core';
-import { useDebouncedValue } from '@mantine-8/hooks';
+} from '@mantine/core';
+import { useDebouncedValue } from '@mantine/hooks';
 import { IconSearch, IconSelector } from '@tabler/icons-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { useCallback, useMemo, useRef, useState, type FC } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
 import FieldIcon from '../../../../components/common/Filters/FieldIcon';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 import styles from './FilterFieldSelect.module.css';
-import { useFilterFieldSections } from './useFilterFieldSections';
+import {
+    getCollidingFieldIds,
+    getFieldOptionValue,
+    useFilterFieldSections,
+} from './useFilterFieldSections';
 
 interface FilterFieldSelectProps {
     fields: DashboardFilterableField[];
@@ -32,6 +43,14 @@ interface FilterFieldSelectProps {
     activeTabUuid: string | undefined;
     selectedField: DashboardFilterableField | undefined;
     onChange: (field: DashboardFilterableField) => void;
+    // Mounts with the list open; the caller gives the input focus
+    defaultOpened?: boolean;
+    // Shows "Select a field to filter" above the input
+    withLabel?: boolean;
+    // Replaces the placeholders the input has open and closed
+    placeholder?: string;
+    // Renders the list in a portal, for a host that clips its overflow
+    withinPortal?: boolean;
     popoverProps?: {
         onOpen?: () => void;
         onClose?: () => void;
@@ -49,6 +68,11 @@ const GROUP_HEADER_HEIGHT = 28;
 const SECTION_HEADER_HEIGHT = 30;
 const DROPDOWN_MAX_HEIGHT = 300;
 
+const getSelectedFieldLabel = (field: DashboardFilterableField) =>
+    isField(field)
+        ? `${field.tableLabel} ${field.label}`
+        : getItemLabelWithoutTableName(field);
+
 const FilterFieldSelect: FC<FilterFieldSelectProps> = ({
     fields,
     availableTileFilters,
@@ -57,16 +81,21 @@ const FilterFieldSelect: FC<FilterFieldSelectProps> = ({
     activeTabUuid,
     selectedField,
     onChange,
+    defaultOpened = false,
+    withLabel = true,
+    withinPortal = false,
+    placeholder: placeholderOverride,
     popoverProps,
 }) => {
+    const getUiString = useUiStrings();
     const [search, setSearch] = useState('');
     const [debouncedSearch] = useDebouncedValue(search, 150);
-    const searchRef = useRef<HTMLInputElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
 
     const combobox = useCombobox({
+        defaultOpened,
         onDropdownOpen: () => {
-            combobox.resetSelectedOption();
+            combobox.updateSelectedOptionIndex('active');
             popoverProps?.onOpen?.();
         },
         onDropdownClose: () => {
@@ -144,14 +173,33 @@ const FilterFieldSelect: FC<FilterFieldSelectProps> = ({
         estimateSize: getItemSize,
         overscan: 10,
     });
+    // Mounted open, the list exists before the virtualizer has seen its
+    // scroll box; one measure after mount gets the first rows drawn
+    useEffect(() => {
+        virtualizer.measure();
+    }, [virtualizer]);
+
+    const collidingFieldIds = useMemo(
+        () => getCollidingFieldIds(fields),
+        [fields],
+    );
+    const getOptionValue = useCallback(
+        (field: DashboardFilterableField) =>
+            getFieldOptionValue(field, collidingFieldIds),
+        [collidingFieldIds],
+    );
 
     const handleOptionSubmit = (value: string) => {
-        const field = fields.find((f) => getItemId(f) === value);
+        const field = fields.find((f) => getOptionValue(f) === value);
         if (field) {
             onChange(field);
         }
         combobox.closeDropdown();
     };
+
+    const selectedFieldId = selectedField
+        ? getOptionValue(selectedField)
+        : null;
 
     const renderVirtualItem = useCallback(
         (item: VirtualItem) => {
@@ -177,10 +225,11 @@ const FilterFieldSelect: FC<FilterFieldSelectProps> = ({
                         </div>
                     );
                 case 'field': {
-                    const fieldId = getItemId(item.field);
+                    const fieldId = getOptionValue(item.field);
                     return (
                         <Combobox.Option
                             value={fieldId}
+                            active={fieldId === selectedFieldId}
                             className={`${styles.option} ${item.dimmed ? styles.dimmedOption : ''}`}
                         >
                             <Tooltip
@@ -194,9 +243,7 @@ const FilterFieldSelect: FC<FilterFieldSelectProps> = ({
                                         : undefined
                                 }
                                 position="right"
-                                multiline
                                 maw={300}
-                                withinPortal
                                 openDelay={500}
                             >
                                 <Group gap="xs" wrap="nowrap">
@@ -213,83 +260,70 @@ const FilterFieldSelect: FC<FilterFieldSelectProps> = ({
                 }
             }
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        [],
+        [getOptionValue, selectedFieldId],
     );
+
+    const isOpen = combobox.dropdownOpened;
+    const selectedLabel = selectedField
+        ? getSelectedFieldLabel(selectedField)
+        : null;
+
+    const placeholder =
+        placeholderOverride ??
+        (isOpen
+            ? (selectedLabel ??
+              getUiString('filters.config.searchFieldPlaceholder'))
+            : getUiString('filters.config.selectFilterPlaceholder'));
 
     return (
         <div>
-            <Text size="sm" mb={4}>
-                Select a field to filter{' '}
-                <Text component="span" c="red">
-                    *
+            {withLabel && (
+                <Text size="sm" mb={4}>
+                    {getUiString('filters.config.selectField')}{' '}
+                    <Text component="span" c="red">
+                        *
+                    </Text>
                 </Text>
-            </Text>
+            )}
 
             <Combobox
                 store={combobox}
                 onOptionSubmit={handleOptionSubmit}
-                withinPortal={false}
+                withinPortal={withinPortal}
             >
                 <Combobox.Target>
                     <InputBase
-                        component="button"
-                        type="button"
+                        radius="md"
                         size="xs"
-                        pointer
-                        onClick={() => combobox.toggleDropdown()}
+                        value={isOpen ? search : (selectedLabel ?? '')}
+                        placeholder={placeholder}
+                        onChange={(event) => {
+                            setSearch(event.currentTarget.value);
+                            combobox.openDropdown();
+                        }}
+                        onClick={() => combobox.openDropdown()}
+                        onBlur={() => combobox.closeDropdown()}
                         leftSection={
-                            selectedField ? (
+                            selectedField && !isOpen ? (
                                 <FieldIcon item={selectedField} />
-                            ) : undefined
+                            ) : (
+                                <MantineIcon icon={IconSearch} color="dimmed" />
+                            )
                         }
                         rightSection={<MantineIcon icon={IconSelector} />}
                         rightSectionPointerEvents="none"
-                        multiline={false}
+                        autoComplete="off"
+                        data-autofocus
                         data-testid="FilterConfiguration/FieldSelect"
-                    >
-                        {selectedField ? (
-                            <Text size="xs" truncate="end">
-                                {isField(selectedField)
-                                    ? `${selectedField.tableLabel} ${selectedField.label}`
-                                    : getItemLabelWithoutTableName(
-                                          selectedField,
-                                      )}
-                            </Text>
-                        ) : (
-                            <Text size="xs" truncate="end">
-                                Select a filter
-                            </Text>
-                        )}
-                    </InputBase>
+                    />
                 </Combobox.Target>
 
                 <Combobox.Dropdown p={0}>
-                    <Combobox.Search
-                        ref={searchRef}
-                        value={search}
-                        onChange={(event) =>
-                            setSearch(event.currentTarget.value)
-                        }
-                        placeholder="Search field..."
-                        size="xs"
-                        radius="md"
-                        leftSection={
-                            <MantineIcon icon={IconSearch} color="ldGray.6" />
-                        }
-                        data-testid="FilterConfiguration/FieldSelectSearch"
-                        styles={{
-                            input: {
-                                border: `1px solid var(--mantine-color-ldGray-1)`,
-                                borderRadius: 'var(--mantine-radius-sm)',
-                                margin: 2,
-                                width: 'calc(100% - 4px)',
-                            },
-                        }}
-                    />
                     <Combobox.Options>
                         {totalFields === 0 ? (
-                            <Combobox.Empty>No matching fields</Combobox.Empty>
+                            <Combobox.Empty>
+                                {getUiString('filters.config.noMatchingFields')}
+                            </Combobox.Empty>
                         ) : (
                             <Box
                                 mah={DROPDOWN_MAX_HEIGHT}

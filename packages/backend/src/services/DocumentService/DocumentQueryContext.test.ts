@@ -1,0 +1,274 @@
+import {
+    ChartType,
+    ForbiddenError,
+    MergeJoinType,
+    NotFoundError,
+    type Document,
+    type MetricQuery,
+    type RegisteredAccount,
+} from '@lightdash/common';
+import { buildAccount } from '../ProjectService/ProjectService.mock';
+import { DocumentQueryContext } from './DocumentQueryContext';
+import { DocumentService } from './DocumentService';
+
+const account = buildAccount() as RegisteredAccount;
+const projectUuid = 'project';
+const reference = {
+    documentUuid: 'document',
+    versionUuid: 'version',
+    chartId: 'c1',
+};
+const query: MetricQuery = {
+    exploreName: 'orders',
+    dimensions: ['orders_status'],
+    metrics: ['orders_count'],
+    filters: {},
+    sorts: [],
+    limit: 100,
+    tableCalculations: [],
+};
+const chart = {
+    name: 'Orders',
+    tableName: 'orders',
+    metricQuery: query,
+    chartConfig: { type: ChartType.TABLE } as const,
+};
+const document = {
+    documentUuid: reference.documentUuid,
+    projectUuid,
+    version: {
+        versionUuid: reference.versionUuid,
+        content: {
+            markdown: '<document-chart id="c1">',
+            charts: { c1: { source: 'semantic', chart } },
+        },
+    },
+} as unknown as Document;
+
+const setup = (savedDocument = document, chartId = reference.chartId) => {
+    const getVersion = vi.fn().mockResolvedValue(savedDocument);
+    const authorize = () =>
+        DocumentQueryContext.authorize({
+            documentService: {
+                getVersion,
+                getChart: DocumentService.prototype.getChart,
+            } as unknown as DocumentService,
+            account,
+            projectUuid,
+            reference: { ...reference, chartId },
+            sourceRowCap: 1000,
+        });
+    return { getVersion, authorize };
+};
+
+describe('DocumentQueryContext', () => {
+    test.each(['c2', '0', '', 'toString', '__proto__'])(
+        'rejects unknown chart id %j',
+        async (chartId) => {
+            await expect(setup(document, chartId).authorize()).rejects.toThrow(
+                NotFoundError,
+            );
+        },
+    );
+
+    test('addresses charts by id, not position', async () => {
+        const saved: Document = {
+            ...document,
+            version: {
+                ...document.version,
+                content: {
+                    markdown:
+                        '# Intro\n\n<document-chart id="c3">\n\n<document-chart id="c1">',
+                    charts: {
+                        c3: {
+                            source: 'semantic',
+                            chart: {
+                                ...chart,
+                                metricQuery: { ...query, limit: 5 },
+                            },
+                        },
+                        ...document.version.content.charts,
+                    },
+                },
+            },
+        };
+        const context = await setup(saved, 'c1').authorize();
+        expect(context.reference.chartId).toBe('c1');
+        expect(context.metricQuery).toMatchObject(query);
+    });
+
+    test('loads the persisted cell through Document authorization and binds query identity', async () => {
+        const { getVersion, authorize } = setup();
+        const context = await authorize();
+        expect(getVersion).toHaveBeenCalledWith(
+            account,
+            projectUuid,
+            reference.documentUuid,
+            reference.versionUuid,
+        );
+        expect(context.reference).toEqual(reference);
+        expect(() =>
+            context.assertMetricQuery(
+                account,
+                projectUuid,
+                context.metricQuery,
+            ),
+        ).not.toThrow();
+        expect(() =>
+            context.assertMetricQuery(
+                account,
+                'another-project',
+                context.metricQuery,
+            ),
+        ).toThrow(ForbiddenError);
+        expect(() =>
+            context.assertMetricQuery(
+                { ...account, user: { ...account.user, id: 'another-user' } },
+                projectUuid,
+                context.metricQuery,
+            ),
+        ).toThrow(ForbiddenError);
+    });
+
+    test.each([
+        { metrics: ['orders_secret'] },
+        { filters: { dimensions: { id: 'injected', and: [] } } },
+        { limit: 200 },
+        { exploreName: 'private_orders' },
+        { tableCalculations: [{ name: 'sql', displayName: 'SQL', sql: '1' }] },
+    ])('refuses an altered saved query: %j', async (change) => {
+        const context = await setup().authorize();
+        expect(() =>
+            context.assertMetricQuery(account, projectUuid, {
+                ...context.metricQuery,
+                ...change,
+            }),
+        ).toThrow(ForbiddenError);
+    });
+
+    test('does not allow caller parameter overrides', async () => {
+        const context = await setup().authorize();
+        expect(() =>
+            context.assertMetricQuery(
+                account,
+                projectUuid,
+                context.metricQuery,
+                { region: 'other' },
+            ),
+        ).toThrow(ForbiddenError);
+    });
+
+    test('reads the referenced version, not only the latest', async () => {
+        const { getVersion, authorize } = setup();
+        await authorize();
+        expect(getVersion).toHaveBeenCalledWith(
+            account,
+            projectUuid,
+            reference.documentUuid,
+            reference.versionUuid,
+        );
+    });
+
+    test('requires the chart in the referenced version', async () => {
+        await expect(
+            setup({
+                ...document,
+                version: {
+                    ...document.version,
+                    content: { markdown: 'text', charts: {} },
+                },
+            }).authorize(),
+        ).rejects.toThrow(NotFoundError);
+    });
+
+    test.each([
+        new NotFoundError('Deleted or foreign Document'),
+        new ForbiddenError('Disabled or revoked'),
+    ])('propagates Document authorization failure', async (error) => {
+        const { getVersion, authorize } = setup();
+        getVersion.mockRejectedValue(error);
+        await expect(authorize()).rejects.toBe(error);
+    });
+
+    test('binds the complete merge and permits only unsorted row-capped persisted legs', async () => {
+        const sourceQuery = {
+            ...query,
+            exploreName: 'payments',
+            metrics: ['payments_count'],
+        };
+        const saved: Document = {
+            ...document,
+            version: {
+                ...document.version,
+                content: {
+                    markdown: '<document-chart id="c1">',
+                    charts: {
+                        c1: {
+                            source: 'merge',
+                            chart: {
+                                ...chart,
+                                merge: {
+                                    primarySourceId: 'a',
+                                    sources: [
+                                        { id: 'a', kind: 'chart' },
+                                        {
+                                            id: 'b',
+                                            kind: 'query',
+                                            metricQuery: sourceQuery,
+                                        },
+                                    ],
+                                    joinKey: [
+                                        {
+                                            name: 'status',
+                                            fieldIdBySourceId: {
+                                                a: 'orders_status',
+                                                b: 'orders_status',
+                                            },
+                                        },
+                                    ],
+                                    joinType: MergeJoinType.FULL,
+                                    tableCalculations: [],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        const context = await setup(saved).authorize();
+        const { mergeQuery } = context;
+        if (!mergeQuery) {
+            throw new Error('Expected a merge');
+        }
+        expect(() =>
+            context.assertMergeQuery(account, projectUuid, mergeQuery),
+        ).not.toThrow();
+        expect(() =>
+            context.assertMergeQuery(account, projectUuid, {
+                ...mergeQuery,
+                joinType: MergeJoinType.INNER,
+            }),
+        ).toThrow(ForbiddenError);
+        for (const source of mergeQuery.sources) {
+            if (!('metricQuery' in source)) {
+                throw new Error('Expected a persisted metric source');
+            }
+            const leg = { ...source.metricQuery, sorts: [], limit: 1000 };
+            expect(() =>
+                context.assertMetricQuery(account, projectUuid, leg),
+            ).not.toThrow();
+            expect(() =>
+                context.assertMetricQuery(account, projectUuid, {
+                    ...leg,
+                    limit: 1001,
+                }),
+            ).toThrow(ForbiddenError);
+            expect(() =>
+                context.assertMetricQuery(account, projectUuid, {
+                    ...leg,
+                    dimensions: [],
+                }),
+            ).toThrow(ForbiddenError);
+        }
+    });
+});

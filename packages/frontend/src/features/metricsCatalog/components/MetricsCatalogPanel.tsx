@@ -1,15 +1,16 @@
 import { subject } from '@casl/ability';
 import { CatalogCategoryFilterMode, isCompileJob } from '@lightdash/common';
 import {
-    ActionIcon,
     Box,
-    Button,
     Group,
-    Popover,
     Stack,
     Text,
-    useMantineTheme,
+    Button,
     type ButtonProps,
+    ActionIcon,
+    Popover,
+    useComputedColorScheme,
+    useMantineTheme,
 } from '@mantine/core';
 import { useClickOutside, useDisclosure } from '@mantine/hooks';
 import { IconRefresh, IconSparkles, IconX } from '@tabler/icons-react';
@@ -17,12 +18,15 @@ import { useCallback, useEffect, useRef, useState, type FC } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import MantineIcon from '../../../components/common/MantineIcon';
 import RefreshDbtButton from '../../../components/RefreshDbtButton';
+import useEmbed from '../../../ee/providers/Embed/useEmbed';
 import { useProject } from '../../../hooks/useProject';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { useAccount } from '../../../hooks/user/useAccount';
 import useSearchParams from '../../../hooks/useSearchParams';
 import { useTimeAgo } from '../../../hooks/useTimeAgo';
 import useActiveJob from '../../../providers/ActiveJob/useActiveJob';
-import useApp from '../../../providers/App/useApp';
 import { LearnMoreContent } from '../../../svgs/metricsCatalog';
+import { isScopeTourRunning } from '../../scopeTours/isScopeTourRunning';
 import { useAppDispatch, useAppSelector } from '../../sqlRunner/store/hooks';
 import { useIndexCatalogJob } from '../hooks/useIndexCatalogJob';
 import {
@@ -39,8 +43,9 @@ import {
     setUser,
     toggleMetricExploreModal,
 } from '../store/metricsCatalogSlice';
-import { type MetricCatalogView } from '../types';
+import { type MetricCatalogView, type MetricsCatalogFilter } from '../types';
 import { MetricChartUsageModal } from './MetricChartUsageModal';
+import classes from './MetricsCatalogPanel.module.css';
 import { MetricsTable } from './MetricsTable';
 
 const LOCAL_STORAGE_KEY = 'metrics-catalog-learn-more-popover-closed';
@@ -54,7 +59,7 @@ const LearnMorePopover: FC<{ buttonStyles?: ButtonProps['style'] }> = ({
 
     useEffect(() => {
         const hasPrevClosed = localStorage.getItem(LOCAL_STORAGE_KEY);
-        if (!hasPrevClosed) {
+        if (!hasPrevClosed && !isScopeTourRunning()) {
             open();
         }
     }, [open]);
@@ -81,14 +86,13 @@ const LearnMorePopover: FC<{ buttonStyles?: ButtonProps['style'] }> = ({
             position="bottom-start"
             opened={opened}
             onClose={setLocalStorage}
-            shadow="sm"
         >
             <Popover.Target>
                 <Button
                     ref={buttonRef}
                     size="xs"
                     variant="default"
-                    leftIcon={<MantineIcon icon={IconSparkles} />}
+                    leftSection={<MantineIcon icon={IconSparkles} />}
                     style={buttonStyles}
                     onClick={opened ? handleClose : open}
                 >
@@ -96,18 +100,15 @@ const LearnMorePopover: FC<{ buttonStyles?: ButtonProps['style'] }> = ({
                 </Button>
             </Popover.Target>
             <Popover.Dropdown
-                bg="ldDark.6"
-                c="white"
+                bg="ldDark.9"
+                c="ldGray.0"
                 p={16}
-                sx={{
-                    borderRadius: 12,
-                    alignItems: 'flex-start',
-                }}
+                className={classes.spotlightDropdown}
             >
-                <Stack spacing="sm" w="100%" ref={ref}>
-                    <Group position="apart">
-                        <Text fw={600} size={14}>
-                            ✨ Lightdash Spotlight is here!
+                <Stack gap="sm" w="100%" ref={ref}>
+                    <Group justify="space-between">
+                        <Text fw={600} fz="sm">
+                            ✨ Spotlight is here!
                         </Text>
                         <ActionIcon
                             variant="transparent"
@@ -118,7 +119,7 @@ const LearnMorePopover: FC<{ buttonStyles?: ButtonProps['style'] }> = ({
                         </ActionIcon>
                     </Group>
                     <LearnMoreContent width="100%" height="100%" />
-                    <Text size={13} c="ldGray.3">
+                    <Text fz="sm" c="ldGray.3">
                         Explore and curate your key Metrics in the{' '}
                         <Text span fw={600} inherit>
                             Catalog
@@ -129,31 +130,27 @@ const LearnMorePopover: FC<{ buttonStyles?: ButtonProps['style'] }> = ({
                         </Text>
                         .
                     </Text>
-                    <Group spacing="xs">
+                    <Group gap="xs">
                         <Button
                             variant="outline"
-                            radius="md"
                             bg="ldDark.4"
                             c="ldGray.0"
                             hidden={true}
                             disabled={true}
-                            sx={(theme) => ({
+                            style={{
                                 display: 'none', // ! Disabled for now
                                 border: 'none',
                                 flexGrow: 1,
-                                '&:hover': {
-                                    backgroundColor: theme.colors.ldDark[5],
-                                },
-                            })}
+                            }}
                         >
                             View Demo
                         </Button>
                         <Button
                             component="a"
+                            variant="default"
                             href="https://docs.lightdash.com/guides/metrics-catalog/"
                             target="_blank"
-                            radius="md"
-                            sx={{ border: 'none', flexGrow: 1 }}
+                            style={{ border: 'none', flexGrow: 1 }}
                         >
                             Learn more
                         </Button>
@@ -166,13 +163,16 @@ const LearnMorePopover: FC<{ buttonStyles?: ButtonProps['style'] }> = ({
 
 type MetricsCatalogPanelProps = {
     metricCatalogView: MetricCatalogView;
+    hiddenFilters: MetricsCatalogFilter[];
 };
 
 export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
     metricCatalogView,
+    hiddenFilters,
 }) => {
     const dispatch = useAppDispatch();
     const theme = useMantineTheme();
+    const colorScheme = useComputedColorScheme();
     const projectUuid = useAppSelector(
         (state) => state.metricsCatalog.projectUuid,
     );
@@ -213,9 +213,11 @@ export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
     const timeAgo = useTimeAgo(
         lastDbtRefreshAt ?? fallbackLastDbtRefreshAtRef.current,
     );
-    const params = useParams<{ projectUuid: string }>();
+    const routeProjectUuid = useProjectUuid();
     const { data: project } = useProject(projectUuid);
-    const { user } = useApp();
+    const { data: account } = useAccount();
+    const { embedToken } = useEmbed();
+    const isEmbed = !!embedToken;
 
     // Track active compile job
     const { activeJob } = useActiveJob();
@@ -243,12 +245,12 @@ export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
 
     useEffect(() => {
         if (
-            params.projectUuid &&
-            (!projectUuid || projectUuid !== params.projectUuid)
+            routeProjectUuid &&
+            (!projectUuid || projectUuid !== routeProjectUuid)
         ) {
-            dispatch(setProjectUuid(params.projectUuid));
+            dispatch(setProjectUuid(routeProjectUuid));
         }
-    }, [params.projectUuid, dispatch, projectUuid]);
+    }, [routeProjectUuid, dispatch, projectUuid]);
 
     useEffect(() => {
         if (
@@ -371,57 +373,71 @@ export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
 
     useEffect(
         function handleAbilities() {
-            if (user.data) {
-                const canManageTags = user.data.ability.can(
+            if (account) {
+                const organizationUuidFromAccount =
+                    account.organization.organizationUuid;
+                const canManageTags = account.user.ability.can(
                     'manage',
                     subject('Tags', {
-                        organizationUuid: user.data.organizationUuid,
+                        organizationUuid: organizationUuidFromAccount,
                         projectUuid,
                     }),
                 );
 
                 const canRefreshCatalog =
-                    user.data.ability.can('manage', 'Job') ||
-                    user.data.ability.can('manage', 'CompileProject');
+                    !isEmbed &&
+                    (account.user.ability.can('manage', 'Job') ||
+                        account.user.ability.can('manage', 'CompileProject'));
 
-                const canManageExplore = user.data.ability.can(
+                const canViewExplore = account.user.ability.can(
+                    'view',
+                    subject('Explore', {
+                        organizationUuid: organizationUuidFromAccount,
+                        projectUuid,
+                    }),
+                );
+                const canManageExplore = account.user.ability.can(
                     'manage',
                     subject('Explore', {
-                        organizationUuid: user.data.organizationUuid,
+                        organizationUuid: organizationUuidFromAccount,
                         projectUuid,
                     }),
                 );
 
-                const canManageMetricsTree = user.data.ability.can(
-                    'manage',
-                    subject('MetricsTree', {
-                        organizationUuid: user.data.organizationUuid,
-                        projectUuid,
-                    }),
-                );
+                const canManageMetricsTree =
+                    !isEmbed &&
+                    account.user.ability.can(
+                        'manage',
+                        subject('MetricsTree', {
+                            organizationUuid: organizationUuidFromAccount,
+                            projectUuid,
+                        }),
+                    );
 
-                const canManageSpotlight = user.data.ability.can(
-                    'manage',
-                    subject('SpotlightTableConfig', {
-                        organizationUuid: user.data.organizationUuid,
-                        projectUuid,
-                    }),
-                );
+                const canManageSpotlight =
+                    !isEmbed &&
+                    account.user.ability.can(
+                        'manage',
+                        subject('SpotlightTableConfig', {
+                            organizationUuid: organizationUuidFromAccount,
+                            projectUuid,
+                        }),
+                    );
 
-                dispatch(setUser({ userUuid: user.data.userUuid }));
+                dispatch(setUser({ userUuid: account.user.id }));
 
                 dispatch(
                     setAbility({
                         canManageTags,
                         canRefreshCatalog,
-                        canManageExplore,
+                        canManageExplore: canManageExplore || canViewExplore,
                         canManageMetricsTree,
                         canManageSpotlight,
                     }),
                 );
             }
         },
-        [user.data, dispatch, projectUuid],
+        [account, dispatch, isEmbed, projectUuid],
     );
 
     useEffect(
@@ -441,32 +457,40 @@ export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
     const headerButtonStyles: ButtonProps['style'] = {
         borderRadius: theme.radius.md,
         border: `1px solid ${theme.colors.ldGray[2]}`,
-        padding: `${theme.spacing.xxs} 10px ${theme.spacing.xxs} ${theme.spacing.xs}`,
+        padding: `0.25rem 10px 0.25rem ${theme.spacing.xs}`,
         fontSize: theme.fontSizes.sm,
         fontWeight: 500,
         color:
-            theme.colorScheme === 'dark'
+            colorScheme === 'dark'
                 ? theme.colors.ldDark[9]
                 : theme.colors.ldGray[7],
     };
 
     return (
-        <Stack w="100%" spacing="xxl">
-            <Group position="apart">
+        <Stack
+            w="100%"
+            h={isEmbed ? '100%' : undefined}
+            mih={isEmbed ? 0 : undefined}
+            gap={isEmbed ? 0 : 'xxl'}
+        >
+            <Group
+                justify="space-between"
+                style={{ display: isEmbed ? 'none' : undefined }}
+            >
                 <Box>
-                    <Text color="ldGray.8" weight={600} size="xl">
+                    <Text c="ldGray.8" fw={600} size="xl">
                         Metrics Catalog
                     </Text>
-                    <Text color="ldGray.6" size="sm" weight={400}>
+                    <Text c="dimmed" size="sm" fw={400}>
                         Browse all Metrics & KPIs across this project
                     </Text>
                 </Box>
-                <Group spacing="xs">
+                <Group gap="xs">
                     {isIndexingCatalog ? (
                         <Button
                             size="xs"
                             variant="default"
-                            leftIcon={
+                            leftSection={
                                 <MantineIcon
                                     size="sm"
                                     color="ldGray.7"
@@ -480,6 +504,7 @@ export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
                         </Button>
                     ) : (
                         <RefreshDbtButton
+                            allowContentSync={false}
                             leftIcon={
                                 <MantineIcon
                                     size="sm"
@@ -499,7 +524,11 @@ export const MetricsCatalogPanel: FC<MetricsCatalogPanelProps> = ({
                     <LearnMorePopover buttonStyles={headerButtonStyles} />
                 </Group>
             </Group>
-            <MetricsTable metricCatalogView={metricCatalogView} />
+            <MetricsTable
+                metricCatalogView={metricCatalogView}
+                isEmbed={isEmbed}
+                hiddenFilters={hiddenFilters}
+            />
             <MetricChartUsageModal
                 opened={isMetricUsageModalOpen}
                 onClose={onCloseMetricUsageModal}

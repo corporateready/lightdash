@@ -1,16 +1,21 @@
 import {
+    AI_AGENT_APPLICATION_NAME,
     AnyType,
     CreateTrinoCredentials,
     DimensionType,
+    getWarehouseTableType,
     Metric,
     MetricType,
     getErrorMessage as originalGetErrorMessage,
+    setCatalogTimestampDomain,
     SupportedDbtAdapter,
     TimeIntervalUnit,
     WarehouseConnectionError,
     WarehouseQueryError,
     WarehouseResults,
     WarehouseTypes,
+    type ResultNumericKind,
+    type TimestampDomain,
 } from '@lightdash/common';
 import {
     BasicAuth,
@@ -21,6 +26,7 @@ import {
     Trino,
 } from 'trino-client';
 import { WarehouseCatalog } from '../types';
+import { coerceTagToString, DriftedTagValue } from '../utils/coerceTagToString';
 import {
     DEFAULT_BATCH_SIZE,
     processPromisesInBatches,
@@ -28,6 +34,21 @@ import {
 import { normalizeUnicode } from '../utils/sql';
 import WarehouseBaseClient from './WarehouseBaseClient';
 import WarehouseBaseSqlBuilder from './WarehouseBaseSqlBuilder';
+
+const TRINO_CLIENT_TAGS_HEADER = 'X-Trino-Client-Tags';
+
+const removeNumericTypeParameters = (type: string): string =>
+    type.replace(/\(\s*\d+(?:\s*,\s*\d+)?\s*\)/, '');
+
+// Trino splits the header on commas and Node rejects non-latin1 header values,
+// so tag keys/values are restricted to a safe charset
+const sanitizeClientTag = (tag: DriftedTagValue): string =>
+    coerceTagToString(tag, {
+        caller: 'TrinoWarehouseClient.sanitizeClientTag',
+        key: null,
+    })
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .substring(0, 60);
 
 export enum TrinoTypes {
     BOOLEAN = 'boolean',
@@ -62,6 +83,61 @@ interface TableInfo {
     table: string;
 }
 
+interface TrinoHttpErrorCause {
+    status: number;
+}
+
+const getSanitizedHttpCause = (
+    error: unknown,
+): TrinoHttpErrorCause | undefined => {
+    if (
+        typeof error !== 'object' ||
+        error === null ||
+        !('isAxiosError' in error) ||
+        error.isAxiosError !== true
+    )
+        return undefined;
+    if ('status' in error && typeof error.status === 'number')
+        return { status: error.status };
+    if (
+        'response' in error &&
+        typeof error.response === 'object' &&
+        error.response !== null &&
+        'status' in error.response &&
+        typeof error.response.status === 'number'
+    )
+        return { status: error.response.status };
+    return undefined;
+};
+
+interface TrinoQueryErrorCause {
+    errorName: string;
+    errorCode: number;
+    errorType: string;
+}
+
+const sanitizeTrinoCause = (
+    cause: unknown,
+): TrinoHttpErrorCause | TrinoQueryErrorCause | undefined => {
+    if (typeof cause !== 'object' || cause === null) return undefined;
+    if ('status' in cause && typeof cause.status === 'number')
+        return { status: cause.status };
+    if (
+        'errorName' in cause &&
+        typeof cause.errorName === 'string' &&
+        'errorCode' in cause &&
+        typeof cause.errorCode === 'number' &&
+        'errorType' in cause &&
+        typeof cause.errorType === 'string'
+    )
+        return {
+            errorName: cause.errorName,
+            errorCode: cause.errorCode,
+            errorType: cause.errorType,
+        };
+    return getSanitizedHttpCause(cause);
+};
+
 const getErrorMessage = (e: QueryError) => {
     // Trino returns Object of type QueryError
     if (e.message) {
@@ -85,11 +161,46 @@ const queryTableSchema = ({
                                                                       AND table_name = '${table}'
                                                                     ORDER BY 1, 2, 3, ordinal_position`;
 
+export const getTrinoTimestampDomain = (
+    type: TrinoTypes | string,
+): TimestampDomain | undefined => {
+    switch (removeNumericTypeParameters(type)) {
+        case TrinoTypes.TIMESTAMP:
+            return 'naive';
+        case TrinoTypes.TIMESTAMP_TZ:
+            return 'aware';
+        default:
+            return undefined;
+    }
+};
+
+// The column type string carries the decimal scale: decimal(p,s)
+export const getTrinoNumericKind = (
+    type: TrinoTypes | string,
+): ResultNumericKind | null => {
+    switch (removeNumericTypeParameters(type)) {
+        case TrinoTypes.TINYINT:
+        case TrinoTypes.SMALLINT:
+        case TrinoTypes.INTEGER:
+        case TrinoTypes.BIGINT:
+            return { kind: 'integer' };
+        case TrinoTypes.REAL:
+        case TrinoTypes.DOUBLE:
+            return { kind: 'float' };
+        case TrinoTypes.DECIMAL: {
+            const scale = type.match(/\(\s*\d+\s*,\s*(\d+)\s*\)/);
+            return scale ? { kind: 'decimal', scale: Number(scale[1]) } : null;
+        }
+        default:
+            return null;
+    }
+};
+
 const convertDataTypeToDimensionType = (
     type: TrinoTypes | string,
 ): DimensionType => {
-    const typeWithoutTimePrecision = type.replace(/\(\d\)/, '');
-    switch (typeWithoutTimePrecision) {
+    const typeWithoutParameters = removeNumericTypeParameters(type);
+    switch (typeWithoutParameters) {
         case TrinoTypes.BOOLEAN:
             return DimensionType.BOOLEAN;
         case TrinoTypes.TINYINT:
@@ -138,6 +249,14 @@ const catalogToSchema = (results: string[][][]): WarehouseCatalog => {
                 warehouseCatalog[table_catalog][table_schema][table_name][
                     column_name
                 ] = convertDataTypeToDimensionType(data_type);
+                setCatalogTimestampDomain(
+                    warehouseCatalog,
+                    table_catalog,
+                    table_schema,
+                    table_name,
+                    column_name,
+                    getTrinoTimestampDomain(data_type),
+                );
             },
         );
     });
@@ -172,6 +291,11 @@ export class TrinoSqlBuilder extends WarehouseBaseSqlBuilder {
 
     getAdapterType(): SupportedDbtAdapter {
         return SupportedDbtAdapter.TRINO;
+    }
+
+    // Trino never materializes a CTE — every reference re-runs its full lineage.
+    supportsCteMaterialization(): boolean {
+        return false;
     }
 
     getEscapeStringQuoteChar(): string {
@@ -214,6 +338,15 @@ export class TrinoSqlBuilder extends WarehouseBaseSqlBuilder {
         );
     }
 
+    castToTimestamp(date: Date): string {
+        // Trino rejects zone-suffixed strings cast to plain TIMESTAMP
+        return `TIMESTAMP '${date.toISOString().slice(0, 23).replace('T', ' ')}'`;
+    }
+
+    castToDate(date: Date): string {
+        return `DATE '${date.toISOString().slice(0, 10)}'`;
+    }
+
     getIntervalSql(value: number, unit: TimeIntervalUnit): string {
         // Trino uses INTERVAL with quoted value and separate unit keyword
         const unitStr = TrinoSqlBuilder.intervalUnitsSingular[unit];
@@ -237,8 +370,15 @@ export class TrinoSqlBuilder extends WarehouseBaseSqlBuilder {
 export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredentials> {
     connectionOptions: ConnectionOptions;
 
-    constructor(credentials: CreateTrinoCredentials) {
-        super(credentials, new TrinoSqlBuilder(credentials.startOfWeek));
+    constructor(
+        credentials: CreateTrinoCredentials,
+        options?: { agentSession?: boolean },
+    ) {
+        super(
+            credentials,
+            new TrinoSqlBuilder(credentials.startOfWeek),
+            options,
+        );
         this.connectionOptions = {
             auth: new BasicAuth(credentials.user, credentials.password),
             catalog: credentials.dbname,
@@ -255,7 +395,9 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
         try {
             session = await client.create(this.connectionOptions);
         } catch (e: AnyType) {
-            throw new WarehouseConnectionError(getErrorMessage(e));
+            const error = new WarehouseConnectionError(getErrorMessage(e));
+            error.cause = sanitizeTrinoCause(e);
+            throw error;
         }
 
         return {
@@ -279,23 +421,72 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
         try {
             let alteredQuery = sql;
             if (options?.tags) {
+                // tags can carry BigInt values at runtime; plain
+                // JSON.stringify would throw without the app-level toJSON patch
                 alteredQuery = `${alteredQuery}\n-- ${JSON.stringify(
                     options?.tags,
+                    (_key, value) =>
+                        typeof value === 'bigint' ? value.toString() : value,
                 )}`;
             }
             if (options?.timezone) {
                 console.debug(`Setting Trino timezone to ${options?.timezone}`);
-                await session.query(`SET TIME ZONE '${options?.timezone}'`);
+                const timezoneQuery = await session.query(
+                    `SET TIME ZONE '${options?.timezone}'`,
+                );
+                let timezoneResult: IteratorResult<QueryResult>;
+                do {
+                    // eslint-disable-next-line no-await-in-loop
+                    timezoneResult = await timezoneQuery.next();
+                    if (timezoneResult.value.error) {
+                        const error = new WarehouseQueryError(
+                            getErrorMessage(timezoneResult.value.error) ??
+                                'Failed to set the time zone',
+                        );
+                        error.cause = sanitizeTrinoCause(
+                            timezoneResult.value.error,
+                        );
+                        throw error;
+                    }
+                } while (!timezoneResult.done);
             }
-            query = await session.query(alteredQuery);
+
+            query = await session.query(
+                options?.tags || this.agentSession
+                    ? {
+                          query: alteredQuery,
+                          extraHeaders: {
+                              [TRINO_CLIENT_TAGS_HEADER]: Object.entries(
+                                  options.tags ?? {},
+                              )
+                                  .map(
+                                      ([key, value]) =>
+                                          `${sanitizeClientTag(
+                                              key,
+                                          )}=${sanitizeClientTag(value)}`,
+                                  )
+                                  .join(','),
+                              ...(this.agentSession
+                                  ? {
+                                        'X-Trino-Extra-Credential':
+                                            'agent=true',
+                                        'User-Agent': AI_AGENT_APPLICATION_NAME,
+                                    }
+                                  : {}),
+                          },
+                      }
+                    : alteredQuery,
+            );
 
             let queryResult = await query.next();
 
             if (queryResult.value.error) {
-                throw new WarehouseQueryError(
+                const error = new WarehouseQueryError(
                     getErrorMessage(queryResult.value.error) ??
                         'Unexpected error in query execution',
                 );
+                error.cause = sanitizeTrinoCause(queryResult.value.error);
+                throw error;
             }
 
             const schema: {
@@ -303,15 +494,22 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
                 type: string;
                 typeSignature: { rawType: string };
             }[] = queryResult.value.columns ?? [];
-            const fields = schema.reduce(
-                (acc, column) => ({
-                    ...acc,
-                    [normalizeColumnName(column.name)]: {
-                        type: convertDataTypeToDimensionType(
-                            column.typeSignature.rawType ?? TrinoTypes.VARCHAR,
-                        ),
-                    },
-                }),
+            const fields = schema.reduce<WarehouseResults['fields']>(
+                (acc, column) => {
+                    // The full type string carries the decimal scale that rawType drops
+                    const type =
+                        column.type ??
+                        column.typeSignature.rawType ??
+                        TrinoTypes.VARCHAR;
+                    const numericKind = getTrinoNumericKind(type);
+                    return {
+                        ...acc,
+                        [normalizeColumnName(column.name)]: {
+                            type: convertDataTypeToDimensionType(type),
+                            ...(numericKind ? { numericKind } : {}),
+                        },
+                    };
+                },
                 {},
             );
 
@@ -348,7 +546,11 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
                 });
             }
         } catch (e: AnyType) {
-            throw new WarehouseQueryError(getErrorMessage(e));
+            const error = new WarehouseQueryError(getErrorMessage(e));
+            error.cause = sanitizeTrinoCause(
+                e instanceof WarehouseQueryError ? e.cause : e,
+            );
+            throw error;
         } finally {
             await close();
         }
@@ -370,7 +572,11 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
                         const result = (await query.next()).value.data ?? [];
                         return result;
                     } catch (e: AnyType) {
-                        throw new WarehouseQueryError(getErrorMessage(e));
+                        const error = new WarehouseQueryError(
+                            getErrorMessage(e),
+                        );
+                        error.cause = sanitizeTrinoCause(e);
+                        throw error;
                     } finally {
                         if (query) void close();
                     }
@@ -388,24 +594,6 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
             this.sqlBuilder.getEscapeStringQuoteChar() +
                 this.sqlBuilder.getStringQuoteChar(),
         );
-    }
-
-    async getTables(
-        schema?: string,
-        tags?: Record<string, string>,
-    ): Promise<WarehouseCatalog> {
-        const schemaFilter = schema
-            ? `AND table_schema = '${this.sanitizeInput(schema)}'`
-            : '';
-        const query = `
-            SELECT table_catalog, table_schema, table_name
-            FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE' 
-            ${schemaFilter}
-            ORDER BY 1,2,3
-        `;
-        const { rows } = await this.runQuery(query, tags);
-        return this.parseWarehouseCatalog(rows, convertDataTypeToDimensionType);
     }
 
     async getFields(
@@ -435,7 +623,11 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
         `;
         const { rows } = await this.runQuery(query, tags);
 
-        return this.parseWarehouseCatalog(rows, convertDataTypeToDimensionType);
+        return this.parseWarehouseCatalog(
+            rows,
+            convertDataTypeToDimensionType,
+            getTrinoTimestampDomain,
+        );
     }
 
     async getAllTables() {
@@ -445,9 +637,9 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
             : '';
         const filterSystemTables = `AND table_schema NOT IN ('information_schema', 'pg_catalog')`;
         const query = `
-            SELECT table_catalog, table_schema, table_name
+            SELECT table_catalog, table_schema, table_name, table_type
             FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE'
+            WHERE table_type IN ('BASE TABLE', 'VIEW')
                 ${whereSql}
                 ${filterSystemTables}
             ORDER BY 1, 2, 3
@@ -457,6 +649,7 @@ export class TrinoWarehouseClient extends WarehouseBaseClient<CreateTrinoCredent
             database: row.table_catalog,
             schema: row.table_schema,
             table: row.table_name,
+            tableType: getWarehouseTableType(row.table_type),
         }));
     }
 }

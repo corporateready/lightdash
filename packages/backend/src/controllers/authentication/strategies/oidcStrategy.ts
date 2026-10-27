@@ -2,9 +2,11 @@
 /// <reference path="../../../@types/express-session.d.ts" />
 import {
     ArgumentsOf,
+    GenericOidcSsoConfig,
     LightdashError,
     OpenIdIdentityIssuerType,
     OpenIdUser,
+    OrganizationSsoProvider,
 } from '@lightdash/common';
 import {
     Issuer,
@@ -24,7 +26,9 @@ export const isGenericOidcPassportStrategyAvailableToUse =
 
 const createOpenIdUserFromProfile = (
     profile: PassportProfile & {
+        email_verified?: boolean;
         _json?: {
+            email_verified?: boolean;
             given_name?: string;
             family_name?: string;
             [key: string]: unknown;
@@ -36,6 +40,8 @@ const createOpenIdUserFromProfile = (
 ) => {
     const email = profile.emails?.[0]?.value || profile.email;
     const subject = profile.id || profile.sub;
+    const emailVerified =
+        profile.email_verified ?? profile._json?.email_verified;
 
     if (!email) {
         Logger.error(
@@ -45,6 +51,18 @@ const createOpenIdUserFromProfile = (
         );
         return done(null, false, {
             message: 'Authentication failed: missing email in OpenID profile.',
+        });
+    }
+
+    if (emailVerified === false) {
+        Logger.error(
+            `Authentication failed: email is not verified in OpenID profile. ${JSON.stringify(
+                profile,
+            )}`,
+        );
+        return done(null, false, {
+            message:
+                'Authentication failed: email is not verified in OpenID profile.',
         });
     }
 
@@ -87,10 +105,22 @@ const createOpenIdUserFromProfile = (
     return openIdUser;
 };
 
+/**
+ * Identifies the per-org SSO method whose strategy authenticated a request, so
+ * the callback can confirm the IdP-asserted email domain is one that method is
+ * actually allowed to route. Absent for env-based single-tenant strategies,
+ * which are trusted instance-wide and carry no per-org whitelist.
+ */
+export type PerOrgSsoContext = {
+    organizationUuid: string;
+    provider: OrganizationSsoProvider;
+};
+
 export const genericOidcHandler =
     (
         issuerType: OpenIdUser['openId']['issuerType'],
         issuerOverride?: string,
+        perOrgSso?: PerOrgSsoContext,
     ): VerifyFunctionWithRequest =>
     async (req, issuer, profile, done) => {
         try {
@@ -105,6 +135,25 @@ export const genericOidcHandler =
             );
 
             if (openIdUser) {
+                if (perOrgSso) {
+                    const isAllowed = await req.services
+                        .getOrganizationSsoService()
+                        .isEmailDomainAllowedForOrgSso(
+                            openIdUser.openId.email,
+                            perOrgSso.organizationUuid,
+                            perOrgSso.provider,
+                        );
+                    if (!isAllowed) {
+                        Logger.error(
+                            `Authentication failed: OpenID email domain is not allowed for the authenticating SSO method (org ${perOrgSso.organizationUuid}, provider ${perOrgSso.provider}).`,
+                        );
+                        return done(null, false, {
+                            message:
+                                'Authentication failed: email domain is not allowed for this login method.',
+                        });
+                    }
+                }
+
                 const user = await req.services
                     .getUserService()
                     .loginWithOpenId(
@@ -189,6 +238,49 @@ export const createGenericOidcPassportStrategy = async () => {
         genericOidcHandler(
             OpenIdIdentityIssuerType.GENERIC_OIDC,
             issuer.metadata.issuer,
+        ) as unknown as StrategyVerifyCallback<unknown>,
+    );
+};
+
+/**
+ * Builds a generic OIDC passport strategy from a plain config object using the
+ * client-secret flow. Used by the per-org DB-stored config path. (The env-based
+ * `createGenericOidcPassportStrategy` additionally supports the private_key_jwt
+ * / x509 cert flow, which per-org config does not expose.)
+ */
+export const createGenericOidcStrategyForConfig = async (
+    config: GenericOidcSsoConfig,
+    organizationUuid?: string,
+) => {
+    const issuer = await Issuer.discover(config.metadataDocumentEndpoint);
+
+    const client = new issuer.Client({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        token_endpoint_auth_method: 'client_secret_basic',
+    });
+
+    return new OpenIdClientStrategy(
+        {
+            client,
+            passReqToCallback: true,
+            params: {
+                redirect_uri: new URL(
+                    `/api/v1${lightdashConfig.auth.oidc.callbackPath}`,
+                    lightdashConfig.siteUrl,
+                ).href,
+                scope: config.scopes || 'openid profile email',
+            },
+        },
+        genericOidcHandler(
+            OpenIdIdentityIssuerType.GENERIC_OIDC,
+            issuer.metadata.issuer,
+            organizationUuid
+                ? {
+                      organizationUuid,
+                      provider: OrganizationSsoProvider.GENERIC_OIDC,
+                  }
+                : undefined,
         ) as unknown as StrategyVerifyCallback<unknown>,
     );
 };

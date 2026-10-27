@@ -1,16 +1,22 @@
-import {
-    getDefaultZIndex,
-    Text,
-    Tooltip,
-    type TextProps,
-} from '@mantine-8/core';
+import { getDefaultZIndex, Text, Tooltip, type TextProps } from '@mantine/core';
 import { type FC } from 'react';
 import { useIsTruncated } from '../../../hooks/useIsTruncated';
 
 interface TruncatedTextProps extends Omit<TextProps, 'truncate'> {
     children: string;
     maxWidth: number | string;
+    /** Render the inner element as <span> instead of <p>. Use when the
+     *  TruncatedText is nested inside another block-level text element to
+     *  avoid invalid HTML (<p> inside <p>). */
+    inline?: boolean;
+    /** Caps the tooltip label at this many characters and wraps it, so long
+     *  values don't stretch the tooltip across the page. */
+    tooltipMaxLength?: number;
+    /** Wraps the full tooltip text within this width. */
+    tooltipMaxWidth?: number;
 }
+
+const TOOLTIP_MAX_WIDTH = 400;
 
 /**
  * Renders text truncated with an ellipsis at the given maxWidth.
@@ -19,15 +25,24 @@ interface TruncatedTextProps extends Omit<TextProps, 'truncate'> {
 const TruncatedText: FC<TruncatedTextProps> = ({
     children,
     maxWidth,
+    inline,
+    tooltipMaxLength,
+    tooltipMaxWidth,
     ...textProps
 }) => {
     const { ref, isTruncated } = useIsTruncated<HTMLParagraphElement>();
+    const isCapped = tooltipMaxLength !== undefined;
+    const label =
+        isCapped && children.length > tooltipMaxLength
+            ? `${children.slice(0, tooltipMaxLength).trimEnd()}…`
+            : children;
 
     return (
         <Tooltip
-            label={children}
+            label={label}
             disabled={!isTruncated}
-            withinPortal
+            multiline={isCapped || tooltipMaxWidth !== undefined}
+            maw={tooltipMaxWidth ?? (isCapped ? TOOLTIP_MAX_WIDTH : undefined)}
             zIndex={getDefaultZIndex('max')}
         >
             <Text
@@ -35,6 +50,7 @@ const TruncatedText: FC<TruncatedTextProps> = ({
                 fz="sm"
                 truncate="end"
                 maw={maxWidth}
+                span={inline}
                 {...textProps}
             >
                 {children}

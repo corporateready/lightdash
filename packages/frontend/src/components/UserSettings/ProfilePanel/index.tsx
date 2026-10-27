@@ -1,6 +1,7 @@
 import {
     FeatureFlags,
     getEmailSchema,
+    getUserNameSchema,
     isValidTimezone,
     type ApiError,
 } from '@lightdash/common';
@@ -12,9 +13,10 @@ import {
     Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
-import { useForm, zodResolver } from '@mantine/form';
+} from '@mantine/core';
+import { useForm } from '@mantine/form';
 import { IconAlertCircle, IconCircleCheck } from '@tabler/icons-react';
+import { zod4Resolver as zodResolver } from 'mantine-form-zod-resolver';
 import { useEffect, useState, type FC } from 'react';
 import { z } from 'zod';
 import useToaster from '../../../hooks/toaster/useToaster';
@@ -28,10 +30,11 @@ import { VerifyEmailModal } from '../../../pages/VerifyEmail';
 import useApp from '../../../providers/App/useApp';
 import MantineIcon from '../../common/MantineIcon';
 import TimeZonePicker from '../../common/TimeZonePicker';
+import AvatarSettings from './AvatarSettings';
 
 const validationSchema = z.object({
-    firstName: z.string().nonempty(),
-    lastName: z.string().nonempty(),
+    firstName: getUserNameSchema(),
+    lastName: getUserNameSchema(),
     email: getEmailSchema().or(z.undefined()),
     timezone: z
         .string()
@@ -51,10 +54,10 @@ const ProfilePanel: FC = () => {
     } = useApp();
     const { showToastSuccess, showToastApiError } = useToaster();
 
-    const { data: userTimezonesFlag } = useServerFeatureFlag(
-        FeatureFlags.EnableUserTimezones,
+    const { data: timezoneSupportFlag } = useServerFeatureFlag(
+        FeatureFlags.EnableTimezoneSupport,
     );
-    const userTimezonesEnabled = userTimezonesFlag?.enabled === true;
+    const timezoneSupportEnabled = timezoneSupportFlag?.enabled === true;
 
     const form = useForm<FormValues>({
         validate: zodResolver(validationSchema),
@@ -128,6 +131,8 @@ const ProfilePanel: FC = () => {
     return (
         <form onSubmit={handleOnSubmit}>
             <Stack mt="md">
+                <AvatarSettings />
+
                 <TextInput
                     placeholder="First name"
                     label="First name"
@@ -172,7 +177,7 @@ const ProfilePanel: FC = () => {
                             <MantineIcon
                                 size="lg"
                                 icon={IconAlertCircle}
-                                color="ldGray.6"
+                                color="dimmed"
                             />
                         )
                     }
@@ -198,10 +203,10 @@ const ProfilePanel: FC = () => {
                     }
                 />
 
-                {userTimezonesEnabled && (
+                {timezoneSupportEnabled && (
                     <TimeZonePicker
                         label="Default timezone"
-                        description="Used to render query results when a chart hasn't pinned its own timezone. Leave empty to use the project default."
+                        description="Used to render query results for charts pinned to the viewer timezone. Leave empty to fall back to the project timezone."
                         variant="default"
                         maw="100%"
                         size="sm"

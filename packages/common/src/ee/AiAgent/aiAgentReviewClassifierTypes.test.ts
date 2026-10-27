@@ -1,0 +1,723 @@
+import {
+    aiAgentJudgeProjectContextEntrySchema,
+    aiAgentReviewClassifierJudgeCallOutputSchema,
+    aiAgentReviewClassifierJudgeOutputSchema,
+    aiAgentReviewClassifierJudgeProjectContextCallSchema,
+    getAiAgentConfigSnapshotHash,
+    getAiAgentReviewItemFingerprint,
+    getAiAgentReviewItemFingerprintScope,
+    getVisibleAiAgentReviewRootCauses,
+    isHiddenAiAgentReviewRootCause,
+    persistedAiAgentJudgeProjectContextEntrySchema,
+    shouldReopenReviewItem,
+    type AiAgentConfigSnapshot,
+    type AiAgentReviewItemFingerprintInput,
+} from './aiAgentReviewClassifierTypes';
+
+const baseJudgeOutput = {
+    signal: 'implicit_correction' as const,
+    implicitSignalSources: ['next_user_correction' as const],
+    confidence: 'high' as const,
+    promotedToFinding: true,
+    promotionReason: 'Found a semantic-layer correction.',
+    matchedExistingItemKey: null,
+    primaryRootCause: 'semantic_layer' as const,
+    secondaryRootCauses: [],
+    subcategories: [],
+    fixTargets: [],
+    targetRefs: [],
+    agentConfigurationSettings: [],
+    ownerType: 'semantic_layer_owner' as const,
+    evidenceExcerpts: [],
+    recommendation: null,
+    reviewItem: { title: 'Fix metric', description: 'why' },
+    projectContextEntry: null,
+    skillProposal: null,
+};
+
+const baseInput: AiAgentReviewItemFingerprintInput = {
+    organizationUuid: 'org-1',
+    projectUuid: 'project-1',
+    agentUuid: 'agent-1',
+    primaryRootCause: 'semantic_layer',
+    subcategories: ['wrong_field_or_domain_term', 'missing_default_filter'],
+    fixTargets: ['semantic_yaml_patch'],
+    targetRefs: [
+        {
+            type: 'metric',
+            modelName: 'orders',
+            metricName: 'total_order_amount',
+        },
+    ],
+    agentConfigurationSettings: [],
+    capabilityKey: null,
+};
+
+describe('getAiAgentReviewItemFingerprint', () => {
+    it('is stable when unordered inputs are reordered', () => {
+        const reordered: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            subcategories: [
+                'missing_default_filter',
+                'wrong_field_or_domain_term',
+            ],
+            targetRefs: [...baseInput.targetRefs].reverse(),
+        };
+
+        expect(getAiAgentReviewItemFingerprint(reordered)).toEqual(
+            getAiAgentReviewItemFingerprint(baseInput),
+        );
+    });
+
+    it('changes when the actionable semantic target changes', () => {
+        const differentTarget: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'completed_order_count',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(differentTarget)).not.toEqual(
+            getAiAgentReviewItemFingerprint(baseInput),
+        );
+    });
+
+    it('scopes agent configuration findings to agent, not project', () => {
+        const agentConfigInput: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'agent_configuration',
+            projectUuid: 'project-a',
+            targetRefs: [{ type: 'agent_config', setting: 'data_access' }],
+            agentConfigurationSettings: ['data_access'],
+        };
+
+        expect(
+            getAiAgentReviewItemFingerprint({
+                ...agentConfigInput,
+                projectUuid: 'project-b',
+            }),
+        ).toEqual(getAiAgentReviewItemFingerprint(agentConfigInput));
+    });
+
+    it('requires project scope for semantic layer findings', () => {
+        expect(() =>
+            getAiAgentReviewItemFingerprintScope({
+                organizationUuid: 'org-1',
+                projectUuid: null,
+                agentUuid: 'agent-1',
+                primaryRootCause: 'semantic_layer',
+            }),
+        ).toThrow('projectUuid is required for semantic_layer fingerprints');
+    });
+
+    it('collapses runtime_reliability findings in one thread regardless of targetRefs or subcategories (Mode A)', () => {
+        const firstTurn: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'runtime_reliability',
+            threadUuid: 'thread-1',
+            subcategories: ['query_execution_failure'],
+            targetRefs: [
+                {
+                    type: 'explore',
+                    modelName: 'customers',
+                    exploreName: 'customers',
+                },
+            ],
+        };
+        const laterTurn: AiAgentReviewItemFingerprintInput = {
+            ...firstTurn,
+            subcategories: ['sql_approval_timeout'],
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'payments',
+                    metricName: 'total_revenue',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(laterTurn)).toEqual(
+            getAiAgentReviewItemFingerprint(firstTurn),
+        );
+    });
+
+    it('collapses semantic_layer findings on the same object across different threads, ignoring ref casing (Mode B)', () => {
+        const threadA: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-a',
+            subcategories: ['wrong_field_or_domain_term'],
+            fixTargets: ['semantic_yaml_patch'],
+            targetRefs: [
+                {
+                    type: 'dimension',
+                    modelName: 'fanouts_deals',
+                    dimensionName: 'region',
+                },
+            ],
+        };
+        const threadB: AiAgentReviewItemFingerprintInput = {
+            ...threadA,
+            threadUuid: 'thread-b',
+            subcategories: ['missing_default_filter'],
+            fixTargets: ['dbt_modeling_ticket'],
+            targetRefs: [
+                {
+                    type: 'dimension',
+                    modelName: 'Fanouts_Deals',
+                    dimensionName: 'Region',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(threadB)).toEqual(
+            getAiAgentReviewItemFingerprint(threadA),
+        );
+    });
+
+    it('collapses semantic_layer findings on the same field despite model-name and context-ref variance (Mode B)', () => {
+        const turnOne: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-1',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_order_amount',
+                },
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_completed_order_amount',
+                },
+                { type: 'explore', modelName: 'orders', exploreName: 'orders' },
+            ],
+        };
+        const turnTwo: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-2',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'country_orders',
+                    metricName: 'total_order_amount',
+                },
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_completed_order_amount',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(turnTwo)).toEqual(
+            getAiAgentReviewItemFingerprint(turnOne),
+        );
+    });
+
+    it('treats qualified and unqualified field ids as the same object (Mode B)', () => {
+        const qualified: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'orders_total_order_amount',
+                },
+            ],
+        };
+        const unqualified: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_order_amount',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(qualified)).toEqual(
+            getAiAgentReviewItemFingerprint(unqualified),
+        );
+    });
+
+    it('keeps runtime_reliability incidents in different threads distinct (Mode A)', () => {
+        const incident: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'runtime_reliability',
+            threadUuid: 'thread-1',
+        };
+
+        expect(
+            getAiAgentReviewItemFingerprint({
+                ...incident,
+                threadUuid: 'thread-2',
+            }),
+        ).not.toEqual(getAiAgentReviewItemFingerprint(incident));
+    });
+
+    it('never collides a Mode A incident with a Mode B object', () => {
+        const incident: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'runtime_reliability',
+            threadUuid: 'thread-1',
+        };
+        const object: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-1',
+        };
+
+        expect(getAiAgentReviewItemFingerprint(incident)).not.toEqual(
+            getAiAgentReviewItemFingerprint(object),
+        );
+    });
+});
+
+describe('shouldReopenReviewItem', () => {
+    it('reopens a resolved item when its finding recurs', () => {
+        expect(shouldReopenReviewItem('resolved', null)).toBe(true);
+    });
+
+    it('reopens a dismissed item unless it was dismissed as expected behavior', () => {
+        expect(shouldReopenReviewItem('dismissed', 'not_actionable')).toBe(
+            true,
+        );
+        expect(shouldReopenReviewItem('dismissed', 'low_confidence')).toBe(
+            true,
+        );
+        expect(shouldReopenReviewItem('dismissed', 'expected_behavior')).toBe(
+            false,
+        );
+    });
+
+    it('leaves non-terminal items untouched', () => {
+        expect(shouldReopenReviewItem('triage', null)).toBe(false);
+        expect(shouldReopenReviewItem('open', null)).toBe(false);
+        expect(shouldReopenReviewItem('in_progress', null)).toBe(false);
+    });
+});
+
+describe('hidden review root causes', () => {
+    it('hides product capability findings and nothing else', () => {
+        expect(isHiddenAiAgentReviewRootCause('product_capability')).toBe(true);
+        expect(isHiddenAiAgentReviewRootCause('semantic_layer')).toBe(false);
+        expect(isHiddenAiAgentReviewRootCause('ambiguous')).toBe(false);
+    });
+
+    it('treats an unclassified root cause as visible', () => {
+        expect(isHiddenAiAgentReviewRootCause(null)).toBe(false);
+    });
+
+    it('drops hidden root causes while keeping the given order', () => {
+        expect(
+            getVisibleAiAgentReviewRootCauses([
+                'semantic_layer',
+                'product_capability',
+                'runtime_reliability',
+            ]),
+        ).toEqual(['semantic_layer', 'runtime_reliability']);
+    });
+});
+
+describe('aiAgentJudgeProjectContextEntrySchema', () => {
+    test('accepts a create entry', () => {
+        const result = aiAgentJudgeProjectContextEntrySchema.safeParse({
+            op: 'create',
+            id: null,
+            kind: 'definition',
+            content: '"HR" = the high-risk diabetes cohort.',
+            terms: ['HR'],
+            objects: [],
+        });
+        expect(result.success).toBe(true);
+    });
+
+    test('accepts an update entry referencing an existing id', () => {
+        const result = aiAgentJudgeProjectContextEntrySchema.safeParse({
+            op: 'update',
+            id: 'hr-abbreviation',
+            kind: 'definition',
+            content: 'updated definition',
+            terms: ['HR'],
+            objects: [
+                { type: 'explore', name: 'patient_health_scores' },
+                {
+                    type: 'field',
+                    explore: 'patient_health_scores',
+                    fieldId: 'patient_health_scores_diabetes_risk_category',
+                },
+            ],
+        });
+        expect(result.success).toBe(true);
+    });
+
+    test('rejects legacy string object refs from new judge output', () => {
+        const result = aiAgentJudgeProjectContextEntrySchema.safeParse({
+            op: 'create',
+            id: null,
+            kind: 'context',
+            content: 'Use the payments explore.',
+            terms: [],
+            objects: ['payments'],
+        });
+        expect(result.success).toBe(false);
+    });
+
+    test('rejects an update entry without an id', () => {
+        const result = aiAgentJudgeProjectContextEntrySchema.safeParse({
+            op: 'update',
+            id: null,
+            kind: 'definition',
+            content: 'updated definition',
+            terms: ['HR'],
+            objects: [],
+        });
+        expect(result.success).toBe(false);
+    });
+
+    test('rejects an unknown kind', () => {
+        const result = aiAgentJudgeProjectContextEntrySchema.safeParse({
+            op: 'create',
+            id: null,
+            kind: 'nonsense',
+            content: 'x',
+            terms: [],
+            objects: [],
+        });
+        expect(result.success).toBe(false);
+    });
+});
+
+describe('aiAgentReviewClassifierJudgeCallOutputSchema', () => {
+    test('strips projectContextEntry — it is emitted via a separate call', () => {
+        const { projectContextEntry, ...callOutput } = baseJudgeOutput;
+        const result = aiAgentReviewClassifierJudgeCallOutputSchema.safeParse({
+            ...callOutput,
+            projectContextEntry: { anything: true },
+        });
+        expect(result.success).toBe(true);
+        expect(result.success && 'projectContextEntry' in result.data).toBe(
+            false,
+        );
+    });
+
+    test('accepts a judge output without projectContextEntry', () => {
+        const { projectContextEntry, ...callOutput } = baseJudgeOutput;
+        expect(
+            aiAgentReviewClassifierJudgeCallOutputSchema.safeParse(callOutput)
+                .success,
+        ).toBe(true);
+    });
+
+    test('applies the promotion refinement', () => {
+        const { projectContextEntry, ...callOutput } = baseJudgeOutput;
+        expect(
+            aiAgentReviewClassifierJudgeCallOutputSchema.safeParse({
+                ...callOutput,
+                promotedToFinding: true,
+                primaryRootCause: 'not_a_failure',
+            }).success,
+        ).toBe(false);
+    });
+});
+
+describe('aiAgentReviewClassifierJudgeProjectContextCallSchema', () => {
+    test('accepts a typed entry and null', () => {
+        expect(
+            aiAgentReviewClassifierJudgeProjectContextCallSchema.safeParse({
+                projectContextEntry: {
+                    op: 'create',
+                    id: null,
+                    kind: 'definition',
+                    content: '"FC" = fulfillment center.',
+                    terms: ['FC'],
+                    objects: [{ type: 'explore', name: 'orders' }],
+                },
+            }).success,
+        ).toBe(true);
+        expect(
+            aiAgentReviewClassifierJudgeProjectContextCallSchema.safeParse({
+                projectContextEntry: null,
+                skillProposal: null,
+            }).success,
+        ).toBe(true);
+    });
+});
+
+describe('persistedAiAgentJudgeProjectContextEntrySchema', () => {
+    test('drops legacy string object refs from persisted entries', () => {
+        const result = persistedAiAgentJudgeProjectContextEntrySchema.safeParse(
+            {
+                op: 'create',
+                id: null,
+                kind: 'context',
+                content: 'Use the payments explore.',
+                terms: [],
+                objects: ['payments'],
+            },
+        );
+        expect(result.success).toBe(true);
+        expect(result.success && result.data.objects).toEqual([]);
+    });
+
+    test('drops the whole objects array when refs are mixed', () => {
+        const result = persistedAiAgentJudgeProjectContextEntrySchema.safeParse(
+            {
+                op: 'create',
+                id: null,
+                kind: 'context',
+                content: 'Use the payments explore.',
+                terms: [],
+                objects: [{ type: 'explore', name: 'payments' }, 'orders'],
+            },
+        );
+        expect(result.success).toBe(true);
+        expect(result.success && result.data.objects).toEqual([]);
+    });
+
+    test('preserves valid typed object refs', () => {
+        const result = persistedAiAgentJudgeProjectContextEntrySchema.safeParse(
+            {
+                op: 'update',
+                id: 'payments-routing',
+                kind: 'context',
+                content: 'Use the payments explore.',
+                terms: [],
+                objects: [{ type: 'explore', name: 'payments' }],
+            },
+        );
+        expect(result.success).toBe(true);
+        expect(result.success && result.data.objects).toEqual([
+            { type: 'explore', name: 'payments' },
+        ]);
+    });
+
+    test('still rejects entries invalid beyond legacy objects', () => {
+        const result = persistedAiAgentJudgeProjectContextEntrySchema.safeParse(
+            {
+                op: 'update',
+                id: null,
+                kind: 'context',
+                content: 'x',
+                terms: [],
+                objects: ['payments'],
+            },
+        );
+        expect(result.success).toBe(false);
+    });
+});
+
+describe('aiAgentReviewClassifierJudgeOutputSchema', () => {
+    it('accepts a promoted finding with an actionable root cause', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse(baseJudgeOutput)
+                .success,
+        ).toBe(true);
+    });
+
+    it('rejects a promoted finding with primaryRootCause not_a_failure', () => {
+        const result = aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+            ...baseJudgeOutput,
+            promotedToFinding: true,
+            primaryRootCause: 'not_a_failure',
+        });
+        expect(result.success).toBe(false);
+    });
+
+    it('accepts not_a_failure when not promoted', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                promotedToFinding: false,
+                primaryRootCause: 'not_a_failure',
+            }).success,
+        ).toBe(true);
+    });
+
+    it.each([
+        'normal_refinement',
+        'output_shape_correction',
+        'new_question',
+        'acceptance_or_continuation',
+    ] as const)('rejects a promoted finding with signal %s', (signal) => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                signal,
+            }).success,
+        ).toBe(false);
+    });
+
+    it('accepts a non-failure signal when not promoted', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                signal: 'acceptance_or_continuation',
+                promotedToFinding: false,
+                primaryRootCause: 'not_a_failure',
+            }).success,
+        ).toBe(true);
+    });
+
+    it('accepts a promoted standing instruction that proposes a skill', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                signal: 'standing_instruction',
+                implicitSignalSources: ['standing_instruction'],
+                primaryRootCause: 'agent_configuration',
+                agentConfigurationSettings: ['skills'],
+                fixTargets: ['agent_configuration_change'],
+                recommendation: {
+                    actionType: 'create_skill',
+                    title: 'Create a weekly revenue skill',
+                    rationale: 'The same steer recurs across threads.',
+                    targetRefs: [],
+                },
+                skillProposal: {
+                    name: 'weekly-revenue-table',
+                    description: 'Use when the user asks for weekly revenue.',
+                    instructions: '## Steps\n1. Query weekly revenue.',
+                    arguments: [],
+                    argumentHint: null,
+                },
+            }).success,
+        ).toBe(true);
+    });
+
+    it('rejects a skill proposal with empty fields', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                skillProposal: { name: '', description: '', instructions: '' },
+            }).success,
+        ).toBe(false);
+    });
+
+    it('rejects a promoted finding whose recommendation is no_action', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                recommendation: {
+                    actionType: 'no_action',
+                    title: 'Nothing to do',
+                    rationale: 'n/a',
+                    targetRefs: [],
+                },
+            }).success,
+        ).toBe(false);
+    });
+
+    it('accepts a no_action recommendation when not promoted', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                promotedToFinding: false,
+                primaryRootCause: 'not_a_failure',
+                signal: 'new_question',
+                recommendation: {
+                    actionType: 'no_action',
+                    title: 'Nothing to do',
+                    rationale: 'n/a',
+                    targetRefs: [],
+                },
+            }).success,
+        ).toBe(true);
+    });
+
+    it('accepts a matchedExistingItemKey pointing at a candidate', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                matchedExistingItemKey: 'item_3',
+            }).success,
+        ).toBe(true);
+    });
+
+    it('accepts a null matchedExistingItemKey', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                matchedExistingItemKey: null,
+            }).success,
+        ).toBe(true);
+    });
+
+    it('rejects an output missing matchedExistingItemKey', () => {
+        const withoutKey: Record<string, unknown> = { ...baseJudgeOutput };
+        delete withoutKey.matchedExistingItemKey;
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse(withoutKey)
+                .success,
+        ).toBe(false);
+    });
+});
+
+describe('getAiAgentConfigSnapshotHash', () => {
+    const baseSnapshot: AiAgentConfigSnapshot = {
+        capturedAt: '2026-05-26T10:00:00.000Z',
+        agentUpdatedAt: '2026-05-26T09:00:00.000Z',
+        settings: ['instructions', 'knowledge_documents'],
+        availableCapabilities: ['semantic_query', 'chart_generation'],
+        instructionHash: 'instruction-hash',
+        instructionSummary: 'Use finance definitions.',
+        knowledgeDocuments: [
+            {
+                uuid: 'doc-1',
+                name: 'Revenue definitions',
+                updatedAt: '2026-05-25T10:00:00.000Z',
+                summary: {
+                    description: 'Revenue definitions',
+                    definedTerms: ['revenue', 'arr'],
+                    relatedExploreNames: ['orders'],
+                    useWhen: 'Revenue questions',
+                    relevance: 'high',
+                    warning: null,
+                },
+            },
+        ],
+        mcpServers: [
+            {
+                name: 'Linear',
+                enabledToolNames: ['list_issues', 'create_issue'],
+            },
+        ],
+        skills: [
+            {
+                name: 'weekly-revenue-table',
+                description: 'Use when the user asks for weekly revenue.',
+            },
+        ],
+    };
+
+    it('is stable when unordered snapshot arrays are reordered', () => {
+        expect(
+            getAiAgentConfigSnapshotHash({
+                ...baseSnapshot,
+                settings: [...baseSnapshot.settings].reverse(),
+                availableCapabilities: [
+                    ...baseSnapshot.availableCapabilities,
+                ].reverse(),
+            }),
+        ).toEqual(getAiAgentConfigSnapshotHash(baseSnapshot));
+    });
+
+    it('changes when instruction content hash changes', () => {
+        expect(
+            getAiAgentConfigSnapshotHash({
+                ...baseSnapshot,
+                instructionHash: 'different-instruction-hash',
+            }),
+        ).not.toEqual(getAiAgentConfigSnapshotHash(baseSnapshot));
+    });
+});

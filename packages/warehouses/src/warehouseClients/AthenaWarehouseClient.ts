@@ -3,6 +3,7 @@ import {
     GetQueryExecutionCommand,
     GetQueryResultsCommand,
     GetTableMetadataCommand,
+    ListDatabasesCommand,
     ListTableMetadataCommand,
     QueryExecutionState,
     StartQueryExecutionCommand,
@@ -11,17 +12,26 @@ import { fromTemporaryCredentials } from '@aws-sdk/credential-providers';
 import {
     AnyType,
     AthenaAuthenticationType,
+    AWS_WEB_IDENTITY_NOT_ENABLED_MESSAGE,
     CreateAthenaCredentials,
     DimensionType,
     getErrorMessage,
+    getWarehouseTableType,
     Metric,
     MetricType,
+    setCatalogTimestampDomain,
     SupportedDbtAdapter,
     TimeIntervalUnit,
+    WAREHOUSE_LISTED_DATABASES_LIMIT,
     WarehouseConnectionError,
+    WarehouseDatabaseListing,
+    WarehouseListedDatabase,
     WarehouseQueryError,
     WarehouseResults,
+    WarehouseTables,
     WarehouseTypes,
+    type ResultNumericKind,
+    type TimestampDomain,
 } from '@lightdash/common';
 import { WarehouseCatalog } from '../types';
 import {
@@ -32,6 +42,9 @@ import { normalizeUnicode } from '../utils/sql';
 import WarehouseBaseClient from './WarehouseBaseClient';
 import WarehouseBaseSqlBuilder from './WarehouseBaseSqlBuilder';
 
+// Glue databases listed in parallel when listing every table in the catalog
+const ALL_TABLES_DATABASE_CONCURRENCY = 5;
+
 export enum AthenaTypes {
     BOOLEAN = 'boolean',
     TINYINT = 'tinyint',
@@ -39,6 +52,7 @@ export enum AthenaTypes {
     INTEGER = 'integer',
     BIGINT = 'bigint',
     REAL = 'real',
+    FLOAT = 'float',
     DOUBLE = 'double',
     DECIMAL = 'decimal',
     VARCHAR = 'varchar',
@@ -57,7 +71,44 @@ export enum AthenaTypes {
     UUID = 'uuid',
 }
 
-const convertDataTypeToDimensionType = (
+// Athena follows Trino semantics: bare timestamp is naive, with time zone is aware
+export const getAthenaTimestampDomain = (
+    type: AthenaTypes | string,
+): TimestampDomain | undefined => {
+    switch (type.toLowerCase().replace(/\(\d+(,\s*\d+)?\)/, '')) {
+        case AthenaTypes.TIMESTAMP:
+            return 'naive';
+        case AthenaTypes.TIMESTAMP_TZ:
+            return 'aware';
+        default:
+            return undefined;
+    }
+};
+
+// Athena reports a decimal's scale beside its type in ColumnInfo
+export const getAthenaNumericKind = (
+    type: AthenaTypes | string,
+    scale: number | undefined,
+): ResultNumericKind | null => {
+    const normalizedType = type.toLowerCase().replace(/\(\d+(,\s*\d+)?\)/, '');
+    switch (normalizedType) {
+        case AthenaTypes.TINYINT:
+        case AthenaTypes.SMALLINT:
+        case AthenaTypes.INTEGER:
+        case AthenaTypes.BIGINT:
+            return { kind: 'integer' };
+        case AthenaTypes.REAL:
+        case AthenaTypes.FLOAT:
+        case AthenaTypes.DOUBLE:
+            return { kind: 'float' };
+        case AthenaTypes.DECIMAL:
+            return scale === undefined ? null : { kind: 'decimal', scale };
+        default:
+            return null;
+    }
+};
+
+export const convertDataTypeToDimensionType = (
     type: AthenaTypes | string,
 ): DimensionType => {
     const normalizedType = type.toLowerCase().replace(/\(\d+(,\s*\d+)?\)/, '');
@@ -69,6 +120,7 @@ const convertDataTypeToDimensionType = (
         case AthenaTypes.INTEGER:
         case AthenaTypes.BIGINT:
         case AthenaTypes.REAL:
+        case AthenaTypes.FLOAT:
         case AthenaTypes.DOUBLE:
         case AthenaTypes.DECIMAL:
             return DimensionType.NUMBER;
@@ -173,10 +225,12 @@ const translateAthenaError = (
         (awsErrorName !== undefined &&
             AWS_AUTH_ERROR_NAMES.has(awsErrorName)) ||
         httpStatusCode === 401;
-    if (isAuthError || options.defaultErrorClass === 'connection') {
-        return new WarehouseConnectionError(fullMessage);
-    }
-    return new WarehouseQueryError(fullMessage);
+    const translatedError =
+        isAuthError || options.defaultErrorClass === 'connection'
+            ? new WarehouseConnectionError(fullMessage)
+            : new WarehouseQueryError(fullMessage);
+    translatedError.cause = error;
+    return translatedError;
 };
 
 export class AthenaSqlBuilder extends WarehouseBaseSqlBuilder {
@@ -184,6 +238,11 @@ export class AthenaSqlBuilder extends WarehouseBaseSqlBuilder {
 
     getAdapterType(): SupportedDbtAdapter {
         return SupportedDbtAdapter.ATHENA;
+    }
+
+    // Athena never materializes a CTE — every reference re-runs its full lineage.
+    supportsCteMaterialization(): boolean {
+        return false;
     }
 
     getEscapeStringQuoteChar(): string {
@@ -246,14 +305,29 @@ export class AthenaSqlBuilder extends WarehouseBaseSqlBuilder {
     }
 }
 
+type AwsCredentialProvider = ReturnType<typeof fromTemporaryCredentials>;
+
+export type AthenaWarehouseClientOptions = {
+    agentSession?: boolean;
+    // AWS credentials for web identity auth, resolved by the server.
+    awsCredentials?: AwsCredentialProvider;
+};
+
 const POLL_INTERVAL_MS = 500;
 const MAX_POLL_ATTEMPTS = 1200; // 10 minutes max wait
 
 export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCredentials> {
     client: AthenaClient;
 
-    constructor(credentials: CreateAthenaCredentials) {
-        super(credentials, new AthenaSqlBuilder(credentials.startOfWeek));
+    constructor(
+        credentials: CreateAthenaCredentials,
+        options?: AthenaWarehouseClientOptions,
+    ) {
+        super(
+            credentials,
+            new AthenaSqlBuilder(credentials.startOfWeek),
+            options,
+        );
 
         try {
             const authenticationType =
@@ -282,11 +356,24 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
                 clientConfig.credentials = {
                     accessKeyId: credentials.accessKeyId!,
                     secretAccessKey: credentials.secretAccessKey!,
+                    sessionToken: credentials.sessionToken || undefined,
                 };
             }
 
-            // Wrap with assume role if configured
-            if (credentials.assumeRoleArn) {
+            if (authenticationType === AthenaAuthenticationType.WEB_IDENTITY) {
+                // The server assumes the role with its own identity, so it is
+                // not wrapped with a second assume role below. Without server
+                // credentials, fail when they're first needed, so a client
+                // used only for SQL generation still works.
+                clientConfig.credentials =
+                    options?.awsCredentials ??
+                    (async () => {
+                        throw new WarehouseConnectionError(
+                            AWS_WEB_IDENTITY_NOT_ENABLED_MESSAGE,
+                        );
+                    });
+            } else if (credentials.assumeRoleArn) {
+                // Wrap with assume role if configured
                 clientConfig.credentials = fromTemporaryCredentials({
                     masterCredentials: clientConfig.credentials,
                     params: {
@@ -375,6 +462,7 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
             case AthenaTypes.BIGINT:
                 return parseInt(value, 10);
             case AthenaTypes.REAL:
+            case AthenaTypes.FLOAT:
             case AthenaTypes.DOUBLE:
             case AthenaTypes.DECIMAL:
                 return parseFloat(value);
@@ -431,7 +519,7 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
             // Stream results using pagination
             let nextToken: string | undefined;
             let isFirstBatch = true;
-            let fields: Record<string, { type: DimensionType }> = {};
+            let fields: WarehouseResults['fields'] = {};
 
             do {
                 // eslint-disable-next-line no-await-in-loop
@@ -449,18 +537,24 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
 
                 // Parse fields from metadata (only on first batch)
                 if (isFirstBatch && columnInfo) {
-                    fields = columnInfo.reduce<
-                        Record<string, { type: DimensionType }>
-                    >((acc, col) => {
-                        if (col.Name) {
-                            acc[normalizeColumnName(col.Name)] = {
-                                type: convertDataTypeToDimensionType(
+                    fields = columnInfo.reduce<WarehouseResults['fields']>(
+                        (acc, col) => {
+                            if (col.Name) {
+                                const numericKind = getAthenaNumericKind(
                                     col.Type || 'varchar',
-                                ),
-                            };
-                        }
-                        return acc;
-                    }, {});
+                                    col.Scale ?? undefined,
+                                );
+                                acc[normalizeColumnName(col.Name)] = {
+                                    type: convertDataTypeToDimensionType(
+                                        col.Type || 'varchar',
+                                    ),
+                                    ...(numericKind ? { numericKind } : {}),
+                                };
+                            }
+                            return acc;
+                        },
+                        {},
+                    );
                 }
 
                 // Skip header row on first batch
@@ -523,9 +617,19 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
 
                     return { database, schema, table, columns };
                 } catch (e: unknown) {
-                    // Table not found - return undefined
+                    // Table not found, or not readable with these credentials:
+                    // compile the model without warehouse types rather than
+                    // failing the whole project.
                     const error = e as { name?: string };
                     if (error.name === 'MetadataException') {
+                        return undefined;
+                    }
+                    if (error.name === 'AccessDeniedException') {
+                        console.warn(
+                            `Skipping table metadata for '${database}.${schema}.${table}': ${getErrorMessage(
+                                e,
+                            )}`,
+                        );
                         return undefined;
                     }
                     throw translateAthenaError(e, {
@@ -541,26 +645,118 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
                 const { database, schema, table, columns } = result;
                 acc[database] = acc[database] || {};
                 acc[database][schema] = acc[database][schema] || {};
-                acc[database][schema][table] = columns.reduce<
-                    Record<string, DimensionType>
-                >(
-                    (colAcc, { name, type }) => ({
-                        ...colAcc,
-                        [normalizeColumnName(name)]:
-                            convertDataTypeToDimensionType(type),
-                    }),
-                    {},
-                );
+                acc[database][schema][table] = {};
+                columns.forEach(({ name, type }) => {
+                    acc[database][schema][table][normalizeColumnName(name)] =
+                        convertDataTypeToDimensionType(type);
+                    setCatalogTimestampDomain(
+                        acc,
+                        database,
+                        schema,
+                        table,
+                        normalizeColumnName(name),
+                        getAthenaTimestampDomain(type),
+                    );
+                });
             }
             return acc;
         }, {});
     }
 
-    async getAllTables(): Promise<
-        { database: string; schema: string; table: string }[]
-    > {
-        const tables: { database: string; schema: string; table: string }[] =
-            [];
+    async getAllTables(): Promise<WarehouseTables> {
+        const configuredDatabase = this.toListedDatabase(
+            this.credentials.schema,
+        );
+        // Credentials scoped to one Glue database often cannot list the catalog
+        const databases = await this.listDatabases().then(
+            (listing) => listing.databases,
+            () => [configuredDatabase],
+        );
+
+        const tables: WarehouseTables = [];
+        for (
+            let i = 0;
+            i < databases.length;
+            i += ALL_TABLES_DATABASE_CONCURRENCY
+        ) {
+            // eslint-disable-next-line no-await-in-loop
+            const batch = await Promise.all(
+                databases
+                    .slice(i, i + ALL_TABLES_DATABASE_CONCURRENCY)
+                    .map((database) =>
+                        this.getTablesForDatabase(database).catch(
+                            (e: unknown) => {
+                                // Only the configured schema must be listable
+                                if (database.isDefault) throw e;
+                                return [];
+                            },
+                        ),
+                    ),
+            );
+            tables.push(...batch.flat());
+        }
+
+        return tables;
+    }
+
+    private toListedDatabase(name: string): WarehouseListedDatabase {
+        return {
+            name,
+            database: this.credentials.database,
+            schema: name,
+            isDefault: name === this.credentials.schema,
+        };
+    }
+
+    async listDatabases(): Promise<WarehouseDatabaseListing> {
+        const databaseNames = new Set([this.credentials.schema]);
+
+        try {
+            let nextToken: string | undefined;
+
+            do {
+                // eslint-disable-next-line no-await-in-loop
+                const response = await this.client.send(
+                    new ListDatabasesCommand({
+                        CatalogName: this.credentials.database,
+                        MaxResults: 50,
+                        NextToken: nextToken,
+                    }),
+                );
+
+                response.DatabaseList?.forEach((database) => {
+                    if (database.Name) {
+                        databaseNames.add(database.Name);
+                    }
+                });
+                nextToken = response.NextToken;
+            } while (
+                nextToken &&
+                databaseNames.size <= WAREHOUSE_LISTED_DATABASES_LIMIT
+            );
+        } catch (e: unknown) {
+            throw translateAthenaError(e, {
+                contextPrefix: `Failed to list databases in catalog '${this.credentials.database}'.`,
+                defaultErrorClass: 'connection',
+            });
+        }
+
+        const databases = [...databaseNames]
+            .slice(0, WAREHOUSE_LISTED_DATABASES_LIMIT)
+            .map((database) => this.toListedDatabase(database));
+
+        return {
+            databases,
+            truncated: databaseNames.size > WAREHOUSE_LISTED_DATABASES_LIMIT,
+            limit: WAREHOUSE_LISTED_DATABASES_LIMIT,
+        };
+    }
+
+    async getTablesForDatabase(
+        listedDatabase: WarehouseListedDatabase,
+    ): Promise<WarehouseTables> {
+        const tables: WarehouseTables = [];
+        const schema = listedDatabase.schema ?? listedDatabase.name;
 
         try {
             let nextToken: string | undefined;
@@ -569,8 +765,8 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
                 // eslint-disable-next-line no-await-in-loop
                 const response = await this.client.send(
                     new ListTableMetadataCommand({
-                        CatalogName: this.credentials.database,
-                        DatabaseName: this.credentials.schema,
+                        CatalogName: listedDatabase.database,
+                        DatabaseName: schema,
                         NextToken: nextToken,
                         MaxResults: 50,
                     }),
@@ -579,9 +775,12 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
                 response.TableMetadataList?.forEach((tableMeta) => {
                     if (tableMeta.Name) {
                         tables.push({
-                            database: this.credentials.database,
-                            schema: this.credentials.schema,
+                            database: listedDatabase.database,
+                            schema,
                             table: tableMeta.Name,
+                            tableType: getWarehouseTableType(
+                                tableMeta.TableType,
+                            ),
                         });
                     }
                 });
@@ -590,7 +789,7 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
             } while (nextToken);
         } catch (e: unknown) {
             throw translateAthenaError(e, {
-                contextPrefix: `Failed to list tables in '${this.credentials.database}.${this.credentials.schema}'.`,
+                contextPrefix: `Failed to list tables in '${listedDatabase.database}.${schema}'.`,
                 defaultErrorClass: 'connection',
             });
         }
@@ -617,23 +816,22 @@ export class AthenaWarehouseClient extends WarehouseBaseClient<CreateAthenaCrede
 
             const columns = response.TableMetadata?.Columns || [];
             const result: WarehouseCatalog = {
-                [db]: {
-                    [sch]: {
-                        [tableName]: columns.reduce<
-                            Record<string, DimensionType>
-                        >(
-                            (acc, col) => ({
-                                ...acc,
-                                [normalizeColumnName(col.Name || '')]:
-                                    convertDataTypeToDimensionType(
-                                        col.Type || 'varchar',
-                                    ),
-                            }),
-                            {},
-                        ),
-                    },
-                },
+                [db]: { [sch]: { [tableName]: {} } },
             };
+            columns.forEach((col) => {
+                const columnName = normalizeColumnName(col.Name || '');
+                const rawType = col.Type || 'varchar';
+                result[db][sch][tableName][columnName] =
+                    convertDataTypeToDimensionType(rawType);
+                setCatalogTimestampDomain(
+                    result,
+                    db,
+                    sch,
+                    tableName,
+                    columnName,
+                    getAthenaTimestampDomain(rawType),
+                );
+            });
 
             return result;
         } catch (e: unknown) {

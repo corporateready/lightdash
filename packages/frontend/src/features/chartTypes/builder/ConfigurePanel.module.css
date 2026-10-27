@@ -1,0 +1,59 @@
+.panel {
+    width: 300px;
+    max-width: 100%;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--mantine-color-body);
+    border-left: 1px solid var(--mantine-color-default-border);
+    /* Follows the card's right corners it sits in. */
+    border-radius: 0 var(--mantine-radius-md) var(--mantine-radius-md) 0;
+}
+
+/* Mid version switch these options still describe the version being left, so
+   they stay readable but go inert until the previewed one's arrive. */
+.panel[data-stale='true'] {
+    opacity: 0.5;
+}
+
+/* Below the source the pill sits on the hairline, so the version's options
+   read as a section of their own. */
+.generatedDivider {
+    margin: var(--mantine-spacing-sm) 0;
+}
+
+.generatedDivider .generatedChip {
+    margin: 0;
+}
+
+.generatedChip {
+    align-self: flex-start;
+    margin: var(--mantine-spacing-sm);
+    padding: var(--mantine-spacing-xxs) 10px;
+    border-radius: var(--mantine-radius-xl);
+    background: var(--mantine-color-ldGray-0);
+    border: 1px solid var(--mantine-color-default-border);
+    color: var(--mantine-color-dimmed);
+    font-size: var(--mantine-font-size-xs);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.tabs {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.tabsList {
+    --overflow-tabs-fade: var(--mantine-color-body);
+    padding-inline: var(--mantine-spacing-sm);
+}
+
+.tabPanel {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}

@@ -1,5 +1,5 @@
 import { ProjectType, type Explore } from '@lightdash/common';
-import { Button, Center, Loader, Modal, Stack, Text } from '@mantine-8/core';
+import { Button, Center, Loader, Modal, Stack, Text } from '@mantine/core';
 import { IconAlertCircle } from '@tabler/icons-react';
 import {
     lazy,
@@ -84,12 +84,15 @@ export const EditVirtualViewModal: FC<Props> = ({
             <MantineModal
                 opened={opened}
                 onClose={onClose}
+                role="alertdialog"
                 title="You have unsaved changes"
                 icon={IconAlertCircle}
                 description="Are you sure you want to leave this page? Changes you've made to your query will not be saved."
                 actions={
                     <Button
                         color="red"
+                        data-tour-anchor="virtual-view-discard"
+                        data-tour-hint="Discard and continue"
                         onClick={() => {
                             startTransition(() => {
                                 handleClearQuery();
@@ -116,7 +119,7 @@ export const EditVirtualViewModal: FC<Props> = ({
             closeOnClickOutside={false}
         >
             <Modal.Overlay />
-            <Modal.Content>
+            <Modal.Content data-tour-anchor="virtual-view-editor">
                 <Modal.Body p={0}>
                     <Suspense
                         fallback={

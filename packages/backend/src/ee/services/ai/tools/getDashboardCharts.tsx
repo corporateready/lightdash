@@ -1,13 +1,13 @@
 import {
-    DashboardSearchResult,
-    toolGetDashboardChartsArgsSchema,
-    toolGetDashboardChartsOutputSchema,
+    DashboardChartSummary,
+    getDashboardChartsToolDefinition,
+    ToolGetDashboardChartsStructuredContent,
 } from '@lightdash/common';
 import { tool } from 'ai';
 import moment from 'moment';
 import type { GetDashboardChartsFn } from '../types/aiAgentDependencies';
 import { toModelOutput } from '../utils/toModelOutput';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
 import { xmlBuilder } from '../xmlBuilder';
 
 type Dependencies = {
@@ -16,22 +16,60 @@ type Dependencies = {
     pageSize: number;
 };
 
-const renderChart = (chart: DashboardSearchResult['charts'][number]) => (
+const toolDefinition = getDashboardChartsToolDefinition.for('agent');
+
+type DashboardChart = ToolGetDashboardChartsStructuredContent['charts'][number];
+
+const toDashboardChart = (chart: DashboardChartSummary): DashboardChart => ({
+    uuid: chart.uuid,
+    name: chart.name,
+    description: chart.description ?? null,
+    chartType: chart.chartType,
+    viewsCount: chart.viewsCount,
+    exploreName: chart.exploreName,
+    verification: chart.verification
+        ? {
+              verifiedBy: `${chart.verification.verifiedBy.firstName} ${chart.verification.verifiedBy.lastName}`,
+              verifiedAt: moment(chart.verification.verifiedAt).toISOString(),
+              verifiedAgo: moment(chart.verification.verifiedAt).fromNow(),
+          }
+        : null,
+});
+
+const renderChart = (chart: DashboardChart) => (
     <chart
         chartUuid={chart.uuid}
         chartType={chart.chartType}
         viewsCount={chart.viewsCount}
+        exploreName={chart.exploreName}
     >
         <name>{chart.name}</name>
         {chart.description && <description>{chart.description}</description>}
         {chart.verification && (
             <verified
-                by={`${chart.verification.verifiedBy.firstName} ${chart.verification.verifiedBy.lastName}`}
+                by={chart.verification.verifiedBy}
                 at={moment(chart.verification.verifiedAt).fromNow()}
+                iso={moment(chart.verification.verifiedAt).toISOString()}
             />
         )}
     </chart>
 );
+
+const renderDashboardCharts = (
+    content: ToolGetDashboardChartsStructuredContent,
+) =>
+    (
+        <dashboardCharts
+            dashboardUuid={content.dashboardUuid}
+            dashboardName={content.dashboardName}
+            page={content.page}
+            pageSize={content.pageSize}
+            totalPageCount={content.totalPageCount}
+            totalResults={content.totalResults}
+        >
+            {content.charts.map((chart) => renderChart(chart))}
+        </dashboardCharts>
+    ).toString();
 
 export const getGetDashboardCharts = ({
     getDashboardCharts,
@@ -39,9 +77,7 @@ export const getGetDashboardCharts = ({
     pageSize,
 }: Dependencies) =>
     tool({
-        description: toolGetDashboardChartsArgsSchema.description,
-        inputSchema: toolGetDashboardChartsArgsSchema,
-        outputSchema: toolGetDashboardChartsOutputSchema,
+        ...toolDefinition,
         execute: async (args) => {
             try {
                 const page = args.page ?? 1;
@@ -58,33 +94,29 @@ export const getGetDashboardCharts = ({
                         Number(a.verification !== null),
                 );
 
+                const structuredContent: ToolGetDashboardChartsStructuredContent =
+                    {
+                        dashboardUuid: args.dashboardUuid,
+                        dashboardName,
+                        page: pagination.page,
+                        pageSize: pagination.pageSize,
+                        totalPageCount: pagination.totalPageCount,
+                        totalResults: pagination.totalResults,
+                        charts: sortedCharts.map(toDashboardChart),
+                    };
+
                 return {
-                    result: (
-                        <dashboardCharts
-                            dashboardUuid={args.dashboardUuid}
-                            dashboardName={dashboardName}
-                            page={pagination.page}
-                            pageSize={pagination.pageSize}
-                            totalPageCount={pagination.totalPageCount}
-                            totalResults={pagination.totalResults}
-                        >
-                            {sortedCharts.map((chart) => renderChart(chart))}
-                        </dashboardCharts>
-                    ).toString(),
+                    result: renderDashboardCharts(structuredContent),
                     metadata: {
                         status: 'success',
                     },
+                    structuredContent,
                 };
             } catch (error) {
-                return {
-                    result: toolErrorHandler(
-                        error,
-                        `Error getting charts for dashboard: ${args.dashboardUuid}`,
-                    ),
-                    metadata: {
-                        status: 'error',
-                    },
-                };
+                return toolErrorOutput(
+                    error,
+                    `Error getting charts for dashboard: ${args.dashboardUuid}`,
+                );
             }
         },
         toModelOutput: ({ output }) => toModelOutput(output),

@@ -18,11 +18,9 @@ let mockGetResultsPage: Mock<
     ) => Promise<ApiGetAsyncQueryResults>
 >;
 
-vi.mock('../api', () => ({
-    lightdashApi: vi.fn(),
-}));
+vi.mock('../api');
 
-import { lightdashApi } from '../api';
+import { sharedLightdashApi } from '../api';
 
 vi.mock('./useQueryError', () => ({
     default: () => vi.fn(),
@@ -70,6 +68,7 @@ function makeReadyPage(
                 resultsPageExecutionMs: 50,
                 queueTimeMs: null,
             },
+            preAggregate: null,
         },
         pivotDetails: null,
         totalResults: opts?.totalResults ?? rowCount,
@@ -79,7 +78,7 @@ function makeReadyPage(
 describe('useInfiniteQueryResults', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mockGetResultsPage = lightdashApi as unknown as Mock;
+        mockGetResultsPage = sharedLightdashApi as unknown as Mock;
     });
 
     it('does not duplicate pages when React Query re-delivers the same READY result', async () => {
@@ -158,6 +157,114 @@ describe('useInfiniteQueryResults', () => {
         // UI renders 'Error running query' when the message is empty, masking
         // the real failure. See PROD-7011.
         expect(result.current.error?.error?.message).toBeTruthy();
+    });
+
+    it('surfaces expired Redshift IAM async query failures as token errors', async () => {
+        const errorResponse: ApiGetAsyncQueryResults = {
+            queryUuid: 'q1',
+            status: QueryHistoryStatus.ERROR,
+            error: 'Failed to mint Redshift IAM credentials: The security token included in the request is expired',
+            erroredAt: new Date(),
+        };
+        mockGetResultsPage.mockResolvedValue(errorResponse);
+
+        const { result } = renderHook(
+            () => useInfiniteQueryResults('p1', 'q1'),
+            { wrapper: createWrapper() },
+        );
+
+        await waitFor(() => {
+            expect(result.current.error).not.toBeNull();
+        });
+
+        expect(result.current.error?.error?.name).toBe('RedshiftIamTokenError');
+        expect(result.current.error?.error?.statusCode).toBe(401);
+    });
+
+    it('surfaces friendly Redshift IAM expiry messages as token errors', async () => {
+        const errorResponse: ApiGetAsyncQueryResults = {
+            queryUuid: 'q1',
+            status: QueryHistoryStatus.ERROR,
+            error: 'Your Redshift IAM AWS session has expired. Generate new AWS credentials and log in to Redshift again.',
+            erroredAt: new Date(),
+        };
+        mockGetResultsPage.mockResolvedValue(errorResponse);
+
+        const { result } = renderHook(
+            () => useInfiniteQueryResults('p1', 'q1'),
+            { wrapper: createWrapper() },
+        );
+
+        await waitFor(() => {
+            expect(result.current.error).not.toBeNull();
+        });
+
+        expect(result.current.error?.error?.name).toBe('RedshiftIamTokenError');
+    });
+
+    it('surfaces a rejected BigQuery refresh token as a token error', async () => {
+        const errorResponse: ApiGetAsyncQueryResults = {
+            queryUuid: 'q1',
+            status: QueryHistoryStatus.ERROR,
+            error: 'Google rejected the BigQuery refresh token (invalid_grant: Token has been expired or revoked.; invalid_rapt). Reconnect your BigQuery account in personal settings.',
+            erroredAt: new Date(),
+        };
+        mockGetResultsPage.mockResolvedValue(errorResponse);
+
+        const { result } = renderHook(
+            () => useInfiniteQueryResults('p1', 'q1'),
+            { wrapper: createWrapper() },
+        );
+
+        await waitFor(() => {
+            expect(result.current.error).not.toBeNull();
+        });
+
+        expect(result.current.error?.error?.name).toBe('BigqueryTokenError');
+        expect(result.current.error?.error?.statusCode).toBe(401);
+    });
+
+    it('leaves a bare invalid_grant message as a generic error', async () => {
+        const errorResponse: ApiGetAsyncQueryResults = {
+            queryUuid: 'q1',
+            status: QueryHistoryStatus.ERROR,
+            error: 'invalid_grant',
+            erroredAt: new Date(),
+        };
+        mockGetResultsPage.mockResolvedValue(errorResponse);
+
+        const { result } = renderHook(
+            () => useInfiniteQueryResults('p1', 'q1'),
+            { wrapper: createWrapper() },
+        );
+
+        await waitFor(() => {
+            expect(result.current.error).not.toBeNull();
+        });
+
+        expect(result.current.error?.error?.name).toBe('Error');
+        expect(result.current.error?.error?.statusCode).toBe(500);
+    });
+
+    it('leaves an unrelated query failure as a generic error', async () => {
+        const errorResponse: ApiGetAsyncQueryResults = {
+            queryUuid: 'q1',
+            status: QueryHistoryStatus.ERROR,
+            error: 'BigQuery quota exceeded. Query exceeded the daily quota',
+            erroredAt: new Date(),
+        };
+        mockGetResultsPage.mockResolvedValue(errorResponse);
+
+        const { result } = renderHook(
+            () => useInfiniteQueryResults('p1', 'q1'),
+            { wrapper: createWrapper() },
+        );
+
+        await waitFor(() => {
+            expect(result.current.error).not.toBeNull();
+        });
+
+        expect(result.current.error?.error?.name).toBe('Error');
     });
 
     it('resets pages when queryUuid changes', async () => {

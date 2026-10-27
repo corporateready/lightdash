@@ -5,24 +5,27 @@ import {
 } from '@lightdash/common';
 import execa from 'execa';
 import inquirer from 'inquirer';
+import type { Mock } from 'vitest';
 import GlobalState from '../../globalState';
 import { getDbtVersion } from './getDbtVersion';
 import { cliMocks } from './getDbtVersion.mocks';
 
-jest.mock('execa');
-const execaMock = execa as unknown as jest.Mock;
-jest.mock('inquirer', () => ({
-    prompt: jest.fn(),
+vi.mock('execa');
+const execaMock = execa as unknown as Mock;
+vi.mock('inquirer', () => ({
+    default: {
+        prompt: vi.fn(),
+    },
 }));
-const promptMock = inquirer.prompt as unknown as jest.Mock;
-const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+const promptMock = inquirer.prompt as unknown as Mock;
+const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
 describe('Get dbt version', () => {
     const { env } = process;
 
     beforeEach(() => {
-        jest.resetAllMocks();
-        jest.resetModules();
+        vi.resetAllMocks();
+        vi.resetModules();
         process.env = { ...env };
         execaMock.mockImplementation(async () => cliMocks.dbt1_4);
         promptMock.mockImplementation(async () => ({ isConfirm: true }));
@@ -53,6 +56,11 @@ describe('Get dbt version', () => {
             const version3 = await getDbtVersion();
             expect(version3.verboseVersion).toEqual('1.11.0');
             expect(version3.versionOption).toEqual(SupportedDbtVersions.V1_11);
+            // Test for 1.12
+            execaMock.mockImplementation(async () => cliMocks.dbt1_12);
+            const version4 = await getDbtVersion();
+            expect(version4.verboseVersion).toEqual('1.12.0');
+            expect(version4.versionOption).toEqual(SupportedDbtVersions.V1_12);
         });
         test('should return latest for dbt cloud', async () => {
             execaMock.mockImplementation(async () => cliMocks.dbtCloud);
@@ -63,6 +71,31 @@ describe('Get dbt version', () => {
             expect(version3.versionOption).toEqual(
                 DbtVersionOptionLatest.LATEST,
             );
+        });
+        test.each([
+            ['dbt 2.0.6', cliMocks.dbt2_0_6],
+            ['dbt 2.0.0', cliMocks.dbt2_0_0],
+            ['dbt 2.0.0-preview.178', cliMocks.dbt2Preview],
+            ['dbt-fusion 2.0.0-preview.65', cliMocks.dbtFusionPreview],
+        ])(
+            'should return latest fusion version for %s',
+            async (expectedVerboseVersion, mock) => {
+                execaMock.mockImplementation(async () => mock);
+                const version = await getDbtVersion();
+                expect(version).toEqual({
+                    verboseVersion: expectedVerboseVersion,
+                    versionOption: DbtVersionOptionLatest.LATEST,
+                    isDbtFusion: true,
+                    isDbtCloudCLI: false,
+                });
+                expect(promptMock).not.toHaveBeenCalled();
+                expect(consoleError).not.toHaveBeenCalled();
+            },
+        );
+        test('should not treat dbt core output as fusion', async () => {
+            execaMock.mockImplementation(async () => cliMocks.dbt1_9);
+            const version = await getDbtVersion();
+            expect(version.isDbtFusion).toEqual(false);
         });
         test('when CI=true, should warn user about unsupported version and return fallback', async () => {
             process.env.CI = 'true';
@@ -105,7 +138,9 @@ describe('Get dbt version', () => {
             expect(consoleError).toHaveBeenCalledTimes(0);
         });
         test('when CI=false, should return error if user declines fallback', async () => {
-            const exitSpy = jest.spyOn(process, 'exit').mockImplementation();
+            const exitSpy = vi
+                .spyOn(process, 'exit')
+                .mockImplementation((() => undefined) as never);
             process.env.CI = 'false';
             execaMock.mockImplementation(async () => cliMocks.dbt1_3);
             promptMock.mockImplementation(async () => ({ isConfirm: false }));
@@ -114,6 +149,22 @@ describe('Get dbt version', () => {
             expect(consoleError).toHaveBeenCalledTimes(1);
             expect(exitSpy).toHaveBeenCalledWith(1);
             exitSpy.mockRestore();
+        });
+    });
+    describe('LIGHTDASH_DBT_VERSION', () => {
+        test('uses the given version without running dbt --version', async () => {
+            process.env.LIGHTDASH_DBT_VERSION = ' 1.12.3 ';
+            const version = await getDbtVersion();
+            expect(version.verboseVersion).toEqual('1.12.3');
+            expect(version.versionOption).toEqual(SupportedDbtVersions.V1_12);
+            expect(execaMock).not.toHaveBeenCalled();
+        });
+        test('runs dbt --version when it is empty', async () => {
+            process.env.LIGHTDASH_DBT_VERSION = '';
+            execaMock.mockImplementation(async () => cliMocks.dbt1_9);
+            const version = await getDbtVersion();
+            expect(version.verboseVersion).toEqual('1.9.1');
+            expect(execaMock).toHaveBeenCalledTimes(1);
         });
     });
 });

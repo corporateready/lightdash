@@ -3,7 +3,13 @@ import { type ProjectMemberProfile } from '../types/projectMemberProfile';
 import { type ProjectMemberRole } from '../types/projectMemberRole';
 import { ProjectType } from '../types/projects';
 import { SpaceMemberRole } from '../types/space';
-import { type MemberAbility } from './types';
+import { AGENT_DEFAULT_CAPABILITY_SUBJECTS } from './agentCapabilityScopes';
+import {
+    DEVELOPER_EMBED_SUBJECTS,
+    INTERACTIVE_VIEWER_EMBED_SUBJECTS,
+    VIEWER_EMBED_SUBJECTS,
+    type MemberAbility,
+} from './types';
 
 // eslint-disable-next-line import/prefer-default-export
 export const projectMemberAbilities: Record<
@@ -14,7 +20,25 @@ export const projectMemberAbilities: Record<
     ) => void
 > = {
     viewer(member, { can }) {
+        AGENT_DEFAULT_CAPABILITY_SUBJECTS.forEach((resource) => {
+            can('view', resource, { projectUuid: member.projectUuid });
+        });
+        VIEWER_EMBED_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                projectUuid: member.projectUuid,
+            });
+        });
         can('view', 'Dashboard', {
+            projectUuid: member.projectUuid,
+            inheritsFromOrgOrProject: true,
+        });
+        can('view', 'Document', {
+            projectUuid: member.projectUuid,
+            access: {
+                $elemMatch: { userUuid: member.userUuid },
+            },
+        });
+        can('view', 'Document', {
             projectUuid: member.projectUuid,
             inheritsFromOrgOrProject: true,
         });
@@ -72,19 +96,14 @@ export const projectMemberAbilities: Record<
             projectUuid: member.projectUuid,
             userUuid: member.userUuid,
         });
-        can('view', 'DataApp', {
-            projectUuid: member.projectUuid,
-            inheritsFromOrgOrProject: true,
-        });
-        can('view', 'DataApp', {
-            projectUuid: member.projectUuid,
-            access: {
-                $elemMatch: { userUuid: member.userUuid },
-            },
-        });
     },
     interactive_viewer(member, { can }) {
         projectMemberAbilities.viewer(member, { can });
+        INTERACTIVE_VIEWER_EMBED_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                projectUuid: member.projectUuid,
+            });
+        });
         can('view', 'UnderlyingData', {
             projectUuid: member.projectUuid,
         });
@@ -119,6 +138,17 @@ export const projectMemberAbilities: Record<
                 },
             },
         });
+        can('manage', 'Document', {
+            projectUuid: member.projectUuid,
+            access: {
+                $elemMatch: {
+                    userUuid: member.userUuid,
+                    role: {
+                        $in: [SpaceMemberRole.EDITOR, SpaceMemberRole.ADMIN],
+                    },
+                },
+            },
+        });
         can('manage', 'SavedChart', {
             projectUuid: member.projectUuid,
             access: {
@@ -164,11 +194,18 @@ export const projectMemberAbilities: Record<
                 },
             },
         });
-        // Create personal data apps; once created, the user can also view
-        // and manage their own. Moving an app into a space is gated
-        // separately by the target space's manage rule.
-        can('create', 'DataApp', {
+        // View data apps shared project-wide or in spaces the user can
+        // access. Gated at interactive-viewer (not viewer) for parity with
+        // manage:Explore — plain viewers don't get data app access.
+        can('view', 'DataApp', {
             projectUuid: member.projectUuid,
+            inheritsFromOrgOrProject: true,
+        });
+        can('view', 'DataApp', {
+            projectUuid: member.projectUuid,
+            access: {
+                $elemMatch: { userUuid: member.userUuid },
+            },
         });
         can('view', 'DataApp', {
             projectUuid: member.projectUuid,
@@ -177,6 +214,12 @@ export const projectMemberAbilities: Record<
         can('manage', 'DataApp', {
             projectUuid: member.projectUuid,
             createdByUserUuid: member.userUuid,
+        });
+        // View admin-enabled external connections to link them when building a
+        // data app. Managing (create/edit/delete) stays admin-only.
+        can('view', 'ExternalConnection', {
+            projectUuid: member.projectUuid,
+            allowDataAppBuilderLinking: true,
         });
 
         can('manage', 'Space', {
@@ -195,12 +238,21 @@ export const projectMemberAbilities: Record<
         can('view', 'AiAgentDocument', {
             projectUuid: member.projectUuid,
         });
+        can('view', 'AiAgentSkill', {
+            projectUuid: member.projectUuid,
+        });
         can('create', 'AiAgentThread', {
+            projectUuid: member.projectUuid,
+        });
+        can('view', 'ContentVerification', {
             projectUuid: member.projectUuid,
         });
     },
     editor(member, { can }) {
         projectMemberAbilities.interactive_viewer(member, { can });
+        can('create', 'DataApp', {
+            projectUuid: member.projectUuid,
+        });
         can('create', 'Space', {
             projectUuid: member.projectUuid,
         });
@@ -222,14 +274,28 @@ export const projectMemberAbilities: Record<
         can('manage', 'MetricsTree', {
             projectUuid: member.projectUuid,
         });
+        can('manage', 'ExternalSource', {
+            projectUuid: member.projectUuid,
+        });
 
         can('manage', 'AiAgentThread', {
             projectUuid: member.projectUuid,
             userUuid: member.userUuid,
         });
+        can('view', 'ContentAsCode', {
+            projectUuid: member.projectUuid,
+        });
+        can('create', 'ContentAsCode', {
+            projectUuid: member.projectUuid,
+        });
     },
     developer(member, { can }) {
         projectMemberAbilities.editor(member, { can });
+        DEVELOPER_EMBED_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                projectUuid: member.projectUuid,
+            });
+        });
         can('manage', 'PreAggregation', {
             projectUuid: member.projectUuid,
         });
@@ -240,6 +306,9 @@ export const projectMemberAbilities: Record<
             projectUuid: member.projectUuid,
         });
         can('manage', 'CustomFields', {
+            projectUuid: member.projectUuid,
+        });
+        can('view', 'CompiledSql', {
             projectUuid: member.projectUuid,
         });
         can('manage', 'CustomSqlTableCalculations', {
@@ -297,6 +366,24 @@ export const projectMemberAbilities: Record<
         can('manage', 'ContentAsCode', {
             projectUuid: member.projectUuid,
         });
+        // Redundant with the broad grant above, but kept so the system
+        // role mirrors the `manage:ContentAsCode@self` scope a custom role
+        // would carry without full `manage:ContentAsCode`.
+        can('manage', 'ContentAsCode', {
+            projectUuid: member.projectUuid,
+            type: ProjectType.PREVIEW,
+            createdByUserUuid: member.userUuid,
+        });
+        can('create', 'DataApp', {
+            projectUuid: member.projectUuid,
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: member.userUuid,
+        });
+        can('manage', 'DataApp', {
+            projectUuid: member.projectUuid,
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: member.userUuid,
+        });
         can('view', 'JobStatus', {
             projectUuid: member.projectUuid,
         });
@@ -304,6 +391,18 @@ export const projectMemberAbilities: Record<
             projectUuid: member.projectUuid,
         });
         can('manage', 'AiAgentDocument', {
+            projectUuid: member.projectUuid,
+        });
+        can('manage', 'AiAgentSkill', {
+            projectUuid: member.projectUuid,
+        });
+        can('manage', 'ContentVerification', {
+            projectUuid: member.projectUuid,
+        });
+        can('manage', 'VerifiedContent', {
+            projectUuid: member.projectUuid,
+        });
+        can('create', 'AiDeepResearch', {
             projectUuid: member.projectUuid,
         });
     },
@@ -314,7 +413,13 @@ export const projectMemberAbilities: Record<
             projectUuid: member.projectUuid,
         });
 
-        can('manage', 'ContentVerification', {
+        // Adding custom npm dependencies is a supply-chain capability gated
+        // above ordinary data-app management — admins only by default.
+        can('manage', 'DataAppDependency', {
+            projectUuid: member.projectUuid,
+        });
+
+        can('manage', 'ExternalConnection', {
             projectUuid: member.projectUuid,
         });
 
@@ -337,6 +442,9 @@ export const projectMemberAbilities: Record<
         can('manage', 'Dashboard', {
             projectUuid: member.projectUuid,
         });
+        can('manage', 'Document', {
+            projectUuid: member.projectUuid,
+        });
 
         can('manage', 'SavedChart', {
             projectUuid: member.projectUuid,
@@ -347,12 +455,19 @@ export const projectMemberAbilities: Record<
         can('manage', 'AiAgentThread', {
             projectUuid: member.projectUuid,
         });
+        can('view', 'AiAgentThreadContext', {
+            projectUuid: member.projectUuid,
+        });
 
         can('manage', 'ScheduledDeliveries', {
             projectUuid: member.projectUuid,
         });
 
         can('manage', 'DeletedContent', {
+            projectUuid: member.projectUuid,
+        });
+
+        can('manage', 'ProjectHomepage', {
             projectUuid: member.projectUuid,
         });
     },

@@ -1,6 +1,13 @@
+import { WeekDay } from '@lightdash/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ApiClient } from '../helpers/api-client';
 import { login } from '../helpers/auth';
+import {
+    bigqueryWarehouseConfig,
+    createAndRefreshProject,
+    deleteProjectsByName,
+    hasBigqueryCredentials,
+} from '../helpers/projects';
 import {
     getRowCount,
     getTotalCount,
@@ -40,9 +47,24 @@ import {
 let admin: ApiClient;
 
 const DIMENSION_KEY = 'timezone_test_event_timestamp_day';
+const HOUR_DIMENSION_KEY = 'timezone_test_event_timestamp_hour';
 const METRIC_KEY = 'timezone_test_count';
 const DIMENSIONS = [DIMENSION_KEY];
 const METRICS = [METRIC_KEY];
+
+const HOUR_EQUALS_FILTER = (instant: string) => ({
+    dimensions: {
+        id: 'tz-test',
+        and: [
+            {
+                id: 'tz-hour-eq',
+                target: { fieldId: HOUR_DIMENSION_KEY },
+                operator: 'equals',
+                values: [instant],
+            },
+        ],
+    },
+});
 
 const EQUALS_FILTER = (day: string) => ({
     dimensions: {
@@ -67,6 +89,20 @@ const IN_BETWEEN_FILTER = (from: string, to: string) => ({
                 target: { fieldId: 'timezone_test_event_timestamp_day' },
                 operator: 'inBetween',
                 values: [from, to],
+            },
+        ],
+    },
+});
+
+const GRAIN_EQUALS_FILTER = (grain: string, value: string) => ({
+    dimensions: {
+        id: 'tz-test',
+        and: [
+            {
+                id: 'tz-grain-eq',
+                target: { fieldId: `timezone_test_event_timestamp_${grain}` },
+                operator: 'equals',
+                values: [value],
             },
         ],
     },
@@ -359,7 +395,252 @@ describe('Query timezone (timezone-aware DATE_TRUNC)', () => {
         });
     });
 
+    // Hour grain exposes the fractional minutes: an equals on the fractional
+    // bucket is 1 only when the partial offset is applied, 0 if dropped/rounded.
+
+    describe('fractional-offset zones — sub-day buckets', () => {
+        it('Asia/Kathmandu (+05:45): groups into 10 hourly buckets', async () => {
+            const rows = await runTimezoneTestQuery(admin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Asia/Kathmandu',
+            });
+            expect(rows).toHaveLength(10);
+            expect(getTotalCount(rows, METRIC_KEY)).toBe(10);
+        });
+
+        it('Asia/Kathmandu (+05:45): bucket aligns to :15, not :00 or :30', async () => {
+            const aligned = await runTimezoneTestQuery(admin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Asia/Kathmandu',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T07:15:00.000Z'),
+            });
+            expect(getTotalCount(aligned, METRIC_KEY)).toBe(1);
+
+            const wholeHour = await runTimezoneTestQuery(admin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Asia/Kathmandu',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T07:30:00.000Z'),
+            });
+            expect(getTotalCount(wholeHour, METRIC_KEY)).toBe(0);
+        });
+
+        it('Pacific/Marquesas (-09:30): groups into 10 hourly buckets', async () => {
+            const rows = await runTimezoneTestQuery(admin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Pacific/Marquesas',
+            });
+            expect(rows).toHaveLength(10);
+            expect(getTotalCount(rows, METRIC_KEY)).toBe(10);
+        });
+
+        it('Pacific/Marquesas (-09:30): bucket aligns to :30, not :00', async () => {
+            const aligned = await runTimezoneTestQuery(admin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Pacific/Marquesas',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T07:30:00.000Z'),
+            });
+            expect(getTotalCount(aligned, METRIC_KEY)).toBe(1);
+
+            const wholeHour = await runTimezoneTestQuery(admin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Pacific/Marquesas',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T08:00:00.000Z'),
+            });
+            expect(getTotalCount(wholeHour, METRIC_KEY)).toBe(0);
+        });
+    });
+
     afterAll(async () => {
         await updateDataTimezone(admin, undefined);
     });
 });
+
+// Warehouse-parity check: execute the discriminating timezone filters against a
+// real BigQuery project. The staging dataset holds the same timezone_test rows
+// as the Postgres seed, so the expected counts are identical.
+describe.skipIf(!hasBigqueryCredentials())(
+    'Query timezone — BigQuery filters',
+    () => {
+        const projectName = 'bigQuery timezone fractional test';
+        // Cold BigQuery queries can exceed the default 15s poll window.
+        const BIGQUERY_MAX_ATTEMPTS = 120;
+        let bqAdmin: ApiClient;
+        let bigqueryProjectUuid: string;
+
+        beforeAll(async () => {
+            bqAdmin = await login();
+            // Clean up any project leaked by a previously interrupted run
+            // before creating a fresh one (names are not unique).
+            await deleteProjectsByName(bqAdmin, [projectName]);
+            bigqueryProjectUuid = await createAndRefreshProject(
+                bqAdmin,
+                projectName,
+                // Monday start makes row #11 (Sun 14 Jan 15:00 UTC) cross a
+                // week boundary in Asia/Tokyo.
+                { ...bigqueryWarehouseConfig(), startOfWeek: WeekDay.MONDAY },
+            );
+        }, 420_000);
+
+        afterAll(async () => {
+            if (bqAdmin) {
+                await deleteProjectsByName(bqAdmin, [projectName]);
+            }
+        });
+
+        it.each([
+            {
+                expectedCount: 5,
+                filter: EQUALS_FILTER('2024-01-15'),
+                name: 'equals',
+            },
+            {
+                expectedCount: 9,
+                filter: IN_BETWEEN_FILTER('2024-01-15', '2024-01-16'),
+                name: 'inBetween',
+            },
+            {
+                expectedCount: 5,
+                filter: GREATER_THAN_FILTER('2024-01-15'),
+                name: 'greaterThan',
+            },
+        ])(
+            'Asia/Tokyo day $name preserves local-calendar filter semantics',
+            async ({ expectedCount, filter }) => {
+                const rows = await runTimezoneTestQuery(bqAdmin, {
+                    dimensions: DIMENSIONS,
+                    metrics: METRICS,
+                    timezone: 'Asia/Tokyo',
+                    filters: filter,
+                    projectUuid: bigqueryProjectUuid,
+                    maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+                });
+                expect(getTotalCount(rows, METRIC_KEY)).toBe(expectedCount);
+            },
+        );
+
+        // Coarser grains use boundary rows that land in a different
+        // week / month / quarter / year once shifted out of UTC; the UTC
+        // answer is one lower in every case.
+        it.each([
+            {
+                grain: 'week',
+                timezone: 'Asia/Tokyo',
+                value: '2024-01-15',
+                // #11 is Mon 15 Jan 00:00 Tokyo (Sun 14 Jan UTC); #1 is Mon 15 Jan in both.
+                eventIds: [11, 1],
+                expectedCount: 2,
+            },
+            {
+                grain: 'month',
+                timezone: 'Asia/Tokyo',
+                value: '2024-02-01',
+                // #18 is 1 Feb 00:00 Tokyo (31 Jan UTC); #20 is 16 Feb in both.
+                eventIds: [18, 20],
+                expectedCount: 2,
+            },
+            {
+                grain: 'quarter',
+                timezone: 'Pacific/Pago_Pago',
+                value: '2023-10-01',
+                // #17 is 31 Dec 2023 13:00 Pago Pago (1 Jan 2024 UTC); #1 is Q1 2024 in both.
+                eventIds: [17, 1],
+                expectedCount: 1,
+            },
+            {
+                grain: 'year',
+                timezone: 'Pacific/Pago_Pago',
+                value: '2023-01-01',
+                eventIds: [17, 1],
+                expectedCount: 1,
+            },
+        ])(
+            '$timezone $grain equals preserves local-calendar filter semantics',
+            async ({ grain, timezone, value, eventIds, expectedCount }) => {
+                const rows = await runTimezoneTestQuery(bqAdmin, {
+                    dimensions: DIMENSIONS,
+                    metrics: METRICS,
+                    timezone,
+                    filters: GRAIN_EQUALS_FILTER(grain, value),
+                    eventIds,
+                    projectUuid: bigqueryProjectUuid,
+                    maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+                });
+                expect(getTotalCount(rows, METRIC_KEY)).toBe(expectedCount);
+            },
+        );
+
+        it('Asia/Kathmandu (+05:45): groups into 10 hourly buckets', async () => {
+            const rows = await runTimezoneTestQuery(bqAdmin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Asia/Kathmandu',
+                projectUuid: bigqueryProjectUuid,
+                maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+            });
+            expect(rows).toHaveLength(10);
+            expect(getTotalCount(rows, METRIC_KEY)).toBe(10);
+        });
+
+        it('Asia/Kathmandu (+05:45): bucket aligns to :15, not :00 or :30', async () => {
+            const aligned = await runTimezoneTestQuery(bqAdmin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Asia/Kathmandu',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T07:15:00.000Z'),
+                projectUuid: bigqueryProjectUuid,
+                maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+            });
+            expect(getTotalCount(aligned, METRIC_KEY)).toBe(1);
+
+            const wholeHour = await runTimezoneTestQuery(bqAdmin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Asia/Kathmandu',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T07:30:00.000Z'),
+                projectUuid: bigqueryProjectUuid,
+                maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+            });
+            expect(getTotalCount(wholeHour, METRIC_KEY)).toBe(0);
+        });
+
+        it('Pacific/Marquesas (-09:30): groups into 10 hourly buckets', async () => {
+            const rows = await runTimezoneTestQuery(bqAdmin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Pacific/Marquesas',
+                projectUuid: bigqueryProjectUuid,
+                maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+            });
+            expect(rows).toHaveLength(10);
+            expect(getTotalCount(rows, METRIC_KEY)).toBe(10);
+        });
+
+        it('Pacific/Marquesas (-09:30): bucket aligns to :30, not :00', async () => {
+            const aligned = await runTimezoneTestQuery(bqAdmin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Pacific/Marquesas',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T07:30:00.000Z'),
+                projectUuid: bigqueryProjectUuid,
+                maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+            });
+            expect(getTotalCount(aligned, METRIC_KEY)).toBe(1);
+
+            const wholeHour = await runTimezoneTestQuery(bqAdmin, {
+                dimensions: [HOUR_DIMENSION_KEY],
+                metrics: METRICS,
+                timezone: 'Pacific/Marquesas',
+                filters: HOUR_EQUALS_FILTER('2024-01-15T08:00:00.000Z'),
+                projectUuid: bigqueryProjectUuid,
+                maxAttempts: BIGQUERY_MAX_ATTEMPTS,
+            });
+            expect(getTotalCount(wholeHour, METRIC_KEY)).toBe(0);
+        });
+    },
+);

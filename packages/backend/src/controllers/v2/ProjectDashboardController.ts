@@ -14,6 +14,7 @@ import {
     OperationId,
     Patch,
     Path,
+    Query,
     Request,
     Response,
     Route,
@@ -22,6 +23,7 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../../auth/account';
+import { requireOAuthScopeOperation } from '../../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -34,7 +36,11 @@ import { BaseController } from '../baseController';
 @Tags('v2', 'Dashboards')
 export class ProjectDashboardControllerV2 extends BaseController {
     /**
-     * Get a dashboard by uuid or slug within a project
+     * Get a dashboard by uuid or slug within a project.
+     * Pass includeUnpublishedDraft=true to see your own unpublished draft
+     * applied on top; omitted, the published dashboard is returned. Rendered
+     * and machine-driven reads must omit it so a draft never reaches an
+     * export or a scheduled delivery.
      * @summary Get dashboard
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
@@ -45,20 +51,23 @@ export class ProjectDashboardControllerV2 extends BaseController {
         @Path() projectUuid: string,
         @Path() dashboardUuidOrSlug: string,
         @Request() req: express.Request,
+        @Query() includeUnpublishedDraft?: boolean,
     ): Promise<ApiDashboardResponse> {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
+        const dashboardService = this.services.getDashboardService();
+        const user = toSessionUser(req.account);
         return {
             status: 'ok',
-            results: await this.services
-                .getDashboardService()
-                .getByIdOrSlug(
-                    toSessionUser(req.account),
-                    dashboardUuidOrSlug,
-                    {
-                        projectUuid,
-                    },
-                ),
+            results: await (includeUnpublishedDraft === true
+                ? dashboardService.getByIdOrSlugForViewer(
+                      user,
+                      dashboardUuidOrSlug,
+                      { projectUuid },
+                  )
+                : dashboardService.getByIdOrSlug(user, dashboardUuidOrSlug, {
+                      projectUuid,
+                  })),
         };
     }
 
@@ -70,6 +79,7 @@ export class ProjectDashboardControllerV2 extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('ProjectDashboardControllerV2.update'),
     ])
     @SuccessResponse('200', 'Success')
     @Patch('/{dashboardUuidOrSlug}')
@@ -80,13 +90,12 @@ export class ProjectDashboardControllerV2 extends BaseController {
         @Body() body: UpdateDashboard,
         @Request() req: express.Request,
     ): Promise<ApiDashboardResponse> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getDashboardService()
-                .update(toSessionUser(req.account), dashboardUuidOrSlug, body, {
+                .updateFromAccount(req.account!, dashboardUuidOrSlug, body, {
                     projectUuid,
                 }),
         };
@@ -134,6 +143,7 @@ export class ProjectDashboardControllerV2 extends BaseController {
         @Path() projectUuid: string,
         @Path() dashboardUuidOrSlug: string,
         @Request() req: express.Request,
+        @Query() resolved?: boolean,
     ): Promise<ApiGetComments> {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
@@ -146,6 +156,7 @@ export class ProjectDashboardControllerV2 extends BaseController {
                     dashboardUuidOrSlug,
                     {
                         projectUuid,
+                        resolved,
                     },
                 ),
         };

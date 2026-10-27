@@ -1,9 +1,10 @@
 import { OrganizationProject, ProjectType } from '@lightdash/common';
-import inquirer from 'inquirer';
 import { URL } from 'url';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
 import { LightdashAnalytics } from '../analytics/analytics';
 import { getConfig, setProject, unsetProject } from '../config';
 import GlobalState from '../globalState';
+import { promptFuzzySearch } from '../prompts/fuzzySearchPrompt';
 import { lightdashApi } from './dbt/apiClient';
 
 type SetProjectOptions = {
@@ -14,8 +15,9 @@ type SetProjectOptions = {
 
 export const setProjectCommand = async (
     name?: string,
-    uuid?: string,
+    uuidOrSlug?: string,
 ): Promise<'selected' | 'skipped' | 'empty'> => {
+    assertAgentCommandAllowed('config set-project');
     const projects = await lightdashApi<OrganizationProject[]>({
         method: 'GET',
         url: `/api/v1/org/projects`,
@@ -39,9 +41,12 @@ export const setProjectCommand = async (
     let selectedProject: OrganizationProject | undefined;
 
     // --uuid or --name options
-    if (uuid !== undefined || name !== undefined) {
+    if (uuidOrSlug !== undefined || name !== undefined) {
         const matchedProject = projects.find(
-            (project) => project.name === name || project.projectUuid === uuid,
+            (project) =>
+                project.name === name ||
+                project.projectUuid === uuidOrSlug ||
+                (uuidOrSlug !== undefined && project.slug === uuidOrSlug),
         );
         if (matchedProject?.type === ProjectType.PREVIEW) {
             throw new Error(
@@ -54,30 +59,27 @@ export const setProjectCommand = async (
         [selectedProject] = nonPreviewProjects;
     } else {
         const SKIP_VALUE = '__skip__';
-        const answers = await inquirer.prompt([
-            {
-                type: 'list',
-                name: 'project',
-                choices: [
-                    {
-                        name: "Don't select a project",
-                        value: SKIP_VALUE,
-                    },
-                    ...nonPreviewProjects.map((project) => ({
-                        name: project.name,
-                        value: project.projectUuid,
-                    })),
-                ],
-            },
-        ]);
+        const answer = await promptFuzzySearch<string>({
+            message: 'Select a project (type to search)',
+            pinnedChoices: [
+                {
+                    name: "Don't select a project",
+                    value: SKIP_VALUE,
+                },
+            ],
+            choices: nonPreviewProjects.map((project) => ({
+                name: project.name,
+                value: project.projectUuid,
+            })),
+        });
 
-        if (answers.project === SKIP_VALUE) {
+        if (answer === SKIP_VALUE) {
             await unsetProject();
             return 'skipped';
         }
 
         selectedProject = nonPreviewProjects.find(
-            (project) => project.projectUuid === answers.project,
+            (project) => project.projectUuid === answer,
         );
     }
 
@@ -99,6 +101,7 @@ export const setProjectCommand = async (
 };
 
 export const setFirstProject = async () => {
+    assertAgentCommandAllowed('config set-project');
     const projects = await lightdashApi<OrganizationProject[]>({
         method: 'GET',
         url: `/api/v1/org/projects`,
@@ -120,6 +123,7 @@ export const setFirstProject = async () => {
 };
 
 export const setProjectHandler = async (options: SetProjectOptions) => {
+    assertAgentCommandAllowed('config set-project');
     const startTime = Date.now();
     let success = true;
     GlobalState.setVerbose(options.verbose);
@@ -143,12 +147,13 @@ export const setProjectHandler = async (options: SetProjectOptions) => {
     }
 };
 
-export const unsetProjectCommand = async () => {
+const unsetProjectCommand = async () => {
     await unsetProject();
     console.error(`\n  Project unset.\n`);
 };
 
 export const unsetProjectHandler = async (options: { verbose: boolean }) => {
+    assertAgentCommandAllowed('config unset-project');
     const startTime = Date.now();
     let success = true;
     GlobalState.setVerbose(options.verbose);

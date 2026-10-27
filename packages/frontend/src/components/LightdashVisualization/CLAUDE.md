@@ -25,18 +25,44 @@ Each chart type requires changes across these layers:
 - Create `isXxxVisualizationConfig()` type guard
 - Add to the `VisualizationConfig` union
 
-### 4. Frontend Config Hook (`packages/frontend/src/hooks/useXxxChartConfig.ts`)
+### 4. Chart Logic (`packages/visualization/src/xxx/`)
 
-- Manages chart state (field selections, display options)
-- Auto-selects fields when data first loads
-- Transforms result rows into chart-specific data format
-- Returns `validConfig`, field change handlers, and transformed data
+Chart logic lives in `@lightdash/visualization`, not in the frontend, so the
+web app, the SDK, embedding and Desktop draw the same chart. Read
+`packages/visualization/CLAUDE.md` first.
 
-### 5. Frontend ECharts Hook (`packages/frontend/src/hooks/echarts/useEchartsXxxConfig.ts`)
+- `config.ts`: `resolveXxxChartConfig` (defaults, field auto-selection,
+  repairs, chart-specific data) and the pure helpers the editor hook calls
+- `echartsOption.ts` (or `model.ts`): `buildXxxEchartsOption`, the tooltip,
+  labels, colours and styling
+- Cases in `resolveChart` and `buildChart` (`render.ts`); the helpers the
+  frontend imports listed in `editor.ts`
 
-- Reads from visualization context via `useVisualizationContext()`
-- Transforms chart config into `EChartsOption`
-- Configures tooltip, labels, colors, styling
+### 5. Frontend Hooks (thin wrappers over the package)
+
+Editor state lives in the per-chart Redux store
+(`packages/frontend/src/features/visualization/store/`, read its CLAUDE.md):
+
+- `store/xxxEditorSlice.ts`: the editor's state type, `buildXxxEditorState`
+  (the seed from a saved config) and reducers for edits with a meaning
+  (toggles, list add/remove, override merges)
+- `store/xxxSelectors.ts`: `createSelector` derivations over
+  `(state, inputs)`, including field repairs and `validConfig`
+- `packages/frontend/src/hooks/useXxxChartConfig.ts`: the aggregate the chart
+  body reads (selected values plus stable actions) and
+  `useXxxEditorActions()` for the config panels
+- `packages/frontend/src/hooks/echarts/useEchartsXxxConfig.ts`: reads
+  `useVisualizationConfig()`, `useVisualizationInputs()` and
+  `useVisualizationTheme()` and calls the package's builder
+
+Consumers read the narrowest hook they need (`useVisualizationContext.ts`):
+`useVisualizationServices()` for refs and actions, `useVisualizationInputs()`
+for results, fields and colours (stable while editing), a store selector
+for one editor field, `useVisualizationConfig()` for the whole aggregate
+(re-renders on every edit), `useEditedChartConfig()` and `useSeriesColor()`
+for the current chart config and its colours, `useVisualizationLayout()`
+only for the container size. `useVisualizationContext()` returns everything
+and is kept for the regression replay and tests.
 
 ### 6. Frontend Visualization Component (`packages/frontend/src/components/SimpleXxx/index.tsx`)
 
@@ -51,10 +77,15 @@ Each chart type requires changes across these layers:
 - Uses `FieldSelect` for dimension/metric pickers
 - Uses `SegmentedControl` for display options
 
-### 8. Frontend Config Provider (`VisualizationConfigXxx.tsx` in this directory)
+### 8. Frontend Config Adapter (`VisualizationConfigXxx.tsx` in this directory)
 
-- Extracts dimensions and numeric fields from `itemsMap`
-- Calls the config hook and propagates changes via `onChartConfigChange`
+- Memoised, so a resize skips it; an echoed config re-renders it, and its
+  memoised aggregate is what keeps consumers from re-rendering
+- Reads inputs from `useVisualizationInputs()`, not props
+- Calls the config hook, emits `validConfig` with `useEmitChartConfig` when
+  it changes, and builds the `visualizationConfig` aggregate
+- Register the type's seed in `store/buildInitialState.ts` and its slice and
+  selectors in `store/index.ts` and `store/selectors.ts`
 
 ### 9. Wiring (switch statements that need new cases)
 
@@ -62,7 +93,7 @@ Files with `assertUnreachable` on `ChartType` or `ChartKind` that **must** be up
 
 - `VisualizationProvider.tsx` - Config provider switch
 - `index.tsx` (this directory) - Rendering switch
-- `Explorer/VisualizationCardOptions/index.tsx` - Chart type menu
+- `Explorer/ChartGallery/ChartTypeGallery.tsx` - Chart type gallery
 - `Explorer/VisualizationCard/VisualizationConfig.tsx` - Config tabs
 - `common/ResourceIcon/utils.ts` - Chart icon
 - `common/ResourceView/resourceUtils.ts` - Chart display name
@@ -71,6 +102,10 @@ Files with `assertUnreachable` on `ChartType` or `ChartKind` that **must** be up
 - `packages/frontend/src/providers/Explorer/types.ts` - `ConfigCacheMap`
 - `packages/frontend/src/providers/Explorer/utils.ts` - `DEFAULTS` map
 - `packages/backend/src/services/RenameService/rename.ts` - Field rename
+- `packages/visualization/src/render.ts` - `resolveChart` / `buildChart`
+
+Before opening the PR, run `pnpm -F visualization test:regression`: the
+existing chart types must draw exactly as they did.
 
 ## Sankey Chart Type
 
@@ -88,7 +123,7 @@ No special dbt configuration or column naming is required. Any two dimensions an
 
 ### BFS Depth Assignment (Cyclical Flow Support)
 
-ECharts doesn't natively support cyclical Sankey data. The `useSankeyChartConfig` hook implements a BFS-based algorithm to handle cycles:
+ECharts doesn't natively support cyclical Sankey data. `transformSankeyData` in `@lightdash/visualization` (`packages/visualization/src/sankey/transform.ts`) implements a BFS-based algorithm to handle cycles:
 
 1. **Aggregate** raw rows into source-target links with summed values
 2. **Build adjacency list** from aggregated links
@@ -114,8 +149,11 @@ The `maxDepth` value is returned alongside nodes/links for per-depth-level color
 | File                                                                                      | Purpose                           |
 | ----------------------------------------------------------------------------------------- | --------------------------------- |
 | `packages/common/src/types/savedCharts.ts`                                                | `SankeyChart` type, enum values   |
-| `packages/frontend/src/hooks/useSankeyChartConfig.ts`                                     | Config state + BFS data transform |
-| `packages/frontend/src/hooks/echarts/useEchartsSankeyConfig.ts`                           | ECharts option builder            |
+| `packages/visualization/src/sankey/transform.ts`                                          | BFS data transform                |
+| `packages/visualization/src/sankey/config.ts`                                             | Field defaults, config resolver   |
+| `packages/visualization/src/sankey/echartsOption.ts`                                      | ECharts option builder            |
+| `packages/frontend/src/hooks/useSankeyChartConfig.ts`                                     | Config state (editor hook)        |
+| `packages/frontend/src/hooks/echarts/useEchartsSankeyConfig.ts`                           | Thin hook over the builder        |
 | `packages/frontend/src/components/SimpleSankey/index.tsx`                                 | Visualization component           |
 | `packages/frontend/src/components/VisualizationConfigs/SankeyConfig/SankeyConfigTabs.tsx` | Config panel UI                   |
 | `packages/frontend/src/components/LightdashVisualization/VisualizationConfigSankey.tsx`   | Config provider                   |

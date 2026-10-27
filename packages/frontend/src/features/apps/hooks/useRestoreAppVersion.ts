@@ -2,8 +2,13 @@ import {
     type ApiError,
     type ApiRestoreAppVersionResponse,
 } from '@lightdash/common';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { lightdashApi } from '../../../api';
+import {
+    useMutation,
+    useQueryClient,
+    type QueryClient,
+} from '@tanstack/react-query';
+import { type LightdashApi } from '../../../api';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 
 type RestoreAppVersionParams = {
     projectUuid: string;
@@ -13,31 +18,43 @@ type RestoreAppVersionParams = {
 
 type RestoreAppVersionResult = ApiRestoreAppVersionResponse['results'];
 
-const restoreAppVersion = ({
-    projectUuid,
-    appUuid,
-    version,
-}: RestoreAppVersionParams) =>
+const restoreAppVersion = (
+    lightdashApi: LightdashApi,
+    { projectUuid, appUuid, version }: RestoreAppVersionParams,
+) =>
     lightdashApi<RestoreAppVersionResult>({
         method: 'POST',
         url: `/ee/projects/${projectUuid}/apps/${appUuid}/versions/${version}/restore`,
         body: undefined,
     });
 
+/** The app or its versions changed server-side; the viz contract may have too. */
+export const invalidateAppQueries = (
+    queryClient: QueryClient,
+    projectUuid: string,
+    appUuid: string,
+) =>
+    Promise.all([
+        queryClient.invalidateQueries({
+            queryKey: ['app', projectUuid, appUuid],
+        }),
+        queryClient.invalidateQueries({
+            queryKey: ['data-app-viz', projectUuid, appUuid],
+        }),
+    ]);
+
 export const useRestoreAppVersion = () => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     return useMutation<
         RestoreAppVersionResult,
         ApiError,
         RestoreAppVersionParams
     >({
-        mutationFn: restoreAppVersion,
-        onSuccess: (_data, variables) => {
-            // Pull the new ready version into the timeline so AppGenerate
-            // auto-pins onto it.
-            void queryClient.invalidateQueries({
-                queryKey: ['app', variables.projectUuid, variables.appUuid],
-            });
+        mutationFn: (args: RestoreAppVersionParams) =>
+            restoreAppVersion(lightdashApi, args),
+        onSuccess: (_data, { projectUuid, appUuid }) => {
+            void invalidateAppQueries(queryClient, projectUuid, appUuid);
         },
     });
 };

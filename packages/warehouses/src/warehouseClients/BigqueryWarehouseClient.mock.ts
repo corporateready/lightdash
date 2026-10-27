@@ -1,4 +1,8 @@
-import { BigQueryDate, BigQueryTimestamp } from '@google-cloud/bigquery';
+import {
+    BigQuery,
+    BigQueryDate,
+    BigQueryTimestamp,
+} from '@google-cloud/bigquery';
 import {
     AnyType,
     CreateBigqueryCredentials,
@@ -31,6 +35,10 @@ const metadata = {
                 type: BigqueryFieldType.NUMERIC,
             },
             {
+                name: 'myBigNumberColumn',
+                type: BigqueryFieldType.BIGNUMERIC,
+            },
+            {
                 name: 'myDateColumn',
                 type: BigqueryFieldType.DATE,
             },
@@ -50,6 +58,28 @@ const metadata = {
                 name: 'myObjectColumn',
                 type: BigqueryFieldType.STRUCT,
             },
+            {
+                name: 'myRepeatedColumn',
+                type: BigqueryFieldType.STRING,
+                mode: 'REPEATED',
+            },
+            {
+                name: 'myRecordColumn',
+                type: BigqueryFieldType.RECORD,
+                mode: 'NULLABLE',
+                fields: [
+                    { name: 'id', type: BigqueryFieldType.INT64 },
+                    { name: 'createdAt', type: BigqueryFieldType.TIMESTAMP },
+                    {
+                        name: 'tags',
+                        type: BigqueryFieldType.RECORD,
+                        mode: 'REPEATED',
+                        fields: [
+                            { name: 'label', type: BigqueryFieldType.STRING },
+                        ],
+                    },
+                ],
+            },
         ],
     },
 };
@@ -57,18 +87,46 @@ const metadata = {
 export const getTableResponse = {
     id: 'myTable',
     bigQuery: { projectId: 'myDatabase' },
-    getMetadata: jest.fn(() => [metadata]),
+    getMetadata: vi.fn(() => [metadata]),
 };
+
+// eslint-disable-next-line no-underscore-dangle
+const [bigqueryDecimalValues] = BigQuery.mergeSchemaWithRows_(
+    {
+        fields: [
+            {
+                name: 'myNumberColumn',
+                type: BigqueryFieldType.NUMERIC,
+            },
+            {
+                name: 'myBigNumberColumn',
+                type: BigqueryFieldType.BIGNUMERIC,
+            },
+        ],
+    },
+    [
+        {
+            f: [{ v: '100.25' }, { v: '200.5' }],
+        },
+    ],
+    { wrapIntegers: false },
+);
 
 export const rows: Record<string, AnyType>[] = [
     {
         myStringColumn: 'string value',
-        myNumberColumn: 100,
+        ...bigqueryDecimalValues,
         myDateColumn: new BigQueryDate('2021-03-10'),
         myTimestampColumn: new BigQueryTimestamp('1990-03-02T08:30:00.010Z'),
         myBooleanColumn: false,
         myArrayColumn: ['1', '2', '3'],
-        myObjectColumn: { test: '1' },
+        myObjectColumn: { test: '1', toFixed: () => '123' },
+        myRepeatedColumn: ['a', 'b'],
+        myRecordColumn: {
+            id: 7,
+            createdAt: new BigQueryTimestamp('1990-03-02T08:30:00.010Z'),
+            tags: [{ label: 'x' }, { label: 'y' }],
+        },
     },
 ];
 
@@ -83,7 +141,7 @@ const mockStreamRow = () =>
 
 export const createJobResponse = [
     {
-        getQueryResults: jest.fn(() => [rows, undefined, metadata]),
-        getQueryResultsStream: jest.fn(mockStreamRow),
+        getQueryResults: vi.fn(() => [rows, undefined, metadata]),
+        getQueryResultsStream: vi.fn(mockStreamRow),
     },
 ];

@@ -1,12 +1,18 @@
 export * from './ssh/sshTunnel';
 export * from './types';
+export * from './validateWarehouseColumnReferences';
 export * from './warehouseClientFromCredentials';
 export * from './warehouseClients/AthenaWarehouseClient';
 export * from './warehouseClients/BigqueryWarehouseClient';
 export * from './warehouseClients/DatabricksWarehouseClient';
 export * from './warehouseClients/DuckdbWarehouseClient';
+export * from './warehouseClients/duckdbEmbeddedBundle';
+export { MotherduckInstanceCache } from './warehouseClients/MotherduckInstanceCache';
+export type { MotherduckCacheEvent } from './warehouseClients/MotherduckInstanceCache';
+export * from './warehouseClients/ListedDatabasesPostgresWarehouseClient';
 export * from './warehouseClients/PostgresWarehouseClient';
 export * from './warehouseClients/RedshiftWarehouseClient';
+export * from './warehouseClients/redshiftIamCredentials';
 export * from './warehouseClients/SnowflakeWarehouseClient';
 export * from './warehouseClients/TrinoWarehouseClient';
 export * from './warehouseSqlBuilderFromType';

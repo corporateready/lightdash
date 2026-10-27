@@ -6,6 +6,7 @@ import {
     useAppDispatch as useVizDispatch,
     useAppSelector as useVizSelector,
 } from '../../../features/sqlRunner/store/hooks';
+import scrollAreaClasses from '../../../styles/ScrollArea.module.css';
 import MantineIcon from '../../common/MantineIcon';
 import { Config } from '../../VisualizationConfigs/common/Config';
 import { TableFieldIcon } from '../Icons';
@@ -28,10 +29,10 @@ const TableVisConfiguration: FC<{ columns: VizColumn[] }> = ({ columns }) => {
     return (
         <ScrollArea
             offsetScrollbars
-            variant="primary"
-            className="only-vertical"
+            scrollbars="y"
+            classNames={{ content: scrollAreaClasses.verticalContent }}
             type="auto"
-            sx={{ flex: 1 }}
+            flex={1}
             mb="md"
         >
             <Config>
@@ -45,17 +46,22 @@ const TableVisConfiguration: FC<{ columns: VizColumn[] }> = ({ columns }) => {
 
                         return (
                             <TextInput
+                                size="xs"
                                 key={reference}
-                                radius="md"
                                 value={columnsConfig[reference].label}
-                                icon={
+                                leftSection={
                                     fieldType && (
                                         <TableFieldIcon fieldType={fieldType} />
                                     )
                                 }
                                 readOnly={!columnsConfig[reference].visible}
+                                rightSectionPointerEvents="all"
                                 rightSection={
                                     <ActionIcon
+                                        aria-label="Toggle column visibility"
+                                        onMouseDown={(event) =>
+                                            event.preventDefault()
+                                        }
                                         onClick={() =>
                                             dispatch(
                                                 updateColumnVisibility({

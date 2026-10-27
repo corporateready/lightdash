@@ -64,7 +64,7 @@ describe('Explore', () => {
 
         cy.findByText('Save chart').click();
 
-        cy.findByTestId('ChartCreateModal/NameInput').type('My chart');
+        cy.findByTestId('ChartCreateModal/NameInput').clear().type('My chart');
         cy.contains('Next').click();
         cy.findByText('Save').click();
         cy.findByText('Success! Chart was saved.');
@@ -81,10 +81,10 @@ describe('Explore', () => {
             .should('be.visible')
             .click();
         cy.wait(300); // Wait for configure panel to open
-        cy.findByText('Bar chart', { timeout: 10000 })
-            .should('be.visible')
-            .click(); // Change chart type
-        cy.findByText('Horizontal bar chart').click();
+        cy.findByRole('button', { name: 'Change chart type' }).click();
+        cy.findByRole('button', {
+            name: 'Horizontal bar chart',
+        }).click();
 
         // cy.findByText('Save changes').parent().should('not.be.disabled');
         cy.findByText('Save changes').parent().click();
@@ -119,41 +119,32 @@ describe('Explore', () => {
         // wait for the chart to finish loading
         cy.contains('Loading chart').should('not.exist');
 
-        // open chart menu and change chart types
+        // open the chart gallery and change chart types
         cy.findByText('Configure').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Bar chart').click();
+        cy.findByRole('button', { name: 'Change chart type' }).click();
+        cy.findByRole('button', { name: 'Table', pressed: true }).should(
+            'be.visible',
+        );
 
-        cy.get('[role="menuitem"]').contains('Bar chart').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Bar chart').click();
+        const selectChartType = (chartType: string) => {
+            cy.findByRole('button', {
+                name: chartType,
+                pressed: false,
+            }).click();
+            cy.findByRole('button', { name: chartType, pressed: true }).should(
+                'be.visible',
+            );
+            cy.findByText('Choose chart type').should('be.visible');
+        };
 
-        cy.get('[role="menuitem"]').contains('Horizontal bar chart').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Horizontal bar chart').click();
-
-        cy.get('[role="menuitem"]').contains('Line chart').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Line chart').click();
-
-        cy.get('[role="menuitem"]').contains('Area chart').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Area chart').click();
-
-        cy.get('[role="menuitem"]').contains('Scatter chart').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Scatter chart').click();
-
-        cy.get('[role="menuitem"]').contains('Pie chart').click();
-        cy.wait(500); // wait for the select to fully update - this tries to ensure that state has finished mutating
-        cy.get('button').contains('Pie chart').click();
-
-        cy.get('[role="menuitem"]').contains('Table').click();
-        // Use a different selector cause there is another button with 'Table'
-        cy.get('[data-testid="VisualizationCardOptions"]').click();
-
-        cy.get('[role="menuitem"]').contains('Big value').click();
-        cy.get('button').contains('Big value');
+        selectChartType('Bar chart');
+        selectChartType('Horizontal bar chart');
+        selectChartType('Line chart');
+        selectChartType('Area chart');
+        selectChartType('Scatter chart');
+        selectChartType('Pie chart');
+        selectChartType('Big value');
+        selectChartType('Table');
     });
 
     // todo: move to unit test
@@ -365,8 +356,10 @@ describe('Explore', () => {
 
                     // open chart menu and change chart type to Table
                     cy.get('button').contains('Configure').click();
-                    cy.get('[data-testid="VisualizationCardOptions"]').click();
-                    cy.get('[role="menuitem"]').contains('Table').click();
+                    cy.findByRole('button', {
+                        name: 'Change chart type',
+                    }).click();
+                    cy.findByRole('button', { name: 'Table' }).click();
 
                     // check that chart table headers are correct (table names hidden by default)
                     cy.findByTestId('visualization')
@@ -410,8 +403,10 @@ describe('Explore', () => {
 
                     // open chart menu and change chart type to Table
                     cy.get('button').contains('Configure').click();
-                    cy.get('[data-testid="VisualizationCardOptions"]').click();
-                    cy.get('[role="menuitem"]').contains('Table').click();
+                    cy.findByRole('button', {
+                        name: 'Change chart type',
+                    }).click();
+                    cy.findByRole('button', { name: 'Table' }).click();
 
                     // check that chart table headers are correct (table names hidden by default)
                     cy.findByTestId('visualization')

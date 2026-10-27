@@ -1,10 +1,11 @@
-import { Badge, type DefaultMantineColor } from '@mantine-8/core';
+import { Badge, type DefaultMantineColor } from '@mantine/core';
 import { SOURCE_LABELS } from './types';
 
 const SOURCE_COLORS: Record<string, DefaultMantineColor> = {
     refresh_dbt: 'indigo',
     cli_deploy: 'pink',
     create_project: 'cyan',
+    project_connection_form: 'teal',
 } as const;
 
 type CompilationSourceBadgeProps = {
@@ -19,7 +20,6 @@ export const CompilationSourceBadge = ({
     return (
         <Badge
             color={color}
-            variant="light"
             size="sm"
             radius="md"
             py={10}

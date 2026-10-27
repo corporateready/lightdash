@@ -1,45 +1,19 @@
-import { type Ability } from '@casl/ability';
-import { isAccount, type Account, type SessionUser } from '@lightdash/common';
-import type { AuditResource, CallStackEntry } from '../logging/auditLog';
+import { subject, type Ability } from '@casl/ability';
+import {
+    isAccount,
+    isJwtUser,
+    type Account,
+    type SessionUser,
+} from '@lightdash/common';
+import type { AuditResource } from '../logging/auditLog';
+import { captureServiceCallStack } from '../logging/callStack';
 import {
     CaslAuditWrapper,
     createActorFromAccount,
     createActorFromUser,
 } from '../logging/caslAuditWrapper';
 import Logger from '../logging/logger';
-import { logAuditEvent } from '../logging/winston';
-
-const SKIP_METHODS = new Set(['createAuditedAbility', 'constructor']);
-
-/**
- * Captures the service call stack from the current stack trace.
- * Extracts up to `maxDepth` service method calls by looking for
- * class methods on classes ending in "Service".
- */
-const captureCallStack = (maxDepth: number = 10): CallStackEntry[] => {
-    const { stack } = new Error();
-    if (!stack) return [];
-
-    const entries: CallStackEntry[] = [];
-    const lines = stack.split('\n');
-
-    // eslint-disable-next-line no-restricted-syntax
-    for (const line of lines) {
-        if (entries.length >= maxDepth) break;
-
-        // Match patterns like "at ClassName.methodName" where ClassName ends with Service
-        const match = line.match(/at (\w*Service)\.(\w+)/);
-        if (match && !SKIP_METHODS.has(match[2])) {
-            entries.push({
-                serviceName: match[1],
-                methodName: match[2],
-                depth: entries.length,
-            });
-        }
-    }
-
-    return entries;
-};
+import { logAuditEvent, winstonLogger } from '../logging/winston';
 
 export abstract class BaseService {
     protected logger: typeof Logger;
@@ -88,7 +62,8 @@ export abstract class BaseService {
     protected createAuditedAbility(
         accountOrUser: Account | SessionUser,
     ): CaslAuditWrapper<Ability> {
-        const callStack = captureCallStack();
+        const auditEnabled = winstonLogger.isLevelEnabled('audit');
+        const callStack = auditEnabled ? captureServiceCallStack() : undefined;
 
         if (isAccount(accountOrUser)) {
             this.logger.debug('Creating audited ability', {
@@ -101,6 +76,7 @@ export abstract class BaseService {
                 {
                     callStack,
                     auditLogger: logAuditEvent,
+                    auditEnabled,
                     ip: requestContext?.ip,
                     userAgent: requestContext?.userAgent,
                     requestId: requestContext?.requestId,
@@ -116,10 +92,29 @@ export abstract class BaseService {
         return new CaslAuditWrapper(accountOrUser.ability, accountOrUser, {
             callStack,
             auditLogger: logAuditEvent,
+            auditEnabled,
             ip: requestContext?.ip,
             userAgent: requestContext?.userAgent,
             requestId: requestContext?.requestId,
         });
+    }
+
+    /** Embed viewers see compiled SQL only when their token grants view:EmbedCompiledSql. */
+    protected cannotViewEmbedCompiledSql(
+        account: Account,
+        projectUuid: string,
+    ): boolean {
+        return (
+            isJwtUser(account) &&
+            this.createAuditedAbility(account).cannot(
+                'view',
+                subject('EmbedCompiledSql', {
+                    organizationUuid:
+                        account.embed.organization.organizationUuid,
+                    projectUuid,
+                }),
+            )
+        );
     }
 
     /**
@@ -131,11 +126,13 @@ export abstract class BaseService {
         action: string,
         resource: AuditResource,
     ): void {
+        if (!winstonLogger.isLevelEnabled('audit')) return;
+
         try {
             const actor = isAccount(accountOrUser)
                 ? createActorFromAccount(accountOrUser)
                 : createActorFromUser(accountOrUser);
-            const callStack = captureCallStack();
+            const callStack = captureServiceCallStack();
 
             logAuditEvent({
                 id: crypto.randomUUID(),

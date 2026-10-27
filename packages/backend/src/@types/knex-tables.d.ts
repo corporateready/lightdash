@@ -1,7 +1,33 @@
 import {
+    AgentActionLogTable,
+    AgentActionLogTableName,
+} from '../database/entities/agentActionLog';
+import {
+    AgentCapabilityPoliciesTable,
+    AgentCapabilityPoliciesTableName,
+    AgentSystemRoleCapabilitiesTable,
+    AgentSystemRoleCapabilitiesTableName,
+} from '../database/entities/agentCapabilityPolicies';
+import {
+    AgentConnectionApprovalRequestsTable,
+    AgentConnectionApprovalRequestsTableName,
+} from '../database/entities/agentConnectionApprovalRequests';
+import {
+    AgentConnectionGrantsTable,
+    AgentConnectionGrantsTableName,
+} from '../database/entities/agentConnectionGrants';
+import {
     AiAgentReasoningTable,
     AiAgentReasoningTableName,
 } from '../database/entities/aiAgentReasoning';
+import {
+    AiServiceAccountCredentialsTable,
+    AiServiceAccountCredentialsTableName,
+} from '../database/entities/aiServiceAccountCredentials';
+import {
+    AiUsageLedgerTable,
+    AiUsageLedgerTableName,
+} from '../database/entities/aiUsageLedger';
 import {
     AnalyticsAppViews,
     AnalyticsAppViewsTableName,
@@ -11,11 +37,23 @@ import {
     AnalyticsDashboardViewsTableName,
 } from '../database/entities/analytics';
 import {
+    AppGroupAccessTable,
+    AppGroupAccessTableName,
+    AppUserAccessTable,
+    AppUserAccessTableName,
+} from '../database/entities/appAccess';
+import {
     AppsTable,
     AppsTableName,
+    AppThreadsTable,
+    AppThreadsTableName,
     AppVersionsTable,
     AppVersionsTableName,
 } from '../database/entities/apps';
+import {
+    AwsWebIdentityAudiencesTable,
+    AwsWebIdentityAudiencesTableName,
+} from '../database/entities/awsWebIdentityAudiences';
 import {
     CatalogTable,
     CatalogTableName,
@@ -31,19 +69,53 @@ import {
     type MetricsTreesTable,
 } from '../database/entities/catalog';
 import {
-    ChangesetsTable,
-    ChangesetsTableName,
-    ChangesTable,
-    ChangesTableName,
-} from '../database/entities/changesets';
-import {
     DashboardTileCommentsTable,
     DashboardTileCommentsTableName,
 } from '../database/entities/comments';
 import {
+    ContentAsCodeSnapshotsTableName,
+    ContentAsCodeSnapshotTable,
+} from '../database/entities/contentAsCodeSnapshots';
+import {
+    ContentAsCodeProjectSettingsTable,
+    ContentAsCodeProjectSettingsTableName,
+    ContentAsCodeWritebacksTableName,
+    ContentAsCodeWritebackTable,
+} from '../database/entities/contentAsCodeWritebacks';
+import {
+    ContentDraftsTable,
+    ContentDraftsTableName,
+} from '../database/entities/contentDrafts';
+import {
+    ContentReviewRequestsTable,
+    ContentReviewRequestsTableName,
+} from '../database/entities/contentReviewRequests';
+import {
+    ContentReviewSettingsTable,
+    ContentReviewSettingsTableName,
+} from '../database/entities/contentReviewSettings';
+import {
     ContentVerificationTable,
     ContentVerificationTableName,
 } from '../database/entities/contentVerification';
+import {
+    CredentialBindingsTable,
+    CredentialBindingsTableName,
+} from '../database/entities/credentialBindings';
+import {
+    CredentialsTable,
+    CredentialsTableName,
+} from '../database/entities/credentials';
+import {
+    CredentialTokenStateTable,
+    CredentialTokenStateTableName,
+} from '../database/entities/credentialTokenState';
+import {
+    DashboardGroupAccessTable,
+    DashboardGroupAccessTableName,
+    DashboardUserAccessTable,
+    DashboardUserAccessTableName,
+} from '../database/entities/dashboardAccess';
 import {
     DashboardsTableName,
     DashboardTable,
@@ -68,6 +140,26 @@ import {
     DashboardViewTable,
 } from '../database/entities/dashboards';
 import {
+    DashboardSlugMappingsTableName,
+    DashboardSlugMappingTable,
+} from '../database/entities/dashboardSlugMappings';
+import {
+    DbtSourceRefCatalogsTableName,
+    type DbtSourceRefCatalogsTable,
+} from '../database/entities/dbtSourceRefCatalogs';
+import {
+    DocumentGroupAccessTable,
+    DocumentGroupAccessTableName,
+    DocumentUserAccessTable,
+    DocumentUserAccessTableName,
+} from '../database/entities/documentAccess';
+import {
+    DocumentsTable,
+    DocumentsTableName,
+    DocumentVersionsTable,
+    DocumentVersionsTableName,
+} from '../database/entities/documents';
+import {
     DownloadAuditTable,
     DownloadAuditTableName,
 } from '../database/entities/downloadAudit';
@@ -80,6 +172,22 @@ import {
     EmailOneTimePasscodeTable,
 } from '../database/entities/emailOneTimePasscodes';
 import { EmailTable, EmailTableName } from '../database/entities/emails';
+import {
+    ExploreNameAllocationsTable,
+    ExploreNameAllocationsTableName,
+} from '../database/entities/exploreNameAllocations';
+import {
+    ExternalSourceCredentialsTable,
+    ExternalSourceCredentialsTableName,
+    ExternalSourceIngestAttemptsTable,
+    ExternalSourceIngestAttemptsTableName,
+    ExternalSourceObjectsTable,
+    ExternalSourceObjectsTableName,
+    ExternalSourcesTable,
+    ExternalSourcesTableName,
+    ExternalSourceTablesTable,
+    ExternalSourceTablesTableName,
+} from '../database/entities/externalSources';
 import {
     FeatureFlagOverridesTable,
     FeatureFlagOverridesTableName,
@@ -95,20 +203,48 @@ import {
     GitlabAppInstallationTableName,
 } from '../database/entities/gitlabAppInstallation';
 import {
+    GitUserCredentialsTable,
+    GitUserCredentialsTableName,
+} from '../database/entities/gitUserCredentials';
+import {
     GroupMembershipTable,
     GroupMembershipTableName,
 } from '../database/entities/groupMemberships';
 import { GroupTable, GroupTableName } from '../database/entities/groups';
 import {
+    HeadlessBrowserLoginGrantsTableName,
+    HeadlessBrowserLoginGrantTable,
+} from '../database/entities/headlessBrowserLoginGrants';
+import {
     InviteLinkTable,
     InviteLinkTableName,
 } from '../database/entities/inviteLinks';
+import {
+    JiraAppInstallationTable,
+    JiraAppInstallationTableName,
+} from '../database/entities/jiraAppInstallation';
 import {
     JobsTable,
     JobsTableName,
     JobStepsTable,
     JobStepsTableName,
 } from '../database/entities/jobs';
+import {
+    LearnCommandOutputTable,
+    LearnCommandOutputTableName,
+    LearnCommandsTable,
+    LearnCommandsTableName,
+    LearnWorkspaceFilesTable,
+    LearnWorkspaceFilesTableName,
+} from '../database/entities/learnSandbox';
+import {
+    LinearAppInstallationTable,
+    LinearAppInstallationTableName,
+} from '../database/entities/linearAppInstallation';
+import {
+    ManagedSignInTokenUsesTable,
+    ManagedSignInTokenUsesTableName,
+} from '../database/entities/managedSignInTokenUses';
 import {
     NotificationsTable,
     NotificationsTableName,
@@ -122,6 +258,10 @@ import {
     OpenIdIdentitiesTableName,
 } from '../database/entities/openIdIdentities';
 import {
+    OrganizationAgentIdentityRulesTable,
+    OrganizationAgentIdentityRulesTableName,
+} from '../database/entities/organizationAgentIdentityRules';
+import {
     OrganizationColorPaletteTable,
     OrganizationColorPaletteTableName,
 } from '../database/entities/organizationColorPalettes';
@@ -133,6 +273,18 @@ import {
     OrganizationDesignsTable,
     OrganizationDesignsTableName,
 } from '../database/entities/organizationDesigns';
+import {
+    OrganizationDomainVerificationsTable,
+    OrganizationDomainVerificationsTableName,
+} from '../database/entities/organizationDomainVerifications';
+import {
+    OrganizationEmailDomainsTable,
+    OrganizationEmailDomainsTableName,
+} from '../database/entities/organizationEmailDomains';
+import {
+    OrganizationMembershipCustomRolesTable,
+    OrganizationMembershipCustomRolesTableName,
+} from '../database/entities/organizationMembershipCustomRoles';
 import {
     OrganizationMembershipsTable,
     OrganizationMembershipsTableName,
@@ -147,6 +299,14 @@ import {
     OrganizationAllowedEmailDomainsTable,
     OrganizationAllowedEmailDomainsTableName,
 } from '../database/entities/organizationsAllowedEmailDomains';
+import {
+    OrganizationSettingsTable,
+    OrganizationSettingsTableName,
+} from '../database/entities/organizationSettings';
+import {
+    OrganizationSnowflakeAgentClientsTable,
+    OrganizationSnowflakeAgentClientsTableName,
+} from '../database/entities/organizationSnowflakeAgentClients';
 import {
     OrganizationSsoConfigurationsTable,
     OrganizationSsoConfigurationsTableName,
@@ -178,15 +338,29 @@ import {
     PinnedChartTableName,
     PinnedDashboardTable,
     PinnedDashboardTableName,
+    PinnedDocumentTable,
+    PinnedDocumentTableName,
     PinnedListTable,
     PinnedListTableName,
     PinnedSpaceTable,
     PinnedSpaceTableName,
 } from '../database/entities/pinnedList';
 import {
+    ProjectDbtSourcesTable,
+    ProjectDbtSourcesTableName,
+} from '../database/entities/projectDbtSources';
+import {
     ProjectGroupAccessTable,
     ProjectGroupAccessTableName,
 } from '../database/entities/projectGroupAccess';
+import {
+    ProjectGroupAccessCustomRolesTable,
+    ProjectGroupAccessCustomRolesTableName,
+} from '../database/entities/projectGroupAccessCustomRoles';
+import {
+    ProjectMembershipCustomRolesTable,
+    ProjectMembershipCustomRolesTableName,
+} from '../database/entities/projectMembershipCustomRoles';
 import {
     ProjectMembershipsTable,
     ProjectMembershipsTableName,
@@ -202,13 +376,23 @@ import {
     CachedExploreTableName,
     CachedWarehouseTable,
     CachedWarehouseTableName,
+    PlaygroundBundleVersionsTable,
+    PlaygroundBundleVersionsTableName,
     ProjectTable,
     ProjectTableName,
 } from '../database/entities/projects';
 import {
+    PullRequestsTable,
+    PullRequestsTableName,
+} from '../database/entities/pullRequests';
+import {
     QueryHistoryTable,
     QueryHistoryTableName,
 } from '../database/entities/queryHistory';
+import {
+    RecentContentTable,
+    RecentContentTableName,
+} from '../database/entities/recentContent';
 import {
     RolesTableName,
     RoleTable,
@@ -234,11 +418,21 @@ import {
     SavedChartVersionsTableName,
 } from '../database/entities/savedCharts';
 import {
+    SavedChartSlugMappingsTableName,
+    SavedChartSlugMappingTable,
+} from '../database/entities/savedChartSlugMappings';
+import {
     SavedSqlTable,
     SavedSqlTableName,
     SavedSqlVersionsTable,
     SavedSqlVersionsTableName,
 } from '../database/entities/savedSql';
+import {
+    SavedSqlGroupAccessTable,
+    SavedSqlGroupAccessTableName,
+    SavedSqlUserAccessTable,
+    SavedSqlUserAccessTableName,
+} from '../database/entities/savedSqlAccess';
 import {
     SchedulerEmailTargetTable,
     SchedulerEmailTargetTableName,
@@ -287,9 +481,21 @@ import {
     UserAttributeTable,
 } from '../database/entities/userAttributes';
 import {
+    UserAvatarsTable,
+    UserAvatarsTableName,
+} from '../database/entities/userAvatars';
+import {
     UserFavoritesTable,
     UserFavoritesTableName,
 } from '../database/entities/userFavorites';
+import {
+    UserOAuthGrantsTable,
+    UserOAuthGrantsTableName,
+} from '../database/entities/userOAuthGrants';
+import {
+    UserOnboardingTable,
+    UserOnboardingTableName,
+} from '../database/entities/userOnboarding';
 import { UserTable, UserTableName } from '../database/entities/users';
 import {
     ProjectUserWarehouseCredentialPreferenceTable,
@@ -306,16 +512,34 @@ import {
     WarehouseAvailableTablesTableName,
 } from '../database/entities/warehouseAvailableTables';
 import {
+    WarehouseConnectCodeTable,
+    WarehouseConnectCodeTableName,
+} from '../database/entities/warehouseConnectCode';
+import {
     WarehouseCredentialTable,
     WarehouseCredentialTableName,
 } from '../database/entities/warehouseCredentials';
 import {
+    AgentOnboardingRunsTable,
+    AgentOnboardingRunsTableName,
+} from '../ee/database/entities/agentOnboarding';
+import {
+    AiAgentToolCallErrorTable,
+    AiAgentToolCallErrorTableName,
     AiAgentToolCallTable,
     AiAgentToolCallTableName,
     AiAgentToolResultTable,
     AiAgentToolResultTableName,
     AiPromptContextTable,
     AiPromptContextTableName,
+    AiPromptDecisionShadowTable,
+    AiPromptDecisionShadowTableName,
+    AiPromptDecisionTable,
+    AiPromptDecisionTableName,
+    AiPromptInterruptTable,
+    AiPromptInterruptTableName,
+    AiPromptSteerTable,
+    AiPromptSteerTableName,
     AiPromptTable,
     AiPromptTableName,
     AiSlackPromptTable,
@@ -326,10 +550,16 @@ import {
     AiSqlApprovalTableName,
     AiThreadCompactionTable,
     AiThreadCompactionTableName,
+    AiThreadShareTable,
+    AiThreadShareTableName,
     AiThreadTable,
     AiThreadTableName,
     AiWebAppPromptTable,
     AiWebAppPromptTableName,
+    AiWebAppThreadTable,
+    AiWebAppThreadTableName,
+    AiWritebackThreadTable,
+    AiWritebackThreadTableName,
 } from '../ee/database/entities/ai';
 import {
     AiAgentGroupAccessTable,
@@ -356,6 +586,32 @@ import {
     AiAgentDocumentTableName,
 } from '../ee/database/entities/aiAgentDocument';
 import {
+    AiAgentMemoryTable,
+    AiAgentMemoryTableName,
+    AiAgentThreadDistillTable,
+    AiAgentThreadDistillTableName,
+} from '../ee/database/entities/aiAgentMemory';
+import {
+    AiAgentReviewClassifierRunTable,
+    AiAgentReviewClassifierRunTableName,
+    AiAgentReviewItemTable,
+    AiAgentReviewItemTableName,
+    AiAgentReviewRemediationEventsTable,
+    AiAgentReviewRemediationEventsTableName,
+    AiAgentReviewRemediationTable,
+    AiAgentReviewRemediationTableName,
+    AiAgentTurnSignalTable,
+    AiAgentTurnSignalTableName,
+} from '../ee/database/entities/aiAgentReviewClassifier';
+import {
+    AiAgentSkillAccessTable,
+    AiAgentSkillAccessTableName,
+    AiAgentSkillTable,
+    AiAgentSkillTableName,
+    AiAgentSkillVersionTable,
+    AiAgentSkillVersionTableName,
+} from '../ee/database/entities/aiAgentSkill';
+import {
     AiAgentUserPreferencesTable,
     AiAgentUserPreferencesTableName,
 } from '../ee/database/entities/aiAgentUserPreferences';
@@ -365,6 +621,16 @@ import {
     AiArtifactVersionsTable,
     AiArtifactVersionsTableName,
 } from '../ee/database/entities/aiArtifacts';
+import {
+    AiCreditAllowanceAlertsTable,
+    AiCreditAllowanceAlertsTableName,
+    AiCreditContractsTable,
+    AiCreditContractsTableName,
+    AiCreditHoldsTable,
+    AiCreditHoldsTableName,
+    AiCreditRateCardTable,
+    AiCreditRateCardTableName,
+} from '../ee/database/entities/aiCredits';
 import {
     AiEvalPromptTable,
     AiEvalPromptTableName,
@@ -378,17 +644,93 @@ import {
     AiEvalTableName,
 } from '../ee/database/entities/aiEvals';
 import {
-    DashboardSummariesTable,
-    DashboardSummariesTableName,
-} from '../ee/database/entities/dashboardSummaries';
+    AiReviewJiraDestinationTable,
+    AiReviewJiraDestinationTableName,
+    AiReviewLinearDestinationTable,
+    AiReviewLinearDestinationTableName,
+    AiReviewNotificationLogTable,
+    AiReviewNotificationLogTableName,
+    AiReviewNotificationSettingsTable,
+    AiReviewNotificationSettingsTableName,
+} from '../ee/database/entities/aiReviewNotifications';
+import {
+    AiRouterDecisionTable,
+    AiRouterDecisionTableName,
+    AiRouterTable,
+    AiRouterTableName,
+} from '../ee/database/entities/aiRouter';
+import {
+    AiSlackArtifactDeliveriesTable,
+    AiSlackArtifactDeliveriesTableName,
+} from '../ee/database/entities/aiSlackArtifactDeliveries';
+import {
+    AiThreadFileTable,
+    AiThreadFileTableName,
+} from '../ee/database/entities/aiThreadFile';
+import {
+    AppSharedStateHistoryTable,
+    AppSharedStateHistoryTableName,
+    AppSharedStateTable,
+    AppSharedStateTableName,
+    AppUserStateTable,
+    AppUserStateTableName,
+} from '../ee/database/entities/appState';
+import {
+    ComposerQueryNodesTable,
+    ComposerQueryNodesTableName,
+} from '../ee/database/entities/composerQueryNodes';
+import {
+    DataAppAnalysesTable,
+    DataAppAnalysesTableName,
+    DataAppAnalysisDailyCountersTable,
+    DataAppAnalysisDailyCountersTableName,
+    DataAppAnalysisRateCountersTable,
+    DataAppAnalysisRateCountersTableName,
+} from '../ee/database/entities/dataAppAnalyses';
+import {
+    AppExternalConnectionsTable,
+    AppExternalConnectionsTableName,
+    ExternalConnectionRateCountersTable,
+    ExternalConnectionRateCountersTableName,
+    ExternalConnectionSamplesTable,
+    ExternalConnectionSamplesTableName,
+    ExternalConnectionSecretsTable,
+    ExternalConnectionSecretsTableName,
+    ExternalConnectionsTable,
+    ExternalConnectionsTableName,
+} from '../ee/database/entities/externalConnections';
+import {
+    HomepageRecommendedActionSkipsTable,
+    HomepageRecommendedActionSkipsTableName,
+} from '../ee/database/entities/homepageRecommendedActionSkips';
 import {
     ManagedAgentActionsTable,
     ManagedAgentActionsTableName,
+    ManagedAgentProtectionsTable,
+    ManagedAgentProtectionsTableName,
     ManagedAgentRunsTable,
     ManagedAgentRunsTableName,
     ManagedAgentSettingsTable,
     ManagedAgentSettingsTableName,
 } from '../ee/database/entities/managedAgent';
+import {
+    McpClientInfoTable,
+    McpClientInfoTableName,
+    McpToolCallTable,
+    McpToolCallTableName,
+} from '../ee/database/entities/mcpToolCall';
+import {
+    AiAgentLiveActivitiesTableName,
+    AiAgentLiveActivityStartAttemptsTableName,
+    AiAgentLiveActivityStartAttemptTable,
+    AiAgentLiveActivityTable,
+    MobilePushInstallationsTableName,
+    MobilePushInstallationTable,
+} from '../ee/database/entities/mobilePushNotifications';
+import {
+    OrganizationHomepageSettingsTable,
+    OrganizationHomepageSettingsTableName,
+} from '../ee/database/entities/organizationHomepageSettings';
 import {
     PreAggregateDailyStatsTable,
     PreAggregateDailyStatsTableName,
@@ -400,6 +742,26 @@ import {
     PreAggregateMaterializationsTableName,
 } from '../ee/database/entities/preAggregates';
 import {
+    AnnouncementsTable,
+    AnnouncementsTableName,
+    HomepageAssignmentsTable,
+    HomepageAssignmentsTableName,
+    HomepagesTableName,
+    ProjectHomepagesTable,
+} from '../ee/database/entities/projectHomepages';
+import {
+    ReleaseHighlightsTable,
+    ReleaseHighlightsTableName,
+} from '../ee/database/entities/releaseHighlights';
+import {
+    SchedulerAiAugmentationTable,
+    SchedulerAiAugmentationTableName,
+} from '../ee/database/entities/schedulerAiAugmentation';
+import {
+    ScimRequestLogsTableName,
+    ScimRequestLogTable,
+} from '../ee/database/entities/scimRequestLogs';
+import {
     ServiceAccountsTableName,
     ServiceAccountTable,
 } from '../ee/database/entities/serviceAccounts';
@@ -410,10 +772,33 @@ import {
 
 declare module 'knex/types/tables' {
     interface Tables {
+        [ExploreNameAllocationsTableName]: ExploreNameAllocationsTable;
+        [DbtSourceRefCatalogsTableName]: DbtSourceRefCatalogsTable;
+        [ReleaseHighlightsTableName]: ReleaseHighlightsTable;
+        [AgentCapabilityPoliciesTableName]: AgentCapabilityPoliciesTable;
+        [AgentConnectionGrantsTableName]: AgentConnectionGrantsTable;
+        [AgentConnectionApprovalRequestsTableName]: AgentConnectionApprovalRequestsTable;
+        [AgentSystemRoleCapabilitiesTableName]: AgentSystemRoleCapabilitiesTable;
+        [AgentActionLogTableName]: AgentActionLogTable;
+        [CredentialBindingsTableName]: CredentialBindingsTable;
+        [CredentialTokenStateTableName]: CredentialTokenStateTable;
+        [CredentialsTableName]: CredentialsTable;
+        [OrganizationAgentIdentityRulesTableName]: OrganizationAgentIdentityRulesTable;
+        [AiServiceAccountCredentialsTableName]: AiServiceAccountCredentialsTable;
+        [OrganizationSnowflakeAgentClientsTableName]: OrganizationSnowflakeAgentClientsTable;
+        [DocumentsTableName]: DocumentsTable;
+        [DocumentVersionsTableName]: DocumentVersionsTable;
         [InviteLinkTableName]: InviteLinkTable;
         [OrganizationTableName]: OrganizationTable;
         [UserTableName]: UserTable;
+        [UserAvatarsTableName]: UserAvatarsTable;
+        [UserOnboardingTableName]: UserOnboardingTable;
         [EmailTableName]: EmailTable;
+        [ExternalSourcesTableName]: ExternalSourcesTable;
+        [ExternalSourceTablesTableName]: ExternalSourceTablesTable;
+        [ExternalSourceCredentialsTableName]: ExternalSourceCredentialsTable;
+        [ExternalSourceIngestAttemptsTableName]: ExternalSourceIngestAttemptsTable;
+        [ExternalSourceObjectsTableName]: ExternalSourceObjectsTable;
         [FeatureFlagsTableName]: FeatureFlagsTable;
         [FeatureFlagOverridesTableName]: FeatureFlagOverridesTable;
         [SessionTableName]: SessionTable;
@@ -421,7 +806,11 @@ declare module 'knex/types/tables' {
         [UserWarehouseCredentialsTableName]: UserWarehouseCredentialsTable;
         [ProjectUserWarehouseCredentialPreferenceTableName]: ProjectUserWarehouseCredentialPreferenceTable;
         [ProjectTableName]: ProjectTable;
+        [PlaygroundBundleVersionsTableName]: PlaygroundBundleVersionsTable;
+        [ProjectDbtSourcesTableName]: ProjectDbtSourcesTable;
         [SavedChartsTableName]: SavedChartTable;
+        [SavedChartSlugMappingsTableName]: SavedChartSlugMappingTable;
+        [DashboardSlugMappingsTableName]: DashboardSlugMappingTable;
         [SavedChartVersionsTableName]: SavedChartVersionsTable;
         [SavedChartVersionFieldsTableName]: SavedChartVersionFieldsTable;
         [SavedChartVersionSortsTableName]: SavedChartVersionSortsTable;
@@ -429,8 +818,14 @@ declare module 'knex/types/tables' {
         [SavedChartAdditionalMetricTableName]: SavedChartAdditionalMetricTable;
         [SavedSqlTableName]: SavedSqlTable;
         [SavedSqlVersionsTableName]: SavedSqlVersionsTable;
+        [SavedSqlUserAccessTableName]: SavedSqlUserAccessTable;
+        [SavedSqlGroupAccessTableName]: SavedSqlGroupAccessTable;
         [SpaceTableName]: SpaceTable;
         [DashboardsTableName]: DashboardTable;
+        [DashboardUserAccessTableName]: DashboardUserAccessTable;
+        [DocumentUserAccessTableName]: DocumentUserAccessTable;
+        [DocumentGroupAccessTableName]: DocumentGroupAccessTable;
+        [DashboardGroupAccessTableName]: DashboardGroupAccessTable;
         [DashboardVersionsTableName]: DashboardVersionTable;
         [DashboardViewsTableName]: DashboardViewTable;
         [DashboardTilesTableName]: DashboardTileTable;
@@ -443,6 +838,7 @@ declare module 'knex/types/tables' {
         [OnboardingTableName]: OnboardingTable;
         [OpenIdIdentitiesTableName]: OpenIdIdentitiesTable;
         [OrganizationMembershipsTableName]: OrganizationMembershipsTable;
+        [OrganizationMembershipCustomRolesTableName]: OrganizationMembershipCustomRolesTable;
         [PasswordResetTableName]: PasswordResetTable;
         [PasswordLoginTableName]: PasswordLoginTable;
         [CachedExploresTableName]: CachedExploresTable;
@@ -452,12 +848,15 @@ declare module 'knex/types/tables' {
         [JobStepsTableName]: JobStepsTable;
         [PersonalAccessTokenTableName]: PersonalAccessTokenTable;
         [ProjectMembershipsTableName]: ProjectMembershipsTable;
+        [ProjectMembershipCustomRolesTableName]: ProjectMembershipCustomRolesTable;
         [ProjectGroupAccessTableName]: ProjectGroupAccessTable;
+        [ProjectGroupAccessCustomRolesTableName]: ProjectGroupAccessCustomRolesTable;
         [ShareTableName]: ShareTable;
         [SpaceUserAccessTableName]: SpaceUserAccessTable;
         [SlackAuthTokensTableName]: SlackAuthTokensTable;
         [SlackChannelsTableName]: SlackChannelsTable;
         [AnalyticsChartViewsTableName]: AnalyticsChartViews;
+        [RecentContentTableName]: RecentContentTable;
         [AnalyticsDashboardViewsTableName]: AnalyticsDashboardViews;
         [AnalyticsAppViewsTableName]: AnalyticsAppViews;
         [PinnedListTableName]: PinnedListTable;
@@ -465,6 +864,7 @@ declare module 'knex/types/tables' {
         [PinnedDashboardTableName]: PinnedDashboardTable;
         [PinnedSpaceTableName]: PinnedSpaceTable;
         [PinnedAppTableName]: PinnedAppTable;
+        [PinnedDocumentTableName]: PinnedDocumentTable;
         [SchedulerTableName]: SchedulerTable;
         [SchedulerSlackTargetTableName]: SchedulerSlackTargetTable;
         [SchedulerEmailTargetTableName]: SchedulerEmailTargetTable;
@@ -474,11 +874,16 @@ declare module 'knex/types/tables' {
         [SchedulerLogTableName]: SchedulerLogTable;
         [OrganizationAllowedEmailDomainsTableName]: OrganizationAllowedEmailDomainsTable;
         [OrganizationAllowedEmailDomainProjectsTableName]: OrganizationAllowedEmailDomainProjectsTable;
+        [OrganizationSettingsTableName]: OrganizationSettingsTable;
         [OrganizationSsoConfigurationsTableName]: OrganizationSsoConfigurationsTable;
+        [OrganizationDomainVerificationsTableName]: OrganizationDomainVerificationsTable;
+        [OrganizationEmailDomainsTableName]: OrganizationEmailDomainsTable;
         [ValidationTableName]: ValidationTable;
         [GroupTableName]: GroupTable;
         [GroupMembershipTableName]: GroupMembershipTable;
+        [HeadlessBrowserLoginGrantsTableName]: HeadlessBrowserLoginGrantTable;
         [SshKeyPairTableName]: SshKeyPairTable;
+        [AwsWebIdentityAudiencesTableName]: AwsWebIdentityAudiencesTable;
         [UserAttributesTable]: UserAttributeTable;
         [OrganizationMemberUserAttributesTable]: OrganizationMemberUserAttributeTable;
         [GroupUserAttributesTable]: GroupUserAttributeTable;
@@ -489,19 +894,50 @@ declare module 'knex/types/tables' {
         [DownloadAuditTableName]: DownloadAuditTable;
         [GithubAppInstallationTableName]: GithubAppInstallationTable;
         [GitlabAppInstallationTableName]: GitlabAppInstallationTable;
+        [JiraAppInstallationTableName]: JiraAppInstallationTable;
+        [LinearAppInstallationTableName]: LinearAppInstallationTable;
+        [GitUserCredentialsTableName]: GitUserCredentialsTable;
+        [UserOAuthGrantsTableName]: UserOAuthGrantsTable;
+        [ManagedSignInTokenUsesTableName]: ManagedSignInTokenUsesTable;
+        [PullRequestsTableName]: PullRequestsTable;
         [DashboardTileCommentsTableName]: DashboardTileCommentsTable;
         [AiThreadTableName]: AiThreadTable;
+        [AiThreadShareTableName]: AiThreadShareTable;
         [AiSlackThreadTableName]: AiSlackThreadTable;
+        [AiWebAppThreadTableName]: AiWebAppThreadTable;
         [AiPromptTableName]: AiPromptTable;
+        [AiPromptInterruptTableName]: AiPromptInterruptTable;
+        [AiPromptSteerTableName]: AiPromptSteerTable;
         [AiPromptContextTableName]: AiPromptContextTable;
+        [AiPromptDecisionTableName]: AiPromptDecisionTable;
+        [AiPromptDecisionShadowTableName]: AiPromptDecisionShadowTable;
         [AiThreadCompactionTableName]: AiThreadCompactionTable;
         [AiArtifactsTableName]: AiArtifactsTable;
         [AiArtifactVersionsTableName]: AiArtifactVersionsTable;
+        [ComposerQueryNodesTableName]: ComposerQueryNodesTable;
         [AiSlackPromptTableName]: AiSlackPromptTable;
+        [AiSlackArtifactDeliveriesTableName]: AiSlackArtifactDeliveriesTable;
         [AiWebAppPromptTableName]: AiWebAppPromptTable;
+        [AiWritebackThreadTableName]: AiWritebackThreadTable;
+        [MobilePushInstallationsTableName]: MobilePushInstallationTable;
+        [AiAgentLiveActivitiesTableName]: AiAgentLiveActivityTable;
+        [AiAgentLiveActivityStartAttemptsTableName]: AiAgentLiveActivityStartAttemptTable;
+        [AgentOnboardingRunsTableName]: AgentOnboardingRunsTable;
+        [HomepageRecommendedActionSkipsTableName]: HomepageRecommendedActionSkipsTable;
         [AiAgentTableName]: AiAgentTable;
         [AiAgentDocumentTableName]: AiAgentDocumentTable;
         [AiAgentDocumentAccessTableName]: AiAgentDocumentAccessTable;
+        [AiThreadFileTableName]: AiThreadFileTable;
+        [AiAgentSkillTableName]: AiAgentSkillTable;
+        [AiAgentSkillVersionTableName]: AiAgentSkillVersionTable;
+        [AiAgentSkillAccessTableName]: AiAgentSkillAccessTable;
+        [AiAgentMemoryTableName]: AiAgentMemoryTable;
+        [AiAgentThreadDistillTableName]: AiAgentThreadDistillTable;
+        [AiAgentReviewClassifierRunTableName]: AiAgentReviewClassifierRunTable;
+        [AiAgentTurnSignalTableName]: AiAgentTurnSignalTable;
+        [AiAgentReviewItemTableName]: AiAgentReviewItemTable;
+        [AiAgentReviewRemediationTableName]: AiAgentReviewRemediationTable;
+        [AiAgentReviewRemediationEventsTableName]: AiAgentReviewRemediationEventsTable;
         [AiAgentGroupAccessTableName]: AiAgentGroupAccessTable;
         [AiAgentIntegrationTableName]: AiAgentIntegrationTable;
         [AiAgentSlackIntegrationTableName]: AiAgentSlackIntegrationTable;
@@ -510,19 +946,39 @@ declare module 'knex/types/tables' {
         [AiMcpServerCredentialTableName]: AiMcpServerCredentialTable;
         [AiAgentMcpServerTableName]: AiAgentMcpServerTable;
         [AiAgentUserPreferencesTableName]: AiAgentUserPreferencesTable;
+        [HomepagesTableName]: ProjectHomepagesTable;
+        [HomepageAssignmentsTableName]: HomepageAssignmentsTable;
+        [OrganizationHomepageSettingsTableName]: OrganizationHomepageSettingsTable;
+        [AnnouncementsTableName]: AnnouncementsTable;
         [AiAgentReasoningTableName]: AiAgentReasoningTable;
         [AiAgentToolCallTableName]: AiAgentToolCallTable;
+        [AiAgentToolCallErrorTableName]: AiAgentToolCallErrorTable;
         [AiAgentToolResultTableName]: AiAgentToolResultTable;
+        [McpToolCallTableName]: McpToolCallTable;
+        [McpClientInfoTableName]: McpClientInfoTable;
         [AiSqlApprovalTableName]: AiSqlApprovalTable;
         [DashboardTabsTableName]: DashboardTabsTable;
         [NotificationsTableName]: NotificationsTable;
-        [DashboardSummariesTableName]: DashboardSummariesTable;
+        [AiReviewNotificationLogTableName]: AiReviewNotificationLogTable;
+        [AiReviewNotificationSettingsTableName]: AiReviewNotificationSettingsTable;
+        [AiReviewJiraDestinationTableName]: AiReviewJiraDestinationTable;
+        [AiReviewLinearDestinationTableName]: AiReviewLinearDestinationTable;
         [CatalogTableName]: CatalogTable;
         [SlackChannelProjectMappingsTableName]: SlackChannelProjectMappingsTable;
         [WarehouseAvailableTablesTableName]: WarehouseAvailableTablesTable;
+        [WarehouseConnectCodeTableName]: WarehouseConnectCodeTable;
+        [AiUsageLedgerTableName]: AiUsageLedgerTable;
+        [AiCreditRateCardTableName]: AiCreditRateCardTable;
+        [AiCreditContractsTableName]: AiCreditContractsTable;
+        [AiCreditHoldsTableName]: AiCreditHoldsTable;
+        [AiCreditAllowanceAlertsTableName]: AiCreditAllowanceAlertsTable;
         [TagsTableName]: TagsTable;
         [CatalogTagsTableName]: CatalogTagsTable;
         [ServiceAccountsTableName]: ServiceAccountTable;
+        [ScimRequestLogsTableName]: ScimRequestLogTable;
+        [DataAppAnalysesTableName]: DataAppAnalysesTable;
+        [DataAppAnalysisRateCountersTableName]: DataAppAnalysisRateCountersTable;
+        [DataAppAnalysisDailyCountersTableName]: DataAppAnalysisDailyCountersTable;
         [MetricsTreeEdgesTableName]: MetricsTreeEdgesTable;
         [MetricsTreeLocksTableName]: MetricsTreeLocksTable;
         [MetricsTreesTableName]: MetricsTreesTable;
@@ -544,14 +1000,36 @@ declare module 'knex/types/tables' {
         [AiEvalRunTableName]: AiEvalRunTable;
         [AiEvalRunResultTableName]: AiEvalRunResultTable;
         [AiEvalRunResultAssessmentTableName]: AiEvalRunResultAssessmentTable;
-        [ChangesetsTableName]: ChangesetsTable;
-        [ChangesTableName]: ChangesTable;
         [ManagedAgentSettingsTableName]: ManagedAgentSettingsTable;
         [ManagedAgentActionsTableName]: ManagedAgentActionsTable;
         [ManagedAgentRunsTableName]: ManagedAgentRunsTable;
+        [ManagedAgentProtectionsTableName]: ManagedAgentProtectionsTable;
         [UserFavoritesTableName]: UserFavoritesTable;
+        [ContentAsCodeSnapshotsTableName]: ContentAsCodeSnapshotTable;
+        [ContentDraftsTableName]: ContentDraftsTable;
+        [ContentAsCodeProjectSettingsTableName]: ContentAsCodeProjectSettingsTable;
+        [ContentAsCodeWritebacksTableName]: ContentAsCodeWritebackTable;
         [ContentVerificationTableName]: ContentVerificationTable;
+        [ContentReviewRequestsTableName]: ContentReviewRequestsTable;
+        [ContentReviewSettingsTableName]: ContentReviewSettingsTable;
         [AppsTableName]: AppsTable;
         [AppVersionsTableName]: AppVersionsTable;
+        [AppThreadsTableName]: AppThreadsTable;
+        [AppUserAccessTableName]: AppUserAccessTable;
+        [AppGroupAccessTableName]: AppGroupAccessTable;
+        [AiRouterTableName]: AiRouterTable;
+        [AiRouterDecisionTableName]: AiRouterDecisionTable;
+        [ExternalConnectionsTableName]: ExternalConnectionsTable;
+        [ExternalConnectionSecretsTableName]: ExternalConnectionSecretsTable;
+        [AppExternalConnectionsTableName]: AppExternalConnectionsTable;
+        [ExternalConnectionRateCountersTableName]: ExternalConnectionRateCountersTable;
+        [ExternalConnectionSamplesTableName]: ExternalConnectionSamplesTable;
+        [AppUserStateTableName]: AppUserStateTable;
+        [AppSharedStateTableName]: AppSharedStateTable;
+        [AppSharedStateHistoryTableName]: AppSharedStateHistoryTable;
+        [SchedulerAiAugmentationTableName]: SchedulerAiAugmentationTable;
+        [LearnWorkspaceFilesTableName]: LearnWorkspaceFilesTable;
+        [LearnCommandsTableName]: LearnCommandsTable;
+        [LearnCommandOutputTableName]: LearnCommandOutputTable;
     }
 }

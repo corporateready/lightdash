@@ -1,14 +1,22 @@
 import {
+    getRequestMethod,
+    LightdashAppUuidHeader,
+    LightdashBuildHashHeader,
+    LightdashCliVersionHeader,
     LightdashMode,
     LightdashRequestMethodHeader,
     LightdashSdkVersionHeader,
+    LightdashSignedDownloadHeader,
     LightdashVersionHeader,
+    RequestMethod,
     SessionUser,
 } from '@lightdash/common';
 import { getActiveSpan } from '@sentry/node';
+import { randomUUID } from 'crypto';
 import * as express from 'express';
 import * as expressWinston from 'express-winston';
 import ExecutionContext from 'node-execution-context';
+import qs from 'qs';
 import * as winston from 'winston';
 import { lightdashConfig } from '../config/lightdashConfig';
 import { AuditActor, AuditLogEvent, AuditResource } from './auditLog';
@@ -64,6 +72,16 @@ export type ExecutionContextInfo = {
     };
     organization_uuid?: string;
     organization_name?: string;
+    app_uuid?: string;
+    app_version?: number;
+    // The client that made the request (Lightdash-Request-Method header).
+    // Analytics stamps it on every event tracked while handling the request.
+    request_method?: RequestMethod;
+    query_request?: {
+        startedAtMs: number;
+        requestId: string;
+        traceId: string | null;
+    };
     scheduler?: {
         scheduler_uuid?: string;
         scheduler_name?: string;
@@ -89,16 +107,26 @@ export const getSchedulerContext = ():
     return ExecutionContext.get<ExecutionContextInfo>().scheduler;
 };
 
-export const getOrganizationContext = (): Pick<
-    ExecutionContextInfo,
-    'organization_uuid' | 'organization_name'
-> => {
+// Reads the originating data app from the request-scoped ExecutionContext
+// (populated by requestExecutionContextMiddleware from the app attribution
+// header) so warehouse queries can be tagged back to the app. Returns an empty
+// object outside an app-originated request.
+export const getAppContext = (): Pick<ExecutionContextInfo, 'app_uuid'> => {
     if (!ExecutionContext.exists()) return {};
-    const ctx = ExecutionContext.get<ExecutionContextInfo>();
-    return {
-        organization_uuid: ctx.organization_uuid,
-        organization_name: ctx.organization_name,
-    };
+    return { app_uuid: ExecutionContext.get<ExecutionContextInfo>().app_uuid };
+};
+
+// Server-generated request timing survives asynchronous query submission via history.
+export const getQueryRequestContext = (): ExecutionContextInfo =>
+    ExecutionContext.exists()
+        ? ExecutionContext.get<ExecutionContextInfo>()
+        : {};
+
+/** Attribution only: called after existing signed app-version access checks. */
+export const setQueryAppVersion = (appUuid: string, version: number): void => {
+    if (ExecutionContext.exists()) {
+        ExecutionContext.update({ app_uuid: appUuid, app_version: version });
+    }
 };
 
 const ALIAS_RESPONSE_TIME_AS_DURATION = winston.format((info) => {
@@ -226,12 +254,22 @@ export const formatAuditActor = (actor: AuditActor): string => {
     return actor.uuid;
 };
 
+const formatAuditMetadataValue = (value: unknown): string => {
+    if (typeof value !== 'object' || value === null) return String(value);
+
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
+};
+
 export const formatAuditResource = (resource: AuditResource): string => {
     const typePart = resource.type;
 
     if (resource.metadata) {
         const parts = Object.entries(resource.metadata)
-            .map(([key, value]) => `${key}: ${value}`)
+            .map(([key, value]) => `${key}: ${formatAuditMetadataValue(value)}`)
             .join(', ');
         return `${typePart} -> ${parts}`;
     }
@@ -256,10 +294,16 @@ export const formatAuditMessage = (event: AuditLogEvent): string => {
 };
 
 export const logAuditEvent = (event: AuditLogEvent): void => {
+    if (!winstonLogger.isLevelEnabled('audit')) return;
+
     winstonLogger.log({
         level: 'audit',
         message: formatAuditMessage(event),
         ...event,
+        // Opt-in for deployments whose log indexers map `actor` as text
+        ...(lightdashConfig.logging.auditActorAsString
+            ? { actor: JSON.stringify(event.actor) }
+            : {}),
     });
 };
 
@@ -269,11 +313,79 @@ declare global {
     }
 }
 
+export const sanitizeRequestUrl = (url: string): string => {
+    const sanitizedUrl = url.replace(
+        /^((?:\/[^/?#]+)*\/api\/v2\/user\/agent-connections\/requests\/)[^/?#]+((?:\/(?:decision|completion))?\/?)(?=[?#]|$)/i,
+        '$1[REDACTED]$2',
+    );
+    const queryStart = sanitizedUrl.indexOf('?');
+    if (queryStart === -1) return sanitizedUrl;
+    const fragmentStart = sanitizedUrl.indexOf('#');
+    if (fragmentStart !== -1 && fragmentStart < queryStart) return sanitizedUrl;
+    const queryEnd = fragmentStart === -1 ? sanitizedUrl.length : fragmentStart;
+    const query = sanitizedUrl.slice(queryStart + 1, queryEnd);
+    const sanitized = query.split('&').map((pair) => {
+        const separator = pair.indexOf('=');
+        if (separator === -1) return pair;
+        const rawName = pair.slice(0, separator);
+        let names: string[];
+        try {
+            names = Object.keys(
+                qs.parse(`${rawName}=x`, { arrayLimit: 1000 }),
+            ).map((name) => name.toLowerCase());
+        } catch {
+            return `${rawName}=[REDACTED]`;
+        }
+        if (
+            names.some((name) =>
+                [
+                    'downloadtoken',
+                    'code',
+                    'state',
+                    'access_token',
+                    'refresh_token',
+                    'agent_request',
+                ].includes(name),
+            )
+        ) {
+            return `${rawName}=[REDACTED]`;
+        }
+        return pair;
+    });
+    return `${sanitizedUrl.slice(0, queryStart + 1)}${sanitized.join('&')}${sanitizedUrl.slice(queryEnd)}`;
+};
+
+const safeRequestHeaderNames = new Set([
+    'content-length',
+    'content-type',
+    'host',
+    'user-agent',
+    'x-amzn-trace-id',
+    'x-request-id',
+    LightdashAppUuidHeader.toLowerCase(),
+    LightdashBuildHashHeader.toLowerCase(),
+    LightdashCliVersionHeader.toLowerCase(),
+    LightdashRequestMethodHeader.toLowerCase(),
+    LightdashSdkVersionHeader.toLowerCase(),
+    LightdashSignedDownloadHeader.toLowerCase(),
+    LightdashVersionHeader.toLowerCase(),
+]);
+
+const filterRequestHeaders = (
+    headers: express.Request['headers'],
+): express.Request['headers'] =>
+    Object.fromEntries(
+        Object.entries(headers).filter(([name]) =>
+            safeRequestHeaderNames.has(name.toLowerCase()),
+        ),
+    );
+
 export const expressWinstonMiddleware: express.RequestHandler =
     expressWinston.logger({
         winstonInstance: winstonLogger,
         level: 'http',
-        msg: '{{req.method}} {{req.url}} {{res.statusCode}} - {{res.responseTime}} ms',
+        msg: (req, res) =>
+            `${req.method} ${sanitizeRequestUrl(req.url)} ${res.statusCode} - ${(res as typeof res & { responseTime?: number }).responseTime} ms`,
         colorize: false,
         meta: true,
         metaField: null, // on root of log
@@ -288,13 +400,14 @@ export const expressWinstonMiddleware: express.RequestHandler =
             includesResponse: true,
         }),
         requestWhitelist: ['url', 'headers', 'method'],
+        requestFilter: (req, propertyName) => {
+            if (propertyName === 'url') return sanitizeRequestUrl(req.url);
+            if (propertyName === 'headers') {
+                return filterRequestHeaders(req.headers);
+            }
+            return (req as unknown as Record<string, unknown>)[propertyName];
+        },
         responseWhitelist: ['statusCode'],
-        headerBlacklist: [
-            'cookie',
-            'authorization',
-            'connection',
-            'accept-encoding',
-        ],
     });
 
 // Logs the request before the response is sent
@@ -306,11 +419,10 @@ export const expressWinstonPreResponseMiddleware: express.RequestHandler = (
     if (lightdashConfig.mode !== LightdashMode.DEV) {
         winstonLogger.log({
             level: 'http',
-            message: `${req.method} ${req.url}`,
+            message: `${req.method} ${sanitizeRequestUrl(req.url)}`,
             req: {
                 method: req.method,
-                url: req.url,
-                headers: req.headers,
+                url: sanitizeRequestUrl(req.url),
             },
             includesResponse: false,
             userUuid: req.user?.userUuid,
@@ -323,10 +435,13 @@ export const expressWinstonPreResponseMiddleware: express.RequestHandler = (
 };
 
 // Stamps every log emitted while processing this request with the requesting
-// user's organization context, by attaching it to the AsyncLocalStorage-backed
-// ExecutionContext that `addExecutionContent` already merges into log payloads.
-// Place this AFTER session/auth middlewares so req.user and req.account are
-// populated. req.user is set for session-authenticated requests; embed/JWT
+// user's organization context and, for data-app traffic, the originating app —
+// by attaching them to the AsyncLocalStorage-backed ExecutionContext that
+// `addExecutionContent` already merges into log payloads. The app id rides in
+// on a self-reported header and is also read here so warehouse query tagging
+// can attribute queries back to the app without threading it through service
+// args. Place this AFTER session/auth middlewares so req.user and req.account
+// are populated. req.user is set for session-authenticated requests; embed/JWT
 // requests populate req.account only, so we fall back to it.
 export const requestExecutionContextMiddleware: express.RequestHandler = (
     req,
@@ -338,13 +453,29 @@ export const requestExecutionContextMiddleware: express.RequestHandler = (
         req.account?.organization?.organizationUuid;
     const organizationName =
         req.user?.organizationName ?? req.account?.organization?.name;
-    if (!organizationUuid && !organizationName) {
+    const appUuidHeader = req.headers[LightdashAppUuidHeader.toLowerCase()];
+    const appUuid =
+        typeof appUuidHeader === 'string' ? appUuidHeader : undefined;
+    const requestMethodHeader =
+        req.headers[LightdashRequestMethodHeader.toLowerCase()];
+    if (!organizationUuid && !organizationName && !appUuid) {
         next();
         return;
     }
     const context: ExecutionContextInfo = {
+        query_request: {
+            startedAtMs: Date.now(),
+            requestId: randomUUID(),
+            traceId: getActiveSpan()?.spanContext().traceId ?? null,
+        },
         organization_uuid: organizationUuid,
         organization_name: organizationName,
+        ...(appUuid ? { app_uuid: appUuid } : {}),
+        request_method: getRequestMethod(
+            typeof requestMethodHeader === 'string'
+                ? requestMethodHeader
+                : undefined,
+        ),
     };
     if (ExecutionContext.exists()) {
         ExecutionContext.update(context as unknown as Record<string, unknown>);

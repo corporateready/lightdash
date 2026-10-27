@@ -3,13 +3,8 @@
     overflow: visible;
 }
 
-.groupHeader {
-    width: 100%;
-    padding: var(--mantine-spacing-xs);
-
-    &:hover {
-        background-color: var(--mantine-color-ldDark-3);
-    }
+.sectionHeader {
+    padding: var(--mantine-spacing-xs) var(--mantine-spacing-sm);
 }
 
 .badge {
@@ -17,29 +12,111 @@
 }
 
 .targetButton {
-    max-width: 200px;
+    max-width: 260px;
 
     &:disabled {
-        color: var(--mantine-color-white);
-        background-color: var(--mantine-color-ldDark-6);
-        border-color: var(--mantine-color-ldDark-4);
+        color: light-dark(
+            var(--mantine-color-ldGray-6),
+            var(--mantine-color-white)
+        );
+        background-color: light-dark(
+            var(--mantine-color-ldGray-1),
+            var(--mantine-color-ldDark-6)
+        );
+        border-color: var(--mantine-color-ldGray-3);
     }
+}
+
+/* Allow the button label (and its flex children) to shrink so the project
+   name truncates with an ellipsis instead of being cropped. */
+.targetButtonLabel {
+    min-width: 0;
+}
+
+@media ($navigation-compact <= width < $navigation-project-label) {
+    .targetButton {
+        width: rem(34px);
+        padding-inline: rem(8px);
+    }
+
+    .targetButton .previewName,
+    .targetButton .upstreamName {
+        display: none;
+    }
+}
+
+.breadcrumbSeparator {
+    flex-shrink: 0;
+}
+
+.upstreamName {
+    flex-shrink: 0;
+}
+
+.previewName {
+    min-width: 0;
 }
 
 .searchHeader {
     padding: var(--mantine-spacing-sm);
-    border-bottom: 1px solid var(--mantine-color-dark-4);
+    border-bottom: 1px solid var(--mantine-color-default-border);
 }
 
 .searchInput {
     background-color: transparent;
-    border: 1px solid var(--mantine-color-dark-4);
+    border: 1px solid var(--mantine-color-default-border);
 
     &:focus {
         border-color: var(--mantine-color-blue-6);
     }
 }
 
+.previewCountChip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    padding: 2px var(--mantine-spacing-xs);
+    border-radius: var(--mantine-radius-sm);
+    color: var(--mantine-color-ldGray-6);
+    cursor: pointer;
+
+    &:hover {
+        background-color: light-dark(
+            var(--mantine-color-ldGray-1),
+            var(--mantine-color-ldDark-4)
+        );
+        color: var(--mantine-color-ldGray-9);
+    }
+}
+
+.drillHeader {
+    width: 100%;
+    padding: var(--mantine-spacing-xs) var(--mantine-spacing-sm);
+    border: none;
+    background-color: transparent;
+    text-align: left;
+    cursor: pointer;
+
+    &:hover {
+        background-color: light-dark(
+            var(--mantine-color-ldGray-1),
+            var(--mantine-color-ldDark-3)
+        );
+    }
+}
+
+.activePreviewItem {
+    background-color: rgba(38, 128, 235, 0.1);
+    box-shadow: inset 2px 0 0 var(--mantine-color-blue-6);
+}
+
 .stickyFooter {
-    border-top: 1px solid var(--mantine-color-dark-4);
+    border-top: 1px solid var(--mantine-color-default-border);
+}
+
+@media (width < $mantine-breakpoint-sm) {
+    .dropdown :global(.mantine-Menu-item) {
+        min-height: 44px;
+    }
 }

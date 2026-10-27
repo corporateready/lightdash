@@ -1,0 +1,685 @@
+import {
+    ChartType,
+    ContentReviewContentType,
+    fromDocumentChartBlocks,
+    type ContentReviewRequest,
+    type Document,
+    type DocumentChartContent,
+    type DocumentContent,
+} from '@lightdash/common';
+import { MantineProvider } from '@mantine/core';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { type ReactNode } from 'react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
+import { mockedLightdashApi } from '../testing/mockedLightdashApi';
+import DocumentPage from './Document';
+
+const mocks = vi.hoisted(() => ({
+    api: vi.fn(),
+    chartFails: false,
+    chart: vi.fn(),
+    flag: { data: { enabled: true }, isInitialLoading: false, isError: false },
+    eligibility: vi.fn(),
+    pendingReview: null as ContentReviewRequest | null,
+    canRequestReview: false,
+    actions: vi.fn(),
+}));
+
+vi.unmock('@uiw/react-markdown-preview');
+vi.mock('../api');
+vi.mock('../features/documents/useCanEditDocument', () => ({
+    useCanEditDocument: () => true,
+}));
+vi.mock('../features/documents/DocumentEditor', () => ({
+    default: ({ onClose }: { onClose: () => void }) => (
+        <button onClick={onClose}>Close editor</button>
+    ),
+}));
+vi.mock('../features/documents/DocumentActions', () => ({
+    default: (props: unknown) => {
+        mocks.actions(props);
+        return null;
+    },
+}));
+vi.mock('../ee/features/contentReview', () => ({
+    useContentReviewEligibility: (args: unknown) => {
+        mocks.eligibility(args);
+        return {
+            isAvailable: true,
+            isPersonalContent: true,
+            pendingRequest: mocks.pendingReview,
+            canRequest: mocks.canRequestReview,
+        };
+    },
+    PendingReviewBadge: () => <span>Review pending</span>,
+}));
+vi.mock('../features/documents/DocumentAiAgentContextBridge', () => ({
+    default: ({ documentUuid }: { documentUuid: string }) => (
+        <span data-testid="ai-agent-context">{documentUuid}</span>
+    ),
+}));
+vi.mock('../hooks/useProjectUuid', () => ({
+    useProjectUuid: () => 'project-uuid',
+}));
+vi.mock('../hooks/useProjectRoute', () => ({
+    useProjectUrlIdentifier: () => 'project-slug',
+}));
+vi.mock('../hooks/useServerOrClientFeatureFlag', () => ({
+    useServerFeatureFlag: () => mocks.flag,
+}));
+vi.mock('../components/common/Page/Page', () => ({
+    default: ({
+        children,
+        header,
+    }: {
+        children: ReactNode;
+        header: ReactNode;
+    }) => (
+        <main>
+            {header}
+            {children}
+        </main>
+    ),
+}));
+vi.mock('../features/documents/DocumentChart', () => ({
+    default: (props: { content: DocumentChartContent }) => {
+        mocks.chart(props);
+        const { content } = props;
+        if (mocks.chartFails) {
+            throw new Error('Chart rendering failed');
+        }
+        return <div data-testid="document-chart">{content.chart.name}</div>;
+    },
+}));
+
+type TestCell =
+    | { type: 'markdown'; content: { markdown: string } }
+    | { type: 'chart'; content: DocumentChartContent };
+
+/** Ordered test cells as stored content; charts get ids c1, c2, … in order. */
+const toContent = (testCells: TestCell[]): DocumentContent => {
+    let chartNumber = 0;
+    return fromDocumentChartBlocks(
+        testCells.map((cell) => {
+            if (cell.type === 'markdown') {
+                return { type: 'markdown', markdown: cell.content.markdown };
+            }
+            chartNumber += 1;
+            return {
+                type: 'chart',
+                id: `c${chartNumber}`,
+                chart: cell.content,
+            };
+        }),
+    );
+};
+
+const chart = {
+    type: 'chart',
+    content: {
+        source: 'semantic',
+        chart: {
+            name: 'Orders chart',
+            tableName: 'orders',
+            metricQuery: {
+                exploreName: 'orders',
+                dimensions: [],
+                metrics: ['orders_count'],
+                filters: {},
+                sorts: [],
+                limit: 100,
+                tableCalculations: [],
+            },
+            chartConfig: { type: ChartType.TABLE },
+        },
+    },
+} satisfies TestCell;
+const cells: TestCell[] = [
+    {
+        type: 'markdown',
+        content: {
+            markdown: '# Findings\n\nSupporting findings',
+        },
+    },
+    chart,
+    {
+        type: 'markdown',
+        content: {
+            markdown: '# Recommendations\n\nNext steps',
+        },
+    },
+];
+const document: Document = {
+    pinnedListUuid: null,
+    verification: null,
+    createdBy: null,
+    owner: null,
+    ownerUserUuid: null,
+    documentUuid: 'document-uuid',
+    projectUuid: 'project-uuid',
+    organizationUuid: 'org-uuid',
+    spaceUuid: 'space-uuid',
+    name: 'Weekly review',
+    slug: 'weekly-review',
+    description: 'Revenue and next steps',
+    createdAt: new Date('2026-09-15'),
+    updatedAt: new Date('2026-09-15'),
+    createdByUserUuid: null,
+    version: {
+        versionUuid: 'version-uuid',
+        versionNumber: 1,
+        schemaVersion: 2,
+        content: toContent(cells),
+        createdAt: new Date('2026-09-15'),
+        createdByUserUuid: null,
+    },
+};
+
+const renderPage = (
+    returnTo?: string,
+    documentIdentifier = 'document-uuid',
+    state: unknown = null,
+) => {
+    const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, cacheTime: 0 } },
+        logger: { log: () => {}, warn: () => {}, error: () => {} },
+    });
+    const router = createMemoryRouter(
+        [
+            {
+                path: '/projects/:projectUuid/documents/:documentUuidOrSlug',
+                element: <DocumentPage />,
+            },
+            {
+                path: '/projects/:projectUuid/home',
+                element: <div>Project home</div>,
+            },
+            {
+                path: '/projects/:projectUuid/documents',
+                element: <div>Document list</div>,
+            },
+            {
+                path: '/projects/:projectUuid/research',
+                element: <div>Research run</div>,
+            },
+        ],
+        {
+            initialEntries: [
+                {
+                    pathname: `/projects/project-slug/documents/${documentIdentifier}`,
+                    search:
+                        returnTo === undefined
+                            ? ''
+                            : `?returnTo=${encodeURIComponent(returnTo)}`,
+                    state,
+                },
+            ],
+        },
+    );
+    const result = render(
+        <QueryClientProvider client={queryClient}>
+            <MantineProvider env="test">
+                <RouterProvider router={router} />
+            </MantineProvider>
+        </QueryClientProvider>,
+    );
+    return { ...result, router };
+};
+
+describe('Document page', () => {
+    test('offers editing for an authorized document author', async () => {
+        renderPage();
+        expect(
+            await screen.findByRole('button', { name: 'Edit document' }),
+        ).toBeInTheDocument();
+    });
+
+    test('opens straight into the editor after creation, only once', async () => {
+        const { router } = renderPage(undefined, 'document-uuid', {
+            startEditing: true,
+        });
+        expect(
+            await screen.findByRole('button', { name: 'Close editor' }),
+        ).toBeInTheDocument();
+        await waitFor(() => expect(router.state.location.state).toBeNull());
+        expect(router.state.location.pathname).toBe(
+            '/projects/project-slug/documents/document-uuid',
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Close editor' }));
+        expect(
+            await screen.findByRole('button', { name: 'Edit document' }),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByRole('button', { name: /^Drag chart/ }),
+        ).not.toBeInTheDocument();
+    });
+    beforeEach(() => {
+        mocks.eligibility.mockReset();
+        mocks.actions.mockReset();
+        mocks.pendingReview = null;
+        mocks.canRequestReview = false;
+        mocks.chartFails = false;
+        mocks.chart.mockReset();
+        mockedLightdashApi.mockReset();
+        mockedLightdashApi.mockResolvedValue(document);
+        mocks.flag = {
+            data: { enabled: true },
+            isInitialLoading: false,
+            isError: false,
+        };
+    });
+
+    test('lets the author request a review of this Document', async () => {
+        mocks.canRequestReview = true;
+        renderPage();
+        await screen.findByRole('button', { name: 'Edit document' });
+        expect(mocks.eligibility).toHaveBeenCalledWith(
+            expect.objectContaining({
+                contentType: ContentReviewContentType.DOCUMENT,
+                contentUuid: document.documentUuid,
+                spaceUuid: document.spaceUuid,
+            }),
+        );
+        expect(mocks.actions).toHaveBeenLastCalledWith(
+            expect.objectContaining({ canRequestReview: true }),
+        );
+        expect(screen.queryByText('Review pending')).not.toBeInTheDocument();
+    });
+
+    test('shows a pending review outside the document controls', async () => {
+        mocks.pendingReview = { uuid: 'request' } as ContentReviewRequest;
+        renderPage();
+        const controls = await screen.findByRole('group', {
+            name: 'Document controls',
+        });
+        const badge = screen.getByText('Review pending');
+        expect(controls).not.toContainElement(badge);
+    });
+
+    test('shows the document loading state until the request resolves', async () => {
+        mockedLightdashApi.mockReturnValue(new Promise(() => {}));
+        renderPage();
+        await waitFor(() => expect(mockedLightdashApi).toHaveBeenCalledOnce());
+        expect(screen.getByText('Loading document')).toBeInTheDocument();
+    });
+
+    test('renders ordered markdown and chart cells with a title but no description', async () => {
+        const { container } = renderPage();
+        expect(
+            await screen.findByRole('heading', {
+                name: 'Weekly review',
+                level: 1,
+            }),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByText('Revenue and next steps'),
+        ).not.toBeInTheDocument();
+        expect(screen.getByText(/^Last edited/)).toBeInTheDocument();
+        expect(
+            screen.queryByText('Document', { exact: true }),
+        ).not.toBeInTheDocument();
+        expect(
+            screen.queryByText('Contents', { exact: true }),
+        ).not.toBeInTheDocument();
+        expect(
+            screen.getByRole('navigation', { name: 'Report contents' }),
+        ).toBeInTheDocument();
+        expect(mockedLightdashApi).toHaveBeenCalledWith(
+            expect.objectContaining({
+                url: '/projects/project-uuid/documents/document-uuid',
+                method: 'GET',
+            }),
+        );
+        expect(
+            Array.from(
+                container.querySelectorAll(
+                    'h1[data-report-heading], h2, [data-testid="document-chart"]',
+                ),
+            ).map((element) => element.textContent),
+        ).toEqual(['Findings', 'Orders chart', 'Recommendations']);
+    });
+
+    test('shows the creator beside the edit timestamp without attributing the latest edit to them', async () => {
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            createdBy: {
+                userUuid: 'original-author',
+                firstName: 'Original',
+                lastName: 'Author',
+                avatarUrl: '/api/v1/user/original-author/avatar?v=hash',
+                avatarGradient: null,
+            },
+            version: {
+                ...document.version,
+                createdByUserUuid: 'latest-editor',
+            },
+        });
+        renderPage();
+        expect(await screen.findByText('Original Author')).toBeInTheDocument();
+        expect(screen.getByLabelText('Created by')).toHaveTextContent(
+            'Original Author',
+        );
+        expect(screen.getByText(/^Last edited/)).not.toHaveTextContent(
+            'Original Author',
+        );
+    });
+
+    test('keeps the timestamp without inventing an author when the creator is unavailable', async () => {
+        renderPage();
+        expect(await screen.findByText(/^Last edited/)).toBeInTheDocument();
+        expect(screen.queryByLabelText('Created by')).not.toBeInTheDocument();
+    });
+
+    test('identifies the opening section even when an introductory cell precedes it', async () => {
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: {
+                ...document.version,
+                content: toContent([
+                    {
+                        type: 'markdown',
+                        content: { markdown: 'Opening narrative' },
+                    },
+                    ...cells,
+                ]),
+            },
+        });
+        renderPage();
+        expect(
+            await screen.findByRole('heading', { name: 'Findings' }),
+        ).toHaveAttribute('data-first-heading', 'true');
+        expect(
+            screen.getByRole('heading', { name: 'Recommendations' }),
+        ).not.toHaveAttribute('data-first-heading');
+    });
+
+    test('shows unavailable content without leaking the server error', async () => {
+        mockedLightdashApi.mockRejectedValue({
+            error: { message: 'Internal detail', statusCode: 404 },
+        });
+        renderPage();
+        expect(
+            await screen.findByText('Document unavailable'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText('Internal detail')).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('link', { name: 'Back' }));
+        expect(await screen.findByText('Document list')).toBeInTheDocument();
+    });
+
+    test('loads a document slug but passes resolved UUIDs to chart queries', async () => {
+        renderPage(undefined, 'weekly-review');
+        expect(await screen.findByTestId('document-chart')).toBeInTheDocument();
+        expect(mockedLightdashApi).toHaveBeenCalledWith(
+            expect.objectContaining({
+                url: '/projects/project-uuid/documents/weekly-review',
+                method: 'GET',
+            }),
+        );
+        expect(mocks.chart).toHaveBeenCalledWith(
+            expect.objectContaining({
+                projectUuid: 'project-uuid',
+                documentUuid: 'document-uuid',
+                versionUuid: 'version-uuid',
+                chartId: 'c1',
+            }),
+        );
+        expect(screen.getByTestId('ai-agent-context')).toHaveTextContent(
+            'document-uuid',
+        );
+    });
+
+    test('shows report contents linked to the document sections', async () => {
+        renderPage();
+        const heading = await screen.findByRole('heading', {
+            name: 'Findings',
+        });
+        expect(
+            screen.getByRole('navigation', { name: 'Report contents' }),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByRole('button', { name: 'Findings' }),
+        ).toBeInTheDocument();
+        expect(heading).toHaveAttribute('id', 'document-heading-0');
+        expect(heading.tagName).toBe('H1');
+        expect(
+            screen.getByRole('heading', { name: 'Recommendations' }),
+        ).toHaveAttribute('id', 'document-heading-1');
+    });
+
+    test('omits chart names and Markdown H2s from the contents', async () => {
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: {
+                ...document.version,
+                content: toContent([
+                    {
+                        type: 'markdown',
+                        content: { markdown: '## Embedded heading' },
+                    },
+                    {
+                        ...chart,
+                        content: {
+                            ...chart.content,
+                            chart: {
+                                ...chart.content.chart,
+                                name: 'Chart section',
+                            },
+                        },
+                    },
+                ]),
+            },
+        });
+        renderPage();
+        expect(await screen.findByText('Chart section')).not.toHaveAttribute(
+            'data-report-heading',
+        );
+        expect(
+            screen.queryByRole('button', { name: 'Chart section' }),
+        ).not.toBeInTheDocument();
+        expect(
+            screen.getByRole('heading', { name: 'Embedded heading' }),
+        ).not.toHaveAttribute('data-report-heading');
+        expect(
+            screen.queryByRole('button', { name: 'Embedded heading' }),
+        ).not.toBeInTheDocument();
+    });
+
+    test('preserves the chart title and Markdown navigation when a chart renderer throws', async () => {
+        mocks.chartFails = true;
+        const errorLog = vi
+            .spyOn(console, 'error')
+            .mockImplementation(() => {});
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: {
+                ...document.version,
+                content: toContent([
+                    {
+                        ...chart,
+                        content: {
+                            ...chart.content,
+                            chart: {
+                                ...chart.content.chart,
+                                name: 'Failed chart section',
+                            },
+                        },
+                    },
+                    cells[0],
+                ]),
+            },
+        });
+        try {
+            renderPage();
+            await screen.findByRole('heading', { name: 'Findings' });
+            expect(
+                screen.getByText('Failed chart section'),
+            ).toBeInTheDocument();
+            expect(
+                screen.getByRole('figure', { name: 'Failed chart section' })
+                    .parentElement,
+            ).toContainElement(screen.getByText('Failed chart section'));
+            expect(
+                screen.queryByRole('button', { name: 'Failed chart section' }),
+            ).not.toBeInTheDocument();
+            const title = screen.getByRole('heading', {
+                name: 'Findings',
+            });
+            title.scrollIntoView = vi.fn();
+            fireEvent.click(screen.getByRole('button', { name: 'Findings' }));
+            expect(title.scrollIntoView).toHaveBeenCalledWith({
+                block: 'start',
+            });
+            expect(
+                screen.getByRole('heading', { name: 'Findings' }),
+            ).toBeInTheDocument();
+            expect(
+                screen.queryByTestId('document-chart'),
+            ).not.toBeInTheDocument();
+        } finally {
+            errorLog.mockRestore();
+        }
+    });
+
+    test('renders section titles as literal text rather than Markdown or HTML', async () => {
+        const title = '<img src=x onerror=alert(1)> **Results**';
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: {
+                ...document.version,
+                content: toContent([
+                    {
+                        type: 'chart',
+                        content: {
+                            ...chart.content,
+                            chart: { ...chart.content.chart, name: title },
+                        },
+                    },
+                ]),
+            },
+        });
+        const { container } = renderPage();
+        expect(await screen.findByText(title)).toBeInTheDocument();
+        expect(
+            screen.queryByRole('button', { name: title }),
+        ).not.toBeInTheDocument();
+        expect(container.querySelector('img, [onerror], strong')).toBeNull();
+    });
+
+    test('renders an empty document explicitly', async () => {
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: { ...document.version, content: toContent([]) },
+        });
+        renderPage();
+        expect(
+            await screen.findByText('This document is empty.'),
+        ).toBeInTheDocument();
+    });
+
+    test('shows an unknown tag as text and preserves neighboring content', async () => {
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: {
+                ...document.version,
+                content: {
+                    markdown:
+                        '# Findings\n\nSupporting findings\n\n<widget id="x">',
+                    charts: {},
+                },
+            },
+        });
+        renderPage();
+        expect(
+            await screen.findByRole('heading', { name: 'Findings' }),
+        ).toBeInTheDocument();
+        expect(screen.getByText('<widget id="x">')).toBeInTheDocument();
+        expect(screen.queryByTestId('document-chart')).not.toBeInTheDocument();
+    });
+
+    test('returns to a validated internal research location', async () => {
+        mockedLightdashApi.mockRejectedValue({ error: { statusCode: 404 } });
+        const { router } = renderPage(
+            '/projects/project-uuid/research?run=123#report',
+        );
+        fireEvent.click(await screen.findByRole('link', { name: 'Back' }));
+        expect(await screen.findByText('Research run')).toBeInTheDocument();
+        expect(router.state.location.search).toBe('?run=123');
+        expect(router.state.location.hash).toBe('#report');
+    });
+
+    test('replaces an external return location with the canonical document list', async () => {
+        mockedLightdashApi.mockRejectedValue({ error: { statusCode: 404 } });
+        renderPage('https://example.com/projects/project-uuid/research');
+        expect(
+            await screen.findByRole('link', { name: 'Back' }),
+        ).toHaveAttribute('href', '/projects/project-slug/documents');
+    });
+
+    test.each(['Weekly review', 'A long document name '.repeat(20)])(
+        'shows one document title with its actions and no Back: %s',
+        async (name) => {
+            mockedLightdashApi.mockResolvedValue({ ...document, name });
+            renderPage('/projects/project-uuid/research');
+            expect(
+                await screen.findByRole('heading', {
+                    name: name.trim(),
+                    level: 1,
+                }),
+            ).toBeInTheDocument();
+            expect(
+                screen.getAllByRole('heading', { name: name.trim() }),
+            ).toHaveLength(1);
+            expect(
+                screen
+                    .getByRole('heading', { name: name.trim() })
+                    .closest('header'),
+            ).toContainElement(
+                screen.getByRole('group', { name: 'Document controls' }),
+            );
+            expect(
+                screen.queryByRole('link', { name: 'Back' }),
+            ).not.toBeInTheDocument();
+            expect(
+                screen.queryByRole('button', { name: 'Back' }),
+            ).not.toBeInTheDocument();
+        },
+    );
+
+    test('renders real markdown without raw HTML or unsafe URL schemes', async () => {
+        mockedLightdashApi.mockResolvedValue({
+            ...document,
+            version: {
+                ...document.version,
+                content: toContent([
+                    {
+                        type: 'markdown',
+                        content: {
+                            markdown: [
+                                '## Safe heading',
+                                '<iframe src="https://example.com"></iframe>',
+                                '<script>alert(1)</script>',
+                                '<img src=x onerror="alert(1)">',
+                                '[unsafe](javascript:alert%281%29)',
+                                '[data link](data:text/html,test)',
+                                '[safe link](https://example.com/report)',
+                            ].join('\n\n'),
+                        },
+                    },
+                ]),
+            },
+        });
+        const { container } = renderPage();
+        expect(
+            await screen.findByRole('heading', { name: 'Safe heading' }),
+        ).toBeInTheDocument();
+        expect(container.querySelector('iframe, script, [onerror]')).toBeNull();
+        expect(
+            container.querySelector('a[href^="javascript:"], a[href^="data:"]'),
+        ).toBeNull();
+        expect(screen.getByRole('link', { name: 'safe link' })).toHaveAttribute(
+            'href',
+            'https://example.com/report',
+        );
+    });
+});

@@ -1,0 +1,643 @@
+import {
+    ChartType,
+    DimensionType,
+    FieldType,
+    MergeJoinType,
+    MetricType,
+    MergeQueryErrorKind,
+    type ApiError,
+    type ApiExecuteAsyncMergeQueryResults,
+    type ItemsMap,
+    type MergeQuery,
+    type SavedChartDAO,
+} from '@lightdash/common';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { useEffect, useRef, type PropsWithChildren } from 'react';
+import { PRIMARY_SOURCE_ID } from '../constants';
+import { getMergeSourceNames } from '../utils/getMergeSourceNames';
+import { MergeProvider } from './MergeContext';
+import { MERGE_URL_PARAM, serializeMergeState } from './mergeUrlState';
+import { useMerge } from './useMerge';
+
+const setSearchParams = vi.fn();
+const { executeMergeQuery, searchParams } = vi.hoisted(() => ({
+    executeMergeQuery: vi.fn(),
+    searchParams: new URLSearchParams(),
+}));
+
+vi.mock('react-router', () => ({
+    useParams: () => ({ projectUuid: 'project-uuid' }),
+    useSearchParams: () => [searchParams, setSearchParams],
+}));
+
+vi.mock('../../../hooks/useProjectUuid', () => ({
+    useProjectUuid: () => 'project-uuid',
+}));
+
+vi.mock('../../../hooks/useQueryResults', () => ({
+    useInfiniteQueryResults: () => ({
+        data: undefined,
+        error: null,
+        isFetching: false,
+    }),
+}));
+
+vi.mock('../hooks/useMergeQuery', () => ({ executeMergeQuery }));
+
+const mergeQuery: MergeQuery = {
+    sources: [],
+    joinKey: [],
+    joinType: MergeJoinType.FULL,
+    tableCalculations: [],
+    limit: 500,
+};
+
+const fields: ItemsMap = {
+    merge_month: {
+        fieldType: FieldType.DIMENSION,
+        type: DimensionType.DATE,
+        name: 'month',
+        label: 'Month',
+        table: 'merge',
+        tableLabel: 'Merged result',
+        sql: '${TABLE}.month',
+        hidden: false,
+    },
+    merge_status: {
+        fieldType: FieldType.DIMENSION,
+        type: DimensionType.STRING,
+        name: 'status',
+        label: 'Status',
+        table: 'merge',
+        tableLabel: 'Merged result',
+        sql: '${TABLE}.status',
+        hidden: false,
+    },
+    orders_total: {
+        fieldType: FieldType.METRIC,
+        type: MetricType.SUM,
+        name: 'total',
+        label: 'Total',
+        table: 'orders',
+        tableLabel: 'Orders',
+        sql: '${TABLE}.total',
+        hidden: false,
+    },
+};
+
+const startedResult = (
+    queryUuid: string,
+): ApiExecuteAsyncMergeQueryResults => ({
+    outcome: 'started',
+    parameterReferences: [],
+    fieldOrigins: {},
+    query: {
+        queryUuid,
+        cacheMetadata: { cacheHit: false },
+        parameterReferences: [],
+        usedParametersValues: {},
+        resolvedTimezone: null,
+        metricQuery: {
+            exploreName: 'merge',
+            dimensions: ['merge_month', 'merge_status'],
+            metrics: ['orders_total'],
+            filters: {},
+            sorts: [],
+            limit: 500,
+            tableCalculations: [],
+            additionalMetrics: [],
+        },
+        fields,
+        warnings: [],
+    },
+});
+
+const wrapper = ({ children }: PropsWithChildren) => (
+    <MergeProvider>{children}</MergeProvider>
+);
+
+describe('MergeProvider', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        searchParams.delete(MERGE_URL_PARAM);
+    });
+
+    it('stops waiting for a restored merge once it is refused before execution', () => {
+        searchParams.set(
+            MERGE_URL_PARAM,
+            serializeMergeState({
+                focus: { kind: 'join' },
+                primarySourceName: null,
+                additionalSources: [
+                    {
+                        id: 'b',
+                        exploreName: 'payments',
+                        dimensions: [
+                            'orders_status',
+                            'payments_payment_method',
+                        ],
+                        metrics: ['payments_total_revenue'],
+                        filters: {},
+                    },
+                ],
+                joinParts: [
+                    {
+                        fieldIdBySourceId: {
+                            [PRIMARY_SOURCE_ID]: 'orders_status',
+                            b: 'orders_status',
+                        },
+                    },
+                ],
+                joinType: MergeJoinType.FULL,
+                repeatValuesSourceIds: [],
+                tableCalculations: [],
+            }),
+        );
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        expect(result.current.wasRestored).toBe(true);
+
+        act(() => result.current.refuseRestoredRun());
+
+        expect(result.current.wasRestored).toBe(false);
+        expect(result.current.isRunning).toBe(false);
+        expect(result.current.mergeResults).toBeNull();
+        expect(result.current.runErrors).toEqual([]);
+        expect(result.current.runError).toBeNull();
+        expect(executeMergeQuery).not.toHaveBeenCalled();
+    });
+
+    it('keeps replacing the Explorer query through a re-run and a refusal, until the merge is removed', async () => {
+        executeMergeQuery.mockResolvedValueOnce(startedResult('first'));
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        expect(result.current.replacesQuery).toBe(false);
+
+        act(() => result.current.run(mergeQuery));
+        await waitFor(() =>
+            expect(result.current.mergeResults?.queryUuid).toBe('first'),
+        );
+        expect(result.current.replacesQuery).toBe(true);
+
+        // A re-run clears the results while it waits; the Explorer's own
+        // query must not wake up in the gap, its sorts may name merged fields
+        let resolveRerun: (
+            value: ApiExecuteAsyncMergeQueryResults,
+        ) => void = () => {};
+        executeMergeQuery.mockReturnValueOnce(
+            new Promise<ApiExecuteAsyncMergeQueryResults>((resolve) => {
+                resolveRerun = resolve;
+            }),
+        );
+        act(() => result.current.run(mergeQuery));
+        expect(result.current.mergeResults).toBeNull();
+        expect(result.current.replacesQuery).toBe(true);
+
+        await act(async () => {
+            resolveRerun({
+                outcome: 'refused',
+                errors: [
+                    {
+                        kind: MergeQueryErrorKind.FAN_OUT,
+                        sourceId: 'b',
+                        fieldIds: [],
+                        message: 'Fan-out',
+                    },
+                ],
+                parameterReferences: [],
+                fieldOrigins: {},
+            });
+        });
+        await waitFor(() => expect(result.current.runErrors).toHaveLength(1));
+        expect(result.current.replacesQuery).toBe(true);
+
+        act(() => result.current.removeSource('b'));
+        expect(result.current.replacesQuery).toBe(false);
+    });
+
+    it('publishes join type changes immediately', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+
+        expect(result.current.joinType).toBe(MergeJoinType.FULL);
+
+        act(() => result.current.setJoinType(MergeJoinType.LEFT));
+
+        expect(result.current.joinType).toBe(MergeJoinType.LEFT);
+    });
+
+    it('owns merge-level table calculations independently of either source', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        const calculation = {
+            name: 'ratio',
+            displayName: 'Ratio',
+            sql: '',
+            formula: '=a_total / b_total',
+        };
+
+        act(() => result.current.addTableCalculation(calculation));
+        expect(result.current.tableCalculations).toEqual([calculation]);
+
+        act(() =>
+            result.current.updateTableCalculation('ratio', {
+                ...calculation,
+                displayName: 'Conversion rate',
+            }),
+        );
+        expect(result.current.tableCalculations[0].displayName).toBe(
+            'Conversion rate',
+        );
+
+        act(() => result.current.removeTableCalculation('ratio'));
+        expect(result.current.tableCalculations).toEqual([]);
+    });
+
+    it('adds, deselects, and removes source fields without orphaning join state', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+
+        act(() => result.current.addSource('b'));
+        act(() => result.current.setSourceExplore('b', 'payments', {}));
+        act(() => {
+            result.current.toggleSourceField('b', 'orders_status', true);
+            result.current.toggleSourceField(
+                'b',
+                'payments_unique_payment_count',
+                false,
+            );
+            result.current.setJoinField(0, 'b', 'orders_status');
+        });
+
+        expect(result.current.additionalSources[0]).toMatchObject({
+            id: 'b',
+            exploreName: 'payments',
+            dimensions: ['orders_status'],
+            metrics: ['payments_unique_payment_count'],
+        });
+        expect(result.current.joinParts[0].fieldIdBySourceId.b).toBe(
+            'orders_status',
+        );
+
+        act(() =>
+            result.current.toggleSourceField(
+                'b',
+                'payments_unique_payment_count',
+                false,
+            ),
+        );
+        expect(result.current.additionalSources[0].metrics).toEqual([]);
+
+        act(() => result.current.removeSource('b'));
+        expect(result.current.isMerging).toBe(false);
+        expect(result.current.additionalSources).toEqual([]);
+        expect(
+            result.current.joinParts[0].fieldIdBySourceId,
+        ).not.toHaveProperty('b');
+    });
+
+    it('adds a custom metric to its source query and selects it', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        const metric = {
+            name: 'amount_sum',
+            label: 'Sum of amount',
+            table: 'payments',
+            sql: '${TABLE}.amount',
+            type: MetricType.SUM,
+            baseDimensionName: 'amount',
+        };
+
+        act(() => result.current.addSource('b'));
+        act(() => result.current.setSourceExplore('b', 'payments', {}));
+        act(() => result.current.addSourceAdditionalMetric('b', metric));
+        act(() => result.current.addSourceAdditionalMetric('b', metric));
+
+        expect(result.current.additionalSources[0]).toMatchObject({
+            id: 'b',
+            exploreName: 'payments',
+            additionalMetrics: [metric],
+            metrics: ['payments_amount_sum'],
+        });
+    });
+
+    it('removes a middle source without changing the remaining keys, names or repeat flags', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        act(() => {
+            result.current.addSource('b');
+            result.current.addSource('c');
+            result.current.addSource('d');
+        });
+        act(() => {
+            result.current.setSourceExplore('b', 'payments', {});
+            result.current.setSourceExplore('c', 'payments', {});
+            result.current.setSourceExplore('d', 'payments', {});
+            result.current.setJoinField(0, 'a', 'orders_week');
+            result.current.setJoinField(0, 'b', 'payments_week');
+            result.current.setJoinField(0, 'c', 'payments_week');
+            result.current.setJoinField(0, 'd', 'payments_week');
+            result.current.setRepeatValues('b', true);
+            result.current.setRepeatValues('d', true);
+            result.current.addTableCalculation({
+                name: 'keep_ratio',
+                displayName: 'Keep ratio',
+                sql: '${payments.payments_total} / ${payments_3.payments_total}',
+            });
+            result.current.addTableCalculation({
+                name: 'remove_ratio',
+                displayName: 'Remove ratio',
+                sql: '${payments_2.payments_total} / ${payments.payments_total}',
+            });
+        });
+        act(() =>
+            result.current.removeSource('c', {
+                a: 'orders',
+                b: 'payments',
+                c: 'payments_2',
+                d: 'payments_3',
+            }),
+        );
+        expect(
+            result.current.additionalSources.map(({ id, name }) => ({
+                id,
+                name,
+            })),
+        ).toEqual([
+            { id: 'b', name: 'payments' },
+            { id: 'd', name: 'payments_3' },
+        ]);
+        expect(result.current.joinParts[0].fieldIdBySourceId).toEqual({
+            a: 'orders_week',
+            b: 'payments_week',
+            d: 'payments_week',
+        });
+        expect(result.current.repeatValuesSourceIds).toEqual(['b', 'd']);
+        expect(
+            result.current.tableCalculations.map(({ name }) => name),
+        ).toEqual(['keep_ratio']);
+        act(() => result.current.addSource('d'));
+        expect(result.current.additionalSources).toHaveLength(2);
+    });
+
+    it('drops only formula calculations that reference a removed middle source', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        act(() => {
+            result.current.addSource('b');
+            result.current.addSource('c');
+            result.current.addSource('d');
+        });
+        act(() => {
+            ['b', 'c', 'd'].forEach((id) => {
+                result.current.setSourceExplore(id, 'payments', {});
+            });
+        });
+        act(() => {
+            ['b', 'c', 'd'].forEach((id) => {
+                result.current.toggleSourceField(id, 'payments_total', false);
+            });
+            result.current.addTableCalculation({
+                name: 'keep_sum',
+                displayName: 'Keep sum',
+                sql: '',
+                formula: '=payments_payments_total + payments_3_payments_total',
+            });
+            result.current.addTableCalculation({
+                name: 'remove_sum',
+                displayName: 'Remove sum',
+                sql: '',
+                formula: '=payments_payments_total + payments_2_payments_total',
+            });
+        });
+        act(() =>
+            result.current.removeSource('c', {
+                a: 'orders',
+                b: 'payments',
+                c: 'payments_2',
+                d: 'payments_3',
+            }),
+        );
+        expect(
+            result.current.tableCalculations.map(({ name }) => name),
+        ).toEqual(['keep_sum']);
+    });
+
+    it('keeps the other sources names when a middle source changes explore', () => {
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        const names = () =>
+            getMergeSourceNames({
+                tableName: 'payments',
+                primarySourceName: null,
+                additionalSources: result.current.additionalSources,
+            }).nameByHandle;
+        act(() => {
+            result.current.addSource('b');
+            result.current.addSource('c');
+        });
+        act(() => {
+            result.current.setSourceExplore('b', 'payments', names());
+        });
+        act(() => {
+            result.current.setSourceExplore('c', 'payments', names());
+        });
+        act(() => {
+            ['b', 'c'].forEach((id) => {
+                result.current.toggleSourceField(id, 'payments_total', false);
+            });
+            result.current.addTableCalculation({
+                name: 'keep_sum',
+                displayName: 'Keep sum',
+                sql: '',
+                formula: '=payments_payments_total + payments_3_payments_total',
+            });
+            result.current.addTableCalculation({
+                name: 'remove_sum',
+                displayName: 'Remove sum',
+                sql: '',
+                formula: '=payments_payments_total + payments_2_payments_total',
+            });
+        });
+        expect(names()).toEqual({
+            a: 'payments',
+            b: 'payments_2',
+            c: 'payments_3',
+        });
+        act(() => result.current.setSourceExplore('b', 'refunds', names()));
+        expect(names()).toEqual({
+            a: 'payments',
+            b: 'refunds',
+            c: 'payments_3',
+        });
+        expect(
+            result.current.tableCalculations.map(({ name }) => name),
+        ).toEqual(['keep_sum']);
+    });
+
+    it('finishes a run started on mount under StrictMode', async () => {
+        executeMergeQuery.mockResolvedValueOnce(startedResult('mount-query'));
+        const RunOnMount = () => {
+            const merge = useMerge();
+            const hasRun = useRef(false);
+            useEffect(() => {
+                if (hasRun.current) return;
+                hasRun.current = true;
+                merge.run(mergeQuery);
+            }, [merge]);
+            return null;
+        };
+        const { result } = renderHook(() => useMerge(), {
+            wrapper: ({ children }: PropsWithChildren) => (
+                <MergeProvider>
+                    <RunOnMount />
+                    {children}
+                </MergeProvider>
+            ),
+            reactStrictMode: true,
+        });
+
+        await waitFor(() =>
+            expect(result.current.mergeResults?.queryUuid).toBe('mount-query'),
+        );
+        expect(result.current.isRunning).toBe(false);
+    });
+
+    it('keeps the parameter values used by the merged run', async () => {
+        executeMergeQuery.mockResolvedValueOnce({
+            outcome: 'started',
+            parameterReferences: ['customers.customer_name'],
+            fieldOrigins: {},
+            query: {
+                queryUuid: 'merge-query-uuid',
+                cacheMetadata: { cacheHit: false },
+                parameterReferences: ['customers.customer_name'],
+                usedParametersValues: {
+                    'customers.customer_name': 'Ken',
+                },
+                resolvedTimezone: null,
+                metricQuery: {
+                    exploreName: 'orders',
+                    dimensions: [],
+                    metrics: [],
+                    filters: {},
+                    sorts: [],
+                    limit: 500,
+                    tableCalculations: [],
+                    additionalMetrics: [],
+                },
+                fields: {},
+                warnings: [],
+            },
+        } satisfies ApiExecuteAsyncMergeQueryResults);
+        const { result } = renderHook(() => useMerge(), { wrapper });
+
+        act(() =>
+            result.current.run(mergeQuery, {
+                'customers.customer_name': 'Ken',
+            }),
+        );
+
+        await waitFor(() =>
+            expect(result.current.mergeResults?.usedParametersValues).toEqual({
+                'customers.customer_name': 'Ken',
+            }),
+        );
+        expect(executeMergeQuery).toHaveBeenCalledWith(
+            expect.anything(),
+            'project-uuid',
+            mergeQuery,
+            { 'customers.customer_name': 'Ken' },
+            undefined,
+        );
+    });
+
+    it('starts an unpivoted run for the raw Results table', async () => {
+        executeMergeQuery
+            .mockResolvedValueOnce(startedResult('pivoted-query'))
+            .mockResolvedValueOnce(startedResult('raw-query'));
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        const savedChart = {
+            chartConfig: { type: ChartType.TABLE },
+            pivotConfig: { columns: ['merge_status'] },
+        } satisfies Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'>;
+
+        act(() => result.current.run(mergeQuery, undefined, savedChart));
+
+        await waitFor(() =>
+            expect(
+                result.current.mergeResults?.unpivotedResults,
+            ).not.toBeNull(),
+        );
+        expect(executeMergeQuery).toHaveBeenNthCalledWith(
+            1,
+            expect.anything(),
+            'project-uuid',
+            mergeQuery,
+            undefined,
+            savedChart,
+        );
+        expect(executeMergeQuery).toHaveBeenNthCalledWith(
+            2,
+            expect.anything(),
+            'project-uuid',
+            mergeQuery,
+            undefined,
+        );
+    });
+
+    it('keeps the pivoted chart when the raw Results query is refused', async () => {
+        executeMergeQuery
+            .mockResolvedValueOnce(startedResult('pivoted-query'))
+            .mockResolvedValueOnce({
+                outcome: 'refused',
+                errors: [
+                    {
+                        kind: MergeQueryErrorKind.UNRESOLVED_COLUMN_TYPE,
+                        sourceId: null,
+                        fieldIds: ['merge_status'],
+                        message: 'Could not compile raw results',
+                    },
+                ],
+                parameterReferences: [],
+                fieldOrigins: {},
+            });
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        const savedChart = {
+            chartConfig: { type: ChartType.TABLE },
+            pivotConfig: { columns: ['merge_status'] },
+        } satisfies Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'>;
+
+        act(() => result.current.run(mergeQuery, undefined, savedChart));
+
+        await waitFor(() =>
+            expect(result.current.mergeResults?.queryUuid).toBe(
+                'pivoted-query',
+            ),
+        );
+        expect(result.current.mergeResults?.unpivotedResults).toBeNull();
+        expect(result.current.runErrors).toEqual([]);
+        expect(result.current.unpivotedRunErrors).toHaveLength(1);
+    });
+
+    it('keeps the pivoted chart when the raw Results request fails', async () => {
+        const rawResultsError: ApiError = {
+            status: 'error',
+            error: {
+                name: 'NetworkError',
+                statusCode: 500,
+                message: 'Could not start raw results',
+                data: {},
+            },
+        };
+        executeMergeQuery
+            .mockResolvedValueOnce(startedResult('pivoted-query'))
+            .mockRejectedValueOnce(rawResultsError);
+        const { result } = renderHook(() => useMerge(), { wrapper });
+        const savedChart = {
+            chartConfig: { type: ChartType.TABLE },
+            pivotConfig: { columns: ['merge_status'] },
+        } satisfies Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'>;
+
+        act(() => result.current.run(mergeQuery, undefined, savedChart));
+
+        await waitFor(() =>
+            expect(result.current.mergeResults?.queryUuid).toBe(
+                'pivoted-query',
+            ),
+        );
+        expect(result.current.runError).toBeNull();
+        expect(result.current.unpivotedRunError).toBe(rawResultsError);
+    });
+});

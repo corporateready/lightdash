@@ -4,6 +4,8 @@ export const getSearchItemLabel = (itemType: SearchItemType) => {
     switch (itemType) {
         case SearchItemType.FIELD:
             return 'Fields';
+        case SearchItemType.DOCUMENT:
+            return 'Documents';
         case SearchItemType.DASHBOARD:
             return 'Dashboards';
         case SearchItemType.DASHBOARD_TAB:
@@ -20,6 +22,8 @@ export const getSearchItemLabel = (itemType: SearchItemType) => {
             return 'SQL Charts';
         case SearchItemType.DATA_APP:
             return 'Data apps';
+        case SearchItemType.SETTINGS:
+            return 'Settings';
         default:
             return assertUnreachable(
                 itemType,

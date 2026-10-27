@@ -3,62 +3,122 @@ import {
     LightdashInstallType,
     LightdashMode,
     SessionUser,
-    UnexpectedDatabaseError,
 } from '@lightdash/common';
 import { createHmac } from 'crypto';
 import { getDockerHubVersion } from '../../clients/DockerHub/DockerHub';
+import { isAppRuntimeConfigured } from '../../config/appRuntimeAvailability';
 import { LightdashConfig } from '../../config/parseConfig';
+import { isSnowflakeAgentConfigured } from '../../config/snowflakeAgentConfiguration';
+import { isPreAggregatesEnabled } from '../../ee/preAggregates/isPreAggregatesEnabled';
+import type { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { MigrationModel } from '../../models/MigrationModel/MigrationModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
+import { OrganizationSettingsModel } from '../../models/OrganizationSettingsModel';
+import { getDuckdbRuntimeConfig } from '../../utils/duckdb/getDuckdbRuntimeConfig';
 import { VERSION } from '../../version';
 import { BaseService } from '../BaseService';
+import type { LearnSandboxService } from '../LearnSandboxService/LearnSandboxService';
+import { LicenseService } from '../LicenseService/LicenseService';
+import { resolveOrganizationExportLimits } from '../OrganizationSettingsService/resolveExportLimits';
+import type { ReadinessService } from '../ReadinessService/ReadinessService';
 
 type HealthServiceArguments = {
     lightdashConfig: LightdashConfig;
+    licenseService: LicenseService;
     organizationModel: OrganizationModel;
     migrationModel: MigrationModel;
+    organizationSettingsModel: OrganizationSettingsModel;
+    featureFlagModel: FeatureFlagModel;
+    readinessService?: Pick<ReadinessService, 'getReadiness'>;
+    learnSandboxService: Pick<LearnSandboxService, 'isRuntimeAvailable'>;
 };
 
 export class HealthService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
 
+    private readonly licenseService: LicenseService;
+
     private readonly organizationModel: OrganizationModel;
 
     private readonly migrationModel: MigrationModel;
+
+    private readonly organizationSettingsModel: OrganizationSettingsModel;
+
+    private readonly featureFlagModel: FeatureFlagModel;
+
+    private readonly readinessService?: Pick<ReadinessService, 'getReadiness'>;
+
+    private readonly learnSandboxService: Pick<
+        LearnSandboxService,
+        'isRuntimeAvailable'
+    >;
 
     constructor({
         organizationModel,
         migrationModel,
         lightdashConfig,
+        licenseService,
+        organizationSettingsModel,
+        featureFlagModel,
+        readinessService,
+        learnSandboxService,
     }: HealthServiceArguments) {
         super();
         this.lightdashConfig = lightdashConfig;
+        this.licenseService = licenseService;
         this.organizationModel = organizationModel;
         this.migrationModel = migrationModel;
+        this.organizationSettingsModel = organizationSettingsModel;
+        this.featureFlagModel = featureFlagModel;
+        this.readinessService = readinessService;
+        this.learnSandboxService = learnSandboxService;
     }
 
     private isEnterpriseEnabled(): boolean {
         return this.lightdashConfig.license.licenseKey !== undefined;
     }
 
-    async getHealthState(user: SessionUser | undefined): Promise<HealthState> {
+    async getHealthState(
+        user: SessionUser | undefined,
+        _options: { skipMigrationCheck: boolean } = {
+            skipMigrationCheck: false,
+        },
+    ): Promise<HealthState> {
         const isAuthenticated: boolean = !!user?.userUuid;
+
+        // Resolve the query/CSV limits for the requesting org (override ?? the
+        // instance env default). Unauthenticated callers (e.g. the login page)
+        // have no org, so they see the instance defaults — unchanged behavior.
+        const {
+            maxLimit: effectiveMaxLimit,
+            csvCellsLimit: effectiveCsvCellsLimit,
+        } = user?.organizationUuid
+            ? await resolveOrganizationExportLimits(
+                  this.organizationSettingsModel,
+                  this.lightdashConfig.query,
+                  user.organizationUuid,
+              )
+            : {
+                  maxLimit: this.lightdashConfig.query.maxLimit,
+                  csvCellsLimit: this.lightdashConfig.query.csvCellsLimit,
+              };
+
+        const preAggregatesEnabled = isPreAggregatesEnabled(
+            this.lightdashConfig,
+        );
 
         const migrationStartTime = performance.now();
         const { status: migrationStatus, currentVersion } =
             await this.migrationModel.getMigrationStatus();
         const migrationExecutionTime = performance.now() - migrationStartTime;
+        const requiresMigration = migrationStatus < 0;
+        const readiness = await this.readinessService?.getReadiness();
 
-        if (migrationStatus < 0) {
-            throw new UnexpectedDatabaseError(
-                'Database has not been migrated yet',
-                { currentVersion },
-            );
-        } else if (migrationStatus > 0) {
+        if (migrationStatus > 0) {
             console.warn(
                 `There are more DB migrations than defined in the code (you are running old code against a newer DB). Current version: ${currentVersion}`,
             );
-        } // else migrationStatus === 0 (all migrations are up to date)
+        }
 
         const hasOrgsStartTime = performance.now();
         const requiresOrgRegistration =
@@ -87,8 +147,13 @@ export class HealthService extends BaseService {
 
         return {
             healthy: true,
+            requiresMigration,
+            migrationWarnings:
+                readiness?.status === 'ready' ? readiness.warnings : undefined,
+            license: this.licenseService.getLicenseStatus(),
             mode: this.lightdashConfig.mode,
             version: VERSION,
+            mobile: this.lightdashConfig.mobile,
             localDbtEnabled,
             defaultProject: undefined,
             isAuthenticated,
@@ -116,10 +181,23 @@ export class HealthService extends BaseService {
             signupUrl: this.lightdashConfig.signupUrl,
             helpMenuUrl: this.lightdashConfig.helpMenuUrl,
             query: {
-                csvCellsLimit: this.lightdashConfig.query.csvCellsLimit,
-                maxLimit: this.lightdashConfig.query.maxLimit,
+                // Effective for this org (override ?? env default).
+                csvCellsLimit: effectiveCsvCellsLimit,
+                exportTimeoutMs: this.lightdashConfig.scheduler.jobTimeout,
+                maxLimit: effectiveMaxLimit,
+                // The instance ceilings an org admin can set the per-org limits
+                // to (the env values) — used by the admin panel's "Up to" hints.
+                csvMaxLimit: Math.max(
+                    this.lightdashConfig.query.csvMaxLimit,
+                    this.lightdashConfig.query.csvCellsLimit,
+                ),
+                queryMaxLimit: this.lightdashConfig.query.maxLimit,
                 maxPageSize: this.lightdashConfig.query.maxPageSize,
-                defaultLimit: this.lightdashConfig.query.defaultLimit,
+                // The new-query default, never above this org's effective max.
+                defaultLimit: Math.min(
+                    this.lightdashConfig.query.defaultLimit,
+                    effectiveMaxLimit,
+                ),
                 retryQueryOnTransientErrors:
                     this.lightdashConfig.query.retryQueryOnTransientErrors,
             },
@@ -130,6 +208,8 @@ export class HealthService extends BaseService {
             hasGitlab:
                 this.lightdashConfig.gitlab.clientId !== undefined &&
                 this.lightdashConfig.gitlab.clientSecret !== undefined,
+            hasJira: true,
+            hasLinear: true,
             auth: {
                 disablePasswordAuthentication:
                     this.lightdashConfig.auth.disablePasswordAuthentication,
@@ -169,14 +249,27 @@ export class HealthService extends BaseService {
                         !!this.lightdashConfig.auth.snowflake.clientId &&
                         this.isEnterpriseEnabled(),
                 },
+                snowflakeAi: {
+                    enabled: isSnowflakeAgentConfigured(this.lightdashConfig),
+                },
                 databricks: {
                     // Databricks OAuth browser flow requires a configured client ID.
                     enabled:
                         !!this.lightdashConfig.auth.databricks.clientId &&
                         this.isEnterpriseEnabled(),
                 },
+                mobileLogin: {
+                    loginExperienceVersion: 1,
+                    available: this.lightdashConfig.auth.mobileLogin.enabled,
+                },
             },
             hasEmailClient: !!this.lightdashConfig.smtp,
+            // Deliberately not isEnterpriseEnabled(): that check is `!==
+            // undefined` against a string|null config value, so it is true
+            // even without a license. Existing consumers rely on that
+            // behaviour; this new field must not (see PROD-9154).
+            hasPlaygroundProjects: !!this.lightdashConfig.license.licenseKey,
+            hasEmailWhitelabel: !!this.lightdashConfig.postmark.accountToken,
             hasHeadlessBrowser:
                 this.lightdashConfig.headlessBrowser?.host !== undefined,
             hasExtendedUsageAnalytics:
@@ -191,9 +284,8 @@ export class HealthService extends BaseService {
                     ? this.lightdashConfig.appearance.overrideColorPaletteName
                     : undefined,
             },
+            hasBrandfetch: !!this.lightdashConfig.brandfetch?.apiKey,
             hasMicrosoftTeams: this.lightdashConfig.microsoftTeams.enabled,
-            isServiceAccountEnabled:
-                this.lightdashConfig.serviceAccount.enabled,
             isOrganizationWarehouseCredentialsEnabled:
                 this.lightdashConfig.organizationWarehouseCredentials.enabled,
             isAthenaWarehouseIamRoleAuthEnabled:
@@ -219,9 +311,14 @@ export class HealthService extends BaseService {
                 isAmbientAiEnabled:
                     !!this.lightdashConfig.ai.copilot.providers.anthropic
                         ?.apiKey,
+                threadDumpEnabled:
+                    this.isEnterpriseEnabled() &&
+                    this.lightdashConfig.ai.copilot.threadDumpEnabled,
+                fastDecisionsEnabled:
+                    !!this.lightdashConfig.ai.decisions.apiKey,
             },
             echarts6: {
-                enabled: this.lightdashConfig.echarts6.enabled,
+                enabled: false,
             },
             funnelBuilder: {
                 enabled: this.lightdashConfig.funnelBuilder.enabled,
@@ -234,10 +331,26 @@ export class HealthService extends BaseService {
                 enabled: this.lightdashConfig.dashboardComments.enabled,
             },
             preAggregates: {
-                enabled: this.lightdashConfig.preAggregates.enabled,
+                enabled: preAggregatesEnabled,
+            },
+            externalSources: {
+                engineAvailable:
+                    getDuckdbRuntimeConfig(
+                        this.lightdashConfig.preAggregates.s3,
+                    ) !== undefined,
             },
             dataApps: {
                 previewOrigin: this.lightdashConfig.appRuntime.previewOrigin,
+                sampleDataEnabled:
+                    this.lightdashConfig.appRuntime.sampleDataEnabled,
+                capturesEnabled:
+                    this.lightdashConfig.appRuntime.capturesEnabled,
+                runtimeAvailable:
+                    this.licenseService.getLicenseStatus().valid &&
+                    isAppRuntimeConfigured(this.lightdashConfig),
+            },
+            learnSandbox: {
+                enabled: await this.learnSandboxService.isRuntimeAvailable(),
             },
         };
     }

@@ -1,12 +1,14 @@
 import { subject } from '@casl/ability';
 import {
     ChartKind,
+    getParameterReferences,
+    isVizBigNumberConfig,
     isVizCartesianChartConfig,
     isVizPieChartConfig,
     isVizTableConfig,
     type DashboardSqlChartTile,
 } from '@lightdash/common';
-import { Box, Menu } from '@mantine-8/core';
+import { Box, Menu } from '@mantine/core';
 import {
     IconAlertCircle,
     IconFilePencil,
@@ -20,16 +22,25 @@ import {
     useState,
     type FC,
 } from 'react';
-import { useParams } from 'react-router';
+import {
+    selectInvalidateCache,
+    selectParameterValues,
+    useDashboardSelector,
+} from '../../features/dashboard/store';
 import { useSavedSqlChartResults } from '../../features/sqlRunner/hooks/useSavedSqlChartResults';
 import useDashboardFiltersForTile from '../../hooks/dashboard/useDashboardFiltersForTile';
+import { useConnectionBadges } from '../../hooks/useConnectionBadges';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import useSearchParams from '../../hooks/useSearchParams';
 import useApp from '../../providers/App/useApp';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import useDashboardTileStatusContext from '../../providers/Dashboard/useDashboardTileStatusContext';
+import { useRegisterTileQuery } from '../../providers/Dashboard/useRegisterTileQuery';
+import { getConnectionName } from '../common/connectionName';
 import LinkMenuItem from '../common/LinkMenuItem';
 import MantineIcon from '../common/MantineIcon';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
+import BigNumberView from '../DataViz/visualizations/BigNumberView';
 import ChartView from '../DataViz/visualizations/ChartView';
 import { Table } from '../DataViz/visualizations/Table';
 import ExportDataModal from './ExportDataModal';
@@ -46,6 +57,8 @@ interface Props extends Pick<
      * tile membership) instead of the registered chart endpoints.
      */
     isEmbed?: boolean;
+    projectUuidOverride?: string;
+    dashboardUuidOverride?: string;
 }
 
 /**
@@ -74,12 +87,19 @@ const DashboardOptions = memo(
     ),
 );
 
-const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
+const SqlChartTile: FC<Props> = ({
+    tile,
+    isEditMode,
+    isEmbed,
+    projectUuidOverride,
+    dashboardUuidOverride,
+    ...rest
+}) => {
     const { user } = useApp();
-    const { projectUuid, dashboardUuid } = useParams<{
-        projectUuid: string;
-        dashboardUuid: string;
-    }>();
+    const projectUuid = useProjectUuid();
+    const dashboardUuid = useDashboardContext((c) => c.dashboard?.uuid);
+    const effectiveProjectUuid = projectUuidOverride ?? projectUuid;
+    const effectiveDashboardUuid = dashboardUuidOverride ?? dashboardUuid;
     const context = useSearchParams('context') || undefined;
     const savedSqlUuid = tile.properties.savedSqlUuid || undefined;
     const [isDataExportModalOpen, setIsDataExportModalOpen] = useState(false);
@@ -87,18 +107,25 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
         'manage',
         subject('SqlRunner', {
             organizationUuid: user.data?.organizationUuid,
-            projectUuid,
+            projectUuid: effectiveProjectUuid,
         }),
     );
     const updateSqlChartTilesMetadata = useDashboardTileStatusContext(
         (c) => c.updateSqlChartTilesMetadata,
     );
-    const parameters = useDashboardContext((c) => c.parameterValues);
+    const parameters = useDashboardSelector(selectParameterValues);
+    const invalidateCache = useDashboardSelector(selectInvalidateCache);
+    const addParameterReferences = useDashboardContext(
+        (c) => c.addParameterReferences,
+    );
     const markTileScreenshotReady = useDashboardTileStatusContext(
         (c) => c.markTileScreenshotReady,
     );
     const markTileScreenshotErrored = useDashboardTileStatusContext(
         (c) => c.markTileScreenshotErrored,
+    );
+    const markEmbedTileComplete = useDashboardTileStatusContext(
+        (c) => c.markEmbedTileComplete,
     );
     const dashboardFilters = useDashboardFiltersForTile(tile.uuid);
 
@@ -123,7 +150,7 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
     } = useSavedSqlChartResults(
         isEmbed
             ? {
-                  projectUuid,
+                  projectUuid: effectiveProjectUuid,
                   savedSqlUuid,
                   context,
                   tileUuid: tile.uuid,
@@ -133,16 +160,60 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
                   isEmbed: true,
               }
             : {
-                  projectUuid,
+                  projectUuid: effectiveProjectUuid,
                   savedSqlUuid,
                   context,
-                  dashboardUuid: dashboardUuid!,
+                  dashboardUuid: effectiveDashboardUuid!,
                   tileUuid: tile.uuid,
                   dashboardFilters,
                   dashboardSorts: [],
                   parameters,
+                  invalidateCache,
               },
     );
+    const connections = useConnectionBadges(effectiveProjectUuid);
+
+    // Publish this tile's query as an AI analysis source once it settles.
+    const sqlQueryUuid = chartResultsData?.queryUuid ?? null;
+    const tileError = chartError ?? chartResultsError ?? null;
+    const registration = useMemo(() => {
+        const label =
+            tile.properties.title || tile.properties.chartName || 'Chart';
+        // Errors settle the tile before any loading guard: a failed chart
+        // fetch leaves the dependent results query disabled with
+        // isLoading: true forever, which would pin the dashboard in flight.
+        if (tileError) {
+            return {
+                tileUuid: tile.uuid,
+                queryUuid: sqlQueryUuid,
+                label,
+                status: 'error' as const,
+            };
+        }
+        // Withdraw during background refetches too: a cached tab remount
+        // keeps the old queryUuid while replacement results load, and stale
+        // uuids must never be analysed.
+        if (isChartLoading || isChartResultsLoading || isChartResultsFetching) {
+            return null;
+        }
+        if (!sqlQueryUuid) return null;
+        return {
+            tileUuid: tile.uuid,
+            queryUuid: sqlQueryUuid,
+            label,
+            status: 'ready' as const,
+        };
+    }, [
+        sqlQueryUuid,
+        tileError,
+        isChartLoading,
+        isChartResultsLoading,
+        isChartResultsFetching,
+        tile.uuid,
+        tile.properties.title,
+        tile.properties.chartName,
+    ]);
+    useRegisterTileQuery(registration);
 
     // Charts in Dashboard shouldn't have animation
     const specWithoutAnimation = useMemo(() => {
@@ -152,6 +223,18 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
             animation: false,
         };
     }, [chartResultsData?.chartSpec]);
+
+    // Report the parameters this chart's SQL needs so the dashboard renders
+    // controls for them. Derived from the SQL rather than the query response,
+    // so the controls appear before the first (otherwise failing) run.
+    const parameterReferences = useMemo(
+        () => getParameterReferences(chartData?.sql),
+        [chartData?.sql],
+    );
+
+    useEffect(() => {
+        addParameterReferences(tile.uuid, parameterReferences);
+    }, [addParameterReferences, tile.uuid, parameterReferences]);
 
     // Update SQL chart columns in the dashboard context
     useEffect(() => {
@@ -188,6 +271,28 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
         tile.uuid,
         markTileScreenshotReady,
         markTileScreenshotErrored,
+    ]);
+
+    useEffect(() => {
+        const hasLoadError = !savedSqlUuid || !!chartError;
+        const hasResultsError = !!chartResultsError;
+        const hasResults = !!chartResultsData;
+
+        if (
+            (!isChartLoading && hasLoadError) ||
+            (!isChartResultsFetching && (hasResultsError || hasResults))
+        ) {
+            markEmbedTileComplete(tile.uuid);
+        }
+    }, [
+        chartError,
+        chartResultsData,
+        chartResultsError,
+        isChartLoading,
+        isChartResultsFetching,
+        markEmbedTileComplete,
+        savedSqlUuid,
+        tile.uuid,
     ]);
 
     const userCanExportData = user.data?.ability.can(
@@ -242,15 +347,19 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
                 isLoading={isChartResultsLoading}
                 hasError={!!chartResultsError}
                 chartKind={chartData.config.type}
+                connectionName={getConnectionName(
+                    connections,
+                    chartData.warehouseConnectionUuid,
+                )}
                 {...rest}
-                titleHref={`/projects/${projectUuid}/sql-runner/${chartData.slug}`}
+                titleHref={`/projects/${effectiveProjectUuid}/sql-runner/${chartData.slug}`}
                 extraMenuItems={
-                    projectUuid &&
+                    effectiveProjectUuid &&
                     canManageSqlRunner &&
                     chartData.slug && (
                         <DashboardOptions
                             isEditMode={isEditMode}
-                            projectUuid={projectUuid}
+                            projectUuid={effectiveProjectUuid}
                             slug={chartData.slug}
                         />
                     )
@@ -270,25 +379,33 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
         );
     }
 
+    const bigNumberConfig = isVizBigNumberConfig(chartData.config)
+        ? chartData.config
+        : undefined;
+
     // Chart available & results available!
     return (
         <TileBase
             isEditMode={isEditMode}
             chartName={tile.properties.chartName ?? ''}
-            titleHref={`/projects/${projectUuid}/sql-runner/${chartData.slug}`}
+            titleHref={`/projects/${effectiveProjectUuid}/sql-runner/${chartData.slug}`}
             tile={tile}
             title={tile.properties.title || tile.properties.chartName || ''}
             chartKind={chartData.config.type}
+            connectionName={getConnectionName(
+                connections,
+                chartData.warehouseConnectionUuid,
+            )}
             fullWidth={chartData.config.type === ChartKind.TABLE}
             {...rest}
             extraMenuItems={
-                projectUuid &&
+                effectiveProjectUuid &&
                 (canManageSqlRunner || userCanExportData) && (
                     <>
                         {canManageSqlRunner && (
                             <DashboardOptions
                                 isEditMode={isEditMode}
-                                projectUuid={projectUuid}
+                                projectUuid={effectiveProjectUuid}
                                 slug={chartData.slug}
                             />
                         )}
@@ -316,6 +433,14 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
                         />
                     </Box>
                 )}
+            {bigNumberConfig && (
+                <BigNumberView
+                    spec={chartResultsData.chartSpec}
+                    isLoading={isChartResultsFetching}
+                    error={undefined}
+                    hasValueField={!!bigNumberConfig.fieldConfig?.y?.length}
+                />
+            )}
             {(isVizCartesianChartConfig(chartData.config) ||
                 isVizPieChartConfig(chartData.config)) && (
                 <ChartView
@@ -333,7 +458,7 @@ const SqlChartTile: FC<Props> = ({ tile, isEditMode, isEmbed, ...rest }) => {
             <ExportDataModal
                 isOpen={isDataExportModalOpen}
                 onClose={closeDataExportModal}
-                projectUuid={projectUuid!}
+                projectUuid={effectiveProjectUuid!}
                 totalResults={
                     chartResultsData.chartUnderlyingData?.rows.length ?? 0
                 }

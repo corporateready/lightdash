@@ -2,10 +2,15 @@
 
 # version control
 .git
+.local/
 .worktrees/
+
+# Conductor workspace context
+/.context/
 
 # dependencies
 node_modules/
+**/node_modules
 /.pnp
 .pnp.js
 
@@ -27,15 +32,18 @@ packages/e2e/lightdash
 /packages/backend/src/database/logs
 /packages/cli/logs
 /packages/warehouses/logs
+*.log
 
 # development
 lightdash_dev.yml
+/.dev-chart-registry/
 
 # production
 /packages/frontend/build
 /packages/frontend/sdk/dist
 /packages/common/dist
 /packages/backend/dist
+/packages/formula/dist
 /packages/cli/dist
 /packages/warehouses/dist
 /packages/sdk/dist
@@ -78,7 +86,7 @@ credentials.json
 # dbt
 /target
 packages/backend/target/
-venv/
+venv
 .venv/
 .venvs/
 dbt_modules/
@@ -129,3 +137,43 @@ http-client.private.env.json
 scripts/har-replay-server.ts
 *.har
 agent-harness/cloud/credentials.env
+
+# AI
+.agents
+!.agents/
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
+.codex
+.claude/*.lock
+AGENTS.md
+
+# octarine
+.octarine/properties.json
+
+# editor swap files
+*.swp
+
+
+# Superpowers brainstorm scratch
+.superpowers/
+docs/superpowers/
+
+# Playground bundle builder venv and staging
+scripts/playground-bundle/.venv/
+packages/backend/assets/playground/.staging-*/
+
+# Local pnpm store
+.pnpm-store/
+
+# Heavy local development paths
+scripts/k8s-dev/terraform/.terraform/
+examples/metricflow-demo/.fusion/
+.claude/worktrees/
+
+# Impeccable design-skill artifacts
+.impeccable/
+
+# humanlayer task scratch
+.humanlayer/

@@ -8,16 +8,50 @@
  *    → returns results when status is 'ready'
  */
 
+import { AppStateError } from './appState';
 import type {
+    AiPromptRequest,
+    AiPromptResult,
+    AppStateHistoryEntry,
+    AppStateSharedEntry,
+    AppStateSnapshot,
+    AppStateTransport,
+    AppStateUserEntry,
     Column,
+    DownloadResultsFileType,
+    DownloadResultsLimit,
+    DownloadResultsOptions,
+    DownloadResultsResult,
+    DownloadUnderlyingDataOptions,
+    ExternalFetchOptions,
+    ExternalFetchResult,
     FormatFunction,
     InternalFilterDefinition,
     LightdashClientConfig,
     LightdashUser,
+    ParametersValuesMap,
     QueryDefinition,
     QueryResult,
     Row,
     Transport,
+    UnderlyingDataOptions,
+    UnderlyingDataResult,
+    VizDrillDownIntent,
+    VizPointMenuIntent,
+    VizPointMenuResult,
+    VizUnderlyingDataIntent,
+    VizSubtotalsRequest,
+    VizSubtotalsResult,
+} from './types';
+import {
+    VIZ_DRILL_DOWN_PATH,
+    VIZ_POINT_MENU_PATH,
+    VIZ_UNDERLYING_DATA_OPEN_PATH,
+    VIZ_UNDERLYING_DATA_PATH,
+    VIZ_SUBTOTALS_PATH,
+    EXPLORE_BASE_TABLE_PATH,
+    type ExploreBaseTableRequest,
+    type ExploreBaseTableResult,
 } from './types';
 
 // Mirrors the explorer's `useInfiniteQueryResults` polling rhythm so the
@@ -27,6 +61,8 @@ const PAGE_SIZE = 500;
 const INITIAL_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 1000;
 const MAX_POLL_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_DOWNLOAD_POLL_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+const ALL_RESULTS_LIMIT = Number.MAX_SAFE_INTEGER;
 
 type ApiResponse<T> = {
     status: 'ok';
@@ -39,10 +75,25 @@ type AsyncQueryResponse = {
     fields: Record<string, FieldMeta>;
 };
 
+type ScheduleDownloadResponse = {
+    jobId: string;
+};
+
+type SchedulerJobStatusResponse = {
+    status: 'scheduled' | 'started' | 'completed' | 'error';
+    details?: {
+        fileUrl?: string;
+        truncated?: boolean;
+        error?: string;
+        [key: string]: unknown;
+    } | null;
+};
+
 type FieldMeta = {
     fieldType: 'dimension' | 'metric' | 'table_calculation';
     type: string;
     label?: string;
+    displayName?: string;
     format?: string;
     round?: number;
     compact?: string;
@@ -55,6 +106,8 @@ type ResultValue = {
 };
 
 type ResultRow = Record<string, { value: ResultValue }>;
+
+type ApiFilters = Record<string, unknown>;
 
 type PollResponse =
     | {
@@ -79,6 +132,11 @@ type PollResponse =
           error: string | null;
       };
 
+const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+    });
+
 /**
  * A function that performs HTTP requests and returns parsed JSON results.
  * The default implementation uses `Authorization: ApiKey` header.
@@ -92,36 +150,290 @@ export type FetchAdapter = <T>(
 ) => Promise<T>;
 
 /**
- * Convert SDK filter definitions into the Lightdash API filter format.
- * The API expects { dimensions: { id, and: [...rules] } }
+ * Convert SDK dimension and metric filter definitions into the Lightdash API
+ * filter format.
  */
 function buildApiFilters(
-    filters: InternalFilterDefinition[],
-): Record<string, unknown> {
-    if (filters.length === 0) {
+    dimensionFilters: InternalFilterDefinition[],
+    metricFilters: InternalFilterDefinition[] = [],
+): ApiFilters {
+    const buildGroup = (
+        filters: InternalFilterDefinition[],
+        rootId: string,
+        ruleIdPrefix: string,
+    ) => ({
+        id: rootId,
+        and: filters.map((filter, index) => ({
+            id: `${ruleIdPrefix}-${index}`,
+            target: { fieldId: filter.fieldId },
+            operator: filter.operator,
+            values: filter.values,
+            ...(filter.settings ? { settings: filter.settings } : {}),
+        })),
+    });
+
+    return {
+        ...(dimensionFilters.length > 0
+            ? {
+                  dimensions: buildGroup(
+                      dimensionFilters,
+                      'sdk-root',
+                      'sdk-filter',
+                  ),
+              }
+            : {}),
+        ...(metricFilters.length > 0
+            ? {
+                  metrics: buildGroup(
+                      metricFilters,
+                      'sdk-metric-root',
+                      'sdk-metric-filter',
+                  ),
+              }
+            : {}),
+    };
+}
+
+/**
+ * Field ids are `<table>_<field>`. The table is the explore's base table,
+ * which differs from the explore name for explores defined under
+ * `meta.explores`; without it, the explore name is the best guess.
+ */
+export const createFieldQualifier = (
+    exploreName: string,
+    baseTable: string | null,
+    customDimensionIds: string[],
+) => {
+    // Custom dimensions are sent with the id the app wrote, so a selection
+    // naming one (in full or without its table prefix) must resolve to it.
+    const prefixes = [...new Set([baseTable ?? exploreName, exploreName])];
+    const customDimensionIdByName = new Map<string, string>();
+    for (const id of customDimensionIds) {
+        for (const prefix of prefixes) {
+            if (id.startsWith(`${prefix}_`)) {
+                customDimensionIdByName.set(id.slice(prefix.length + 1), id);
+            }
+        }
+    }
+    for (const id of customDimensionIds) customDimensionIdByName.set(id, id);
+
+    return (fieldId: string): string => {
+        const customDimensionId = customDimensionIdByName.get(fieldId);
+        if (customDimensionId !== undefined) return customDimensionId;
+        // Dot notation: 'customers.name' -> 'customers_name'
+        if (fieldId.includes('.')) {
+            return fieldId.replace('.', '_');
+        }
+        if (baseTable !== null) {
+            return fieldId.startsWith(`${baseTable}_`)
+                ? fieldId
+                : `${baseTable}_${fieldId}`;
+        }
+        if (fieldId.startsWith(`${exploreName}_`)) {
+            return fieldId;
+        }
+        return `${exploreName}_${fieldId}`;
+    };
+};
+
+/** Resolves an explore's base table, or `null` when it can't be learned. */
+export type ExploreBaseTableResolver = (
+    exploreName: string,
+) => Promise<string | null>;
+
+export type ApiTransportOptions = {
+    resolveExploreBaseTable: ExploreBaseTableResolver | null;
+};
+
+const toBaseTable = (value: unknown): string | null =>
+    typeof value === 'string' && value.length > 0 ? value : null;
+
+export const createApiExploreBaseTableResolver =
+    (fetchFn: FetchAdapter, projectUuid: string): ExploreBaseTableResolver =>
+    async (exploreName) => {
+        const explore = await fetchFn<{ baseTable?: unknown } | null>(
+            'GET',
+            `/api/v1/projects/${projectUuid}/explores/${encodeURIComponent(exploreName)}`,
+        );
+        return toBaseTable(explore?.baseTable);
+    };
+
+/** Asks the host (app bridge or CLI preview proxy) via its virtual route. */
+export const createHostExploreBaseTableResolver =
+    (fetchFn: FetchAdapter): ExploreBaseTableResolver =>
+    async (exploreName) => {
+        const body: ExploreBaseTableRequest = { exploreName };
+        const result = await fetchFn<Partial<ExploreBaseTableResult> | null>(
+            'POST',
+            EXPLORE_BASE_TABLE_PATH,
+            body,
+        );
+        return toBaseTable(result?.baseTable);
+    };
+
+function buildUnderlyingDataFilters(
+    query: QueryDefinition,
+    row: Row,
+    qualify: (fieldId: string) => string,
+): ApiFilters {
+    const sourceFilters = buildApiFilters(
+        query.filters.map((f) => ({
+            ...f,
+            fieldId: qualify(f.fieldId),
+        })),
+    );
+
+    const rowFilters = query.dimensions.map((dimension, i) => {
+        if (!Object.prototype.hasOwnProperty.call(row, dimension)) {
+            throw new Error(
+                `Cannot fetch underlying data because the row is missing dimension "${dimension}". Pass the original row returned by useLightdash().`,
+            );
+        }
+
+        const value = row[dimension];
+        return {
+            id: `sdk-underlying-row-filter-${i}`,
+            target: { fieldId: qualify(dimension) },
+            operator: value === null ? 'isNull' : 'equals',
+            ...(value === null ? {} : { values: [value] }),
+        };
+    });
+
+    if (!sourceFilters.dimensions && rowFilters.length === 0) {
         return {};
     }
 
-    // For now, all filters are AND-ed on dimensions.
-    // TODO: support metric filters and OR groups
-    const rules = filters.map((f, i) => ({
-        id: `sdk-filter-${i}`,
-        target: { fieldId: f.fieldId },
-        operator: f.operator,
-        values: f.values,
-        ...(f.settings ? { settings: f.settings } : {}),
-    }));
-
     return {
         dimensions: {
-            id: 'sdk-root',
-            and: rules,
+            id: 'sdk-underlying-root',
+            and: [
+                ...(sourceFilters.dimensions ? [sourceFilters.dimensions] : []),
+                ...rowFilters,
+            ],
         },
     };
 }
 
-function createDefaultFetchAdapter(config: LightdashClientConfig): FetchAdapter {
-    return async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+/**
+ * Thrown for a non-2xx response. `status` lets hosts tell a recoverable
+ * 429 (rate limited, retry later) from a real failure.
+ */
+export class LightdashApiError extends Error {
+    readonly status: number;
+
+    /** The API error's `data` field, when the response carried one. */
+    readonly data: unknown;
+
+    constructor(status: number, message: string, data?: unknown) {
+        super(`Lightdash API error (${status}): ${message}`);
+        this.name = 'LightdashApiError';
+        this.status = status;
+        this.data = data;
+    }
+}
+
+const toAppStateErrorFromApi = (error: unknown): AppStateError => {
+    if (error instanceof AppStateError) return error;
+    if (error instanceof LightdashApiError) {
+        const data =
+            typeof error.data === 'object' && error.data !== null
+                ? (error.data as Record<string, unknown>)
+                : {};
+        if (error.status === 409) {
+            return new AppStateError(
+                'conflict',
+                error.message,
+                (data.current as AppStateSharedEntry | null | undefined) ??
+                    null,
+            );
+        }
+        if (error.status === 403) {
+            return new AppStateError(
+                data.code === 'feature_not_enabled'
+                    ? 'feature_disabled'
+                    : 'forbidden',
+                error.message,
+            );
+        }
+        if (error.status === 400 || error.status === 422) {
+            return new AppStateError('invalid', error.message);
+        }
+        return new AppStateError('unknown', error.message);
+    }
+    return new AppStateError(
+        'unavailable',
+        error instanceof Error ? error.message : String(error),
+    );
+};
+
+/** App state over the REST endpoints, for local development with a PAT. */
+function createApiAppState(
+    projectUuid: string,
+    appUuid: string,
+    fetchFn: FetchAdapter,
+): AppStateTransport {
+    const base = `/api/v1/ee/projects/${projectUuid}/apps/${appUuid}/state`;
+    const keyPath = (scope: 'user' | 'shared', key: string) =>
+        `${base}/${scope}/${encodeURIComponent(key)}`;
+    const call = async <T>(run: () => Promise<T>): Promise<T> => {
+        try {
+            return await run();
+        } catch (error) {
+            throw toAppStateErrorFromApi(error);
+        }
+    };
+    return {
+        getSnapshot: () => call(() => fetchFn<AppStateSnapshot>('GET', base)),
+        setUser: (key, value) =>
+            call(() =>
+                fetchFn<AppStateUserEntry>('PUT', keyPath('user', key), {
+                    value,
+                }),
+            ),
+        deleteUser: (key) =>
+            call(async () => {
+                await fetchFn<undefined>('DELETE', keyPath('user', key));
+            }),
+        setShared: (key, value, expectedVersion) =>
+            call(() =>
+                fetchFn<AppStateSharedEntry>('PUT', keyPath('shared', key), {
+                    value,
+                    expectedVersion,
+                }),
+            ),
+        deleteShared: (key) =>
+            call(async () => {
+                await fetchFn<undefined>('DELETE', keyPath('shared', key));
+            }),
+        getSharedHistory: (key, options) =>
+            call(async () => {
+                const params = new URLSearchParams();
+                if (options.limit !== undefined) {
+                    params.set('limit', String(options.limit));
+                }
+                if (options.beforeVersion !== undefined) {
+                    params.set('beforeVersion', String(options.beforeVersion));
+                }
+                const query = params.toString();
+                const { versions } = await fetchFn<{
+                    versions: AppStateHistoryEntry[];
+                }>(
+                    'GET',
+                    `${keyPath('shared', key)}/history${query ? `?${query}` : ''}`,
+                );
+                return versions;
+            }),
+    };
+}
+
+function createDefaultFetchAdapter(
+    config: LightdashClientConfig,
+): FetchAdapter {
+    return async <T>(
+        method: string,
+        path: string,
+        body?: unknown,
+    ): Promise<T> => {
         const useProxy = config.useProxy ?? false;
         const baseUrl = useProxy ? '' : config.baseUrl.replace(/\/$/, '');
         const url = `${baseUrl}${path}`;
@@ -137,19 +449,320 @@ function createDefaultFetchAdapter(config: LightdashClientConfig): FetchAdapter 
         if (!res.ok) {
             const text = await res.text();
             let message: string;
+            let data: unknown;
             try {
                 const parsed = JSON.parse(text);
                 message = parsed.error?.message ?? parsed.message ?? text;
+                data = parsed.error?.data;
             } catch {
                 message = text;
             }
-            throw new Error(
-                `Lightdash API error (${res.status}): ${message}`,
-            );
+            throw new LightdashApiError(res.status, message, data);
         }
 
         const json = (await res.json()) as ApiResponse<T>;
         return json.results;
+    };
+}
+
+function buildMetricQueryBody(
+    query: QueryDefinition,
+    qualify: (fieldId: string) => string,
+    limit: number = query.limit,
+): Record<string, unknown> {
+    return {
+        query: {
+            exploreName: query.exploreName,
+            dimensions: query.dimensions.map(qualify),
+            metrics: query.metrics.map(qualify),
+            filters: buildApiFilters(
+                query.filters.map((f) => ({
+                    ...f,
+                    fieldId: qualify(f.fieldId),
+                })),
+                (query.metricFilters ?? []).map((f) => ({
+                    ...f,
+                    fieldId: qualify(f.fieldId),
+                })),
+            ),
+            sorts: query.sorts.map((s) => ({
+                fieldId: qualify(s.fieldId),
+                descending: s.descending,
+            })),
+            limit,
+            tableCalculations: query.tableCalculations,
+            ...(query.additionalMetrics.length > 0
+                ? { additionalMetrics: query.additionalMetrics }
+                : {}),
+            ...(query.customDimensions.length > 0
+                ? { customDimensions: query.customDimensions }
+                : {}),
+        },
+        // Parameters go at the TOP LEVEL of the body — the backend reads
+        // `body.parameters`, not `body.query.parameters`.
+        ...(query.parameters && Object.keys(query.parameters).length > 0
+            ? { parameters: query.parameters }
+            : {}),
+    };
+}
+
+async function executeMetricQuery(
+    fetchFn: FetchAdapter,
+    projectUuid: string,
+    query: QueryDefinition,
+    qualify: (fieldId: string) => string,
+    limit?: number,
+): Promise<AsyncQueryResponse> {
+    const metadata = query.label ? { label: query.label } : undefined;
+    return fetchFn<AsyncQueryResponse>(
+        'POST',
+        `/api/v2/projects/${projectUuid}/query/metric-query`,
+        buildMetricQueryBody(query, qualify, limit),
+        metadata,
+    );
+}
+
+function buildUnderlyingDataBody({
+    query,
+    queryUuid,
+    row,
+    metricId,
+    qualify,
+    limit,
+}: {
+    query: QueryDefinition;
+    queryUuid: string;
+    row: Row;
+    metricId: string;
+    qualify: (fieldId: string) => string;
+    limit?: number | null;
+}): Record<string, unknown> {
+    return {
+        context: 'viewUnderlyingData',
+        underlyingDataSourceQueryUuid: queryUuid,
+        underlyingDataItemId: metricId,
+        filters: buildUnderlyingDataFilters(query, row, qualify),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(query.parameters && Object.keys(query.parameters).length > 0
+            ? { parameters: query.parameters }
+            : {}),
+    };
+}
+
+async function executeUnderlyingDataQuery({
+    fetchFn,
+    projectUuid,
+    query,
+    queryUuid,
+    row,
+    metricId,
+    qualify,
+    limit,
+}: {
+    fetchFn: FetchAdapter;
+    projectUuid: string;
+    query: QueryDefinition;
+    queryUuid: string;
+    row: Row;
+    metricId: string;
+    qualify: (fieldId: string) => string;
+    limit?: number | null;
+}): Promise<AsyncQueryResponse> {
+    return fetchFn<AsyncQueryResponse>(
+        'POST',
+        `/api/v2/projects/${projectUuid}/query/underlying-data`,
+        buildUnderlyingDataBody({
+            query,
+            queryUuid,
+            row,
+            metricId,
+            qualify,
+            limit,
+        }),
+    );
+}
+
+function getDownloadLimit(limit: DownloadResultsLimit | undefined): {
+    kind: 'table' | 'rerun';
+    limit?: number;
+} {
+    if (limit === undefined || limit === 'table') {
+        return { kind: 'table' };
+    }
+    if (limit === 'all') {
+        return { kind: 'rerun', limit: ALL_RESULTS_LIMIT };
+    }
+    if (!Number.isInteger(limit) || limit < 1) {
+        throw new Error(
+            'Download limit must be "table", "all", or a positive integer.',
+        );
+    }
+    return { kind: 'rerun', limit };
+}
+
+type ChartResponseMetricQuery = {
+    dimensions?: string[];
+    metrics?: string[];
+    filters?: {
+        dimensions?: Record<string, unknown>;
+        metrics?: Record<string, unknown>;
+    };
+};
+
+function buildSavedChartUnderlyingDataBody({
+    metricQuery,
+    queryUuid,
+    row,
+    metricId,
+    limit,
+    parameters,
+}: {
+    metricQuery: ChartResponseMetricQuery;
+    queryUuid: string;
+    row: Row;
+    metricId: string;
+    limit?: number | null;
+    parameters?: ParametersValuesMap;
+}): Record<string, unknown> {
+    const rowFilters = (metricQuery.dimensions ?? []).map((dimension, i) => {
+        if (!Object.prototype.hasOwnProperty.call(row, dimension)) {
+            throw new Error(
+                `Cannot fetch underlying data because the row is missing dimension "${dimension}". Pass the original row returned by useLightdash().`,
+            );
+        }
+        const value = row[dimension];
+        return {
+            id: `sdk-underlying-row-filter-${i}`,
+            target: { fieldId: dimension },
+            operator: value === null ? 'isNull' : 'equals',
+            ...(value === null ? {} : { values: [value] }),
+        };
+    });
+
+    const chartDimensionFilters = metricQuery.filters?.dimensions;
+    const dimensionRules = [
+        ...(chartDimensionFilters ? [chartDimensionFilters] : []),
+        ...rowFilters,
+    ];
+
+    return {
+        context: 'viewUnderlyingData',
+        underlyingDataSourceQueryUuid: queryUuid,
+        underlyingDataItemId: metricId,
+        filters: {
+            // Dimension filters only — the chart's metric (HAVING) filters must
+            // not apply at the underlying rows' grain (mirrors the app's own
+            // drill-down).
+            ...(dimensionRules.length > 0
+                ? {
+                      dimensions: {
+                          id: 'sdk-underlying-root',
+                          and: dimensionRules,
+                      },
+                  }
+                : {}),
+        },
+        ...(limit !== undefined ? { limit } : {}),
+        ...(parameters && Object.keys(parameters).length > 0
+            ? { parameters }
+            : {}),
+    };
+}
+
+function getUnderlyingDownloadLimit(
+    limit: DownloadResultsLimit | undefined,
+): number | null | undefined {
+    if (limit === undefined || limit === 'table') {
+        return undefined;
+    }
+    if (limit === 'all') {
+        return null;
+    }
+    if (!Number.isInteger(limit) || limit < 1) {
+        throw new Error(
+            'Download limit must be "table", "all", or a positive integer.',
+        );
+    }
+    return limit;
+}
+
+function getDownloadOptions(options: DownloadResultsOptions = {}): {
+    fileType: DownloadResultsFileType;
+    values: 'formatted' | 'raw';
+} {
+    const fileType = options.fileType ?? 'csv';
+    if (fileType !== 'csv' && fileType !== 'xlsx') {
+        throw new Error('Download fileType must be "csv" or "xlsx".');
+    }
+
+    const values = options.values ?? 'formatted';
+    if (values !== 'formatted' && values !== 'raw') {
+        throw new Error('Download values must be "formatted" or "raw".');
+    }
+
+    return { fileType, values };
+}
+
+const triggerBrowserDownload = (
+    fileUrl: string,
+    filename: string | undefined,
+    fileType: DownloadResultsFileType,
+) => {
+    if (typeof document === 'undefined') return;
+
+    const link = document.createElement('a');
+    link.href = fileUrl;
+    if (filename) {
+        link.download = filename.toLowerCase().endsWith(`.${fileType}`)
+            ? filename
+            : `${filename}.${fileType}`;
+    }
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+};
+
+async function scheduleDownloadForQuery({
+    fetchFn,
+    projectUuid,
+    queryUuid,
+    options,
+}: {
+    fetchFn: FetchAdapter;
+    projectUuid: string;
+    queryUuid: string;
+    options?: DownloadResultsOptions;
+}): Promise<DownloadResultsResult> {
+    const { fileType, values } = getDownloadOptions(options);
+
+    const scheduled = await fetchFn<ScheduleDownloadResponse>(
+        'POST',
+        `/api/v2/projects/${projectUuid}/query/${queryUuid}/schedule-download`,
+        {
+            type: fileType,
+            onlyRaw: values === 'raw',
+            ...(options?.filename
+                ? { attachmentDownloadName: options.filename }
+                : {}),
+        },
+    );
+
+    const { fileUrl, truncated } = await pollDownloadJob(
+        fetchFn,
+        scheduled.jobId,
+    );
+
+    if (options?.autoDownload !== false) {
+        triggerBrowserDownload(fileUrl, options?.filename, fileType);
+    }
+
+    return {
+        queryUuid,
+        jobId: scheduled.jobId,
+        fileUrl,
+        fileType,
+        truncated,
     };
 }
 
@@ -166,6 +779,198 @@ export function mapColumnType(type: string): Column['type'] {
     return 'string';
 }
 
+async function pollQueryReady(
+    fetchFn: FetchAdapter,
+    projectUuid: string,
+    queryUuid: string,
+    pageSize: number = PAGE_SIZE,
+): Promise<Extract<PollResponse, { status: 'ready' }>> {
+    const pollUrl = (page: number) =>
+        `/api/v2/projects/${projectUuid}/query/${queryUuid}?page=${page}&pageSize=${pageSize}`;
+
+    // The poll endpoint returns status PENDING/QUEUED/EXECUTING while
+    // the warehouse is still running, and READY once results are available.
+    const deadline = Date.now() + MAX_POLL_DURATION_MS;
+    let backoffMs = INITIAL_BACKOFF_MS;
+
+    while (Date.now() < deadline) {
+        const pollResult = await fetchFn<PollResponse>('GET', pollUrl(1));
+
+        if (pollResult.status === 'ready') {
+            return pollResult;
+        }
+
+        if (pollResult.status === 'error' || pollResult.status === 'expired') {
+            throw new Error(
+                `Query failed: ${pollResult.error ?? 'unknown error'}`,
+            );
+        }
+
+        if (pollResult.status === 'cancelled') {
+            throw new Error('Query was cancelled');
+        }
+
+        // Still running — wait with exponential backoff and retry.
+        const sleepMs = backoffMs;
+        await sleep(sleepMs);
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+    }
+
+    throw new Error('Query timed out waiting for results');
+}
+
+async function pollQueryRows(
+    fetchFn: FetchAdapter,
+    projectUuid: string,
+    queryUuid: string,
+): Promise<{
+    firstReadyPage: Extract<PollResponse, { status: 'ready' }>;
+    apiRows: ResultRow[];
+}> {
+    const pollUrl = (page: number) =>
+        `/api/v2/projects/${projectUuid}/query/${queryUuid}?page=${page}&pageSize=${PAGE_SIZE}`;
+
+    const firstReadyPage = await pollQueryReady(
+        fetchFn,
+        projectUuid,
+        queryUuid,
+    );
+    const apiRows: ResultRow[] = [...firstReadyPage.rows];
+
+    // Drain remaining pages. The backend already streamed results to S3 by
+    // the time the first page is ready, so subsequent pages resolve quickly.
+    let { nextPage } = firstReadyPage;
+    const { totalResults } = firstReadyPage;
+    while (nextPage !== undefined && apiRows.length < totalResults) {
+        const pageResult = await fetchFn<PollResponse>(
+            'GET',
+            pollUrl(nextPage),
+        );
+
+        if (pageResult.status !== 'ready') {
+            throw new Error(
+                `Unexpected status while paginating results: ${pageResult.status}`,
+            );
+        }
+
+        apiRows.push(...pageResult.rows);
+        nextPage = pageResult.nextPage;
+    }
+
+    return { firstReadyPage, apiRows };
+}
+
+async function pollDownloadJob(
+    fetchFn: FetchAdapter,
+    jobId: string,
+): Promise<{ fileUrl: string; truncated: boolean }> {
+    const deadline = Date.now() + MAX_DOWNLOAD_POLL_DURATION_MS;
+
+    while (Date.now() < deadline) {
+        const result = await fetchFn<SchedulerJobStatusResponse>(
+            'GET',
+            `/api/v1/schedulers/job/${jobId}/status`,
+        );
+
+        if (result.status === 'completed') {
+            const fileUrl = result.details?.fileUrl;
+            if (!fileUrl) {
+                throw new Error('Download completed without a file URL.');
+            }
+            return {
+                fileUrl,
+                truncated: result.details?.truncated === true,
+            };
+        }
+
+        if (result.status === 'error') {
+            throw new Error(result.details?.error ?? 'Download failed.');
+        }
+
+        await sleep(2000);
+    }
+
+    throw new Error('Download timed out waiting for the export job.');
+}
+
+function mapApiRowsToQueryResult({
+    apiRows,
+    columns,
+    fields,
+    fieldIds,
+    fieldNameForId,
+}: {
+    apiRows: ResultRow[];
+    columns: Record<string, { reference: string; type: string }>;
+    fields: Record<string, FieldMeta>;
+    fieldIds: string[];
+    fieldNameForId: (fieldId: string) => string;
+}): Pick<QueryResult, 'rows' | 'columns' | 'format' | 'rowKeys'> {
+    const idToName = new Map<string, string>();
+    for (const fieldId of fieldIds) {
+        idToName.set(fieldId, fieldNameForId(fieldId));
+    }
+
+    const resultColumns: Column[] = fieldIds.map((fieldId) => {
+        const name = idToName.get(fieldId) ?? fieldId;
+        const fieldMeta = fields[fieldId];
+        const colMeta = columns[fieldId];
+        return {
+            name,
+            label: fieldMeta?.label ?? fieldMeta?.displayName ?? name,
+            type: mapColumnType(colMeta?.type ?? fieldMeta?.type ?? 'string'),
+        };
+    });
+
+    const formattedCache = new Map<string, Map<unknown, string>>();
+
+    const rows: Row[] = apiRows.map((apiRow) => {
+        const row: Row = {};
+        for (const fieldId of fieldIds) {
+            const name = idToName.get(fieldId) ?? fieldId;
+            const cell = apiRow[fieldId];
+            if (!cell) {
+                row[name] = null;
+                continue;
+            }
+            const { raw, formatted } = cell.value;
+
+            if (!formattedCache.has(name)) {
+                formattedCache.set(name, new Map());
+            }
+            formattedCache.get(name)!.set(raw, formatted);
+
+            if (raw === null || raw === undefined) {
+                row[name] = null;
+            } else if (typeof raw === 'number') {
+                row[name] = raw;
+            } else if (typeof raw === 'boolean') {
+                row[name] = raw;
+            } else {
+                row[name] = String(raw);
+            }
+        }
+        return row;
+    });
+
+    const format: FormatFunction = (row, fieldId) => {
+        const rawVal = row[fieldId];
+        const cache = formattedCache.get(fieldId);
+        if (cache) {
+            const formatted = cache.get(rawVal);
+            if (formatted !== undefined) return formatted;
+        }
+        return String(rawVal ?? '');
+    };
+
+    return {
+        rows,
+        columns: resultColumns,
+        format,
+        rowKeys: Object.fromEntries(idToName),
+    };
+}
+
 /**
  * Creates a transport that executes queries via the Lightdash REST API.
  *
@@ -177,230 +982,408 @@ export function mapColumnType(type: string): Column['type'] {
 export function createApiTransport(
     config: LightdashClientConfig,
     adapter?: FetchAdapter,
+    options?: ApiTransportOptions,
 ): Transport {
     const fetchFn = adapter ?? createDefaultFetchAdapter(config);
+    // Custom adapters may proxy through a route allowlist without the explore
+    // endpoint, so only the default adapter looks base tables up by default.
+    // Behind a dev proxy (CLI preview) the proxy answers the host route.
+    let defaultResolver: ExploreBaseTableResolver | null = null;
+    if (adapter === undefined) {
+        defaultResolver = config.useProxy
+            ? createHostExploreBaseTableResolver(fetchFn)
+            : createApiExploreBaseTableResolver(fetchFn, config.projectUuid);
+    }
+    const resolveExploreBaseTable =
+        options === undefined
+            ? defaultResolver
+            : options.resolveExploreBaseTable;
+    const baseTableByExplore = new Map<string, Promise<string | null>>();
+
+    const getFieldQualifier = async (query: QueryDefinition) => {
+        const { exploreName } = query;
+        const customDimensionIds = query.customDimensions.map((d) => d.id);
+        if (resolveExploreBaseTable === null) {
+            return createFieldQualifier(exploreName, null, customDimensionIds);
+        }
+        let baseTable = baseTableByExplore.get(exploreName);
+        if (baseTable === undefined) {
+            baseTable = resolveExploreBaseTable(exploreName)
+                .catch(() => null)
+                .then((resolved) => {
+                    // Keep only answers, so a failed lookup is retried.
+                    if (resolved === null) {
+                        baseTableByExplore.delete(exploreName);
+                    }
+                    return resolved;
+                });
+            baseTableByExplore.set(exploreName, baseTable);
+        }
+        return createFieldQualifier(
+            exploreName,
+            await baseTable,
+            customDimensionIds,
+        );
+    };
 
     return {
         async executeQuery(query: QueryDefinition): Promise<QueryResult> {
-            const table = query.exploreName;
-
-            // Lightdash field IDs are `{table}_{column}`.
-            // The SDK lets users write short names like 'driver_name'
-            // and we qualify them to 'fct_race_results_driver_name'.
-            //
-            // For joined table fields, use dot notation: 'customers.name'
-            // which resolves to 'customers_name' (not 'orders_customers_name').
-            const qualify = (fieldId: string): string => {
-                // Dot notation: 'customers.name' → 'customers_name'
-                if (fieldId.includes('.')) {
-                    return fieldId.replace('.', '_');
-                }
-                // Already qualified with explore name
-                if (fieldId.startsWith(`${table}_`)) {
-                    return fieldId;
-                }
-                // Short name → qualify with explore name
-                return `${table}_${fieldId}`;
-            };
+            const qualify = await getFieldQualifier(query);
 
             const qualifiedDims = query.dimensions.map(qualify);
             const qualifiedMetrics = query.metrics.map(qualify);
 
             // Kick off the async query — returns a queryUuid we then poll.
-            const body = {
-                query: {
-                    exploreName: table,
-                    dimensions: qualifiedDims,
-                    metrics: qualifiedMetrics,
-                    filters: buildApiFilters(
-                        query.filters.map((f) => ({
-                            ...f,
-                            fieldId: qualify(f.fieldId),
-                        })),
-                    ),
-                    sorts: query.sorts.map((s) => ({
-                        fieldId: qualify(s.fieldId),
-                        descending: s.descending,
-                    })),
-                    limit: query.limit,
-                    tableCalculations: query.tableCalculations,
-                    ...(query.additionalMetrics.length > 0
-                        ? { additionalMetrics: query.additionalMetrics }
-                        : {}),
-                    ...(query.customDimensions.length > 0
-                        ? { customDimensions: query.customDimensions }
-                        : {}),
-                },
-                // Parameters go at the TOP LEVEL of the body — the backend reads
-                // `body.parameters`, not `body.query.parameters`.
-                ...(query.parameters && Object.keys(query.parameters).length > 0
-                    ? { parameters: query.parameters }
-                    : {}),
-            };
-
-            // Pass label as transport metadata (not in the API body)
-            // so the parent bridge can display it in the query inspector.
-            const metadata = query.label
-                ? { label: query.label }
-                : undefined;
-
-            const execResult = await fetchFn<AsyncQueryResponse>(
-                'POST',
-                `/api/v2/projects/${config.projectUuid}/query/metric-query`,
-                body,
-                metadata,
+            const execResult = await executeMetricQuery(
+                fetchFn,
+                config.projectUuid,
+                query,
+                qualify,
             );
 
             const { queryUuid, fields } = execResult;
 
-            const pollUrl = (page: number) =>
-                `/api/v2/projects/${config.projectUuid}/query/${queryUuid}?page=${page}&pageSize=${PAGE_SIZE}`;
-
-            // The poll endpoint returns status PENDING/QUEUED/EXECUTING while
-            // the warehouse is still running, and READY (with the first page
-            // of rows) once results are available. Mirrors the explorer's
-            // `useInfiniteQueryResults`: backoff while waiting, then follow
-            // `nextPage` to drain remaining pages.
-            const deadline = Date.now() + MAX_POLL_DURATION_MS;
-            let backoffMs = INITIAL_BACKOFF_MS;
-            let firstReadyPage:
-                | Extract<PollResponse, { status: 'ready' }>
-                | null = null;
-            const apiRows: ResultRow[] = [];
-
-            // Wait for the first ready page.
-            while (Date.now() < deadline) {
-                const pollResult = await fetchFn<PollResponse>(
-                    'GET',
-                    pollUrl(1),
-                );
-
-                if (pollResult.status === 'ready') {
-                    firstReadyPage = pollResult;
-                    apiRows.push(...pollResult.rows);
-                    backoffMs = INITIAL_BACKOFF_MS;
-                    break;
-                }
-
-                if (
-                    pollResult.status === 'error' ||
-                    pollResult.status === 'expired'
-                ) {
-                    throw new Error(
-                        `Query failed: ${pollResult.error ?? 'unknown error'}`,
-                    );
-                }
-
-                if (pollResult.status === 'cancelled') {
-                    throw new Error('Query was cancelled');
-                }
-
-                // Still running — wait with exponential backoff and retry.
-                const sleepMs = backoffMs;
-                // eslint-disable-next-line no-promise-executor-return
-                await new Promise((resolve) => setTimeout(resolve, sleepMs));
-                backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
-            }
-
-            if (!firstReadyPage) {
-                throw new Error('Query timed out waiting for results');
-            }
-
-            // Drain remaining pages. The backend already streamed results to
-            // S3 by the time the first page is ready, so subsequent pages
-            // resolve quickly (no warehouse round-trip per page).
-            let { nextPage } = firstReadyPage;
-            const { totalResults } = firstReadyPage;
-            while (
-                nextPage !== undefined &&
-                apiRows.length < totalResults
-            ) {
-                const pageResult = await fetchFn<PollResponse>(
-                    'GET',
-                    pollUrl(nextPage),
-                );
-
-                if (pageResult.status !== 'ready') {
-                    // Status shouldn't regress once we've seen ready; treat
-                    // anything else as a hard failure rather than retrying.
-                    throw new Error(
-                        `Unexpected status while paginating results: ${pageResult.status}`,
-                    );
-                }
-
-                apiRows.push(...pageResult.rows);
-                nextPage = pageResult.nextPage;
-            }
-
             // Build a mapping from qualified → short field names
             // so app code uses row.driver_name, not row.fct_race_results_driver_name
-            const allShort = [...query.dimensions, ...query.metrics];
-            const allQualified = [...qualifiedDims, ...qualifiedMetrics];
+            const tableCalculationNames = query.tableCalculations.map(
+                (calculation) => calculation.name,
+            );
+            const allShort = [
+                ...query.dimensions,
+                ...query.metrics,
+                ...tableCalculationNames,
+            ];
+            const allQualified = [
+                ...qualifiedDims,
+                ...qualifiedMetrics,
+                ...tableCalculationNames,
+            ];
             const qualifiedToShort = new Map<string, string>();
             for (let i = 0; i < allShort.length; i++) {
                 qualifiedToShort.set(allQualified[i], allShort[i]);
             }
 
-            // Map columns from field metadata
-            const columns: Column[] = allQualified.map((qFieldId) => {
-                const shortName = qualifiedToShort.get(qFieldId) ?? qFieldId;
-                const fieldMeta = fields[qFieldId];
-                const colMeta = firstReadyPage.columns[qFieldId];
-                return {
-                    name: shortName,
-                    label: fieldMeta?.label ?? shortName,
-                    type: mapColumnType(
-                        colMeta?.type ?? fieldMeta?.type ?? 'string',
+            const { firstReadyPage, apiRows } = await pollQueryRows(
+                fetchFn,
+                config.projectUuid,
+                queryUuid,
+            );
+
+            const mappedResult = mapApiRowsToQueryResult({
+                apiRows,
+                columns: firstReadyPage.columns,
+                fields,
+                fieldIds: allQualified,
+                fieldNameForId: (fieldId) =>
+                    qualifiedToShort.get(fieldId) ?? fieldId,
+            });
+
+            const getUnderlyingData = async (
+                options: UnderlyingDataOptions,
+            ): Promise<UnderlyingDataResult> => {
+                const metricId = qualify(options.metric);
+                if (!qualifiedMetrics.includes(metricId)) {
+                    throw new Error(
+                        `Cannot fetch underlying data for "${options.metric}" because it is not a metric in the source query.`,
+                    );
+                }
+
+                const underlyingExecResult = await executeUnderlyingDataQuery({
+                    fetchFn,
+                    projectUuid: config.projectUuid,
+                    query,
+                    queryUuid,
+                    row: options.row,
+                    metricId,
+                    qualify,
+                    limit: options.limit,
+                });
+
+                const {
+                    firstReadyPage: underlyingFirstReadyPage,
+                    apiRows: underlyingApiRows,
+                } = await pollQueryRows(
+                    fetchFn,
+                    config.projectUuid,
+                    underlyingExecResult.queryUuid,
+                );
+
+                const underlyingFieldIds = [
+                    ...Object.keys(underlyingExecResult.fields),
+                    ...Object.keys(underlyingFirstReadyPage.columns).filter(
+                        (fieldId) => !(fieldId in underlyingExecResult.fields),
                     ),
+                ];
+
+                return {
+                    ...mapApiRowsToQueryResult({
+                        apiRows: underlyingApiRows,
+                        columns: underlyingFirstReadyPage.columns,
+                        fields: underlyingExecResult.fields,
+                        fieldIds: underlyingFieldIds,
+                        fieldNameForId: (fieldId) => fieldId,
+                    }),
+                    queryUuid: underlyingExecResult.queryUuid,
                 };
-            });
-
-            // Map rows: extract raw values, keep formatted for format()
-            const formattedCache = new Map<string, Map<unknown, string>>();
-
-            const rows: Row[] = apiRows.map((apiRow) => {
-                const row: Row = {};
-                for (const qFieldId of allQualified) {
-                    const shortName =
-                        qualifiedToShort.get(qFieldId) ?? qFieldId;
-                    const cell = apiRow[qFieldId];
-                    if (!cell) {
-                        row[shortName] = null;
-                        continue;
-                    }
-                    const { raw, formatted } = cell.value;
-
-                    // Store formatted value for the format() function
-                    if (!formattedCache.has(shortName)) {
-                        formattedCache.set(shortName, new Map());
-                    }
-                    formattedCache.get(shortName)!.set(raw, formatted);
-
-                    // Convert raw to typed value
-                    if (raw === null || raw === undefined) {
-                        row[shortName] = null;
-                    } else if (typeof raw === 'number') {
-                        row[shortName] = raw;
-                    } else if (typeof raw === 'boolean') {
-                        row[shortName] = raw;
-                    } else {
-                        row[shortName] = String(raw);
-                    }
-                }
-                return row;
-            });
-
-            const format: FormatFunction = (row, fieldId) => {
-                const rawVal = row[fieldId];
-                const cache = formattedCache.get(fieldId);
-                if (cache) {
-                    const formatted = cache.get(rawVal);
-                    if (formatted !== undefined) return formatted;
-                }
-                return String(rawVal ?? '');
             };
 
-            return { rows, columns, format };
+            const downloadUnderlyingData = async (
+                options: DownloadUnderlyingDataOptions,
+            ): Promise<DownloadResultsResult> => {
+                const metricId = qualify(options.metric);
+                if (!qualifiedMetrics.includes(metricId)) {
+                    throw new Error(
+                        `Cannot download underlying data for "${options.metric}" because it is not a metric in the source query.`,
+                    );
+                }
+
+                const underlyingExecResult = await executeUnderlyingDataQuery({
+                    fetchFn,
+                    projectUuid: config.projectUuid,
+                    query,
+                    queryUuid,
+                    row: options.row,
+                    metricId,
+                    qualify,
+                    limit: getUnderlyingDownloadLimit(options.limit),
+                });
+
+                await pollQueryReady(
+                    fetchFn,
+                    config.projectUuid,
+                    underlyingExecResult.queryUuid,
+                    1,
+                );
+
+                return scheduleDownloadForQuery({
+                    fetchFn,
+                    projectUuid: config.projectUuid,
+                    queryUuid: underlyingExecResult.queryUuid,
+                    options,
+                });
+            };
+
+            const downloadResults = async (
+                options: DownloadResultsOptions = {},
+            ): Promise<DownloadResultsResult> => {
+                const downloadLimit = getDownloadLimit(options.limit);
+                let downloadQueryUuid = queryUuid;
+
+                if (downloadLimit.kind === 'rerun') {
+                    const downloadExecResult = await executeMetricQuery(
+                        fetchFn,
+                        config.projectUuid,
+                        query,
+                        qualify,
+                        downloadLimit.limit,
+                    );
+                    await pollQueryReady(
+                        fetchFn,
+                        config.projectUuid,
+                        downloadExecResult.queryUuid,
+                        1,
+                    );
+                    downloadQueryUuid = downloadExecResult.queryUuid;
+                }
+
+                return scheduleDownloadForQuery({
+                    fetchFn,
+                    projectUuid: config.projectUuid,
+                    queryUuid: downloadQueryUuid,
+                    options,
+                });
+            };
+
+            return {
+                ...mappedResult,
+                totalResults: firstReadyPage.totalResults,
+                queryUuid,
+                getUnderlyingData,
+                downloadUnderlyingData,
+                downloadResults,
+            };
+        },
+
+        async executeSavedChart(params: {
+            chartUuid: string;
+            label?: string;
+            limit?: number;
+            parameters?: ParametersValuesMap;
+            filters?: InternalFilterDefinition[];
+        }): Promise<QueryResult> {
+            const metadata = params.label ? { label: params.label } : undefined;
+            const buildChartBody = (limitOverride?: number) => {
+                const body: Record<string, unknown> = {
+                    chartUuid: params.chartUuid,
+                };
+                const effectiveLimit = limitOverride ?? params.limit;
+                if (effectiveLimit !== undefined) body.limit = effectiveLimit;
+                if (
+                    params.parameters &&
+                    Object.keys(params.parameters).length > 0
+                ) {
+                    body.parameters = params.parameters;
+                }
+                if (params.filters && params.filters.length > 0) {
+                    body.filters = buildApiFilters(params.filters);
+                }
+                return body;
+            };
+            const execResult = await fetchFn<AsyncQueryResponse>(
+                'POST',
+                `/api/v2/projects/${config.projectUuid}/query/chart`,
+                buildChartBody(),
+                metadata,
+            );
+            const { queryUuid, fields, metricQuery } =
+                execResult as AsyncQueryResponse & {
+                    metricQuery?: ChartResponseMetricQuery;
+                };
+
+            const { firstReadyPage, apiRows } = await pollQueryRows(
+                fetchFn,
+                config.projectUuid,
+                queryUuid,
+            );
+
+            // No client-side QueryDefinition for a saved chart — derive the
+            // field ids from the response (same approach as underlying-data).
+            // The response `metricQuery` (merged with any `.filters()`
+            // overrides server-side) provides the dimensions/metrics/filters
+            // context needed for underlying-data requests, and rows are
+            // keyed by their field id (identity).
+            const fieldIds = [
+                ...Object.keys(fields),
+                ...Object.keys(firstReadyPage.columns).filter(
+                    (fieldId) => !(fieldId in fields),
+                ),
+            ];
+
+            const mappedResult = mapApiRowsToQueryResult({
+                apiRows,
+                columns: firstReadyPage.columns,
+                fields,
+                fieldIds,
+                fieldNameForId: (fieldId) => fieldId,
+            });
+
+            const chartMetrics = metricQuery?.metrics ?? [];
+
+            const execUnderlying = async (
+                options: { metric: string; row: Row },
+                limit?: number | null,
+            ) => {
+                if (!chartMetrics.includes(options.metric)) {
+                    throw new Error(
+                        `Cannot fetch underlying data for "${options.metric}" because it is not a metric in the linked chart.`,
+                    );
+                }
+                return fetchFn<AsyncQueryResponse>(
+                    'POST',
+                    `/api/v2/projects/${config.projectUuid}/query/underlying-data`,
+                    buildSavedChartUnderlyingDataBody({
+                        metricQuery: metricQuery ?? {},
+                        queryUuid,
+                        row: options.row,
+                        metricId: options.metric,
+                        limit,
+                        parameters: params.parameters,
+                    }),
+                );
+            };
+
+            const getUnderlyingData = async (
+                options: UnderlyingDataOptions,
+            ): Promise<UnderlyingDataResult> => {
+                const underlyingExecResult = await execUnderlying(
+                    options,
+                    options.limit,
+                );
+                const {
+                    firstReadyPage: underlyingFirstReadyPage,
+                    apiRows: underlyingApiRows,
+                } = await pollQueryRows(
+                    fetchFn,
+                    config.projectUuid,
+                    underlyingExecResult.queryUuid,
+                );
+                const underlyingFieldIds = [
+                    ...Object.keys(underlyingExecResult.fields),
+                    ...Object.keys(underlyingFirstReadyPage.columns).filter(
+                        (fieldId) => !(fieldId in underlyingExecResult.fields),
+                    ),
+                ];
+                return {
+                    ...mapApiRowsToQueryResult({
+                        apiRows: underlyingApiRows,
+                        columns: underlyingFirstReadyPage.columns,
+                        fields: underlyingExecResult.fields,
+                        fieldIds: underlyingFieldIds,
+                        fieldNameForId: (fieldId) => fieldId,
+                    }),
+                    queryUuid: underlyingExecResult.queryUuid,
+                };
+            };
+
+            const downloadUnderlyingData = async (
+                options: DownloadUnderlyingDataOptions,
+            ): Promise<DownloadResultsResult> => {
+                const underlyingExecResult = await execUnderlying(
+                    options,
+                    getUnderlyingDownloadLimit(options.limit),
+                );
+                await pollQueryReady(
+                    fetchFn,
+                    config.projectUuid,
+                    underlyingExecResult.queryUuid,
+                    1,
+                );
+                return scheduleDownloadForQuery({
+                    fetchFn,
+                    projectUuid: config.projectUuid,
+                    queryUuid: underlyingExecResult.queryUuid,
+                    options,
+                });
+            };
+
+            const downloadResults = async (
+                options: DownloadResultsOptions = {},
+            ): Promise<DownloadResultsResult> => {
+                const downloadLimit = getDownloadLimit(options.limit);
+                let downloadQueryUuid = queryUuid;
+
+                if (downloadLimit.kind === 'rerun') {
+                    const rerun = await fetchFn<AsyncQueryResponse>(
+                        'POST',
+                        `/api/v2/projects/${config.projectUuid}/query/chart`,
+                        buildChartBody(downloadLimit.limit),
+                        metadata,
+                    );
+                    await pollQueryReady(
+                        fetchFn,
+                        config.projectUuid,
+                        rerun.queryUuid,
+                        1,
+                    );
+                    downloadQueryUuid = rerun.queryUuid;
+                }
+
+                return scheduleDownloadForQuery({
+                    fetchFn,
+                    projectUuid: config.projectUuid,
+                    queryUuid: downloadQueryUuid,
+                    options,
+                });
+            };
+
+            return {
+                ...mappedResult,
+                totalResults: firstReadyPage.totalResults,
+                queryUuid,
+                getUnderlyingData,
+                downloadUnderlyingData,
+                downloadResults,
+            };
         },
 
         async getUser(): Promise<LightdashUser> {
@@ -421,6 +1404,135 @@ export function createApiTransport(
                 orgId: user.organizationUuid,
                 attributes: user.userAttributes ?? {},
             };
+        },
+
+        async aiPrompt(request: AiPromptRequest): Promise<AiPromptResult> {
+            const { appUuid, prompt, sources, focus } = request;
+            const { text } = await fetchFn<{ text: string }>(
+                'POST',
+                `/api/v2/projects/${config.projectUuid}/apps/${appUuid}/analysis/prompt`,
+                { prompt, sources, ...(focus ? { focus } : {}) },
+            );
+            return { text };
+        },
+
+        // Needs an app to attribute state to; the dev transport only has one
+        // when VITE_LIGHTDASH_APP_UUID is set. Without it the hooks stay in
+        // memory for the session.
+        appState: config.appUuid
+            ? createApiAppState(config.projectUuid, config.appUuid, fetchFn)
+            : undefined,
+
+        async externalFetch(
+            _alias: string,
+            _opts: ExternalFetchOptions,
+        ): Promise<ExternalFetchResult> {
+            // The external-fetch proxy authorizes per linked app. The direct/dev
+            // (PAT) transport has no app context, so there is no connection link
+            // to resolve. Only the in-iframe postMessage transport supports it.
+            throw new Error(
+                'externalFetch is only available inside a data app preview',
+            );
+        },
+
+        async getVizUnderlyingData(
+            intent: VizUnderlyingDataIntent,
+        ): Promise<UnderlyingDataResult> {
+            const execResult = await fetchFn<AsyncQueryResponse>(
+                'POST',
+                VIZ_UNDERLYING_DATA_PATH,
+                intent,
+            );
+
+            const { firstReadyPage, apiRows } = await pollQueryRows(
+                fetchFn,
+                config.projectUuid,
+                execResult.queryUuid,
+            );
+
+            const fieldIds = [
+                ...Object.keys(execResult.fields),
+                ...Object.keys(firstReadyPage.columns).filter(
+                    (fieldId) => !(fieldId in execResult.fields),
+                ),
+            ];
+
+            return {
+                ...mapApiRowsToQueryResult({
+                    apiRows,
+                    columns: firstReadyPage.columns,
+                    fields: execResult.fields,
+                    fieldIds,
+                    fieldNameForId: (fieldId) => fieldId,
+                }),
+                queryUuid: execResult.queryUuid,
+            };
+        },
+
+        async downloadVizUnderlyingData(
+            intent: Omit<VizUnderlyingDataIntent, 'limit'>,
+            options: DownloadResultsOptions = {},
+        ): Promise<DownloadResultsResult> {
+            const execResult = await fetchFn<AsyncQueryResponse>(
+                'POST',
+                VIZ_UNDERLYING_DATA_PATH,
+                {
+                    ...intent,
+                    limit: getUnderlyingDownloadLimit(options.limit),
+                },
+            );
+
+            await pollQueryReady(
+                fetchFn,
+                config.projectUuid,
+                execResult.queryUuid,
+                1,
+            );
+
+            return scheduleDownloadForQuery({
+                fetchFn,
+                projectUuid: config.projectUuid,
+                queryUuid: execResult.queryUuid,
+                options,
+            });
+        },
+
+        async openVizUnderlyingData(
+            intent: Omit<VizUnderlyingDataIntent, 'limit'>,
+        ): Promise<void> {
+            await fetchFn<Record<string, never>>(
+                'POST',
+                VIZ_UNDERLYING_DATA_OPEN_PATH,
+                intent,
+            );
+        },
+
+        async getVizSubtotals(
+            request: VizSubtotalsRequest,
+        ): Promise<VizSubtotalsResult> {
+            return fetchFn<VizSubtotalsResult>(
+                'POST',
+                VIZ_SUBTOTALS_PATH,
+                request,
+            );
+        },
+
+        async openVizDrillDown(intent: VizDrillDownIntent): Promise<void> {
+            await fetchFn<Record<string, never>>(
+                'POST',
+                VIZ_DRILL_DOWN_PATH,
+                intent,
+            );
+        },
+
+        async openVizPointMenu(
+            intent: VizPointMenuIntent,
+        ): Promise<VizPointMenuResult> {
+            return fetchFn<VizPointMenuResult>(
+                'POST',
+                VIZ_POINT_MENU_PATH,
+                intent,
+            );
         },
     };
 }

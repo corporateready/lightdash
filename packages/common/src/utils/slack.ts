@@ -41,6 +41,59 @@ export const getSlackErrorCode = (error: unknown): string | undefined => {
 };
 
 /**
+ * Slack explains most API errors in response_metadata.messages, e.g.
+ * "[ERROR] downloading image failed [json-pointer:/blocks/3/image_url]".
+ * The top-level error code alone (invalid_arguments, invalid_blocks) rarely
+ * says which argument was rejected.
+ */
+export const getSlackErrorMessages = (error: unknown): string[] => {
+    if (
+        !error ||
+        typeof error !== 'object' ||
+        !('data' in error) ||
+        !error.data ||
+        typeof error.data !== 'object' ||
+        !('response_metadata' in error.data)
+    ) {
+        return [];
+    }
+    const responseMetadata = error.data.response_metadata;
+    if (
+        !responseMetadata ||
+        typeof responseMetadata !== 'object' ||
+        !('messages' in responseMetadata) ||
+        !Array.isArray(responseMetadata.messages)
+    ) {
+        return [];
+    }
+    return responseMetadata.messages.filter(
+        (message): message is string => typeof message === 'string',
+    );
+};
+
+/**
+ * Extracts the indices of the blocks Slack rejected from an invalid_blocks
+ * error. Slack reports block-level failures as json-pointers in
+ * response_metadata.messages.
+ * [WARN] entries are ignored — Slack mixes non-fatal warnings into the same
+ * list and those blocks were not the cause of the rejection.
+ * Returns an empty array when the error carries no block pointers.
+ */
+export const getSlackInvalidBlockIndices = (error: unknown): number[] => {
+    if (getSlackErrorCode(error) !== 'invalid_blocks') return [];
+    const indices = getSlackErrorMessages(error).reduce<Set<number>>(
+        (acc, message) => {
+            if (!message.includes('[ERROR]')) return acc;
+            const match = message.match(/json-pointer:\/blocks\/(\d+)/);
+            if (match) acc.add(Number(match[1]));
+            return acc;
+        },
+        new Set(),
+    );
+    return [...indices].sort((a, b) => a - b);
+};
+
+/**
  * Checks if a Slack error is unrecoverable (installation is broken).
  */
 export const isUnrecoverableSlackError = (error: unknown): boolean => {
@@ -51,6 +104,15 @@ export const isUnrecoverableSlackError = (error: unknown): boolean => {
             errorCode as (typeof UNRECOVERABLE_SLACK_ERRORS)[number],
         )
     );
+};
+
+/**
+ * Whether a Slack error is the message being too large to deliver — a delivery
+ * failure, not a generation failure.
+ */
+export const isSlackMessageTooLongError = (error: unknown): boolean => {
+    const errorCode = getSlackErrorCode(error);
+    return errorCode === 'msg_too_long' || errorCode === 'msg_blocks_too_long';
 };
 
 /**
@@ -74,15 +136,15 @@ export const SLACK_USER_FACING_ERROR_MESSAGES: Record<string, string> = {
     channel_not_found:
         'The Slack channel for this delivery no longer exists. Edit this delivery to choose another channel.',
     not_in_channel:
-        "The Lightdash Slack app isn't a member of this channel. Invite the app to the channel or choose a different one.",
+        "The Slack app isn't a member of this channel. Invite the app to the channel or choose a different one.",
     is_archived:
         'This Slack channel has been archived. Edit this delivery to choose another channel.',
     account_inactive:
-        'The Lightdash Slack app has been deactivated for your workspace. Ask your admin to reconnect Slack in organization settings, or contact support.',
+        'The Slack app has been deactivated for your workspace. Ask your admin to reconnect Slack in organization settings, or contact support.',
     invalid_auth:
         'Slack authentication is invalid for your workspace. Ask your admin to reconnect Slack in organization settings, or contact support.',
     missing_scope:
-        'The Lightdash Slack app is missing required permissions. Ask your admin to reconnect Slack to grant the new scopes, or contact support.',
+        'The Slack app is missing required permissions. Ask your admin to reconnect Slack to grant the new scopes, or contact support.',
 };
 
 /**

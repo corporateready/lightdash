@@ -8,6 +8,7 @@ import {
 } from '@lightdash/common';
 import express, { type Router } from 'express';
 import path from 'path';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -70,7 +71,8 @@ projectRouter.get(
     isAuthenticated,
     async (req, res, next) => {
         try {
-            const { type, fromDate, toDate, createdByUuid } = req.query;
+            const { type, fromDate, toDate, createdByUuid, verifiedOnly } =
+                req.query;
             const results = await req.services
                 .getSearchService()
                 .getSearchResults(
@@ -83,6 +85,7 @@ projectRouter.get(
                         fromDate: fromDate?.toString(),
                         toDate: toDate?.toString(),
                         createdByUuid: createdByUuid?.toString(),
+                        verifiedOnly: verifiedOnly === 'true',
                     },
                 );
             res.json({ status: 'ok', results });
@@ -94,13 +97,18 @@ projectRouter.get(
 
 projectRouter.get(
     '/csv/:nanoId',
-
+    allowApiKeyAuthentication,
+    isAuthenticated,
     async (req, res, next) => {
         try {
             const { nanoId } = req.params;
             const { path: filePath } = await req.services
                 .getDownloadFileService()
-                .getDownloadFile(nanoId);
+                .getDownloadFileForProject(
+                    req.account!,
+                    getObjectValue(req.params, 'projectUuid'),
+                    nanoId,
+                );
             const filename = path.basename(filePath);
             const normalizedPath = path.resolve('/tmp/', filename);
             if (!normalizedPath.startsWith('/tmp/')) {
@@ -124,13 +132,14 @@ projectRouter.get(
 projectRouter.post(
     '/field/:fieldId/search',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('projectRouter POST /field/:fieldId/search'),
     isAuthenticated,
     async (req, res, next) => {
         try {
             const results = await req.services
                 .getProjectService()
                 .searchFieldUniqueValues(
-                    req.user!,
+                    req.account!,
                     getObjectValue(req.params, 'projectUuid'),
                     req.body.table,
                     getObjectValue(req.params, 'fieldId'),
@@ -157,37 +166,37 @@ projectRouter.post(
     isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
-        const savedChartsService = req.services.getSavedChartService();
+        try {
+            const savedChartsService = req.services.getSavedChartService();
+            const projectUuid = getObjectValue(req.params, 'projectUuid');
 
-        if (req.query.duplicateFrom) {
-            savedChartsService
-                .duplicate(
+            if (req.query.duplicateFrom) {
+                const results = await savedChartsService.duplicate(
                     req.user!,
-                    getObjectValue(req.params, 'projectUuid'),
+                    projectUuid,
                     req.query.duplicateFrom.toString(),
                     req.body,
-                )
-                .then((results) => {
-                    res.json({
-                        status: 'ok',
-                        results,
-                    });
-                })
-                .catch(next);
-        } else {
-            savedChartsService
-                .create(
-                    req.user!,
-                    getObjectValue(req.params, 'projectUuid'),
-                    req.body,
-                )
-                .then((results) => {
-                    res.json({
-                        status: 'ok',
-                        results,
-                    });
-                })
-                .catch(next);
+                );
+
+                res.json({
+                    status: 'ok',
+                    results,
+                });
+                return;
+            }
+
+            const results = await savedChartsService.create(
+                req.account!,
+                projectUuid,
+                req.body,
+            );
+
+            res.json({
+                status: 'ok',
+                results,
+            });
+        } catch (error) {
+            next(error);
         }
     },
 );
@@ -195,6 +204,7 @@ projectRouter.post(
 projectRouter.patch(
     '/saved',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('projectRouter PATCH /saved'),
     isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {

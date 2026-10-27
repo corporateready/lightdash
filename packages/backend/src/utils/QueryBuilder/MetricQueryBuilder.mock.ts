@@ -13,6 +13,7 @@ import {
     Explore,
     FieldType,
     FilterOperator,
+    getBigqueryUnnestSql,
     IntrinsicUserAttributes,
     JoinModelRequiredFilterRule,
     JoinRelationship,
@@ -22,14 +23,20 @@ import {
     TimeIntervalUnit,
     WarehouseCatalog,
     WarehouseClient,
+    WarehouseDatabaseListing,
     WarehouseTables,
     WarehouseTypes,
 } from '@lightdash/common';
+import { withWarehouseCredentialVersion } from '../warehouseCredentialVersion';
 
 export const warehouseClientMock: WarehouseClient = {
-    credentials: {
-        type: WarehouseTypes.POSTGRES,
-    } as CreateWarehouseCredentials,
+    getSessionTimezone: async () => null,
+    credentials: withWarehouseCredentialVersion(
+        {
+            type: WarehouseTypes.POSTGRES,
+        } as CreateWarehouseCredentials,
+        'fixture-warehouse-version',
+    ),
     getCatalog: async () => ({
         default: {
             public: {
@@ -38,15 +45,6 @@ export const warehouseClientMock: WarehouseClient = {
                 },
             },
         },
-    }),
-    getAsyncQueryResults: async () => ({
-        queryId: null,
-        queryMetadata: null,
-        totalRows: 0,
-        durationMs: 0,
-        fields: {},
-        pageCount: 0,
-        rows: [],
     }),
     streamQuery(query, streamCallback) {
         void streamCallback({
@@ -66,6 +64,7 @@ export const warehouseClientMock: WarehouseClient = {
             queryMetadata: null,
             totalRows: 0,
             durationMs: 0,
+            phaseTimings: {},
         };
     },
     runQuery: () =>
@@ -90,12 +89,21 @@ export const warehouseClientMock: WarehouseClient = {
     getFieldQuoteChar: () => '"',
     getFloatingType: () => 'FLOAT',
     getNullSafeEqualSql: defaultNullSafeEqualSql,
+    getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
     getAdapterType: () => SupportedDbtAdapter.POSTGRES,
+    supportsCteMaterialization: () => true,
+    getUnnestSql: () => null,
     concatString: (...args) => `(${args.join(' || ')})`,
     getAllTables(
         schema?: string | undefined,
         tags?: Record<string, string> | undefined,
     ): Promise<WarehouseTables> {
+        throw new Error('Function not implemented.');
+    },
+    listDatabases(): Promise<WarehouseDatabaseListing> {
+        throw new Error('Function not implemented.');
+    },
+    getTablesForDatabase(): Promise<WarehouseTables> {
         throw new Error('Function not implemented.');
     },
     getFields(
@@ -127,6 +135,9 @@ export const warehouseClientMock: WarehouseClient = {
             .replace(/\/\*[\s\S]*?\*\//g, '');
     },
     castToTimestamp: (date) => `CAST('${date.toISOString()}' AS TIMESTAMP)`,
+    castToDate: (date) => `CAST('${date.toISOString().slice(0, 10)}' AS DATE)`,
+    castToNaiveTimestamp: (date) =>
+        `CAST('${date.toISOString()}' AS TIMESTAMP)`,
     getIntervalSql: (value, unit: TimeIntervalUnit) =>
         `INTERVAL '${value} ${unit}'`,
     getTimestampDiffSeconds: (startTimestampSql, endTimestampSql) =>
@@ -141,12 +152,15 @@ export const warehouseClientMock: WarehouseClient = {
 };
 
 export const bigqueryClientMock: WarehouseClient = {
+    getSessionTimezone: async () => null,
+    getUnnestSql: getBigqueryUnnestSql,
     credentials: {
         type: WarehouseTypes.BIGQUERY,
     } as CreateWarehouseCredentials,
     getFieldQuoteChar: () => '`',
     getFloatingType: () => 'FLOAT64',
     getNullSafeEqualSql: defaultNullSafeEqualSql,
+    getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
     getCatalog: async () => ({
         default: {
             public: {
@@ -155,15 +169,6 @@ export const bigqueryClientMock: WarehouseClient = {
                 },
             },
         },
-    }),
-    getAsyncQueryResults: async () => ({
-        queryId: null,
-        queryMetadata: null,
-        totalRows: 0,
-        durationMs: 0,
-        fields: {},
-        pageCount: 0,
-        rows: [],
     }),
     streamQuery(query, streamCallback) {
         void streamCallback({
@@ -177,6 +182,7 @@ export const bigqueryClientMock: WarehouseClient = {
         queryMetadata: null,
         totalRows: 0,
         durationMs: 0,
+        phaseTimings: {},
     }),
     runQuery: () =>
         Promise.resolve({
@@ -189,11 +195,18 @@ export const bigqueryClientMock: WarehouseClient = {
     getEscapeStringQuoteChar: () => '\\',
     getMetricSql: () => '',
     getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+    supportsCteMaterialization: () => true,
     concatString: (...args) => `CONCAT(${args.join(', ')})`,
     getAllTables(
         schema?: string | undefined,
         tags?: Record<string, string> | undefined,
     ): Promise<WarehouseTables> {
+        throw new Error('Function not implemented.');
+    },
+    listDatabases(): Promise<WarehouseDatabaseListing> {
+        throw new Error('Function not implemented.');
+    },
+    getTablesForDatabase(): Promise<WarehouseTables> {
         throw new Error('Function not implemented.');
     },
     getFields(
@@ -215,6 +228,9 @@ export const bigqueryClientMock: WarehouseClient = {
     },
     escapeString: (value) => value,
     castToTimestamp: (date) => `TIMESTAMP('${date.toISOString()}')`,
+    castToDate: (date) => `DATE '${date.toISOString().slice(0, 10)}'`,
+    castToNaiveTimestamp: (date) =>
+        `DATETIME '${date.toISOString().slice(0, 19).replace('T', ' ')}'`,
     getIntervalSql: (value, unit: TimeIntervalUnit) =>
         `INTERVAL ${value} ${unit}`,
     getTimestampDiffSeconds: (startTimestampSql, endTimestampSql) =>
@@ -2121,6 +2137,248 @@ export const METRIC_QUERY_CROSS_TABLE: CompiledMetricQuery = {
     compiledCustomDimensions: [],
 };
 
+// Non-aggregate metric whose SQL references a dimension on a joined table
+export const EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_METRICS,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables,
+        customers: {
+            ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.customers,
+            dimensions: {
+                ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.customers.dimensions,
+                customer_tier: {
+                    type: DimensionType.STRING,
+                    name: 'customer_tier',
+                    label: 'Customer Tier',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.customer_tier',
+                    compiledSql: '"customers".customer_tier',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+            },
+        },
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.orders.metrics,
+                premium_order_rate: {
+                    type: MetricType.NUMBER,
+                    name: 'premium_order_rate',
+                    label: 'Premium Order Rate',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: "${orders.total_order_amount} / NULLIF(COUNT(CASE WHEN ${customers.customer_tier} = 'Premium' THEN 1 END), 0)",
+                    compiledSql:
+                        'SUM("orders".amount) / NULLIF(COUNT(CASE WHEN "customers".customer_tier = \'Premium\' THEN 1 END), 0)',
+                    tablesReferences: ['orders', 'customers'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+};
+
+export const METRIC_QUERY_CROSS_TABLE_DIMENSION_REFERENCE: CompiledMetricQuery =
+    {
+        ...METRIC_QUERY_CROSS_TABLE,
+        metrics: ['orders_premium_order_rate'],
+    };
+
+// Same shape, but the cross-table reference points at a field that does not exist
+export const EXPLORE_WITH_CROSS_TABLE_UNKNOWN_REFERENCE: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables,
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders
+                    .metrics,
+                premium_order_rate: {
+                    ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables
+                        .orders.metrics.premium_order_rate,
+                    sql: '${orders.total_order_amount} / ${customers.does_not_exist}',
+                },
+            },
+        },
+    },
+};
+
+// Non-aggregate metric mixing ${TABLE}.column with a dimension on a joined table
+export const EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables,
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders
+                    .metrics,
+                premium_order_amount: {
+                    type: MetricType.NUMBER,
+                    name: 'premium_order_amount',
+                    label: 'Premium Order Amount',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: "SUM(CASE WHEN ${customers.customer_tier} = 'Premium' THEN ${TABLE}.amount END)",
+                    compiledSql:
+                        'SUM(CASE WHEN "customers".customer_tier = \'Premium\' THEN "orders".amount END)',
+                    tablesReferences: ['orders', 'customers'],
+                    hidden: false,
+                },
+                raw_revenue_per_customer: {
+                    type: MetricType.NUMBER,
+                    name: 'raw_revenue_per_customer',
+                    label: 'Raw Revenue Per Customer',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: 'SUM(${TABLE}.amount) / NULLIF(${customers.total_customers}, 0)',
+                    compiledSql:
+                        'SUM("orders".amount) / NULLIF(COUNT("customers".customer_id), 0)',
+                    tablesReferences: ['orders', 'customers'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+};
+
+const crossTableNumberMetric = (
+    name: string,
+    sql: string,
+    compiledSql: string,
+): CompiledMetric => ({
+    type: MetricType.NUMBER,
+    name,
+    label: name,
+    table: 'orders',
+    tableLabel: 'orders',
+    fieldType: FieldType.METRIC,
+    sql,
+    compiledSql,
+    tablesReferences: ['orders', 'customers'],
+    hidden: false,
+});
+
+// ${TABLE} metrics that land in the distinct and nested aggregate flows
+export const EXPLORE_WITH_TABLE_REFERENCE_OVER_CTES: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables,
+        customers: {
+            ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.customers,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.customers
+                    .metrics,
+                distinct_credit: {
+                    type: MetricType.SUM_DISTINCT,
+                    name: 'distinct_credit',
+                    label: 'Distinct Credit',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${TABLE}.credit',
+                    compiledSql: 'SUM("customers".credit)',
+                    compiledValueSql: '"customers".credit',
+                    compiledDistinctKeys: ['"customers".customer_id'],
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+                amount_per_customer: {
+                    type: MetricType.NUMBER,
+                    name: 'amount_per_customer',
+                    label: 'Amount Per Customer',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${orders.total_order_amount} / NULLIF(${customers.total_customers}, 0)',
+                    compiledSql:
+                        'SUM("orders".amount) / NULLIF(COUNT("customers".customer_id), 0)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+                customers_with_orders: {
+                    type: MetricType.NUMBER,
+                    name: 'customers_with_orders',
+                    label: 'Customers With Orders',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: 'COUNT(CASE WHEN ${orders.order_id} IS NOT NULL THEN 1 END)',
+                    compiledSql:
+                        'COUNT(CASE WHEN "orders".order_id IS NOT NULL THEN 1 END)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+                credit_per_order_amount: {
+                    type: MetricType.NUMBER,
+                    name: 'credit_per_order_amount',
+                    label: 'Credit Per Order Amount',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: 'SUM(${TABLE}.credit) / NULLIF(${orders.total_order_amount}, 0)',
+                    compiledSql:
+                        'SUM("customers".credit) / NULLIF(SUM("orders".amount), 0)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+            },
+        },
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.orders
+                    .metrics,
+                amount_per_distinct_credit: crossTableNumberMetric(
+                    'amount_per_distinct_credit',
+                    'SUM(${TABLE}.amount) / NULLIF(${customers.distinct_credit}, 0)',
+                    'SUM("orders".amount) / NULLIF(SUM("customers".credit), 0)',
+                ),
+                order_id_times_distinct_credit: crossTableNumberMetric(
+                    'order_id_times_distinct_credit',
+                    '${TABLE}.order_id * ${customers.distinct_credit}',
+                    '"orders".order_id * SUM("customers".credit)',
+                ),
+                order_id_times_distinct_credit_percent: crossTableNumberMetric(
+                    'order_id_times_distinct_credit_percent',
+                    '${orders.order_id_times_distinct_credit} * 100',
+                    '("orders".order_id * SUM("customers".credit)) * 100',
+                ),
+                customers_on_large_orders: crossTableNumberMetric(
+                    'customers_on_large_orders',
+                    'SUM(CASE WHEN ${TABLE}.amount > 100 THEN ${customers.total_customers} END)',
+                    'SUM(CASE WHEN "orders".amount > 100 THEN COUNT("customers".customer_id) END)',
+                ),
+                revenue_per_table_field: crossTableNumberMetric(
+                    'revenue_per_table_field',
+                    '${orders.total_order_amount} / ${customers.TABLE}',
+                    'SUM("orders".amount) / COUNT("customers".customer_id)',
+                ),
+            },
+        },
+    },
+};
+
+// Same explore without fan-out, so only the nested aggregate flow builds CTEs
+export const EXPLORE_WITH_TABLE_REFERENCE_WITHOUT_FANOUT: Explore = {
+    ...EXPLORE_WITH_TABLE_REFERENCE_OVER_CTES,
+    joinedTables: EXPLORE_WITH_TABLE_REFERENCE_OVER_CTES.joinedTables.map(
+        (join) => ({ ...join, relationship: JoinRelationship.ONE_TO_ONE }),
+    ),
+};
+
+export const METRIC_QUERY_CROSS_TABLE_TABLE_REFERENCE: CompiledMetricQuery = {
+    ...METRIC_QUERY_CROSS_TABLE,
+    metrics: ['orders_premium_order_amount'],
+};
+
 // Expected SQL for cross-table metric references with CTEs
 export const EXPECTED_SQL_WITH_CROSS_TABLE_METRICS = `WITH cte_keys_customers AS (
     SELECT DISTINCT
@@ -2609,6 +2867,171 @@ export const METRIC_QUERY_AVERAGE_DISTINCT_NO_DIMS: CompiledMetricQuery = {
     metrics: ['orders_avg_shipping_cost'],
     filters: {},
     sorts: [{ fieldId: 'orders_avg_shipping_cost', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// PROD-7893: type:number wrappers over sum_distinct metrics, plus a transitive rate.
+export const EXPLORE_WITH_SUM_DISTINCT_WRAPPER: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'transfers',
+    label: 'transfers',
+    baseTable: 'transfers',
+    tags: [],
+    joinedTables: [],
+    tables: {
+        transfers: {
+            name: 'transfers',
+            label: 'transfers',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."transfers"',
+            primaryKey: ['client_id'],
+            dimensions: {
+                client_id: {
+                    type: DimensionType.STRING,
+                    name: 'client_id',
+                    label: 'Client ID',
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.client_id',
+                    compiledSql: '"transfers".client_id',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                date: {
+                    type: DimensionType.DATE,
+                    name: 'date',
+                    label: 'Date',
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.date',
+                    compiledSql: '"transfers".date',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                total_corridor_transfers: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_corridor_transfers',
+                    label: 'Total corridor transfers',
+                    sql: '${TABLE}.total_daily_corridor_transfers',
+                    compiledSql:
+                        'SUM("transfers".total_daily_corridor_transfers)',
+                    compiledValueSql:
+                        '"transfers".total_daily_corridor_transfers',
+                    compiledDistinctKeys: [
+                        '"transfers".client_id',
+                        '"transfers".date',
+                    ],
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                total_residual_transfers: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_residual_transfers',
+                    label: 'Total residual transfers',
+                    sql: '${TABLE}.total_daily_residual_transfers',
+                    compiledSql:
+                        'SUM("transfers".total_daily_residual_transfers)',
+                    compiledValueSql:
+                        '"transfers".total_daily_residual_transfers',
+                    compiledDistinctKeys: ['"transfers".client_id'],
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                total_inbound_contacts: {
+                    type: MetricType.COUNT_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_inbound_contacts',
+                    label: 'Total inbound contacts',
+                    sql: '${TABLE}.contact_id',
+                    compiledSql: 'COUNT(DISTINCT "transfers".contact_id)',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                total_transfers: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_transfers',
+                    label: 'Total transfers',
+                    sql: '${total_corridor_transfers} + ${total_residual_transfers}',
+                    compiledSql:
+                        '(SUM("transfers".total_daily_corridor_transfers)) + (SUM("transfers".total_daily_residual_transfers))',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                transfer_inbound_contact_rate: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'transfer_inbound_contact_rate',
+                    label: 'Transfer inbound contact rate',
+                    sql: '${total_inbound_contacts} / nullif(${total_transfers}, 0)',
+                    compiledSql:
+                        '(COUNT(DISTINCT "transfers".contact_id)) / nullif(((SUM("transfers".total_daily_corridor_transfers)) + (SUM("transfers".total_daily_residual_transfers))), 0)',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+            },
+            lineageGraph: {},
+        },
+    },
+};
+
+export const METRIC_QUERY_SUM_DISTINCT_WRAPPER_DIRECT: CompiledMetricQuery = {
+    exploreName: 'transfers',
+    dimensions: ['transfers_date'],
+    metrics: ['transfers_total_transfers'],
+    filters: {},
+    sorts: [{ fieldId: 'transfers_date', descending: false }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_SUM_DISTINCT_WRAPPER_TRANSITIVE: CompiledMetricQuery =
+    {
+        exploreName: 'transfers',
+        dimensions: ['transfers_date'],
+        metrics: ['transfers_transfer_inbound_contact_rate'],
+        filters: {},
+        sorts: [{ fieldId: 'transfers_date', descending: false }],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+export const METRIC_QUERY_SUM_DISTINCT_WRAPPER_MIXED: CompiledMetricQuery = {
+    exploreName: 'transfers',
+    dimensions: ['transfers_date'],
+    metrics: [
+        'transfers_total_transfers',
+        'transfers_transfer_inbound_contact_rate',
+    ],
+    filters: {},
+    sorts: [{ fieldId: 'transfers_date', descending: false }],
     limit: 10,
     tableCalculations: [],
     compiledTableCalculations: [],

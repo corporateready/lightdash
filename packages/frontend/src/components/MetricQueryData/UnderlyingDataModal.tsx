@@ -1,30 +1,27 @@
 import { subject } from '@casl/ability';
 import {
     ChartType,
-    convertFieldRefToFieldId,
-    FilterOperator,
     getDimensions,
     getFields,
-    getFiltersFromGroup,
     getItemId,
     isCustomBinDimension,
-    isDimension,
     isField,
     isMetric,
-    normalizeCellRawForFilter,
     QueryExecutionContext,
     type CreateSavedChartVersion,
-    type FilterRule,
     type Filters,
-    type Metric,
     type SortField,
 } from '@lightdash/common';
-import { Button, Divider, Group, Popover } from '@mantine-8/core';
+import { Box, Button, Divider, Group, Popover } from '@mantine/core';
 import { IconShare2, IconStack, IconTelescope } from '@tabler/icons-react';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import { useNavigate } from 'react-router';
-import { v4 as uuidv4 } from 'uuid';
+import { MERGE_URL_PARAM } from '../../features/mergeQuery/context/mergeUrlState';
+import { useMergeSafe } from '../../features/mergeQuery/context/useMerge';
+import { useMergeUnderlyingDataConfig } from '../../features/mergeQuery/hooks/useMergeUnderlyingDataConfig';
 import { useOrganization } from '../../hooks/organization/useOrganization';
+import useToaster from '../../hooks/toaster/useToaster';
+import { useContentAuthoringEnabled } from '../../hooks/useContentAuthoringEnabled';
 import { useExplore } from '../../hooks/useExplore';
 import { getExplorerUrlFromCreateSavedChartVersion } from '../../hooks/useExplorerRoute';
 import { useProjectUuid } from '../../hooks/useProjectUuid';
@@ -36,35 +33,50 @@ import {
 import { Can } from '../../providers/Ability';
 import { useAbilityContext } from '../../providers/Ability/useAbilityContext';
 import useApp from '../../providers/App/useApp';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
 import { convertDateFilters } from '../../utils/dateFilter';
 import ErrorState from '../common/ErrorState';
 import MantineIcon from '../common/MantineIcon';
 import MantineModal from '../common/MantineModal';
-import { type TableColumn } from '../common/Table/types';
 import ExportResults from '../ExportResults';
-import { getZoomedDimFilter } from './dateZoomFilter';
+import { type UnderlyingDataConfig } from './types';
+import UnderlyingDataFilterBadges from './UnderlyingDataFilterBadges';
+import {
+    combineUnderlyingDataFilters,
+    getUnderlyingDataFilterPartsFromConfig,
+} from './underlyingDataFilters';
 import UnderlyingDataResultsTable from './UnderlyingDataResultsTable';
 import { useMetricQueryDataContext } from './useMetricQueryDataContext';
+import { getUnderlyingDataColumnOrder } from './utils';
 
-const UnderlyingDataModalContent: FC = () => {
+const UnderlyingDataModalContent: FC<{
+    underlyingDataConfig: UnderlyingDataConfig | undefined;
+}> = ({ underlyingDataConfig }) => {
+    const lightdashApi = useLightdashApi();
+    const authoringEnabled = useContentAuthoringEnabled();
     const projectUuid = useProjectUuid();
     const {
         isUnderlyingDataModalOpen,
         closeUnderlyingDataModal,
         tableName,
         metricQuery,
-        underlyingDataConfig,
         queryUuid,
         parameters,
         resolvedTimezone,
     } = useMetricQueryDataContext();
+    const source = underlyingDataConfig?.source;
+    const effectiveTableName = source?.tableName ?? tableName;
+    const effectiveMetricQuery = source?.metricQuery ?? metricQuery;
+    const effectiveQueryUuid = source?.queryUuid ?? queryUuid;
 
     const [sorts, setSorts] = useState<SortField[]>([]);
 
     const { user } = useApp();
     const { data: organization } = useOrganization();
 
-    const { data: explore } = useExplore(tableName, { refetchOnMount: false });
+    const { data: explore } = useExplore(effectiveTableName, {
+        refetchOnMount: false,
+    });
     const ability = useAbilityContext();
 
     const underlyingDataItemId = useMemo(
@@ -78,10 +90,10 @@ const UnderlyingDataModalContent: FC = () => {
 
     const nonBinCustomDimensions = useMemo(
         () =>
-            metricQuery?.customDimensions?.filter(
+            effectiveMetricQuery?.customDimensions?.filter(
                 (dimension) => !isCustomBinDimension(dimension),
             ) || [],
-        [metricQuery?.customDimensions],
+        [effectiveMetricQuery?.customDimensions],
     );
 
     const allFields = useMemo(
@@ -121,150 +133,28 @@ const UnderlyingDataModalContent: FC = () => {
         return explore?.tables[explore.baseTable]?.defaultShowUnderlyingValues;
     }, [underlyingDataConfig?.item, explore]);
 
-    const sortByUnderlyingValues = useCallback(
-        (columnA: TableColumn, columnB: TableColumn) => {
-            if (showUnderlyingValues === undefined) return 0;
-
-            const indexOfUnderlyingValue = (column: TableColumn): number => {
-                const columnDimension = allDimensions.find(
-                    (dimension) => getItemId(dimension) === column.id,
-                );
-                if (columnDimension === undefined) return -1;
-                return showUnderlyingValues?.indexOf(columnDimension.name) !==
-                    -1
-                    ? showUnderlyingValues?.indexOf(columnDimension.name)
-                    : showUnderlyingValues?.indexOf(
-                          `${columnDimension.table}.${columnDimension.name}`,
-                      );
-            };
-
-            return (
-                indexOfUnderlyingValue(columnA) -
-                indexOfUnderlyingValue(columnB)
-            );
-        },
-        [showUnderlyingValues, allDimensions],
+    // Flat rules scoping the results to the clicked chart segment/cell, kept
+    // separate from the grouped explore filters so they can be surfaced in the
+    // header filter summary
+    const filterParts = useMemo(
+        () =>
+            getUnderlyingDataFilterPartsFromConfig({
+                underlyingDataConfig,
+                allDimensions,
+                resolvedTimezone,
+            }),
+        [underlyingDataConfig, allDimensions, resolvedTimezone],
     );
 
     const filters = useMemo<Filters>(() => {
-        if (!underlyingDataConfig) return {};
-        const { item, fieldValues, pivotReference, value, dateZoom } =
-            underlyingDataConfig;
+        if (!filterParts) return {};
 
-        if (item === undefined) return {};
-
-        // If we are viewing data from a metric or a table calculation, we filter using all existing dimensions in the table
-        const dimensionFilters = !isDimension(item)
-            ? Object.entries(fieldValues).reduce((acc, r) => {
-                  const [key, { raw }] = r;
-
-                  const isValidDimension = allDimensions.find(
-                      (dimension) => getItemId(dimension) === key,
-                  );
-                  if (!isValidDimension) return acc;
-
-                  const zoomedFilters = getZoomedDimFilter(key, raw, dateZoom);
-                  if (zoomedFilters) return [...acc, ...zoomedFilters];
-
-                  const dimensionFilter: FilterRule = {
-                      id: uuidv4(),
-                      target: {
-                          fieldId: key,
-                      },
-                      operator:
-                          raw === null
-                              ? FilterOperator.NULL
-                              : FilterOperator.EQUALS,
-                      values:
-                          raw === null
-                              ? undefined
-                              : [
-                                    normalizeCellRawForFilter(
-                                        raw,
-                                        isValidDimension,
-                                        resolvedTimezone,
-                                    ),
-                                ],
-                  };
-                  return [...acc, dimensionFilter];
-              }, [] as FilterRule[])
-            : (getZoomedDimFilter(getItemId(item), value.raw, dateZoom) ?? [
-                  {
-                      id: uuidv4(),
-                      target: {
-                          fieldId: getItemId(item),
-                      },
-                      operator:
-                          value.raw === null
-                              ? FilterOperator.NULL
-                              : FilterOperator.EQUALS,
-                      values:
-                          value.raw === null
-                              ? undefined
-                              : [
-                                    normalizeCellRawForFilter(
-                                        value.raw,
-                                        item,
-                                        resolvedTimezone,
-                                    ),
-                                ],
-                  },
-              ]);
-
-        const pivotFilter: FilterRule[] = (
-            pivotReference?.pivotValues || []
-        ).map((pivot) => ({
-            id: uuidv4(),
-            target: {
-                fieldId: pivot.field,
-            },
-            operator:
-                pivot.value === null
-                    ? FilterOperator.NULL
-                    : FilterOperator.EQUALS,
-            values: pivot.value === null ? undefined : [pivot.value],
-        }));
-
-        const metric: Metric | undefined =
-            isField(item) && isMetric(item) ? item : undefined;
-
-        const metricFilters =
-            metric?.filters?.map((filter) => ({
-                ...filter,
-                target: {
-                    fieldId: convertFieldRefToFieldId(
-                        filter.target.fieldRef,
-                        metric.table,
-                    ),
-                },
-            })) || [];
-
-        const exploreFilters =
-            metricQuery?.filters?.dimensions !== undefined
-                ? [metricQuery.filters.dimensions]
-                : [];
-
-        const combinedFilters = [
-            ...exploreFilters,
-            ...dimensionFilters,
-            ...pivotFilter,
-            ...metricFilters,
-        ];
-
-        return getFiltersFromGroup(
-            {
-                id: uuidv4(),
-                and: combinedFilters,
-            },
+        return combineUnderlyingDataFilters({
+            filterParts,
+            exploreDimensionFilters: effectiveMetricQuery?.filters?.dimensions,
             allFields,
-        );
-    }, [
-        underlyingDataConfig,
-        metricQuery,
-        allFields,
-        allDimensions,
-        resolvedTimezone,
-    ]);
+        });
+    }, [filterParts, effectiveMetricQuery, allFields]);
 
     const {
         error,
@@ -272,11 +162,21 @@ const UnderlyingDataModalContent: FC = () => {
         isInitialLoading,
     } = useUnderlyingDataResults(
         filters,
-        queryUuid,
+        effectiveQueryUuid,
         underlyingDataItemId,
         underlyingDataConfig?.dateZoom,
         parameters,
         sorts,
+    );
+
+    const columnOrder = useMemo(
+        () =>
+            getUnderlyingDataColumnOrder(
+                Object.values(resultsData?.fields ?? {}).map(getItemId),
+                showUnderlyingValues,
+                allFields,
+            ),
+        [resultsData?.fields, showUnderlyingValues, allFields],
     );
 
     const exploreFromHereUrl = useMemo(() => {
@@ -294,13 +194,18 @@ const UnderlyingDataModalContent: FC = () => {
                 type: ChartType.CARTESIAN,
                 config: { layout: {}, eChartsConfig: {} },
             },
+            parameters,
         };
-        return getExplorerUrlFromCreateSavedChartVersion(
+        const url = getExplorerUrlFromCreateSavedChartVersion(
             projectUuid,
             createSavedChartVersion,
             true,
         );
-    }, [resultsData, projectUuid]);
+        // Underlying rows are a new single-source chart, not the merge open on this page
+        const params = new URLSearchParams(url.search);
+        params.delete(MERGE_URL_PARAM);
+        return { pathname: url.pathname, search: params.toString() };
+    }, [resultsData, projectUuid, parameters]);
 
     const navigate = useNavigate();
     const { mutateAsync: createShareUrl, isLoading: isCreatingShareUrl } =
@@ -320,10 +225,11 @@ const UnderlyingDataModalContent: FC = () => {
             if (limit === null || limit !== resultsData?.rows.length) {
                 // Get new query uuid with new limit
                 const newQuery = await getUnderlyingDataResults(
+                    lightdashApi,
                     projectUuid!,
                     {
                         context: QueryExecutionContext.VIEW_UNDERLYING_DATA,
-                        underlyingDataSourceQueryUuid: queryUuid!,
+                        underlyingDataSourceQueryUuid: effectiveQueryUuid!,
                         underlyingDataItemId,
                         filters: convertDateFilters(filters),
                         dateZoom: underlyingDataConfig?.dateZoom,
@@ -344,12 +250,13 @@ const UnderlyingDataModalContent: FC = () => {
         [
             filters,
             projectUuid,
-            queryUuid,
+            effectiveQueryUuid,
             resultsData,
             underlyingDataConfig?.dateZoom,
             underlyingDataItemId,
             parameters,
             sorts,
+            lightdashApi,
         ],
     );
 
@@ -369,6 +276,23 @@ const UnderlyingDataModalContent: FC = () => {
             }),
         );
 
+    const modalTitle = (
+        <>
+            View underlying data
+            <UnderlyingDataFilterBadges
+                filterRules={
+                    filterParts
+                        ? [
+                              ...filterParts.pointFilterRules,
+                              ...filterParts.metricFilterRules,
+                          ]
+                        : []
+                }
+                fields={allFields}
+            />
+        </>
+    );
+
     const headerActions = (
         <Group gap="sm">
             {canExportCsv && (
@@ -381,7 +305,6 @@ const UnderlyingDataModalContent: FC = () => {
                         <Button
                             leftSection={<MantineIcon icon={IconShare2} />}
                             variant="light"
-                            color="foreground.9"
                             size="compact-sm"
                             disabled={!resultsData}
                         >
@@ -395,6 +318,7 @@ const UnderlyingDataModalContent: FC = () => {
                                 showTableNames
                                 totalResults={resultsData?.rows.length}
                                 getDownloadQueryUuid={getDownloadQueryUuid}
+                                columnOrder={columnOrder}
                                 forceShowLimitSelection
                             />
                         )}
@@ -410,12 +334,12 @@ const UnderlyingDataModalContent: FC = () => {
             >
                 <Divider orientation="vertical" />
                 <Button
+                    display={authoringEnabled ? undefined : 'none'}
                     leftSection={<MantineIcon icon={IconTelescope} />}
                     onClick={handleExploreFromHere}
                     disabled={!exploreFromHereUrl}
                     loading={isCreatingShareUrl}
                     variant="light"
-                    radius="md"
                     size="compact-sm"
                 >
                     Explore from here
@@ -429,7 +353,7 @@ const UnderlyingDataModalContent: FC = () => {
             opened={isUnderlyingDataModalOpen}
             icon={IconStack}
             onClose={closeUnderlyingDataModal}
-            title="View underlying data"
+            title={modalTitle}
             fullScreen
             headerActions={headerActions}
             cancelLabel={false}
@@ -438,30 +362,63 @@ const UnderlyingDataModalContent: FC = () => {
             {error ? (
                 <ErrorState error={error.error} hasMarginTop={false} />
             ) : (
-                <UnderlyingDataResultsTable
-                    isLoading={isInitialLoading}
-                    resultsData={resultsData}
-                    fieldsMap={resultsData?.fields || {}}
-                    hasJoins={joinedTables.length > 0}
-                    sortByUnderlyingValues={sortByUnderlyingValues}
-                    sorts={sorts}
-                    onSortChange={setSorts}
-                />
+                <Box
+                    // Walkthrough result marker for view:UnderlyingData: the
+                    // rows that add up to the number that was clicked.
+                    data-tour-scope="view:UnderlyingData"
+                    data-tour-step="1"
+                    data-tour-route="/projects/:projectUuid/saved/:savedQueryUuid"
+                    data-tour-label="Every number is made of records"
+                    data-tour-docs="explore/explore-view.mdx#the-explore-page:li4"
+                    data-tour-return="none"
+                    data-tour-resultdocs="explore/dashboards/interact.mdx#view-underlying-data:p3:1"
+                >
+                    <UnderlyingDataResultsTable
+                        isLoading={isInitialLoading}
+                        resultsData={resultsData}
+                        fieldsMap={resultsData?.fields || {}}
+                        hasJoins={joinedTables.length > 0}
+                        columnOrder={columnOrder}
+                        sorts={sorts}
+                        onSortChange={setSorts}
+                    />
+                </Box>
             )}
         </MantineModal>
     );
 };
 
+const MergedUnderlyingDataModalContent: FC = () => {
+    const { underlyingDataConfig, closeUnderlyingDataModal } =
+        useMetricQueryDataContext();
+    const { showToastError } = useToaster();
+    const config = useMergeUnderlyingDataConfig(underlyingDataConfig, () => {
+        showToastError({ title: 'Could not open underlying data' });
+        closeUnderlyingDataModal();
+    });
+
+    if (!config) return null;
+    return <UnderlyingDataModalContent underlyingDataConfig={config} />;
+};
+
 // Only mounts the content when the modal is open
 // This prevents the underlying data query from running on every mount
 const UnderlyingDataModal: FC = () => {
-    const { isUnderlyingDataModalOpen } = useMetricQueryDataContext();
+    const { isUnderlyingDataModalOpen, underlyingDataConfig } =
+        useMetricQueryDataContext();
+    const isMerged = !!useMergeSafe()?.mergeResults;
 
     if (!isUnderlyingDataModalOpen) {
         return null;
     }
 
-    return <UnderlyingDataModalContent />;
+    return isMerged ? (
+        <MergedUnderlyingDataModalContent />
+    ) : (
+        <UnderlyingDataModalContent
+            underlyingDataConfig={underlyingDataConfig}
+        />
+    );
 };
 
 export default UnderlyingDataModal;

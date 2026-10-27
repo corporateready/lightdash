@@ -11,18 +11,20 @@ import {
     Button,
     Group,
     Loader,
-    Select,
     Stack,
     Text,
+    Select,
     Tooltip,
 } from '@mantine/core';
 import { IconInfoCircle, IconX } from '@tabler/icons-react';
 import { type UseQueryResult } from '@tanstack/react-query';
 import { useMemo, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import { groupComboboxItems } from '../../../../components/common/Select/utils';
 import { Blocks } from '../../../../svgs/metricsCatalog';
-import { useSelectStyles } from '../../styles/useSelectStyles';
+import selectStyles from '../../styles/selectStyles.module.css';
 import SelectItem from '../SelectItem';
+import styles from './MetricExploreButtons.module.css';
 
 type Props = {
     query: MetricExplorerQuery;
@@ -39,46 +41,41 @@ export const MetricExploreSegmentationPicker: FC<Props> = ({
     segmentDimensionsQuery,
     hasFilteredSeries,
 }) => {
-    const { classes } = useSelectStyles();
-
     const segmentByData = useMemo(
         () =>
-            dimensions?.map((dimension) => ({
-                value: getItemId(dimension),
-                label: dimension.label,
-                group: dimension.tableLabel,
-            })) ?? [],
+            groupComboboxItems(
+                dimensions?.map((dimension) => ({
+                    value: getItemId(dimension),
+                    label: dimension.label,
+                    group: dimension.tableLabel,
+                })) ?? [],
+            ),
         [dimensions],
     );
 
     return (
-        <Stack spacing="xs">
-            <Group position="apart">
+        <Stack gap="xs">
+            <Group justify="space-between">
                 <Text fw={500} c="ldGray.7">
                     Segment
                 </Text>
 
                 <Button
                     variant="subtle"
-                    compact
-                    color="dark"
-                    size="xs"
-                    radius="md"
-                    rightIcon={
+                    size="compact-xs"
+                    rightSection={
                         <MantineIcon icon={IconX} color="ldGray.5" size={12} />
                     }
-                    sx={(theme) => ({
+                    className={styles.clearButton}
+                    style={{
                         visibility:
                             !('segmentDimension' in query) ||
                             !query.segmentDimension
                                 ? 'hidden'
                                 : 'visible',
-                        '&:hover': {
-                            backgroundColor: theme.colors.ldGray[1],
-                        },
-                    })}
+                    }}
                     styles={{
-                        rightIcon: {
+                        section: {
                             marginLeft: 4,
                         },
                     }}
@@ -95,10 +92,10 @@ export const MetricExploreSegmentationPicker: FC<Props> = ({
             >
                 <Box>
                     <Select
+                        allowDeselect={false}
                         placeholder="Segment by"
-                        icon={<Blocks />}
+                        leftSection={<Blocks />}
                         searchable
-                        radius="md"
                         size="xs"
                         data={segmentByData}
                         disabled={segmentByData.length === 0}
@@ -107,7 +104,13 @@ export const MetricExploreSegmentationPicker: FC<Props> = ({
                                 ? query.segmentDimension
                                 : null
                         }
-                        itemComponent={SelectItem}
+                        renderOption={({ option, checked }) => (
+                            <SelectItem
+                                value={option.value}
+                                label={option.label}
+                                selected={checked ?? false}
+                            />
+                        )}
                         onChange={onSegmentDimensionChange}
                         data-disabled={!segmentDimensionsQuery.isSuccess}
                         rightSection={
@@ -115,12 +118,14 @@ export const MetricExploreSegmentationPicker: FC<Props> = ({
                                 <Loader size="xs" color="ldGray.5" />
                             ) : undefined
                         }
-                        classNames={classes}
-                        sx={{
-                            '&:hover': {
-                                cursor: 'not-allowed',
-                            },
+                        classNames={{
+                            wrapper: selectStyles.wrapper,
+                            input: selectStyles.input,
+                            option: selectStyles.option,
+                            section: selectStyles.rightSection,
+                            dropdown: selectStyles.dropdown,
                         }}
+                        className={styles.segmentationSelect}
                     />
                 </Box>
             </Tooltip>
@@ -129,27 +134,10 @@ export const MetricExploreSegmentationPicker: FC<Props> = ({
                 <Alert
                     py="xs"
                     px="sm"
-                    variant="light"
                     color="blue"
-                    sx={(theme) => ({
-                        borderStyle: 'dashed',
-                        borderWidth: 1,
-                        borderColor: theme.colors.blue[4],
-                    })}
-                    styles={{
-                        icon: {
-                            marginRight: 2,
-                        },
-                    }}
-                    icon={
-                        <MantineIcon
-                            icon={IconInfoCircle}
-                            color="blue.7"
-                            size={16}
-                        />
-                    }
+                    icon={<MantineIcon icon={IconInfoCircle} />}
                 >
-                    <Text size="xs" color="blue.7" span>
+                    <Text size="xs" span>
                         Only the first {MAX_SEGMENT_DIMENSION_UNIQUE_VALUES}{' '}
                         series are displayed to maintain a clear and readable
                         chart.

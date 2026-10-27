@@ -1,0 +1,302 @@
+import { subject } from '@casl/ability';
+import {
+    FeatureFlags,
+    ManagedAgentActionType,
+    ManagedAgentRunStatus,
+    type ManagedAgentRun,
+} from '@lightdash/common';
+import { Button, HoverCard } from '@mantine/core';
+import {
+    IconArrowRight,
+    IconChartBar,
+    IconShieldCheck,
+    IconTarget,
+    IconTrendingUp,
+} from '@tabler/icons-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useNavigate } from 'react-router';
+import { type LightdashApi } from '../../api';
+import { useManagedAgentLatestRun } from '../../ee/features/managedAgent/hooks/useManagedAgentLatestRun';
+import { useManagedAgentSettings } from '../../ee/features/managedAgent/hooks/useManagedAgentSettings';
+import { ManagedAgentSetupModal } from '../../ee/features/managedAgent/ManagedAgentSetupModal';
+import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
+import useApp from '../../providers/App/useApp';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
+import MantineIcon from '../common/MantineIcon';
+import AppColorSchemeScope from './AppColorSchemeScope';
+import classes from './AutopilotNavButton.module.css';
+import { useNavBarPortalTarget } from './NavBarPortalContext';
+
+const resumeSettings = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    schedule: string,
+) =>
+    lightdashApi({
+        url: `/projects/${projectUuid}/managed-agent/settings`,
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: true, schedule }),
+    });
+
+type Props = {
+    projectUuid: string;
+    withLabel?: boolean;
+};
+
+const formatRelative = (dateInput: Date | string) => {
+    const diff = Date.now() - new Date(dateInput).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+};
+
+const summarizeActionCounts = (
+    counts: ManagedAgentRun['actionCountsByType'] | undefined,
+): string | null => {
+    if (!counts) return null;
+    const parts: string[] = [];
+    if (counts[ManagedAgentActionType.FIXED_BROKEN])
+        parts.push(`${counts[ManagedAgentActionType.FIXED_BROKEN]} fixed`);
+    if (counts[ManagedAgentActionType.CREATED_CONTENT])
+        parts.push(`${counts[ManagedAgentActionType.CREATED_CONTENT]} created`);
+    if (counts[ManagedAgentActionType.FLAGGED_STALE])
+        parts.push(`${counts[ManagedAgentActionType.FLAGGED_STALE]} flagged`);
+    if (counts[ManagedAgentActionType.SOFT_DELETED])
+        parts.push(`${counts[ManagedAgentActionType.SOFT_DELETED]} deleted`);
+    return parts.length > 0 ? parts.join(' · ') : null;
+};
+
+const CAPABILITIES = [
+    { icon: IconShieldCheck, label: 'Fixes broken charts' },
+    { icon: IconTrendingUp, label: 'Flags stale content' },
+    { icon: IconChartBar, label: 'Creates fresh visualizations' },
+];
+
+/**
+ * Autopilot setup, resume and status in the primary nav, gated by feature
+ * flag, permissions and project settings.
+ */
+export const AutopilotNavButton = ({
+    projectUuid,
+    withLabel = false,
+}: Props) => {
+    const lightdashApi = useLightdashApi();
+    const portalTarget = useNavBarPortalTarget();
+    const navigate = useNavigate();
+    const queryClient = useQueryClient();
+    const { user } = useApp();
+    const canManage =
+        user.data?.ability?.can(
+            'manage',
+            subject('AiAgent', {
+                organizationUuid: user.data?.organizationUuid,
+                projectUuid,
+            }),
+        ) ?? false;
+    const { data: aiAutopilotFlag } = useServerFeatureFlag(
+        FeatureFlags.AiAutopilot,
+    );
+    const active = !!aiAutopilotFlag?.enabled && canManage;
+
+    const { data: settings } = useManagedAgentSettings({ enabled: active });
+    const isEnabled = settings?.enabled ?? false;
+    const { data: latestRun } = useManagedAgentLatestRun({
+        enabled: active && isEnabled,
+    });
+
+    const [setupOpen, setSetupOpen] = useState(false);
+
+    const goToAutopilot = () =>
+        void navigate(`/projects/${projectUuid}/autopilot`);
+
+    const resumeMutation = useMutation({
+        mutationFn: () =>
+            resumeSettings(lightdashApi, projectUuid, settings!.schedule),
+        onSuccess: () => {
+            void queryClient.invalidateQueries({
+                queryKey: ['managed-agent-settings', projectUuid],
+            });
+        },
+    });
+
+    if (!active) return null;
+
+    if (!isEnabled) {
+        const hasExistingSettings = !!settings;
+        const actionLabel = hasExistingSettings
+            ? 'Resume Autopilot'
+            : 'Set up Autopilot';
+        const handleCellClick = hasExistingSettings
+            ? () => resumeMutation.mutate()
+            : () => setSetupOpen(true);
+
+        return (
+            <HoverCard
+                width={280}
+                position="bottom-start"
+                offset={8}
+                openDelay={120}
+                closeDelay={80}
+                portalProps={{ target: portalTarget }}
+            >
+                <HoverCard.Target>
+                    <Button
+                        size="xs"
+                        variant="default"
+                        data-icon-only={!withLabel || undefined}
+                        classNames={{
+                            root: classes.cell,
+                            label: classes.cellLabel,
+                            section: classes.cellSection,
+                        }}
+                        leftSection={
+                            <MantineIcon
+                                icon={IconTarget}
+                                size={16}
+                                color="dimmed"
+                            />
+                        }
+                        onClick={handleCellClick}
+                        loading={resumeMutation.isLoading}
+                        aria-label={actionLabel}
+                    >
+                        {withLabel && actionLabel}
+                    </Button>
+                </HoverCard.Target>
+                <HoverCard.Dropdown className={classes.promoDropdown}>
+                    <div className={classes.promo}>
+                        <div className={classes.promoHeader}>
+                            <div className={classes.promoTitle}>Autopilot</div>
+                            <div className={classes.promoTagline}>
+                                Your project, kept sharp and current.
+                            </div>
+                        </div>
+                        <div className={classes.promoFeatures}>
+                            {CAPABILITIES.map((feature) => (
+                                <div
+                                    key={feature.label}
+                                    className={classes.promoFeature}
+                                >
+                                    <MantineIcon
+                                        icon={feature.icon}
+                                        size={15}
+                                        className={classes.promoFeatureIcon}
+                                    />
+                                    <span>{feature.label}</span>
+                                </div>
+                            ))}
+                        </div>
+                        <button
+                            type="button"
+                            className={classes.promoCta}
+                            onClick={handleCellClick}
+                            disabled={resumeMutation.isLoading}
+                        >
+                            {resumeMutation.isLoading
+                                ? 'Resuming…'
+                                : actionLabel}
+                            <MantineIcon icon={IconArrowRight} size={14} />
+                        </button>
+                    </div>
+                </HoverCard.Dropdown>
+                <AppColorSchemeScope>
+                    <ManagedAgentSetupModal
+                        projectUuid={projectUuid}
+                        opened={setupOpen}
+                        onClose={() => setSetupOpen(false)}
+                        onEnabled={() => {
+                            setSetupOpen(false);
+                            goToAutopilot();
+                        }}
+                    />
+                </AppColorSchemeScope>
+            </HoverCard>
+        );
+    }
+
+    const running = latestRun?.status === ManagedAgentRunStatus.STARTED;
+    const failed = latestRun?.status === ManagedAgentRunStatus.ERROR;
+    const dotClass = failed ? classes.dotFailed : classes.dotActive;
+
+    let statusText: string;
+    if (running) {
+        statusText = latestRun?.currentActivity ?? 'Working…';
+    } else if (failed) {
+        statusText = 'Last run failed';
+    } else if (latestRun) {
+        const count = latestRun.actionCount;
+        statusText = `${count} action${count === 1 ? '' : 's'} · ${formatRelative(
+            latestRun.finishedAt ?? latestRun.startedAt,
+        )}`;
+    } else {
+        statusText = 'Monitoring your project';
+    }
+
+    const actionSummary = summarizeActionCounts(latestRun?.actionCountsByType);
+
+    return (
+        <HoverCard
+            width={240}
+            position="bottom-start"
+            offset={8}
+            openDelay={120}
+            closeDelay={80}
+            portalProps={{ target: portalTarget }}
+        >
+            <HoverCard.Target>
+                <Button
+                    size="xs"
+                    variant="default"
+                    data-icon-only={!withLabel || undefined}
+                    classNames={{
+                        root: classes.cell,
+                        label: classes.cellLabel,
+                        section: classes.cellSection,
+                    }}
+                    leftSection={
+                        <span className={classes.iconWrap}>
+                            <MantineIcon icon={IconTarget} size={16} />
+                            <span
+                                className={`${classes.dotCorner} ${dotClass}`}
+                                aria-hidden="true"
+                            />
+                        </span>
+                    }
+                    onClick={goToAutopilot}
+                    aria-label="Autopilot"
+                >
+                    {withLabel && 'Autopilot'}
+                </Button>
+            </HoverCard.Target>
+            <HoverCard.Dropdown className={classes.promoDropdown}>
+                <button
+                    type="button"
+                    className={classes.miniCard}
+                    onClick={goToAutopilot}
+                >
+                    <div className={classes.miniHeaderText}>
+                        <span className={classes.promoTitle}>Autopilot</span>
+                        <span
+                            className={`${classes.miniStatusDot} ${dotClass}`}
+                            aria-hidden="true"
+                        />
+                    </div>
+                    <div className={classes.miniStatus}>{statusText}</div>
+                    {actionSummary && !running && (
+                        <div className={classes.miniSummary}>
+                            {actionSummary}
+                        </div>
+                    )}
+                    <div className={classes.miniFooter}>
+                        View activity
+                        <MantineIcon icon={IconArrowRight} size={12} />
+                    </div>
+                </button>
+            </HoverCard.Dropdown>
+        </HoverCard>
+    );
+};

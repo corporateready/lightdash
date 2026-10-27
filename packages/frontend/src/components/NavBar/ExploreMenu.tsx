@@ -1,8 +1,9 @@
 import { subject } from '@casl/ability';
 import { FeatureFlags } from '@lightdash/common';
-import { Button, getDefaultZIndex, Menu } from '@mantine-8/core';
+import { Button, getDefaultZIndex, Menu } from '@mantine/core';
 import {
     IconAppWindow,
+    IconFileText,
     IconFolder,
     IconFolderPlus,
     IconLayoutDashboard,
@@ -12,6 +13,11 @@ import {
 } from '@tabler/icons-react';
 import { memo, useState, type FC } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
+import DocumentCreateModal from '../../features/documents/DocumentCreateModal';
+import { useContentAuthoringEnabled } from '../../hooks/useContentAuthoringEnabled';
+import { useProject } from '../../hooks/useProject';
+import { useOptionalProjectRoute } from '../../hooks/useProjectRoute';
+import useCreateInAnySpaceAccess from '../../hooks/user/useCreateInAnySpaceAccess';
 import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
 import { Can } from '../../providers/Ability';
 import useApp from '../../providers/App/useApp';
@@ -20,14 +26,27 @@ import MantineIcon from '../common/MantineIcon';
 import DashboardCreateModal from '../common/modal/DashboardCreateModal';
 import SpaceActionModal from '../common/SpaceActionModal';
 import { ActionType } from '../common/SpaceActionModal/types';
+import AppColorSchemeScope from './AppColorSchemeScope';
+import { useNavBarMenuProps } from './NavBarPortalContext';
 
 type Props = {
     projectUuid: string;
+    projectUrlIdentifier?: string;
 };
 
-const ExploreMenu: FC<Props> = memo(({ projectUuid }) => {
+const ExploreMenu: FC<Props> = memo((props) => {
+    const menuProps = useNavBarMenuProps();
+    const { projectUuid, projectUrlIdentifier: projectUrlIdentifierProp } =
+        props;
+    const projectRoute = useOptionalProjectRoute();
+    const { data: project } = useProject(projectUuid);
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ??
+        projectUrlIdentifierProp ??
+        projectUuid;
     const navigate = useNavigate();
     const location = useLocation();
+    const contentAuthoringEnabled = useContentAuthoringEnabled();
 
     const { user } = useApp();
     const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
@@ -35,6 +54,17 @@ const ExploreMenu: FC<Props> = memo(({ projectUuid }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [isCreateSpaceOpen, setIsCreateSpaceOpen] = useState(false);
     const [isCreateDashboardOpen, setIsCreateDashboardOpen] = useState(false);
+    const [isCreateDocumentOpen, setIsCreateDocumentOpen] = useState(false);
+    const userCanCreateDashboards = useCreateInAnySpaceAccess(
+        projectUuid,
+        'Dashboard',
+        { enabled: isOpen },
+    );
+    const userCanCreateDocuments = useCreateInAnySpaceAccess(
+        projectUuid,
+        'Document',
+        { enabled: isOpen },
+    );
 
     return (
         <>
@@ -46,79 +76,108 @@ const ExploreMenu: FC<Props> = memo(({ projectUuid }) => {
                 })}
             >
                 <Menu
-                    withArrow
-                    shadow="lg"
                     position="bottom-start"
                     arrowOffset={16}
                     offset={-2}
+                    opened={isOpen}
+                    onChange={setIsOpen}
                     zIndex={getDefaultZIndex('max')}
-                    portalProps={{ target: '#navbar-header' }}
+                    {...menuProps}
                 >
                     <Menu.Target>
                         <Button
+                            aria-label="New"
                             variant="default"
                             size="xs"
                             fz="sm"
                             leftSection={
                                 <MantineIcon
-                                    color="ldGray.6"
+                                    color="dimmed"
                                     icon={IconSquareRoundedPlus}
                                 />
                             }
-                            onClick={() => setIsOpen(!isOpen)}
                             data-testid="ExploreMenu/NewButton"
+                            // Navigation anchor for scope walkthroughs
+                            data-tour-nav="new"
+                            data-tour-hint="Click New"
                         >
                             New
                         </Button>
                     </Menu.Target>
 
                     <Menu.Dropdown>
-                        <LargeMenuItem
-                            component={Link}
-                            title="Chart"
-                            description="Build queries and save them as charts."
-                            to={`/projects/${projectUuid}/tables`}
-                            icon={IconTable}
-                        />
-
-                        <Can
-                            I="manage"
-                            this={subject('SqlRunner', {
-                                organizationUuid: user.data?.organizationUuid,
-                                projectUuid,
-                            })}
-                        >
+                        {contentAuthoringEnabled && (
                             <LargeMenuItem
                                 component={Link}
-                                title="Query using SQL runner"
-                                description="Access your database to run ad-hoc queries."
-                                to={`/projects/${projectUuid}/sql-runner`}
-                                onClick={(
-                                    event: React.MouseEvent<HTMLAnchorElement>,
-                                ) => {
-                                    if (
-                                        location.pathname.startsWith(
-                                            `/projects/${projectUuid}/sql-runner`,
-                                        )
-                                    ) {
-                                        event.preventDefault();
-                                        window.open(
-                                            `/projects/${projectUuid}/sql-runner`,
-                                            '_blank',
-                                        );
-                                    }
-                                }}
-                                icon={IconTerminal2}
+                                title="Chart"
+                                description="Build queries and save them as charts."
+                                to={`/projects/${projectUrlIdentifier}/tables`}
+                                icon={IconTable}
+                                data-tour-nav="new-chart"
+                                data-tour-hint="Choose Chart"
                             />
-                        </Can>
-                        <LargeMenuItem
-                            // Users who manage explores should be able to create dashboards in any space
-                            title="Dashboard"
-                            description="Arrange multiple charts into a single view."
-                            onClick={() => setIsCreateDashboardOpen(true)}
-                            icon={IconLayoutDashboard}
-                            data-testid="ExploreMenu/NewDashboardButton"
-                        />
+                        )}
+
+                        {contentAuthoringEnabled &&
+                            project?.provisioningSource !== 'analytics' && (
+                                <Can
+                                    I="manage"
+                                    this={subject('SqlRunner', {
+                                        organizationUuid:
+                                            user.data?.organizationUuid,
+                                        projectUuid,
+                                    })}
+                                >
+                                    <LargeMenuItem
+                                        component={Link}
+                                        title="Query using SQL runner"
+                                        description="Access your database to run ad-hoc queries."
+                                        to={`/projects/${projectUrlIdentifier}/sql-runner`}
+                                        data-tour-nav="new-sql-runner"
+                                        data-tour-hint="Choose Query using SQL runner"
+                                        onClick={(
+                                            event: React.MouseEvent<HTMLAnchorElement>,
+                                        ) => {
+                                            if (
+                                                location.pathname.startsWith(
+                                                    `/projects/${projectUrlIdentifier}/sql-runner`,
+                                                )
+                                            ) {
+                                                event.preventDefault();
+                                                window.open(
+                                                    `/projects/${projectUrlIdentifier}/sql-runner`,
+                                                    '_blank',
+                                                );
+                                            }
+                                        }}
+                                        icon={IconTerminal2}
+                                    />
+                                </Can>
+                            )}
+                        {contentAuthoringEnabled && userCanCreateDashboards && (
+                            <LargeMenuItem
+                                title="Dashboard"
+                                description="Arrange multiple charts into a single view."
+                                onClick={() => setIsCreateDashboardOpen(true)}
+                                icon={IconLayoutDashboard}
+                                data-testid="ExploreMenu/NewDashboardButton"
+                                data-tour-nav="new-dashboard"
+                                data-tour-hint="Choose Dashboard"
+                            />
+                        )}
+
+                        {contentAuthoringEnabled && userCanCreateDocuments && (
+                            <LargeMenuItem
+                                title="Document"
+                                description="Write up analysis with live charts."
+                                onClick={() => setIsCreateDocumentOpen(true)}
+                                icon={IconFileText}
+                                data-testid="ExploreMenu/NewDocumentButton"
+                                // Navigation anchor for scope walkthroughs (data-tour-via)
+                                data-tour-nav="new-document"
+                                data-tour-hint="Choose Document"
+                            />
+                        )}
 
                         {dataAppsFlag.data?.enabled && (
                             <Can
@@ -131,7 +190,10 @@ const ExploreMenu: FC<Props> = memo(({ projectUuid }) => {
                             >
                                 <LargeMenuItem
                                     component={Link}
-                                    title="App"
+                                    // Navigation anchor for scope walkthroughs (data-tour-via)
+                                    data-tour-nav="new-app"
+                                    data-tour-hint="Choose Data App"
+                                    title="Data App"
                                     description="Build an interactive app powered by your data."
                                     to={`/projects/${projectUuid}/apps/generate`}
                                     icon={IconAppWindow}
@@ -159,35 +221,48 @@ const ExploreMenu: FC<Props> = memo(({ projectUuid }) => {
             </Can>
 
             {isCreateSpaceOpen && (
-                <SpaceActionModal
-                    projectUuid={projectUuid}
-                    actionType={ActionType.CREATE}
-                    title="Create new space"
-                    confirmButtonLabel="Create"
-                    icon={IconFolderPlus}
-                    onClose={() => setIsCreateSpaceOpen(false)}
-                    onSubmitForm={(space) => {
-                        if (space)
-                            void navigate(
-                                `/projects/${projectUuid}/spaces/${space.uuid}`,
-                            );
-                    }}
-                    parentSpaceUuid={null}
-                />
+                <AppColorSchemeScope>
+                    <SpaceActionModal
+                        projectUuid={projectUuid}
+                        actionType={ActionType.CREATE}
+                        title="Create new space"
+                        confirmButtonLabel="Create"
+                        icon={IconFolderPlus}
+                        onClose={() => setIsCreateSpaceOpen(false)}
+                        onSubmitForm={(space) => {
+                            if (space)
+                                void navigate(
+                                    `/projects/${projectUrlIdentifier}/spaces/${space.uuid}`,
+                                );
+                        }}
+                        parentSpaceUuid={null}
+                    />
+                </AppColorSchemeScope>
+            )}
+            {isCreateDocumentOpen && (
+                <AppColorSchemeScope>
+                    <DocumentCreateModal
+                        projectUuid={projectUuid}
+                        defaultSpaceUuid={null}
+                        onClose={() => setIsCreateDocumentOpen(false)}
+                    />
+                </AppColorSchemeScope>
             )}
             {isCreateDashboardOpen && (
-                <DashboardCreateModal
-                    projectUuid={projectUuid}
-                    opened={isCreateDashboardOpen}
-                    onClose={() => setIsCreateDashboardOpen(false)}
-                    onConfirm={(dashboard) => {
-                        void navigate(
-                            `/projects/${projectUuid}/dashboards/${dashboard.uuid}/edit`,
-                        );
+                <AppColorSchemeScope>
+                    <DashboardCreateModal
+                        projectUuid={projectUuid}
+                        opened={isCreateDashboardOpen}
+                        onClose={() => setIsCreateDashboardOpen(false)}
+                        onConfirm={(dashboard) => {
+                            void navigate(
+                                `/projects/${projectUrlIdentifier}/dashboards/${dashboard.slug}/edit`,
+                            );
 
-                        setIsCreateDashboardOpen(false);
-                    }}
-                />
+                            setIsCreateDashboardOpen(false);
+                        }}
+                    />
+                </AppColorSchemeScope>
             )}
         </>
     );

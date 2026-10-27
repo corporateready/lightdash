@@ -24,7 +24,7 @@ import {
     type SavedChart,
     type SortField,
     type TableCalculation,
-    type TimeZone,
+    type TimezoneSetting,
 } from '@lightdash/common';
 import {
     createNextState,
@@ -39,12 +39,13 @@ import {
     type ExplorerReduceState,
     type ExplorerSection,
     type MapExtent,
+    type PendingQueryCostConfirmation,
 } from '../../../providers/Explorer/types';
 import {
     getCachedPivotConfig,
     getValidChartConfig,
 } from '../../../providers/Explorer/utils';
-import { calcColumnOrder } from './utils';
+import { calcColumnOrder, reorderColumnOrderSlots } from './utils';
 
 export type ExplorerSliceState = ExplorerReduceState;
 
@@ -54,7 +55,7 @@ function saveConfigToCache<T extends ChartType>(
     cache: Partial<ConfigCacheMap>,
     chartType: T,
     config: ConfigCacheMap[T]['chartConfig'],
-    pivotConfig?: { columns: string[] },
+    pivotConfig?: SavedChart['pivotConfig'],
 ): void {
     cache[chartType] = {
         chartConfig: config,
@@ -62,7 +63,81 @@ function saveConfigToCache<T extends ChartType>(
     } as ConfigCacheMap[T];
 }
 
+// `current` rejects undefined, and a data app viz chart may carry no config.
+const snapshotChartConfig = (config: ChartConfig['config']) =>
+    config === undefined ? undefined : current(config);
+
 const initialState: ExplorerSliceState = defaultState;
+
+const removePivotValuesFromSorts = (sorts: SortField[]): SortField[] => {
+    const seen = new Set<string>();
+    return sorts.reduce<SortField[]>((acc, sort) => {
+        if (seen.has(sort.fieldId)) return acc;
+        seen.add(sort.fieldId);
+        const { pivotValues: _pivotValues, ...rest } = sort;
+        acc.push(rest);
+        return acc;
+    }, []);
+};
+
+const applyToggleDimension = (state: ExplorerSliceState, fieldId: FieldId) => {
+    const currentDimensions = state.unsavedChartVersion.metricQuery.dimensions;
+
+    state.unsavedChartVersion.metricQuery.dimensions = toggleArrayValue(
+        currentDimensions,
+        fieldId,
+    );
+
+    state.unsavedChartVersion.metricQuery.sorts =
+        state.unsavedChartVersion.metricQuery.sorts.filter(
+            (s) => s.fieldId !== fieldId,
+        );
+
+    const dimensionIds = state.unsavedChartVersion.metricQuery.dimensions;
+    const metricIds = state.unsavedChartVersion.metricQuery.metrics;
+    const calcIds = state.unsavedChartVersion.metricQuery.tableCalculations.map(
+        ({ name }) => name,
+    );
+
+    state.unsavedChartVersion.tableConfig.columnOrder = calcColumnOrder(
+        state.unsavedChartVersion.tableConfig.columnOrder,
+        [...dimensionIds, ...metricIds, ...calcIds],
+        dimensionIds,
+    );
+};
+
+const applyToggleMetric = (state: ExplorerSliceState, fieldId: FieldId) => {
+    const currentMetrics = state.unsavedChartVersion.metricQuery.metrics;
+
+    state.unsavedChartVersion.metricQuery.metrics = toggleArrayValue(
+        currentMetrics,
+        fieldId,
+    );
+
+    state.unsavedChartVersion.metricQuery.sorts =
+        state.unsavedChartVersion.metricQuery.sorts.filter(
+            (s) => s.fieldId !== fieldId,
+        );
+
+    state.unsavedChartVersion.metricQuery.metricOverrides = Object.fromEntries(
+        Object.entries(
+            state.unsavedChartVersion.metricQuery.metricOverrides || {},
+        ).filter(([key]) =>
+            state.unsavedChartVersion.metricQuery.metrics.includes(key),
+        ),
+    );
+
+    const dimensionIds = state.unsavedChartVersion.metricQuery.dimensions;
+    const metricIds = state.unsavedChartVersion.metricQuery.metrics;
+    const calcIds = state.unsavedChartVersion.metricQuery.tableCalculations.map(
+        ({ name }) => name,
+    );
+
+    state.unsavedChartVersion.tableConfig.columnOrder = calcColumnOrder(
+        state.unsavedChartVersion.tableConfig.columnOrder,
+        [...dimensionIds, ...metricIds, ...calcIds],
+    );
+};
 
 const explorerSlice = createSlice({
     name: 'explorer',
@@ -88,6 +163,23 @@ const explorerSlice = createSlice({
             state.savedChart = action.payload;
             state.unsavedColorPaletteUuid =
                 action.payload?.colorPaletteUuid ?? null;
+        },
+        // Server-owned metadata (name, pin, verification, slug...) without the
+        // version or palette, so a mid-session refetch leaves staged edits
+        // and the staged palette alone (setSavedChart would reset them).
+        setSavedChartMetadata: (state, action: PayloadAction<SavedChart>) => {
+            if (!state.savedChart) return;
+            const {
+                metricQuery,
+                chartConfig,
+                tableConfig,
+                pivotConfig,
+                parameters,
+                colorPaletteUuid,
+                merge,
+                ...metadata
+            } = action.payload;
+            state.savedChart = { ...state.savedChart, ...metadata };
         },
         setColorPaletteUuid: (state, action: PayloadAction<string | null>) => {
             state.unsavedColorPaletteUuid = action.payload;
@@ -133,74 +225,36 @@ const explorerSlice = createSlice({
         },
 
         toggleDimension: (state, action: PayloadAction<FieldId>) => {
-            const fieldId = action.payload;
-            const currentDimensions =
-                state.unsavedChartVersion.metricQuery.dimensions;
-
-            state.unsavedChartVersion.metricQuery.dimensions = toggleArrayValue(
-                currentDimensions,
-                fieldId,
-            );
-
-            state.unsavedChartVersion.metricQuery.sorts =
-                state.unsavedChartVersion.metricQuery.sorts.filter(
-                    (s) => s.fieldId !== fieldId,
-                );
-
-            const dimensionIds =
-                state.unsavedChartVersion.metricQuery.dimensions;
-            const metricIds = state.unsavedChartVersion.metricQuery.metrics;
-            const calcIds =
-                state.unsavedChartVersion.metricQuery.tableCalculations.map(
-                    ({ name }) => name,
-                );
-
-            state.unsavedChartVersion.tableConfig.columnOrder = calcColumnOrder(
-                state.unsavedChartVersion.tableConfig.columnOrder,
-                [...dimensionIds, ...metricIds, ...calcIds],
-                dimensionIds,
-            );
+            applyToggleDimension(state, action.payload);
         },
 
         toggleMetric: (state, action: PayloadAction<FieldId>) => {
-            const fieldId = action.payload;
-            const currentMetrics =
-                state.unsavedChartVersion.metricQuery.metrics;
+            applyToggleMetric(state, action.payload);
+        },
 
-            state.unsavedChartVersion.metricQuery.metrics = toggleArrayValue(
-                currentMetrics,
-                fieldId,
-            );
+        // Config-panel "Add to query" pickers: never deselect, and always run
+        // the query — itemsMap only refreshes from results, even when
+        // auto-fetch is off.
+        addDimensionToQuery: (state, action: PayloadAction<FieldId>) => {
+            if (
+                !state.unsavedChartVersion.metricQuery.dimensions.includes(
+                    action.payload,
+                )
+            ) {
+                applyToggleDimension(state, action.payload);
+            }
+            state.queryExecution.pendingFetch = true;
+        },
 
-            state.unsavedChartVersion.metricQuery.sorts =
-                state.unsavedChartVersion.metricQuery.sorts.filter(
-                    (s) => s.fieldId !== fieldId,
-                );
-
-            state.unsavedChartVersion.metricQuery.metricOverrides =
-                Object.fromEntries(
-                    Object.entries(
-                        state.unsavedChartVersion.metricQuery.metricOverrides ||
-                            {},
-                    ).filter(([key]) =>
-                        state.unsavedChartVersion.metricQuery.metrics.includes(
-                            key,
-                        ),
-                    ),
-                );
-
-            const dimensionIds =
-                state.unsavedChartVersion.metricQuery.dimensions;
-            const metricIds = state.unsavedChartVersion.metricQuery.metrics;
-            const calcIds =
-                state.unsavedChartVersion.metricQuery.tableCalculations.map(
-                    ({ name }) => name,
-                );
-
-            state.unsavedChartVersion.tableConfig.columnOrder = calcColumnOrder(
-                state.unsavedChartVersion.tableConfig.columnOrder,
-                [...dimensionIds, ...metricIds, ...calcIds],
-            );
+        addMetricToQuery: (state, action: PayloadAction<FieldId>) => {
+            if (
+                !state.unsavedChartVersion.metricQuery.metrics.includes(
+                    action.payload,
+                )
+            ) {
+                applyToggleMetric(state, action.payload);
+            }
+            state.queryExecution.pendingFetch = true;
         },
 
         removeField: (state, action: PayloadAction<FieldId>) => {
@@ -244,7 +298,10 @@ const explorerSlice = createSlice({
             state.unsavedChartVersion.metricQuery.limit = action.payload;
         },
 
-        setTimeZone: (state, action: PayloadAction<TimeZone | undefined>) => {
+        setTimeZone: (
+            state,
+            action: PayloadAction<TimezoneSetting | undefined>,
+        ) => {
             state.unsavedChartVersion.metricQuery.timezone = action.payload;
         },
 
@@ -254,22 +311,49 @@ const explorerSlice = createSlice({
 
         setPivotConfig: (
             state,
-            action: PayloadAction<{ columns: string[] } | undefined>,
+            action: PayloadAction<SavedChart['pivotConfig']>,
         ) => {
             state.unsavedChartVersion.pivotConfig = action.payload;
             if (!action.payload?.columns.length) {
-                const seen = new Set<string>();
                 state.unsavedChartVersion.metricQuery.sorts =
-                    state.unsavedChartVersion.metricQuery.sorts.reduce<
-                        SortField[]
-                    >((acc, sort) => {
-                        if (seen.has(sort.fieldId)) return acc;
-                        seen.add(sort.fieldId);
-                        const { pivotValues: _pivotValues, ...rest } = sort;
-                        acc.push(rest);
-                        return acc;
-                    }, []);
+                    removePivotValuesFromSorts(
+                        state.unsavedChartVersion.metricQuery.sorts,
+                    );
             }
+        },
+
+        setPivotColumns: (state, action: PayloadAction<string[]>) => {
+            const rows = state.unsavedChartVersion.pivotConfig?.rows;
+            state.unsavedChartVersion.pivotConfig = {
+                columns: action.payload,
+                ...(rows !== undefined && { rows }),
+            };
+
+            if (!action.payload.length) {
+                state.unsavedChartVersion.metricQuery.sorts =
+                    removePivotValuesFromSorts(
+                        state.unsavedChartVersion.metricQuery.sorts,
+                    );
+            }
+        },
+
+        setPivotRows: (state, action: PayloadAction<string[] | undefined>) => {
+            const columns =
+                state.unsavedChartVersion.pivotConfig?.columns ?? [];
+            // Without pivot columns the table follows columnOrder, so reorder it instead
+            if (columns.length === 0 && action.payload !== undefined) {
+                state.unsavedChartVersion.tableConfig.columnOrder =
+                    reorderColumnOrderSlots(
+                        state.unsavedChartVersion.tableConfig.columnOrder,
+                        action.payload,
+                    );
+                state.unsavedChartVersion.pivotConfig = { columns };
+                return;
+            }
+            state.unsavedChartVersion.pivotConfig = {
+                columns,
+                ...(action.payload !== undefined && { rows: action.payload }),
+            };
         },
 
         setParameter: (
@@ -313,6 +397,102 @@ const explorerSlice = createSlice({
         },
         closeVisualizationConfig: (state) => {
             state.isVisualizationConfigOpen = false;
+            state.chartSidebarStep = 'configure';
+        },
+        setChartSidebarStep: (
+            state,
+            action: PayloadAction<ExplorerSliceState['chartSidebarStep']>,
+        ) => {
+            state.chartSidebarStep = action.payload;
+        },
+
+        // A new type has no viz to point at until its first version lands;
+        // what was there before is kept so cancelling restores it.
+        startChartTypeAuthoring: (
+            state,
+            action: PayloadAction<{ dataAppVizUuid: string | null }>,
+        ) => {
+            const before = state.unsavedChartVersion.chartConfig;
+            const beforePivotConfig = state.unsavedChartVersion.pivotConfig;
+            state.chartTypeAuthoring = {
+                dataAppVizUuid: action.payload.dataAppVizUuid,
+                viewedVersion: null,
+                createdInSession: false,
+                previous: {
+                    chartSidebarStep: state.chartSidebarStep,
+                    chartConfig: current(before),
+                    pivotConfig: beforePivotConfig
+                        ? (current(
+                              beforePivotConfig,
+                          ) as SavedChart['pivotConfig'])
+                        : undefined,
+                },
+            };
+            state.chartSidebarStep = 'configure';
+            state.isVisualizationConfigOpen = true;
+            if (action.payload.dataAppVizUuid === null) {
+                saveConfigToCache(
+                    state.cachedChartConfigs,
+                    before.type,
+                    snapshotChartConfig(before.config),
+                    beforePivotConfig
+                        ? (current(
+                              beforePivotConfig,
+                          ) as SavedChart['pivotConfig'])
+                        : undefined,
+                );
+                state.unsavedChartVersion.chartConfig = {
+                    type: ChartType.DATA_APP_VIZ,
+                };
+                state.unsavedChartVersion.pivotConfig = undefined;
+            }
+        },
+        // The builder pinned an older version (or returned to the current
+        // one), so the sidebar configures what the preview renders.
+        viewChartTypeAuthoringVersion: (
+            state,
+            action: PayloadAction<number | null>,
+        ) => {
+            if (state.chartTypeAuthoring === null) return;
+            state.chartTypeAuthoring.viewedVersion = action.payload;
+        },
+        // A first build claimed an app; the session keeps going under it.
+        claimChartTypeAuthoringViz: (state, action: PayloadAction<string>) => {
+            if (state.chartTypeAuthoring?.dataAppVizUuid !== null) return;
+            state.chartTypeAuthoring.dataAppVizUuid = action.payload;
+            state.chartTypeAuthoring.createdInSession = true;
+        },
+        // Back to the chart and the sidebar step as they were.
+        cancelChartTypeAuthoring: (state) => {
+            const authoring = state.chartTypeAuthoring;
+            if (authoring === null) return;
+            // The query stayed live meanwhile, so the pivot only keeps the
+            // dimensions it still has.
+            const dimensions = new Set(
+                state.unsavedChartVersion.metricQuery.dimensions,
+            );
+            const pivot = authoring.previous.pivotConfig;
+            const columns = pivot?.columns.filter((c) => dimensions.has(c));
+            state.unsavedChartVersion.chartConfig =
+                authoring.previous.chartConfig;
+            state.unsavedChartVersion.pivotConfig =
+                pivot && columns && columns.length > 0
+                    ? { ...pivot, columns }
+                    : undefined;
+            state.chartSidebarStep = authoring.previous.chartSidebarStep;
+            state.chartTypeAuthoring = null;
+            state.isVisualizationConfigOpen = true;
+        },
+        // Return edits to their entry point; a new type needs configuration.
+        finishChartTypeAuthoring: (state) => {
+            const authoring = state.chartTypeAuthoring;
+            if (authoring === null) return;
+            state.chartSidebarStep =
+                authoring.dataAppVizUuid !== null && !authoring.createdInSession
+                    ? authoring.previous.chartSidebarStep
+                    : 'configure';
+            state.chartTypeAuthoring = null;
+            state.isVisualizationConfigOpen = true;
         },
 
         toggleCustomDimensionModal: (
@@ -336,8 +516,16 @@ const explorerSlice = createSlice({
             action: PayloadAction<
                 | {
                       type?: MetricType;
-                      item?: Dimension | AdditionalMetric | CustomDimension;
+                      item?:
+                          | Dimension
+                          | AdditionalMetric
+                          | CustomDimension
+                          | Metric;
                       isEditing: boolean;
+                      /** Label typed before handing over from quick create */
+                      label?: string;
+                      /** Merge source that owns this custom metric. */
+                      mergeSourceId?: string;
                   }
                 | undefined
             >,
@@ -476,9 +664,9 @@ const explorerSlice = createSlice({
             saveConfigToCache(
                 state.cachedChartConfigs,
                 before.type,
-                current(before.config),
+                snapshotChartConfig(before.config),
                 beforePivotConfig
-                    ? (current(beforePivotConfig) as { columns: string[] })
+                    ? (current(beforePivotConfig) as SavedChart['pivotConfig'])
                     : undefined,
             );
 
@@ -513,11 +701,13 @@ const explorerSlice = createSlice({
             );
         },
 
-        // Table calculations
+        // Table calculation changes must run even when auto-fetch is disabled,
+        // so a broken calculation can recover as soon as it is fixed or removed.
         addTableCalculation: (
             state,
             action: PayloadAction<TableCalculation>,
         ) => {
+            state.queryExecution.pendingFetch = true;
             state.unsavedChartVersion.metricQuery.tableCalculations.push(
                 action.payload,
             );
@@ -545,6 +735,8 @@ const explorerSlice = createSlice({
         ) => {
             const { oldName, tableCalculation } = action.payload;
             const newName = tableCalculation.name;
+
+            state.queryExecution.pendingFetch = true;
 
             // Update metadata to track the name change, this is used
             // by consuming visualizations to translate old field names
@@ -595,6 +787,8 @@ const explorerSlice = createSlice({
         },
         deleteTableCalculation: (state, action: PayloadAction<string>) => {
             const nameToRemove = action.payload;
+
+            state.queryExecution.pendingFetch = true;
 
             // Remove from metadata if it exists
             if (state.metadata?.tableCalculations) {
@@ -943,7 +1137,23 @@ const explorerSlice = createSlice({
                 queryUuidHistory: [],
                 unpivotedQueryUuidHistory: [],
                 pendingFetch: false,
+                pendingCostConfirmation: null,
             };
+        },
+        requestQueryCostConfirmation: (
+            state,
+            action: PayloadAction<PendingQueryCostConfirmation>,
+        ) => {
+            state.queryExecution.pendingCostConfirmation = action.payload;
+        },
+        confirmQueryCost: (state) => {
+            const pending = state.queryExecution.pendingCostConfirmation;
+            if (!pending) return;
+            state.queryExecution.validQueryArgs = pending.args;
+            state.queryExecution.pendingCostConfirmation = null;
+        },
+        cancelQueryCostConfirmation: (state) => {
+            state.queryExecution.pendingCostConfirmation = null;
         },
 
         // Request a query execution (works regardless of auto-fetch setting)
@@ -991,12 +1201,19 @@ const explorerSlice = createSlice({
                 tableName: string;
             }>,
         ) => {
-            const { isEditMode, isMinimal } = state;
+            const {
+                isEditMode,
+                isMinimal,
+                chartSidebarStep,
+                chartTypeAuthoring,
+            } = state;
             return createNextState(d, (draft: ExplorerSliceState) => {
                 draft.unsavedChartVersion.tableName = tableName;
                 draft.unsavedChartVersion.metricQuery.exploreName = tableName;
                 draft.isEditMode = isEditMode;
                 draft.isMinimal = isMinimal;
+                draft.chartSidebarStep = chartSidebarStep;
+                draft.chartTypeAuthoring = chartTypeAuthoring;
             });
         },
 

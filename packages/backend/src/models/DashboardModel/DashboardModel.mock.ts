@@ -145,6 +145,7 @@ export const spaceEntry: SpaceTable['base'] = {
 export const savedChartEntry: SavedChartTable['base'] = {
     saved_query_id: 0,
     saved_query_uuid: '123',
+    project_uuid: 'project_uuid',
     space_id: 0,
     name: 'chart name',
     slug: 'chart-name',
@@ -166,6 +167,7 @@ export const savedChartEntry: SavedChartTable['base'] = {
 export const dashboardEntry: DashboardTable['base'] = {
     dashboard_id: 0,
     dashboard_uuid: 'my_dashboard_uuid',
+    project_uuid: projectEntry.project_uuid,
     name: 'name',
     slug: 'name',
 
@@ -179,9 +181,11 @@ export const dashboardEntry: DashboardTable['base'] = {
     deleted_at: null,
     deleted_by_user_uuid: null,
     color_palette_uuid: null,
+    owner_user_uuid: null,
 };
 
 export const dashboardVersionEntry: DashboardVersionTable['base'] = {
+    agent_identity: null,
     dashboard_version_id: 0,
     dashboard_version_uuid: 'dashboard-version-uuid',
     dashboard_id: 0,
@@ -223,6 +227,10 @@ export const dashboardWithVersionEntry: GetDashboardQuery = {
     views_count: 1,
     first_viewed_at: new Date(1),
     config: undefined,
+    owner_user_uuid: null,
+    owner_first_name: null,
+    owner_last_name: null,
+    owner_email: null,
 };
 
 export const dashboardTileEntry: DashboardTileTable['base'] = {
@@ -272,6 +280,7 @@ export const expectedDashboard: DashboardDAO = {
     name: dashboardEntry.name,
     slug: `name`,
     verification: null,
+    owner: null,
 
     description: dashboardEntry.description,
     updatedAt: dashboardVersionEntry.created_at,
@@ -344,6 +353,7 @@ export const expectedAllDashboards: DashboardBasicDetailsWithTileTypes[] = [
         organizationUuid: 'organizationUuid',
         projectUuid: projectEntry.project_uuid,
         uuid: dashboardEntry.dashboard_uuid,
+        slug: dashboardEntry.slug,
         name: dashboardEntry.name,
         description: dashboardEntry.description,
         updatedAt: dashboardVersionEntry.created_at,
@@ -373,6 +383,8 @@ export const user: SessionUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     userId: 0,

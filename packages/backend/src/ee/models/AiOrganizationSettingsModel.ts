@@ -1,10 +1,26 @@
 import {
+    AI_DEEP_RESEARCH_DEFAULT_LIMITS,
     AiOrganizationSettings,
+    AiProviderApiKeyHints,
+    AiProviderApiKeysSet,
+    AiProviderBaseUrls,
+    BEDROCK_INFERENCE_GEOGRAPHIES,
+    BYO_AI_API_KEY_PROVIDERS,
+    BYO_AI_PROVIDERS,
     CreateAiOrganizationSettings,
+    DATA_APP_ANALYSIS_DEFAULT_LIMITS,
     NotFoundError,
+    ParameterError,
     UpdateAiOrganizationSettings,
+    UpdateAiProviderApiKeys,
+    type ByoAiApiKeyProvider,
+    type ByoAiProvider,
 } from '@lightdash/common';
 import { Knex } from 'knex';
+import { z } from 'zod';
+import { parseLlmGatewayBaseUrl } from '../../config/aiGatewayConfig';
+import Logger from '../../logging/logger';
+import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
 import {
     AiOrganizationSettingsTable,
     AiOrganizationSettingsTableName,
@@ -13,29 +29,304 @@ import {
 
 type Dependencies = {
     database: Knex;
+    encryptionUtil: EncryptionUtil;
+};
+
+export type StoredAiOrganizationSettings = Omit<
+    AiOrganizationSettings,
+    'aiAgentMemoryEnabled' | 'mcpEnabled'
+> & { mcpEnabled: boolean };
+
+const storedAiOrgProviderApiKeyFields = {
+    anthropic: z.string().optional(),
+    google: z.string().optional(),
+    openai: z.string().optional(),
+    // Bedrock needs a region alongside the key to address an inference profile.
+    bedrock: z
+        .object({
+            apiKey: z.string().min(1),
+            region: z.string().min(1),
+            allowedModels: z.array(z.string()).min(1),
+            // Carried by named credentials; the legacy blob never stores it
+            // and resolves to the region's default geography.
+            inferenceGeography: z
+                .enum(BEDROCK_INFERENCE_GEOGRAPHIES)
+                .optional(),
+        })
+        .optional(),
+} satisfies Record<ByoAiProvider, z.ZodTypeAny>;
+
+// Keep known provider keys strongly typed and exhaustive, but strip unknown
+// future-provider keys so mixed-version deploys do not invalidate the whole blob.
+const storedAiOrgProviderApiKeysSchema = z.object(
+    storedAiOrgProviderApiKeyFields,
+);
+
+// Gateway each org key is sent to; only meaningful alongside that key. Stored
+// in its own nullable column, not in the encrypted blob.
+const storedProviderBaseUrlsSchema = z.object({
+    anthropic: z.string().optional(),
+    google: z.string().optional(),
+    openai: z.string().optional(),
+} satisfies Record<ByoAiApiKeyProvider, z.ZodTypeAny>);
+
+export type AiOrgProviderApiKeys = z.infer<
+    typeof storedAiOrgProviderApiKeysSchema
+> & {
+    providerBaseUrls?: z.infer<typeof storedProviderBaseUrlsSchema>;
+};
+
+export const parseAiOrgProviderApiKeys = (
+    value: unknown,
+): AiOrgProviderApiKeys | null => {
+    const result = storedAiOrgProviderApiKeysSchema.safeParse(value);
+    if (!result.success) return null;
+
+    return result.data;
+};
+
+const parseProviderBaseUrls = (
+    value: unknown,
+): AiOrgProviderApiKeys['providerBaseUrls'] => {
+    const result = storedProviderBaseUrlsSchema.safeParse(value);
+    return result.success && Object.keys(result.data).length > 0
+        ? result.data
+        : undefined;
+};
+
+const emptyProviderApiKeyHints = (): AiProviderApiKeyHints => ({
+    anthropic: null,
+    google: null,
+    openai: null,
+    bedrock: null,
+});
+
+const emptyProviderApiKeysSet = (): AiProviderApiKeysSet => ({
+    anthropic: false,
+    google: false,
+    openai: false,
+    bedrock: false,
+});
+
+export const applyProviderApiKeyUpdates = (
+    existing: AiOrgProviderApiKeys,
+    updates: UpdateAiProviderApiKeys,
+): AiOrgProviderApiKeys => {
+    const next: AiOrgProviderApiKeys = { ...existing };
+    BYO_AI_API_KEY_PROVIDERS.forEach((provider) => {
+        const update = updates[provider];
+        if (update === undefined) return;
+        if (update === null) {
+            delete next[provider];
+            return;
+        }
+        const trimmed = update.trim();
+        if (trimmed.length === 0) {
+            throw new ParameterError(`API key for ${provider} cannot be empty`);
+        }
+        next[provider] = trimmed;
+    });
+
+    const baseUrls = { ...(next.providerBaseUrls ?? {}) };
+    BYO_AI_API_KEY_PROVIDERS.forEach((provider) => {
+        const update = updates.providerBaseUrls?.[provider];
+        if (update === null || (update === undefined && !next[provider])) {
+            delete baseUrls[provider];
+            return;
+        }
+        if (update === undefined) return;
+        if (!next[provider]) {
+            throw new ParameterError(
+                `Set an API key for ${provider} before a custom base URL`,
+            );
+        }
+        const normalized = parseLlmGatewayBaseUrl(update);
+        if (normalized === null) {
+            throw new ParameterError(
+                `Gateway URL for ${provider} must be an HTTP(S) base URL without credentials, query parameters, or a fragment`,
+            );
+        }
+        baseUrls[provider] = normalized;
+    });
+    if (Object.keys(baseUrls).length > 0) {
+        next.providerBaseUrls = baseUrls;
+    } else {
+        delete next.providerBaseUrls;
+    }
+
+    const { bedrock } = updates;
+    if (bedrock !== undefined) {
+        if (bedrock === null) {
+            delete next.bedrock;
+        } else {
+            // An omitted key keeps the stored one, so region and model edits
+            // don't require re-entering the key.
+            const apiKey =
+                bedrock.apiKey === undefined
+                    ? existing.bedrock?.apiKey
+                    : bedrock.apiKey.trim();
+            if (!apiKey) {
+                throw new ParameterError('API key for bedrock cannot be empty');
+            }
+            next.bedrock = {
+                apiKey,
+                region: bedrock.region,
+                allowedModels: bedrock.allowedModels,
+            };
+        }
+    }
+    return next;
+};
+
+export const buildProviderApiKeyHint = (key: string): string => {
+    const prefix = key.match(/^(sk-ant-[a-z0-9]+-|sk-proj-|sk-)/)?.[0] ?? '';
+    const headLength = prefix.length + 3;
+    if (key.length < headLength + 8) {
+        return `${key.slice(0, 2)}...`;
+    }
+    return `${key.slice(0, headLength)}...${key.slice(-4)}`;
+};
+
+export const buildProviderApiKeyHints = (
+    keys: AiOrgProviderApiKeys,
+): AiProviderApiKeyHints | null => {
+    if (!BYO_AI_PROVIDERS.some((provider) => keys[provider])) return null;
+    const hints = emptyProviderApiKeyHints();
+    BYO_AI_API_KEY_PROVIDERS.forEach((provider) => {
+        const key = keys[provider];
+        hints[provider] = key ? buildProviderApiKeyHint(key) : null;
+    });
+    hints.bedrock = keys.bedrock
+        ? buildProviderApiKeyHint(keys.bedrock.apiKey)
+        : null;
+    return hints;
+};
+
+export const normalizeProviderApiKeyHints = (
+    hints: Partial<AiProviderApiKeyHints> | null,
+): AiProviderApiKeyHints => {
+    const normalized = emptyProviderApiKeyHints();
+    BYO_AI_PROVIDERS.forEach((provider) => {
+        const hint = hints?.[provider];
+        normalized[provider] = typeof hint === 'string' ? hint : null;
+    });
+    return normalized;
+};
+
+export const buildProviderBaseUrls = (
+    keys: AiOrgProviderApiKeys,
+): AiProviderBaseUrls => ({
+    anthropic: keys.providerBaseUrls?.anthropic ?? null,
+    google: keys.providerBaseUrls?.google ?? null,
+    openai: keys.providerBaseUrls?.openai ?? null,
+});
+
+export const buildProviderApiKeysSet = (
+    keys: AiOrgProviderApiKeys,
+): AiProviderApiKeysSet => {
+    const keysSet = emptyProviderApiKeysSet();
+    BYO_AI_PROVIDERS.forEach((provider) => {
+        keysSet[provider] = Boolean(keys[provider]);
+    });
+    return keysSet;
 };
 
 export class AiOrganizationSettingsModel {
     private database: Knex;
 
-    constructor(dependencies: Dependencies) {
-        this.database = dependencies.database;
+    private encryptionUtil: EncryptionUtil;
+
+    get db(): Knex {
+        return this.database;
     }
 
-    // eslint-disable-next-line class-methods-use-this
+    constructor(dependencies: Dependencies) {
+        this.database = dependencies.database;
+        this.encryptionUtil = dependencies.encryptionUtil;
+    }
+
+    private decryptProviderApiKeys(
+        row: Pick<
+            DbAiOrganizationSettings,
+            'encrypted_provider_api_keys' | 'provider_base_urls'
+        >,
+    ): AiOrgProviderApiKeys {
+        if (!row.encrypted_provider_api_keys) return {};
+        try {
+            const keys = parseAiOrgProviderApiKeys(
+                JSON.parse(
+                    this.encryptionUtil.decrypt(
+                        row.encrypted_provider_api_keys,
+                    ),
+                ),
+            );
+            if (!keys) throw new Error('Invalid provider key data');
+            const providerBaseUrls = parseProviderBaseUrls(
+                row.provider_base_urls,
+            );
+            return providerBaseUrls ? { ...keys, providerBaseUrls } : keys;
+        } catch {
+            Logger.warn(
+                'Failed to decrypt AI provider API keys; treating as unset',
+            );
+            return {};
+        }
+    }
+
+    private encryptProviderApiKeys({
+        providerBaseUrls: _,
+        ...keys
+    }: AiOrgProviderApiKeys): Buffer | null {
+        if (!BYO_AI_PROVIDERS.some((provider) => keys[provider])) return null;
+        return this.encryptionUtil.encrypt(JSON.stringify(keys));
+    }
+
     private mapDbToEntity(
         db: DbAiOrganizationSettings,
-    ): AiOrganizationSettings {
+    ): StoredAiOrganizationSettings {
+        const keys = this.decryptProviderApiKeys(db);
         return {
             organizationUuid: db.organization_uuid,
             aiAgentsVisible: db.ai_agents_visible,
+            aiAgentReviewsEnabled: db.ai_agent_reviews_enabled,
+            deepResearchLimits: db.deep_research_limits,
+            deepResearchRawSqlEnabled: db.deep_research_raw_sql_enabled,
+            mcpEnabled: db.mcp_enabled,
+            mcpContentWritesEnabled: db.mcp_content_writes_enabled,
+            mcpAgentsEnabled: db.mcp_agents_enabled,
+            dataAppRuntimeAiEnabled: db.data_app_runtime_ai_enabled,
+            dataAppContinueInAskAiEnabled:
+                db.data_app_continue_in_ask_ai_enabled,
+            dataAppAutoAnalysisEnabled: db.data_app_auto_analysis_enabled,
+            dataAppAnalysisLimits:
+                db.data_app_analysis_limits ?? DATA_APP_ANALYSIS_DEFAULT_LIMITS,
+            dataAppAnalysisDefaultInstructions:
+                db.data_app_analysis_default_instructions,
+            requireExplicitSlackChannelLinking:
+                db.require_explicit_slack_channel_linking,
+            defaultAiAgentModelConfig: db.default_ai_agent_model_config,
+            modelVisibility: db.model_visibility,
+            dataAppModelVisibility: db.data_app_model_visibility,
+            providerApiKeysSet: buildProviderApiKeysSet(keys),
+            providerApiKeyHints: normalizeProviderApiKeyHints(
+                db.provider_api_key_hints,
+            ),
+            bedrockConfig: keys.bedrock
+                ? {
+                      region: keys.bedrock.region,
+                      allowedModels: keys.bedrock.allowedModels,
+                  }
+                : null,
+            providerBaseUrls: buildProviderBaseUrls(keys),
+            threadRetentionHours: db.thread_retention_hours,
         };
     }
 
     async findByOrganizationUuid(
         organizationUuid: string,
-    ): Promise<AiOrganizationSettings | null> {
-        const row = await this.database
+        database: Knex = this.database,
+    ): Promise<StoredAiOrganizationSettings | null> {
+        const row = await database
             .select<DbAiOrganizationSettings>()
             .from(AiOrganizationSettingsTableName)
             .where('organization_uuid', organizationUuid)
@@ -44,10 +335,24 @@ export class AiOrganizationSettingsModel {
         return row ? this.mapDbToEntity(row) : null;
     }
 
+    async findMcpEnabled(organizationUuid: string): Promise<boolean | null> {
+        const row = await this.database<AiOrganizationSettingsTable>(
+            AiOrganizationSettingsTableName,
+        )
+            .select('mcp_enabled')
+            .where('organization_uuid', organizationUuid)
+            .first();
+        return row?.mcp_enabled ?? null;
+    }
+
     async getByOrganizationUuid(
         organizationUuid: string,
-    ): Promise<AiOrganizationSettings> {
-        const settings = await this.findByOrganizationUuid(organizationUuid);
+        database: Knex = this.database,
+    ): Promise<StoredAiOrganizationSettings> {
+        const settings = await this.findByOrganizationUuid(
+            organizationUuid,
+            database,
+        );
         if (!settings) {
             throw new NotFoundError(
                 `AI organization settings not found for organization ${organizationUuid}`,
@@ -56,15 +361,61 @@ export class AiOrganizationSettingsModel {
         return settings;
     }
 
+    async findDecryptedProviderApiKeys(
+        organizationUuid: string,
+    ): Promise<AiOrgProviderApiKeys | null> {
+        const row = await this.database(AiOrganizationSettingsTableName)
+            .select('encrypted_provider_api_keys', 'provider_base_urls')
+            .where('organization_uuid', organizationUuid)
+            .first<
+                | Pick<
+                      DbAiOrganizationSettings,
+                      'encrypted_provider_api_keys' | 'provider_base_urls'
+                  >
+                | undefined
+            >();
+
+        if (!row?.encrypted_provider_api_keys) return null;
+        const keys = this.decryptProviderApiKeys(row);
+        return BYO_AI_PROVIDERS.some((provider) => keys[provider])
+            ? keys
+            : null;
+    }
+
     async create(
         data: CreateAiOrganizationSettings,
-    ): Promise<AiOrganizationSettings> {
-        const [row] = await this.database<AiOrganizationSettingsTable>(
+        database: Knex = this.database,
+    ): Promise<StoredAiOrganizationSettings> {
+        const keys = applyProviderApiKeyUpdates({}, data.providerApiKeys ?? {});
+
+        const [row] = await database<AiOrganizationSettingsTable>(
             AiOrganizationSettingsTableName,
         )
             .insert({
                 organization_uuid: data.organizationUuid,
                 ai_agents_visible: data.aiAgentsVisible,
+                ai_agent_reviews_enabled: data.aiAgentReviewsEnabled,
+                deep_research_limits: data.deepResearchLimits,
+                deep_research_raw_sql_enabled: data.deepResearchRawSqlEnabled,
+                mcp_enabled: data.mcpEnabled,
+                mcp_content_writes_enabled: data.mcpContentWritesEnabled,
+                mcp_agents_enabled: data.mcpAgentsEnabled,
+                data_app_runtime_ai_enabled: data.dataAppRuntimeAiEnabled,
+                data_app_continue_in_ask_ai_enabled:
+                    data.dataAppContinueInAskAiEnabled,
+                data_app_auto_analysis_enabled: data.dataAppAutoAnalysisEnabled,
+                data_app_analysis_limits: data.dataAppAnalysisLimits ?? null,
+                data_app_analysis_default_instructions:
+                    data.dataAppAnalysisDefaultInstructions ?? null,
+                require_explicit_slack_channel_linking:
+                    data.requireExplicitSlackChannelLinking,
+                default_ai_agent_model_config: data.defaultAiAgentModelConfig,
+                model_visibility: data.modelVisibility,
+                data_app_model_visibility: data.dataAppModelVisibility,
+                encrypted_provider_api_keys: this.encryptProviderApiKeys(keys),
+                provider_api_key_hints: buildProviderApiKeyHints(keys),
+                provider_base_urls: keys.providerBaseUrls ?? null,
+                thread_retention_hours: data.threadRetentionHours ?? null,
             })
             .returning('*');
 
@@ -74,14 +425,151 @@ export class AiOrganizationSettingsModel {
     async update(
         organizationUuid: string,
         data: UpdateAiOrganizationSettings,
-    ): Promise<AiOrganizationSettings> {
-        const [row] = await this.database<AiOrganizationSettingsTable>(
+        database: Knex = this.database,
+    ): Promise<StoredAiOrganizationSettings> {
+        const updateData: Partial<
+            Pick<
+                DbAiOrganizationSettings,
+                | 'ai_agents_visible'
+                | 'ai_agent_reviews_enabled'
+                | 'deep_research_limits'
+                | 'deep_research_raw_sql_enabled'
+                | 'mcp_enabled'
+                | 'mcp_content_writes_enabled'
+                | 'mcp_agents_enabled'
+                | 'data_app_runtime_ai_enabled'
+                | 'data_app_continue_in_ask_ai_enabled'
+                | 'data_app_auto_analysis_enabled'
+                | 'data_app_analysis_limits'
+                | 'data_app_analysis_default_instructions'
+                | 'require_explicit_slack_channel_linking'
+                | 'default_ai_agent_model_config'
+                | 'model_visibility'
+                | 'data_app_model_visibility'
+                | 'encrypted_provider_api_keys'
+                | 'provider_api_key_hints'
+                | 'provider_base_urls'
+                | 'thread_retention_hours'
+            >
+        > = {};
+        if (data.aiAgentsVisible !== undefined) {
+            updateData.ai_agents_visible = data.aiAgentsVisible;
+        }
+        if (data.aiAgentReviewsEnabled !== undefined) {
+            updateData.ai_agent_reviews_enabled = data.aiAgentReviewsEnabled;
+        }
+        if (data.deepResearchLimits !== undefined) {
+            updateData.deep_research_limits = data.deepResearchLimits;
+        }
+        if (data.deepResearchRawSqlEnabled !== undefined) {
+            updateData.deep_research_raw_sql_enabled =
+                data.deepResearchRawSqlEnabled;
+        }
+        if (data.mcpEnabled !== undefined) {
+            updateData.mcp_enabled = data.mcpEnabled;
+        }
+        if (data.mcpContentWritesEnabled !== undefined) {
+            updateData.mcp_content_writes_enabled =
+                data.mcpContentWritesEnabled;
+        }
+        if (data.mcpAgentsEnabled !== undefined) {
+            updateData.mcp_agents_enabled = data.mcpAgentsEnabled;
+        }
+        if (data.dataAppRuntimeAiEnabled !== undefined) {
+            updateData.data_app_runtime_ai_enabled =
+                data.dataAppRuntimeAiEnabled;
+        }
+        if (data.dataAppContinueInAskAiEnabled !== undefined) {
+            updateData.data_app_continue_in_ask_ai_enabled =
+                data.dataAppContinueInAskAiEnabled;
+        }
+        if (data.dataAppAutoAnalysisEnabled !== undefined) {
+            updateData.data_app_auto_analysis_enabled =
+                data.dataAppAutoAnalysisEnabled;
+        }
+        if (data.dataAppAnalysisLimits !== undefined) {
+            updateData.data_app_analysis_limits = data.dataAppAnalysisLimits;
+        }
+        if (data.dataAppAnalysisDefaultInstructions !== undefined) {
+            updateData.data_app_analysis_default_instructions =
+                data.dataAppAnalysisDefaultInstructions;
+        }
+        if (data.requireExplicitSlackChannelLinking !== undefined) {
+            updateData.require_explicit_slack_channel_linking =
+                data.requireExplicitSlackChannelLinking;
+        }
+        if (data.defaultAiAgentModelConfig !== undefined) {
+            updateData.default_ai_agent_model_config =
+                data.defaultAiAgentModelConfig;
+        }
+        if (data.modelVisibility !== undefined) {
+            updateData.model_visibility = data.modelVisibility;
+        }
+        if (data.dataAppModelVisibility !== undefined) {
+            updateData.data_app_model_visibility = data.dataAppModelVisibility;
+        }
+        if (data.threadRetentionHours !== undefined) {
+            updateData.thread_retention_hours = data.threadRetentionHours;
+        }
+        if (data.providerApiKeys !== undefined) {
+            const providerApiKeyUpdates = data.providerApiKeys;
+            return database.transaction(async (trx) => {
+                const currentRow = await trx(AiOrganizationSettingsTableName)
+                    .select('encrypted_provider_api_keys', 'provider_base_urls')
+                    .where('organization_uuid', organizationUuid)
+                    .forUpdate()
+                    .first<
+                        | Pick<
+                              DbAiOrganizationSettings,
+                              | 'encrypted_provider_api_keys'
+                              | 'provider_base_urls'
+                          >
+                        | undefined
+                    >();
+
+                if (!currentRow) {
+                    throw new NotFoundError(
+                        `AI organization settings not found for organization ${organizationUuid}`,
+                    );
+                }
+
+                const existingKeys = this.decryptProviderApiKeys(currentRow);
+                const mergedKeys = applyProviderApiKeyUpdates(
+                    existingKeys,
+                    providerApiKeyUpdates,
+                );
+                updateData.encrypted_provider_api_keys =
+                    this.encryptProviderApiKeys(mergedKeys);
+                updateData.provider_api_key_hints =
+                    buildProviderApiKeyHints(mergedKeys);
+                updateData.provider_base_urls =
+                    mergedKeys.providerBaseUrls ?? null;
+
+                const [row] = await trx<AiOrganizationSettingsTable>(
+                    AiOrganizationSettingsTableName,
+                )
+                    .where('organization_uuid', organizationUuid)
+                    .update(updateData)
+                    .returning('*');
+
+                if (!row) {
+                    throw new NotFoundError(
+                        `AI organization settings not found for organization ${organizationUuid}`,
+                    );
+                }
+
+                return this.mapDbToEntity(row);
+            });
+        }
+        if (Object.keys(updateData).length === 0) {
+            return this.getByOrganizationUuid(organizationUuid, database);
+        }
+
+        const [row] = await database<AiOrganizationSettingsTable>(
             AiOrganizationSettingsTableName,
         )
             .where('organization_uuid', organizationUuid)
-            .update({
-                ai_agents_visible: data.aiAgentsVisible,
-            })
+            .update(updateData)
             .returning('*');
 
         if (!row) {
@@ -96,16 +584,46 @@ export class AiOrganizationSettingsModel {
     async upsert(
         organizationUuid: string,
         data: UpdateAiOrganizationSettings,
-    ): Promise<AiOrganizationSettings> {
-        const existing = await this.findByOrganizationUuid(organizationUuid);
+        database: Knex = this.database,
+    ): Promise<StoredAiOrganizationSettings> {
+        const existing = await this.findByOrganizationUuid(
+            organizationUuid,
+            database,
+        );
 
         if (existing) {
-            return this.update(organizationUuid, data);
+            return this.update(organizationUuid, data, database);
         }
-        return this.create({
-            organizationUuid,
-            aiAgentsVisible: data.aiAgentsVisible,
-        });
+        return this.create(
+            {
+                organizationUuid,
+                aiAgentsVisible: data.aiAgentsVisible ?? true,
+                aiAgentReviewsEnabled: data.aiAgentReviewsEnabled ?? false,
+                deepResearchLimits:
+                    data.deepResearchLimits ?? AI_DEEP_RESEARCH_DEFAULT_LIMITS,
+                deepResearchRawSqlEnabled:
+                    data.deepResearchRawSqlEnabled ?? false,
+                mcpEnabled: data.mcpEnabled ?? true,
+                mcpContentWritesEnabled: data.mcpContentWritesEnabled ?? true,
+                mcpAgentsEnabled: data.mcpAgentsEnabled ?? true,
+                dataAppRuntimeAiEnabled: data.dataAppRuntimeAiEnabled ?? false,
+                dataAppContinueInAskAiEnabled:
+                    data.dataAppContinueInAskAiEnabled ?? true,
+                dataAppAutoAnalysisEnabled:
+                    data.dataAppAutoAnalysisEnabled ?? false,
+                dataAppAnalysisDefaultInstructions:
+                    data.dataAppAnalysisDefaultInstructions ?? null,
+                requireExplicitSlackChannelLinking:
+                    data.requireExplicitSlackChannelLinking ?? false,
+                defaultAiAgentModelConfig:
+                    data.defaultAiAgentModelConfig ?? null,
+                modelVisibility: data.modelVisibility ?? null,
+                dataAppModelVisibility: data.dataAppModelVisibility ?? null,
+                providerApiKeys: data.providerApiKeys,
+                threadRetentionHours: data.threadRetentionHours ?? null,
+            },
+            database,
+        );
     }
 
     async delete(organizationUuid: string): Promise<void> {

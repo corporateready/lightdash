@@ -7,9 +7,18 @@ import {
 import { notifications } from '@mantine/notifications';
 import { IconArrowRight } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState, type FC } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useState,
+    type FC,
+    type SetStateAction,
+} from 'react';
+import { useNavigate } from 'react-router';
 import useToaster from '../../hooks/toaster/useToaster';
 import {
+    getJobCompletionToast,
     jobStatusLabel,
     runningStepsInfo,
     TOAST_KEY_FOR_REFRESH_JOB,
@@ -19,15 +28,35 @@ import Context from './context';
 
 const ActiveJobProvider: FC<React.PropsWithChildren<{}>> = ({ children }) => {
     const [isJobsDrawerOpen, setIsJobsDrawerOpen] = useState(false);
-    const [activeJobId, setActiveJobId] = useState();
+    const [activeJobId, setActiveJobIdState] = useState<string | undefined>();
+    const [isQuietJob, setIsQuietJob] = useState(false);
     const queryClient = useQueryClient();
-    const { showToastSuccess, showToastApiError, showToastInfo } = useToaster();
+    const navigate = useNavigate();
+    const {
+        showToastSuccess,
+        showToastApiError,
+        showToastInfo,
+        showToastWarning,
+    } = useToaster();
+
+    const setActiveJobId = useCallback(
+        (jobId: SetStateAction<string | undefined>) => {
+            setIsQuietJob(false);
+            setActiveJobIdState(jobId);
+        },
+        [],
+    );
+
+    const setQuietActiveJobId = useCallback((jobId: string) => {
+        setIsQuietJob(true);
+        setActiveJobIdState(jobId);
+    }, []);
 
     const toastJobStatus = useCallback(
         async (job: Job | undefined) => {
             if (!job || isJobsDrawerOpen) return;
 
-            const toastTitle = jobStatusLabel(job?.jobStatus);
+            const toastTitle = jobStatusLabel(job?.jobStatus, job?.jobType);
 
             switch (job.jobStatus) {
                 case 'DONE':
@@ -37,14 +66,39 @@ const ActiveJobProvider: FC<React.PropsWithChildren<{}>> = ({ children }) => {
                             'projects',
                             'defaultProject',
                         ]);
+                        await queryClient.invalidateQueries(['organization']);
                     }
                     await queryClient.invalidateQueries(['parameters']);
-                    showToastSuccess({
-                        key: TOAST_KEY_FOR_REFRESH_JOB,
-                        title: toastTitle,
-                    });
+                    if (isQuietJob) break;
+                    const completionToast = getJobCompletionToast(job);
+                    if (completionToast.variant === 'warning') {
+                        showToastWarning({
+                            key: TOAST_KEY_FOR_REFRESH_JOB,
+                            title: completionToast.title,
+                            subtitle: completionToast.message,
+                            action:
+                                job.projectUuid &&
+                                job.jobType === JobType.COMPILE_PROJECT &&
+                                (job.jobResults?.errorCount ?? 0) > 0
+                                    ? {
+                                          children: 'View errors',
+                                          icon: IconArrowRight,
+                                          onClick: () =>
+                                              navigate(
+                                                  `/generalSettings/projectManagement/${job.projectUuid}/validator`,
+                                              ),
+                                      }
+                                    : undefined,
+                        });
+                    } else {
+                        showToastSuccess({
+                            key: TOAST_KEY_FOR_REFRESH_JOB,
+                            title: completionToast.title,
+                        });
+                    }
                     break;
                 case 'RUNNING':
+                    if (isQuietJob) break;
                     showToastInfo({
                         key: TOAST_KEY_FOR_REFRESH_JOB,
                         title: toastTitle,
@@ -67,7 +121,15 @@ const ActiveJobProvider: FC<React.PropsWithChildren<{}>> = ({ children }) => {
                     setIsJobsDrawerOpen(true);
             }
         },
-        [showToastInfo, showToastSuccess, queryClient, isJobsDrawerOpen],
+        [
+            showToastInfo,
+            showToastSuccess,
+            showToastWarning,
+            queryClient,
+            isJobsDrawerOpen,
+            isQuietJob,
+            navigate,
+        ],
     );
 
     const toastJobError = ({ error }: ApiError) => {
@@ -102,21 +164,27 @@ const ActiveJobProvider: FC<React.PropsWithChildren<{}>> = ({ children }) => {
     }, [activeJob, activeJobId, toastJobStatus, isJobsDrawerOpen, queryClient]);
 
     const activeJobIsRunning = activeJob && activeJob?.jobStatus === 'RUNNING';
-
-    return (
-        <Context.Provider
-            value={{
-                isJobsDrawerOpen,
-                setIsJobsDrawerOpen,
-                activeJobId,
-                setActiveJobId,
-                activeJob,
-                activeJobIsRunning,
-            }}
-        >
-            {children}
-        </Context.Provider>
+    const contextValue = useMemo(
+        () => ({
+            isJobsDrawerOpen,
+            setIsJobsDrawerOpen,
+            activeJobId,
+            setActiveJobId,
+            setQuietActiveJobId,
+            activeJob,
+            activeJobIsRunning,
+        }),
+        [
+            activeJob,
+            activeJobId,
+            activeJobIsRunning,
+            isJobsDrawerOpen,
+            setActiveJobId,
+            setQuietActiveJobId,
+        ],
     );
+
+    return <Context.Provider value={contextValue}>{children}</Context.Provider>;
 };
 
 export default ActiveJobProvider;

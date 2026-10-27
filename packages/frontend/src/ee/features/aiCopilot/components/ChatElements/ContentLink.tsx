@@ -1,21 +1,32 @@
-import { ChartKind, type AiAgentMessageAssistant } from '@lightdash/common';
-import { Anchor, Button, Text } from '@mantine-8/core';
 import {
-    IconArrowRight,
+    assertUnreachable,
+    ChartKind,
+    type AiAgentMessageAssistant,
+} from '@lightdash/common';
+import { Anchor, Button, Text } from '@mantine/core';
+import {
     IconChartBar,
     IconLayoutDashboard,
     IconTerminal2,
 } from '@tabler/icons-react';
-import { type FC, type ReactNode } from 'react';
-import { Link } from 'react-router';
+import { type FC, type MouseEvent, type ReactNode } from 'react';
+import { Link, createPath, useLocation, useNavigate } from 'react-router';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import { getChartIcon } from '../../../../../components/common/ResourceIcon/utils';
-import { setArtifact } from '../../store/aiArtifactSlice';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
+import { useEmbedAiAgentDashboardOpener } from '../../hooks/useEmbedAiAgentDashboardOpener';
+import { useIsAiAgentNavigationDisabled } from '../../hooks/useIsAiAgentNavigationDisabled';
+import { selectPreview, setPreview } from '../../store/aiArtifactSlice';
 import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
 } from '../../store/hooks';
 import styles from './ContentLink.module.css';
+import { ContentReferenceLink } from './ContentReferenceLink';
+import { type ContentType } from './rehypeContentLinks';
+import {
+    isPlainLeftClick,
+    useDataAppPreviewLink,
+} from './useDataAppPreviewLink';
 
 export type SqlRunnerLinkState = {
     sql: string;
@@ -23,13 +34,14 @@ export type SqlRunnerLinkState = {
 };
 
 type ContentLinkProps = {
-    contentType: string | undefined;
+    contentType: ContentType | undefined;
     props: Record<string, unknown>;
     children: ReactNode;
     message: AiAgentMessageAssistant;
     projectUuid: string;
     agentUuid: string;
     sqlRunnerLinkState?: SqlRunnerLinkState | null;
+    onDashboardLinkClick?: (url: string) => void;
 };
 
 export const ContentLink: FC<ContentLinkProps> = ({
@@ -40,51 +52,185 @@ export const ContentLink: FC<ContentLinkProps> = ({
     projectUuid,
     agentUuid,
     sqlRunnerLinkState,
+    onDashboardLinkClick,
 }) => {
+    const navigate = useNavigate();
+    const location = useLocation();
     const dispatch = useAiAgentStoreDispatch();
-    const currentArtifact = useAiAgentStoreSelector(
-        (state) => state.aiArtifact.artifact,
-    );
+    const currentPreview = useAiAgentStoreSelector(selectPreview);
+    // Inside an embedded agent the full app is unreachable: dashboards open
+    // on the embed route, charts in the side panel, everything else is static.
+    const isEmbed = useIsEmbedded();
+    const openEmbedDashboard = useEmbedAiAgentDashboardOpener(projectUuid);
+    const navigationDisabled = useIsAiAgentNavigationDisabled();
+    const resourceHref = typeof props.href === 'string' ? props.href : '';
+    const title = typeof props.title === 'string' ? props.title : undefined;
+    const dataAppUuid =
+        'data-app-uuid' in props && typeof props['data-app-uuid'] === 'string'
+            ? props['data-app-uuid']
+            : null;
+    const dataAppPreviewLink = useDataAppPreviewLink(dataAppUuid, {
+        messageUuid: message.uuid,
+        threadUuid: message.threadUuid,
+        projectUuid,
+        agentUuid,
+    });
+
+    const handleResourceClick = (e: MouseEvent<HTMLAnchorElement>) => {
+        if (!resourceHref || !isPlainLeftClick(e)) {
+            return;
+        }
+
+        e.preventDefault();
+
+        const currentPath = createPath({
+            pathname: location.pathname,
+            search: location.search,
+        });
+        const targetUrl = new URL(resourceHref, window.location.origin);
+        const targetPath = createPath({
+            pathname: targetUrl.pathname,
+            search: targetUrl.search,
+        });
+
+        if (onDashboardLinkClick) {
+            onDashboardLinkClick(targetPath);
+        } else if (targetPath !== currentPath) {
+            void navigate(targetPath, { viewTransition: true });
+        }
+    };
+
+    if (contentType === undefined) {
+        return <a {...props}>{children}</a>;
+    }
 
     switch (contentType) {
-        case 'dashboard-link':
+        // Documents have no embed surface, so the chip stays a static reference.
+        case 'document-link': {
+            const documentUuidOrSlug =
+                'data-document-uuid' in props &&
+                typeof props['data-document-uuid'] === 'string'
+                    ? props['data-document-uuid']
+                    : undefined;
+            const handleDocumentClick = (e: MouseEvent<HTMLAnchorElement>) => {
+                if (!documentUuidOrSlug || !isPlainLeftClick(e)) {
+                    return;
+                }
+                e.preventDefault();
+                dispatch(
+                    setPreview({
+                        type: 'document',
+                        documentUuidOrSlug,
+                        messageUuid: message.uuid,
+                        threadUuid: message.threadUuid,
+                        projectUuid,
+                        agentUuid,
+                    }),
+                );
+            };
             return (
-                <Anchor
-                    {...props}
-                    data-content-link="true"
-                    target="_blank"
-                    fz="xs"
-                    fw={500}
-                    c="ldGray.8"
-                    td="none"
-                    classNames={{
-                        root: styles.contentLink,
-                    }}
+                <ContentReferenceLink
+                    to={isEmbed ? undefined : resourceHref || undefined}
+                    kind="document"
+                    onClick={isEmbed ? undefined : handleDocumentClick}
+                    title={title}
                 >
-                    <MantineIcon
-                        icon={IconLayoutDashboard}
-                        size={13}
-                        color="green.7"
-                        fill="green.6"
-                        fillOpacity={0.2}
-                        stroke={1.5}
-                    />
+                    {children}
+                </ContentReferenceLink>
+            );
+        }
 
-                    {/* margin is added by md package */}
-                    <Text fz="xs" fw={500} m={0}>
+        case 'dashboard-link': {
+            const dashboardUuid =
+                'data-dashboard-uuid' in props &&
+                typeof props['data-dashboard-uuid'] === 'string'
+                    ? props['data-dashboard-uuid']
+                    : undefined;
+            if (navigationDisabled) {
+                return (
+                    <ContentReferenceLink
+                        kind="dashboard"
+                        showArrow={false}
+                        title={title}
+                    >
                         {children}
-                    </Text>
+                    </ContentReferenceLink>
+                );
+            }
+            if (openEmbedDashboard) {
+                const anchorId = `assistant-${message.uuid}-dashboard-${dashboardUuid}`;
+                return (
+                    <ContentReferenceLink
+                        kind="dashboard"
+                        data-chat-anchor={anchorId}
+                        onClick={
+                            dashboardUuid
+                                ? () =>
+                                      openEmbedDashboard(
+                                          dashboardUuid,
+                                          anchorId,
+                                      )
+                                : undefined
+                        }
+                        title={title}
+                    >
+                        {children}
+                    </ContentReferenceLink>
+                );
+            }
+            return (
+                <ContentReferenceLink
+                    to={resourceHref || undefined}
+                    kind="dashboard"
+                    onClick={handleResourceClick}
+                    title={title}
+                >
+                    {children}
+                </ContentReferenceLink>
+            );
+        }
 
-                    <MantineIcon
-                        icon={IconArrowRight}
-                        color="ldGray.6"
-                        size={11}
-                        stroke={1.5}
-                    />
-                </Anchor>
+        // Resource view URL with ?scheduler_uuid — navigating opens that
+        // delivery's edit modal on the chart/dashboard page, which an embed
+        // cannot reach.
+        case 'scheduled-delivery-link':
+            return (
+                <ContentReferenceLink
+                    to={isEmbed ? undefined : resourceHref || undefined}
+                    kind="scheduled_delivery"
+                    onClick={isEmbed ? undefined : handleResourceClick}
+                    title={title}
+                >
+                    {children}
+                </ContentReferenceLink>
+            );
+
+        case 'data-app-link':
+            return (
+                <ContentReferenceLink
+                    to={resourceHref || undefined}
+                    kind="data_app"
+                    data-app-active={dataAppPreviewLink.isActive || undefined}
+                    onClick={dataAppPreviewLink.onClick}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={title}
+                >
+                    {children}
+                </ContentReferenceLink>
             );
 
         case 'chart-link': {
+            const chartUuid =
+                'data-chart-uuid' in props &&
+                typeof props['data-chart-uuid'] === 'string'
+                    ? props['data-chart-uuid']
+                    : undefined;
+            const chartSource =
+                'data-chart-source' in props &&
+                typeof props['data-chart-source'] === 'string'
+                    ? props['data-chart-source']
+                    : undefined;
             const chartType =
                 'data-chart-type' in props &&
                 typeof props['data-chart-type'] === 'string'
@@ -95,44 +241,73 @@ export const ContentLink: FC<ContentLinkProps> = ({
                 chartType &&
                 Object.values(ChartKind).includes(chartType as ChartKind)
                     ? (chartType as ChartKind)
-                    : undefined;
+                    : ChartKind.VERTICAL_BAR;
+            const href = typeof props.href === 'string' ? props.href : '';
+            const isSavedChart = chartSource !== 'sql-runner' && !!chartUuid;
+            const isActive =
+                isSavedChart &&
+                currentPreview?.type === 'savedChart' &&
+                currentPreview.savedChartUuid === chartUuid;
+
+            const handleChartClick = (e: MouseEvent<HTMLAnchorElement>) => {
+                if (!isSavedChart || !chartUuid || !isPlainLeftClick(e)) {
+                    return;
+                }
+
+                e.preventDefault();
+                dispatch(
+                    setPreview({
+                        type: 'savedChart',
+                        savedChartUuid: chartUuid,
+                        messageUuid: message.uuid,
+                        threadUuid: message.threadUuid,
+                        projectUuid,
+                        agentUuid,
+                    }),
+                );
+            };
+
+            if (navigationDisabled) {
+                return (
+                    <ContentReferenceLink
+                        chartKind={chartTypeKind}
+                        kind="chart"
+                        showArrow={false}
+                        title={title}
+                    >
+                        {children}
+                    </ContentReferenceLink>
+                );
+            }
+
+            // In an embed the chart opens in the side panel only.
+            if (isEmbed) {
+                return (
+                    <ContentReferenceLink
+                        chartKind={chartTypeKind}
+                        kind="chart"
+                        data-chart-active={isActive || undefined}
+                        onClick={isSavedChart ? handleChartClick : undefined}
+                        title={title}
+                    >
+                        {children}
+                    </ContentReferenceLink>
+                );
+            }
 
             return (
-                <Anchor
-                    {...props}
-                    data-content-link="true"
+                <ContentReferenceLink
+                    chartKind={chartTypeKind}
+                    to={href || undefined}
+                    kind="chart"
+                    data-chart-active={isActive || undefined}
+                    onClick={handleChartClick}
+                    rel="noreferrer"
                     target="_blank"
-                    fz="xs"
-                    fw={500}
-                    c="ldGray.8"
-                    td="none"
-                    classNames={{
-                        root: styles.contentLink,
-                    }}
+                    title={title}
                 >
-                    {chartTypeKind && (
-                        <MantineIcon
-                            icon={getChartIcon(chartTypeKind)}
-                            size={13}
-                            color="blue.7"
-                            fill="blue.4"
-                            fillOpacity={0.2}
-                            stroke={1.5}
-                        />
-                    )}
-
-                    {/* margin is added by md package */}
-                    <Text fz="xs" fw={500} m={0}>
-                        {children}
-                    </Text>
-
-                    <MantineIcon
-                        icon={IconArrowRight}
-                        color="ldGray.6"
-                        size={11}
-                        stroke={1.5}
-                    />
-                </Anchor>
+                    {children}
+                </ContentReferenceLink>
             );
         }
 
@@ -161,9 +336,9 @@ export const ContentLink: FC<ContentLinkProps> = ({
                       : IconChartBar;
 
             const isActive =
-                currentArtifact &&
-                currentArtifact.artifactUuid === artifactUuid &&
-                currentArtifact.versionUuid === versionUuid;
+                currentPreview?.type === 'artifact' &&
+                currentPreview.artifactUuid === artifactUuid &&
+                currentPreview.versionUuid === versionUuid;
 
             return (
                 <Anchor
@@ -181,7 +356,8 @@ export const ContentLink: FC<ContentLinkProps> = ({
                         e.preventDefault();
                         if (artifactUuid && versionUuid) {
                             dispatch(
-                                setArtifact({
+                                setPreview({
+                                    type: 'artifact',
                                     artifactUuid,
                                     versionUuid,
                                     messageUuid: message.uuid,
@@ -210,6 +386,35 @@ export const ContentLink: FC<ContentLinkProps> = ({
             );
         }
 
+        case 'settings-link': {
+            // Same-origin settings deep-link (e.g. the "link your personal
+            // GitHub" nudge). Open in a new tab so the chat thread stays put,
+            // using the captured relative path to keep it same-origin.
+            const settingsPath =
+                'data-settings-path' in props &&
+                typeof props['data-settings-path'] === 'string'
+                    ? props['data-settings-path']
+                    : typeof props.href === 'string'
+                      ? props.href
+                      : undefined;
+
+            if (!settingsPath) return <a {...props}>{children}</a>;
+            if (isEmbed) return <>{children}</>;
+
+            return (
+                <Anchor
+                    component={Link}
+                    to={settingsPath}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={title}
+                    inherit
+                >
+                    {children}
+                </Anchor>
+            );
+        }
+
         case 'sql-runner-link': {
             const state =
                 sqlRunnerLinkState?.limit !== undefined
@@ -221,7 +426,7 @@ export const ContentLink: FC<ContentLinkProps> = ({
                       ? { sql: sqlRunnerLinkState.sql }
                       : undefined;
 
-            if (!state) return null;
+            if (!state || isEmbed) return null;
 
             return (
                 <Button
@@ -242,6 +447,9 @@ export const ContentLink: FC<ContentLinkProps> = ({
         }
 
         default:
-            return <a {...props}>{children}</a>;
+            return assertUnreachable(
+                contentType,
+                `Unknown content type: ${contentType}`,
+            );
     }
 };

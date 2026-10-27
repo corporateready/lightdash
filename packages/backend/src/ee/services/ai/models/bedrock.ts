@@ -2,9 +2,15 @@ import {
     AmazonBedrockProvider,
     createAmazonBedrock,
 } from '@ai-sdk/amazon-bedrock';
+import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import type { EmbeddingModel } from 'ai';
 import { LightdashConfig } from '../../../../config/parseConfig';
-import { ModelPreset } from './presets';
+import {
+    ModelPreset,
+    ReasoningEffort,
+    XHIGH_MAX_OUTPUT_TOKENS,
+    XHIGH_THINKING_BUDGET_TOKENS,
+} from './presets';
 import { AiModel } from './types';
 
 const PROVIDER = 'bedrock';
@@ -29,29 +35,41 @@ export const getBedrockProvider = (
     config: NonNullable<
         LightdashConfig['ai']['copilot']['providers']['bedrock']
     >,
-): AmazonBedrockProvider =>
-    'apiKey' in config
-        ? createAmazonBedrock({
-              apiKey: config.apiKey,
-              region: config.region,
-              headers: config.customHeaders,
-          })
-        : createAmazonBedrock({
-              region: config.region,
-              accessKeyId: config.accessKeyId,
-              secretAccessKey: config.secretAccessKey,
-              headers: config.customHeaders,
-              ...(config.sessionToken
-                  ? { sessionToken: config.sessionToken }
-                  : {}),
-          });
+): AmazonBedrockProvider => {
+    if ('apiKey' in config) {
+        return createAmazonBedrock({
+            apiKey: config.apiKey,
+            region: config.region,
+            ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+            headers: config.customHeaders,
+        });
+    }
+    if ('accessKeyId' in config) {
+        return createAmazonBedrock({
+            region: config.region,
+            ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+            accessKeyId: config.accessKeyId,
+            secretAccessKey: config.secretAccessKey,
+            headers: config.customHeaders,
+            ...(config.sessionToken
+                ? { sessionToken: config.sessionToken }
+                : {}),
+        });
+    }
+    return createAmazonBedrock({
+        region: config.region,
+        ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+        headers: config.customHeaders,
+        credentialProvider: fromNodeProviderChain(),
+    });
+};
 
 export const getBedrockModel = (
     config: NonNullable<
         LightdashConfig['ai']['copilot']['providers']['bedrock']
     >,
     preset: ModelPreset<'bedrock'>,
-    options?: { enableReasoning?: boolean },
+    options?: { enableReasoning?: boolean; reasoningEffort?: ReasoningEffort },
 ): AiModel<typeof PROVIDER> => {
     const bedrock = getBedrockProvider(config);
     /** @ref https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock#api-model-ids */
@@ -64,21 +82,44 @@ export const getBedrockModel = (
     const reasoningEnabled =
         options?.enableReasoning && preset.supportsReasoning;
 
+    const reasoningStyle = preset.reasoningStyle ?? 'budget';
+    const effort = options?.reasoningEffort ?? 'medium';
+
     return {
         model,
         callOptions: {
             ...preset.callOptions,
             ...(reasoningEnabled && { temperature: undefined }),
+            ...(reasoningEnabled &&
+                effort === 'xhigh' && {
+                    maxOutputTokens: XHIGH_MAX_OUTPUT_TOKENS,
+                }),
         },
         providerOptions: {
             [PROVIDER]: {
                 ...(preset.providerOptions || {}),
-                ...(reasoningEnabled && {
-                    reasoningConfig: {
-                        type: 'enabled',
-                        budgetTokens: 2048,
-                    },
-                }),
+                ...(reasoningEnabled &&
+                    (reasoningStyle === 'adaptive'
+                        ? {
+                              // Claude 4.7+ models reject `budget_tokens` and
+                              // require adaptive thinking with an effort level.
+                              // @ai-sdk/amazon-bedrock maps this to
+                              // `thinking.type: 'adaptive'` + `output_config.effort`
+                              // for Anthropic models from 4.0.148+.
+                              reasoningConfig: {
+                                  type: 'adaptive' as const,
+                                  maxReasoningEffort: effort,
+                              },
+                          }
+                        : {
+                              reasoningConfig: {
+                                  type: 'enabled' as const,
+                                  budgetTokens:
+                                      effort === 'xhigh'
+                                          ? XHIGH_THINKING_BUDGET_TOKENS
+                                          : 2048,
+                              },
+                          })),
             },
         },
     };

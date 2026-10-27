@@ -16,11 +16,15 @@ import {
     type UseQueryOptions,
 } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
+import useEmbed from '../ee/providers/Embed/useEmbed';
 import useApp from '../providers/App/useApp';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import { convertDateFilters } from '../utils/dateFilter';
 import useToaster from './toaster/useToaster';
 import { invalidateContent } from './useContent';
+import { useOptionalProjectRoute } from './useProjectRoute';
+import { useProjectUuid } from './useProjectUuid';
 import useSearchParams from './useSearchParams';
 
 const isCustomSqlDimensionForbiddenError = (
@@ -30,7 +34,8 @@ const isCustomSqlDimensionForbiddenError = (
     typeof error.message === 'string' &&
     error.message.toLowerCase().includes('custom sql dimensions');
 
-const createSavedQuery = async (
+export const createSavedQuery = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     payload: CreateSavedChart,
 ): Promise<SavedChart> => {
@@ -50,6 +55,7 @@ const createSavedQuery = async (
 };
 
 const duplicateSavedQuery = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     chartUuid: string,
     data: { chartName: string; chartDesc: string },
@@ -60,7 +66,11 @@ const duplicateSavedQuery = async (
         body: JSON.stringify(data),
     });
 
-const deleteSavedQuery = async (id: string, projectUuid: string) =>
+const deleteSavedQuery = async (
+    lightdashApi: LightdashApi,
+    id: string,
+    projectUuid: string,
+) =>
     lightdashApi<null>({
         url: `/projects/${projectUuid}/saved/${id}`,
         version: 'v2',
@@ -69,6 +79,7 @@ const deleteSavedQuery = async (id: string, projectUuid: string) =>
     });
 
 const updateSavedQuery = async (
+    lightdashApi: LightdashApi,
     id: string,
     data: UpdateSavedChart,
 ): Promise<SavedChart> => {
@@ -80,28 +91,36 @@ const updateSavedQuery = async (
             description: data.description,
             spaceUuid: data.spaceUuid,
             colorPaletteUuid: data.colorPaletteUuid,
+            preserveVerification: data.preserveVerification,
         }),
     });
 };
 
 export const getSavedQuery = async (
+    lightdashApi: LightdashApi,
     id: string,
     projectUuid: string,
+    includeUnpublishedDraft = false,
 ): Promise<SavedChart> =>
     lightdashApi<SavedChart>({
-        url: `/projects/${projectUuid}/saved/${id}`,
+        url: `/projects/${projectUuid}/saved/${id}${
+            includeUnpublishedDraft ? '?includeUnpublishedDraft=true' : ''
+        }`,
         version: 'v2',
         method: 'GET',
         body: undefined,
     });
 
-const addVersionSavedQuery = async ({
-    uuid,
-    payload,
-}: {
-    uuid: string;
-    payload: CreateSavedChartVersion;
-}): Promise<SavedChart> => {
+const addVersionSavedQuery = async (
+    lightdashApi: LightdashApi,
+    {
+        uuid,
+        payload,
+    }: {
+        uuid: string;
+        payload: CreateSavedChartVersion;
+    },
+): Promise<SavedChart> => {
     const timezoneFixPayload: CreateSavedChartVersion = {
         ...payload,
         metricQuery: {
@@ -120,6 +139,7 @@ const addVersionSavedQuery = async ({
 interface Args {
     uuidOrSlug?: string;
     projectUuid?: string;
+    includeUnpublishedDraft?: boolean;
     useQueryOptions?: UseQueryOptions<SavedChart, ApiError>;
 }
 
@@ -127,33 +147,52 @@ export const useSavedQuery = ({
     uuidOrSlug,
     projectUuid,
     useQueryOptions,
-}: Args) =>
-    useQuery<SavedChart, ApiError>({
-        queryKey: ['saved_query', uuidOrSlug, projectUuid],
+    includeUnpublishedDraft = false,
+}: Args) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<SavedChart, ApiError>({
+        queryKey: [
+            'saved_query',
+            uuidOrSlug,
+            projectUuid,
+            includeUnpublishedDraft,
+        ],
         queryFn: async () => {
             if (!projectUuid) throw new Error('projectUuid is required');
-            return getSavedQuery(uuidOrSlug || '', projectUuid);
+            return getSavedQuery(
+                lightdashApi,
+                uuidOrSlug || '',
+                projectUuid,
+                includeUnpublishedDraft,
+            );
         },
         enabled: uuidOrSlug !== undefined && !!projectUuid,
         retry: false,
         ...useQueryOptions,
     });
+};
 
-const getChartHistoryQuery = async (chartUuid: string): Promise<ChartHistory> =>
+const getChartHistoryQuery = async (
+    lightdashApi: LightdashApi,
+    chartUuid: string,
+): Promise<ChartHistory> =>
     lightdashApi<ChartHistory>({
         url: `/saved/${chartUuid}/history`,
         method: 'GET',
         body: undefined,
     });
 
-export const useChartHistory = (chartUuid: string | undefined) =>
-    useQuery<ChartHistory, ApiError>({
+export const useChartHistory = (chartUuid: string | undefined) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ChartHistory, ApiError>({
         queryKey: ['chart_history', chartUuid],
-        queryFn: () => getChartHistoryQuery(chartUuid!),
+        queryFn: () => getChartHistoryQuery(lightdashApi, chartUuid!),
         enabled: chartUuid !== undefined,
         retry: false,
     });
+};
 const getChartVersionQuery = async (
+    lightdashApi: LightdashApi,
     chartUuid: string,
     versionUuid: string,
 ): Promise<ChartVersion> =>
@@ -166,15 +205,19 @@ const getChartVersionQuery = async (
 export const useChartVersion = (
     chartUuid: string | undefined,
     versionUuid?: string,
-) =>
-    useQuery<ChartVersion, ApiError>({
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ChartVersion, ApiError>({
         queryKey: ['chart_version', chartUuid, versionUuid],
-        queryFn: () => getChartVersionQuery(chartUuid!, versionUuid!),
+        queryFn: () =>
+            getChartVersionQuery(lightdashApi, chartUuid!, versionUuid!),
         enabled: versionUuid !== undefined && chartUuid !== undefined,
         retry: false,
     });
+};
 
 const rollbackChartQuery = async (
+    lightdashApi: LightdashApi,
     chartUuid: string,
     versionUuid: string,
 ): Promise<null> =>
@@ -190,12 +233,13 @@ export const useChartVersionRollbackMutation = (
         'mutationFn'
     >,
 ) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<null, ApiError, string>(
         (versionUuid: string) =>
             chartUuid && versionUuid
-                ? rollbackChartQuery(chartUuid, versionUuid)
+                ? rollbackChartQuery(lightdashApi, chartUuid, versionUuid)
                 : Promise.reject(),
         {
             mutationKey: ['saved_query_rollback'],
@@ -227,6 +271,7 @@ export const useChartVersionRollbackMutation = (
 };
 
 export const useSavedQueryDeleteMutation = (projectUuid?: string) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const navigate = useNavigate();
     const { health } = useApp();
@@ -238,7 +283,7 @@ export const useSavedQueryDeleteMutation = (projectUuid?: string) => {
                 throw new Error('Project UUID is undefined');
             }
             queryClient.removeQueries(['savedChartResults', data]);
-            return deleteSavedQuery(data, projectUuid);
+            return deleteSavedQuery(lightdashApi, data, projectUuid);
         },
         {
             mutationKey: ['saved_query_create'],
@@ -275,6 +320,7 @@ export const useUpdateMutation = (
     dashboardUuid?: string,
     savedQueryUuid?: string,
 ) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
     const queryClient = useQueryClient();
     const params = useParams();
@@ -283,11 +329,14 @@ export const useUpdateMutation = (
     return useMutation<
         SavedChart,
         ApiError,
-        Pick<UpdateSavedChart, 'name' | 'description' | 'colorPaletteUuid'>
+        Pick<
+            UpdateSavedChart,
+            'name' | 'description' | 'colorPaletteUuid' | 'preserveVerification'
+        >
     >(
         (data) => {
             if (savedQueryUuid) {
-                return updateSavedQuery(savedQueryUuid, data);
+                return updateSavedQuery(lightdashApi, savedQueryUuid, data);
             }
             throw new Error('Saved chart ID is undefined');
         },
@@ -312,12 +361,20 @@ export const useUpdateMutation = (
                     'color-palette',
                 ]);
 
-                queryClient.setQueryData(
-                    ['saved_query', data.uuid, data.projectUuid],
+                queryClient.setQueriesData(
+                    {
+                        queryKey: ['saved_query', data.uuid, data.projectUuid],
+                    },
                     data,
                 );
-                queryClient.setQueryData(
-                    ['saved_query', params.savedQueryUuid, data.projectUuid],
+                queryClient.setQueriesData(
+                    {
+                        queryKey: [
+                            'saved_query',
+                            params.savedQueryUuid,
+                            data.projectUuid,
+                        ],
+                    },
                     data,
                 );
 
@@ -330,14 +387,16 @@ export const useUpdateMutation = (
                 });
 
                 showToastSuccess({
-                    title: `Success! Chart was saved.`,
+                    title: data.hasUnpublishedChanges
+                        ? 'Chart draft saved for review'
+                        : 'Success! Chart was saved.',
                     action: dashboardUuid
                         ? {
                               children: 'Open dashboard',
                               icon: IconArrowRight,
                               onClick: () =>
                                   navigate(
-                                      `/projects/${data.projectUuid}/dashboards/${dashboardUuid}`,
+                                      `/projects/${data.projectUuid}/dashboards/${data.dashboardSlug ?? dashboardUuid}`,
                                   ),
                           }
                         : undefined,
@@ -356,21 +415,33 @@ export const useUpdateMutation = (
 export const useCreateMutation = ({
     redirectOnSuccess = true,
     showToastOnSuccess = true,
-}: { redirectOnSuccess?: boolean; showToastOnSuccess?: boolean } = {}) => {
+    showViewChartAction = true,
+    projectUuid: explicitProjectUuid,
+}: {
+    redirectOnSuccess?: boolean;
+    showToastOnSuccess?: boolean;
+    showViewChartAction?: boolean;
+    /** Overrides the route/embed project — for surfaces not mounted under a project route */
+    projectUuid?: string;
+} = {}) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const routeProjectUuid = useProjectUuid();
+    const projectUuid = explicitProjectUuid ?? routeProjectUuid;
     const queryClient = useQueryClient();
+    const { embedToken } = useEmbed();
+    const isEmbedded = embedToken !== undefined;
     const { showToastSuccess, showToastError, showToastApiError } =
         useToaster();
     return useMutation<SavedChart, ApiError, CreateSavedChart>(
         (data) =>
             projectUuid
-                ? createSavedQuery(projectUuid, data)
+                ? createSavedQuery(lightdashApi, projectUuid, data)
                 : Promise.reject(),
         {
             mutationKey: ['saved_query_create', projectUuid],
             onSuccess: (data) => {
-                const navigateUrl = `/projects/${projectUuid}/saved/${data.uuid}/view`;
+                const navigateUrl = `/projects/${projectUuid}/saved/${data.slug}/view`;
                 queryClient.setQueryData(
                     ['saved_query', data.uuid, data.projectUuid],
                     data,
@@ -378,13 +449,16 @@ export const useCreateMutation = ({
                 if (showToastOnSuccess) {
                     showToastSuccess({
                         title: `Success! Chart was saved.`,
-                        action: redirectOnSuccess
-                            ? undefined
-                            : {
-                                  children: 'View chart',
-                                  icon: IconArrowRight,
-                                  onClick: () => navigate(navigateUrl),
-                              },
+                        action:
+                            isEmbedded ||
+                            redirectOnSuccess ||
+                            !showViewChartAction
+                                ? undefined
+                                : {
+                                      children: 'View chart',
+                                      icon: IconArrowRight,
+                                      onClick: () => navigate(navigateUrl),
+                                  },
                     });
                 }
                 if (redirectOnSuccess) {
@@ -420,8 +494,9 @@ type DuplicateChartMutationOptions = {
 export const useDuplicateChartMutation = (
     options?: DuplicateChartMutationOptions,
 ) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<
@@ -431,7 +506,7 @@ export const useDuplicateChartMutation = (
     >(
         ({ uuid, name, description }) =>
             projectUuid
-                ? duplicateSavedQuery(projectUuid, uuid, {
+                ? duplicateSavedQuery(lightdashApi, projectUuid, uuid, {
                       chartName: name,
                       chartDesc: description ?? '',
                   })
@@ -451,7 +526,7 @@ export const useDuplicateChartMutation = (
                     options?.autoRedirect !== false
                 ) {
                     void navigate(
-                        `/projects/${projectUuid}/saved/${data.uuid}`,
+                        `/projects/${projectUuid}/saved/${data.slug}`,
                     );
                 }
 
@@ -465,7 +540,7 @@ export const useDuplicateChartMutation = (
                               icon: IconArrowRight,
                               onClick: () => {
                                   void navigate(
-                                      `/projects/${projectUuid}/saved/${data.uuid}`,
+                                      `/projects/${projectUuid}/saved/${data.slug}`,
                                   );
                               },
                           }
@@ -482,10 +557,18 @@ export const useDuplicateChartMutation = (
     );
 };
 
-export const useAddVersionMutation = () => {
+export const useAddVersionMutation = (options?: {
+    // Embeds save in place (e.g. the dashboard builder's chart editor); the
+    // chart view route doesn't exist there and would hit the auth guard.
+    redirectOnSuccess?: boolean;
+}) => {
+    const lightdashApi = useLightdashApi();
+    const redirectOnSuccess = options?.redirectOnSuccess ?? true;
     const navigate = useNavigate();
     const queryClient = useQueryClient();
+    const params = useParams();
     const dashboardUuid = useSearchParams('fromDashboard');
+    const projectRoute = useOptionalProjectRoute();
 
     const { showToastSuccess, showToastError, showToastApiError } =
         useToaster();
@@ -493,75 +576,103 @@ export const useAddVersionMutation = () => {
         SavedChart,
         ApiError,
         { uuid: string; payload: CreateSavedChartVersion }
-    >(addVersionSavedQuery, {
-        mutationKey: ['saved_query_version'],
-        onSuccess: async (data) => {
-            await queryClient.invalidateQueries(['spaces']);
-            await queryClient.invalidateQueries([
-                'most-popular-and-recently-updated',
-            ]);
+    >(
+        (args: { uuid: string; payload: CreateSavedChartVersion }) =>
+            addVersionSavedQuery(lightdashApi, args),
+        {
+            mutationKey: ['saved_query_version'],
+            onSuccess: async (data) => {
+                await queryClient.invalidateQueries(['spaces']);
+                await queryClient.invalidateQueries([
+                    'most-popular-and-recently-updated',
+                ]);
 
-            await queryClient.invalidateQueries([
-                'project',
-                data.projectUuid,
-                'color-palette',
-            ]);
+                await queryClient.invalidateQueries([
+                    'project',
+                    data.projectUuid,
+                    'color-palette',
+                ]);
 
-            queryClient.setQueryData(
-                ['saved_query', data.uuid, data.projectUuid],
-                data,
-            );
-            await queryClient.resetQueries(['savedChartResults', data.uuid]);
-            await queryClient.invalidateQueries(['chart_history', data.uuid]);
-
-            // Always invalidate dashboard chart queries for this chart,
-            // regardless of whether we came from a dashboard
-            await queryClient.resetQueries({
-                predicate: (query) =>
-                    query.queryKey[0] === 'dashboard_chart_ready_query' &&
-                    query.queryKey[2] === data.uuid,
-            });
-
-            if (dashboardUuid) {
-                // Reset create-query cache to sync with Redux state reset
-                // This ensures auto-fetch triggers when returning to view mode
-                await queryClient.resetQueries(['create-query']);
-            }
-
-            if (dashboardUuid)
-                showToastSuccess({
-                    title: `Success! Chart was updated.`,
-                    action: {
-                        children: 'Open dashboard',
-                        icon: IconArrowRight,
-                        onClick: () =>
-                            navigate(
-                                `/projects/${data.projectUuid}/dashboards/${dashboardUuid}`,
-                            ),
+                queryClient.setQueriesData(
+                    {
+                        queryKey: ['saved_query', data.uuid, data.projectUuid],
                     },
-                });
-            else {
-                showToastSuccess({
-                    title: `Success! Chart was updated.`,
-                });
-                void navigate(
-                    `/projects/${data.projectUuid}/saved/${data.uuid}/view`,
+                    data,
                 );
-            }
-        },
-        onError: ({ error }) => {
-            if (isCustomSqlDimensionForbiddenError(error)) {
-                showToastError({
-                    title: "Can't update chart",
-                    subtitle:
-                        "You don't have permission to author custom SQL dimensions. Remove them from your chart to save.",
+                queryClient.setQueriesData(
+                    {
+                        queryKey: [
+                            'saved_query',
+                            params.savedQueryUuid,
+                            data.projectUuid,
+                        ],
+                    },
+                    data,
+                );
+                await queryClient.resetQueries([
+                    'savedChartResults',
+                    data.uuid,
+                ]);
+                await queryClient.invalidateQueries([
+                    'chart_history',
+                    data.uuid,
+                ]);
+
+                // Always invalidate dashboard chart queries for this chart,
+                // regardless of whether we came from a dashboard
+                await queryClient.resetQueries({
+                    predicate: (query) =>
+                        query.queryKey[0] === 'dashboard_chart_ready_query' &&
+                        query.queryKey[2] === data.uuid,
                 });
-                return;
-            }
-            showToastApiError({
-                title: `Failed to update chart`,
-                apiError: error,
-            });
+
+                if (dashboardUuid) {
+                    // Reset create-query cache to sync with Redux state reset
+                    // This ensures auto-fetch triggers when returning to view mode
+                    await queryClient.resetQueries(['create-query']);
+                }
+
+                if (dashboardUuid)
+                    showToastSuccess({
+                        title: data.hasUnpublishedChanges
+                            ? 'Chart draft saved for review'
+                            : 'Success! Chart was updated.',
+                        action: {
+                            children: 'Open dashboard',
+                            icon: IconArrowRight,
+                            onClick: () =>
+                                navigate(
+                                    `/projects/${data.projectUuid}/dashboards/${data.dashboardSlug ?? dashboardUuid}`,
+                                ),
+                        },
+                    });
+                else {
+                    showToastSuccess({
+                        title: data.hasUnpublishedChanges
+                            ? 'Chart draft saved for review'
+                            : 'Success! Chart was updated.',
+                    });
+                    if (redirectOnSuccess) {
+                        void navigate(
+                            `/projects/${projectRoute?.projectUrlIdentifier ?? data.projectUuid}/saved/${data.slug}/view`,
+                        );
+                    }
+                }
+            },
+            onError: ({ error }) => {
+                if (isCustomSqlDimensionForbiddenError(error)) {
+                    showToastError({
+                        title: "Can't update chart",
+                        subtitle:
+                            "You don't have permission to author custom SQL dimensions. Remove them from your chart to save.",
+                    });
+                    return;
+                }
+                showToastApiError({
+                    title: `Failed to update chart`,
+                    apiError: error,
+                });
+            },
         },
-    });
+    );
 };

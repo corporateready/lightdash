@@ -5,44 +5,62 @@ import {
     BulkActionable,
     CreateSchedulerAndTargetsWithoutIds,
     CreateSqlChart,
+    FeatureFlags,
     ForbiddenError,
     isValidFrequency,
     isValidTimezone,
     isVizBarChartConfig,
+    isVizBigNumberConfig,
     isVizLineChartConfig,
     isVizPieChartConfig,
     NotFoundError,
     Organization,
     ParameterError,
     Project,
+    ProjectType,
     QueryExecutionContext,
     SchedulerAndTargets,
+    SchedulerFormat,
     SessionUser,
     SqlChart,
     SqlRunnerPivotQueryBody,
     UpdateSqlChart,
     VIZ_DEFAULT_AGGREGATION,
+    type Account,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import { uniq } from 'lodash';
 import {
     CreateSqlChartVersionEvent,
     LightdashAnalytics,
+    type ViewSqlChart,
 } from '../../analytics/LightdashAnalytics';
+import { getAccountWriteContext } from '../../auth/account';
 import { LightdashConfig } from '../../config/parseConfig';
 import { AnalyticsModel } from '../../models/AnalyticsModel';
+import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
-import { SavedSqlModel } from '../../models/SavedSqlModel';
+import {
+    SavedSqlModel,
+    type SqlChartConnectionBinding,
+    type SqlChartVersionBinding,
+} from '../../models/SavedSqlModel';
 import { SchedulerModel } from '../../models/SchedulerModel';
+import { WarehouseConnectionIdentityModel } from '../../models/WarehouseConnectionIdentityModel/WarehouseConnectionIdentityModel';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
 import { BaseService } from '../BaseService';
 import type {
     SoftDeletableService,
     SoftDeleteOptions,
 } from '../SoftDeletableService';
-import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import {
+    SpacePermissionService,
+    type AccessTarget,
+} from '../SpaceService/SpacePermissionService';
+import { withVersionAgentIdentity } from '../VersionAgentIdentity';
 
 type SavedSqlServiceArguments = {
+    featureFlagModel: Pick<FeatureFlagModel, 'get'>;
     lightdashConfig: LightdashConfig;
     analytics: LightdashAnalytics;
     projectModel: ProjectModel;
@@ -51,6 +69,7 @@ type SavedSqlServiceArguments = {
     schedulerModel: SchedulerModel;
     analyticsModel: AnalyticsModel;
     spacePermissionService: SpacePermissionService;
+    warehouseConnectionIdentityModel: WarehouseConnectionIdentityModel;
 };
 
 // TODO: Rename to SqlRunnerService
@@ -59,6 +78,8 @@ export class SavedSqlService
     extends BaseService
     implements BulkActionable<Knex>, SoftDeletableService
 {
+    private readonly featureFlagModel: Pick<FeatureFlagModel, 'get'>;
+
     private readonly lightdashConfig: LightdashConfig;
 
     private readonly analytics: LightdashAnalytics;
@@ -75,8 +96,11 @@ export class SavedSqlService
 
     private readonly spacePermissionService: SpacePermissionService;
 
+    private readonly warehouseConnectionIdentityModel: WarehouseConnectionIdentityModel;
+
     constructor(args: SavedSqlServiceArguments) {
         super();
+        this.featureFlagModel = args.featureFlagModel;
         this.lightdashConfig = args.lightdashConfig;
         this.analytics = args.analytics;
         this.projectModel = args.projectModel;
@@ -85,13 +109,60 @@ export class SavedSqlService
         this.schedulerModel = args.schedulerModel;
         this.analyticsModel = args.analyticsModel;
         this.spacePermissionService = args.spacePermissionService;
+        this.warehouseConnectionIdentityModel =
+            args.warehouseConnectionIdentityModel;
+    }
+
+    private async getConnectionBinding(
+        projectUuid: string,
+        warehouseConnectionUuid: string | null | undefined,
+    ): Promise<SqlChartConnectionBinding | undefined> {
+        if (
+            (await this.projectModel.getConnectionRoute(projectUuid, {
+                kind: 'original',
+            })) !== 'multi'
+        ) {
+            if (
+                warehouseConnectionUuid !== undefined &&
+                warehouseConnectionUuid !== null
+            ) {
+                throw new ParameterError(
+                    'A SQL chart can name a connection only in a project with multiple connections',
+                );
+            }
+            return undefined;
+        }
+        return {
+            kind: 'connection',
+            warehouseConnectionUuid:
+                await this.warehouseConnectionIdentityModel.getSaveWarehouseConnectionUuid(
+                    projectUuid,
+                    warehouseConnectionUuid ?? null,
+                ),
+        };
+    }
+
+    private async getVersionBinding(
+        projectUuid: string,
+        sqlChart: UpdateSqlChart,
+    ): Promise<SqlChartVersionBinding | undefined> {
+        const warehouseConnectionUuid =
+            sqlChart.versionedData?.warehouseConnectionUuid;
+        const binding = await this.getConnectionBinding(
+            projectUuid,
+            warehouseConnectionUuid,
+        );
+        if (binding === undefined || warehouseConnectionUuid !== undefined) {
+            return binding;
+        }
+        return { kind: 'latest' };
     }
 
     static getCreateVersionEventProperties(
         config: SqlChart['config'],
     ): Pick<
         CreateSqlChartVersionEvent['properties'],
-        'chartKind' | 'barChart' | 'lineChart' | 'pieChart'
+        'chartKind' | 'barChart' | 'lineChart' | 'pieChart' | 'bigNumber'
     > {
         return {
             chartKind: config.type,
@@ -120,6 +191,16 @@ export class SavedSqlService
             pieChart: isVizPieChartConfig(config)
                 ? {
                       groupByCount: config.fieldConfig?.x ? 1 : 0,
+                  }
+                : undefined,
+            bigNumber: isVizBigNumberConfig(config)
+                ? {
+                      hasComparison: !!config.display?.showComparison,
+                      aggregationTypes: uniq(
+                          (config.fieldConfig?.y ?? []).map(
+                              (y) => y.aggregation ?? VIZ_DEFAULT_AGGREGATION,
+                          ),
+                      ),
                   }
                 : undefined,
         };
@@ -162,18 +243,43 @@ export class SavedSqlService
             throw new NotFoundError('Space is required');
         }
 
-        const needsNewSpaceCheck =
-            resource.spaceUuid && spaceUuid !== resource.spaceUuid;
+        // Narrow once: a move targets a different, known space or nothing.
+        const newSpaceUuid =
+            resource.spaceUuid && spaceUuid !== resource.spaceUuid
+                ? resource.spaceUuid
+                : null;
 
-        const ctx = needsNewSpaceCheck
-            ? await this.spacePermissionService.getSpacesAccessContext(
-                  actor.user.userUuid,
-                  [spaceUuid, resource.spaceUuid!],
-              )
-            : await this.spacePermissionService.getSpacesAccessContext(
-                  actor.user.userUuid,
-                  [spaceUuid],
-              );
+        const destinationTargets: AccessTarget[] =
+            newSpaceUuid !== null
+                ? [{ type: 'space', spaceUuid: newSpaceUuid }]
+                : [];
+
+        const currentTarget: AccessTarget =
+            destinationTargets.length === 0 && resource.savedSqlUuid !== null
+                ? {
+                      type: 'sqlChart',
+                      savedSqlUuid: resource.savedSqlUuid,
+                      spaceUuid,
+                  }
+                : { type: 'space', spaceUuid };
+        const targets = [currentTarget, ...destinationTargets];
+        const accessResults =
+            await this.spacePermissionService.resolveAccessBatch(
+                actor.user.userUuid,
+                targets,
+            );
+        const contextsBySpaceUuid = new Map(
+            accessResults.map(({ target, context }) => [
+                target.spaceUuid,
+                context,
+            ]),
+        );
+        const currentContext = contextsBySpaceUuid.get(spaceUuid);
+        if (currentContext === undefined) {
+            throw new ForbiddenError(
+                `You don't have access to ${action} this Saved SQL chart`,
+            );
+        }
 
         const auditedAbility = this.createAuditedAbility(actor.user);
 
@@ -181,7 +287,7 @@ export class SavedSqlService
             auditedAbility.cannot(
                 action,
                 subject('SavedChart', {
-                    ...ctx[spaceUuid],
+                    ...currentContext,
                     metadata: { savedSqlUuid: resource.savedSqlUuid ?? '' },
                 }),
             )
@@ -191,12 +297,18 @@ export class SavedSqlService
             );
         }
 
-        if (needsNewSpaceCheck) {
+        if (newSpaceUuid !== null) {
+            const targetContext = contextsBySpaceUuid.get(newSpaceUuid);
+            if (targetContext === undefined) {
+                throw new ForbiddenError(
+                    `You don't have access to ${action} this Saved SQL chart in the new space`,
+                );
+            }
             if (
                 auditedAbility.cannot(
                     action,
                     subject('SavedChart', {
-                        ...ctx[resource.spaceUuid!],
+                        ...targetContext,
                         metadata: { savedSqlUuid: resource.savedSqlUuid ?? '' },
                     }),
                 )
@@ -207,7 +319,39 @@ export class SavedSqlService
             }
         }
 
-        return ctx[spaceUuid];
+        return currentContext;
+    }
+
+    private async hasChartSpaceAccess(
+        user: SessionUser,
+        spaceUuid: string,
+    ): Promise<boolean> {
+        try {
+            return await this.spacePermissionService.can(
+                'view',
+                user,
+                spaceUuid,
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /** Same view check as getSqlChart, without loading the chart or tracking a view. */
+    async assertCanViewSqlChartBySlug(
+        user: SessionUser,
+        projectUuid: string,
+        slug: string,
+    ): Promise<void> {
+        const savedChart = await this.savedSqlModel.getBySlug(
+            projectUuid,
+            slug,
+        );
+        await this.hasAccess(
+            'view',
+            { user, projectUuid },
+            { savedSqlUuid: savedChart.savedSqlUuid },
+        );
     }
 
     async getSqlChart(
@@ -238,7 +382,7 @@ export class SavedSqlService
             },
         );
 
-        this.analytics.track({
+        const viewEvent: ViewSqlChart = {
             event: 'sql_chart.view',
             userId: user.userUuid,
             properties: {
@@ -246,20 +390,147 @@ export class SavedSqlService
                 projectId: savedChart.project.projectUuid,
                 organizationId: savedChart.organization.organizationUuid,
             },
-        });
+        };
 
-        const resolvedColorPalette =
-            await this.savedSqlModel.resolveColorPalette({
+        const resolvedColorPalette = await this.savedSqlModel
+            .resolveColorPalette({
                 projectUuid: savedChart.project.projectUuid,
                 dashboardUuid: savedChart.dashboard?.uuid,
                 spaceUuid: savedChart.space.uuid,
+            })
+            .catch((error: unknown) => {
+                // Preserve the existing event without qualifying a failed fetch.
+                this.analytics.track(viewEvent);
+                throw error;
             });
 
+        this.analytics.track(viewEvent, {
+            contentId: savedChart.savedSqlUuid,
+            contentType: 'sql_chart',
+            contentName: savedChart.name,
+            projectName: savedChart.project.name ?? null,
+            spaceId: savedChart.space.uuid,
+            spaceName: savedChart.space.name,
+            createdAt: savedChart.createdAt?.toISOString() ?? null,
+            isVerified: null,
+            context:
+                savedChart.project.type === ProjectType.PREVIEW
+                    ? 'preview'
+                    : 'backend',
+            actorType: 'user',
+        });
+
+        const { enabled } = await this.featureFlagModel.get({
+            featureFlagId: FeatureFlags.AgentIdentity,
+            user: {
+                organizationUuid: savedChart.organization.organizationUuid,
+                userUuid: user.userUuid,
+            },
+        });
         return {
-            ...savedChart,
+            ...withVersionAgentIdentity(savedChart, enabled),
             space: {
                 ...savedChart.space,
                 userAccess: spaceCtx.access[0],
+            },
+            resolvedColorPalette,
+        };
+    }
+
+    async getSqlChartFromAccount(
+        account: Account,
+        projectUuid: string,
+        savedSqlUuid: string | undefined,
+        slug?: string,
+    ): Promise<SqlChart> {
+        const { user, embedWriteActions } = getAccountWriteContext(account);
+
+        let savedChart;
+        if (savedSqlUuid) {
+            savedChart = await this.savedSqlModel.getByUuid(savedSqlUuid, {
+                projectUuid,
+            });
+        } else if (slug) {
+            savedChart = await this.savedSqlModel.getBySlug(projectUuid, slug);
+        } else {
+            throw new Error('Either savedSqlUuid or slug must be provided');
+        }
+
+        if (
+            embedWriteActions &&
+            !embedWriteActions.writeSpaceUuids.includes(savedChart.space.uuid)
+        ) {
+            throw new ForbiddenError(
+                'SQL chart does not belong to an embedded write space',
+            );
+        }
+
+        const spaceCtx = await this.hasAccess(
+            'view',
+            {
+                user,
+                projectUuid,
+            },
+            embedWriteActions
+                ? {
+                      savedSqlUuid: null,
+                      spaceUuid: savedChart.space.uuid,
+                  }
+                : { savedSqlUuid: savedChart.savedSqlUuid },
+        );
+
+        const viewEvent: ViewSqlChart = {
+            event: 'sql_chart.view',
+            userId: user.userUuid,
+            properties: {
+                chartId: savedChart.savedSqlUuid,
+                projectId: savedChart.project.projectUuid,
+                organizationId: savedChart.organization.organizationUuid,
+            },
+        };
+
+        const resolvedColorPalette = await this.savedSqlModel
+            .resolveColorPalette({
+                projectUuid: savedChart.project.projectUuid,
+                dashboardUuid: savedChart.dashboard?.uuid,
+                spaceUuid: savedChart.space.uuid,
+            })
+            .catch((error: unknown) => {
+                // Preserve the existing event without qualifying a failed fetch.
+                this.analytics.track(viewEvent);
+                throw error;
+            });
+
+        const projectViewContext =
+            savedChart.project.type === ProjectType.PREVIEW
+                ? 'preview'
+                : 'backend';
+        const isEmbedded = !!embedWriteActions || !account.isRegisteredUser();
+        this.analytics.track(viewEvent, {
+            contentId: savedChart.savedSqlUuid,
+            contentType: 'sql_chart',
+            contentName: savedChart.name,
+            projectName: savedChart.project.name ?? null,
+            spaceId: savedChart.space.uuid,
+            spaceName: savedChart.space.name,
+            createdAt: savedChart.createdAt?.toISOString() ?? null,
+            isVerified: null,
+            context: isEmbedded ? 'embed' : projectViewContext,
+            actorType: isEmbedded ? 'embed' : 'user',
+        });
+
+        const { enabled } = await this.featureFlagModel.get({
+            featureFlagId: FeatureFlags.AgentIdentity,
+            user: {
+                organizationUuid: savedChart.organization.organizationUuid,
+                userUuid: user.userUuid,
+            },
+        });
+        return {
+            ...withVersionAgentIdentity(savedChart, enabled),
+            space: {
+                ...savedChart.space,
+                userAccess: embedWriteActions ? undefined : spaceCtx.access[0],
             },
             resolvedColorPalette,
         };
@@ -279,6 +550,7 @@ export class SavedSqlService
                 subject('CustomSql', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { spaceUuid: sqlChart.spaceUuid },
                 }),
             )
         ) {
@@ -298,6 +570,10 @@ export class SavedSqlService
             user.userUuid,
             projectUuid,
             sqlChart,
+            await this.getConnectionBinding(
+                projectUuid,
+                sqlChart.warehouseConnectionUuid,
+            ),
         );
 
         this.analytics.track({
@@ -366,11 +642,14 @@ export class SavedSqlService
             },
         );
 
-        const updatedChart = await this.savedSqlModel.update({
-            userUuid: user.userUuid,
-            savedSqlUuid,
-            sqlChart,
-        });
+        const updatedChart = await this.savedSqlModel.update(
+            {
+                userUuid: user.userUuid,
+                savedSqlUuid,
+                sqlChart,
+            },
+            await this.getVersionBinding(projectUuid, sqlChart),
+        );
 
         this.analytics.track({
             event: 'sql_chart.updated',
@@ -479,6 +758,7 @@ export class SavedSqlService
     ): Promise<void> {
         const savedChart = await this.savedSqlModel.getByUuid(savedSqlUuid, {
             deleted: true,
+            projectUuid: options?.projectUuid,
         });
         const { projectUuid } = savedChart.project;
         const { organizationUuid } = savedChart.organization;
@@ -548,7 +828,7 @@ export class SavedSqlService
         } else {
             const savedChart = await this.savedSqlModel.getByUuid(
                 savedSqlUuid,
-                { deleted: true },
+                { deleted: true, projectUuid: options?.projectUuid },
             );
             const { projectUuid } = savedChart.project;
             const { organizationUuid } = savedChart.organization;
@@ -586,12 +866,14 @@ export class SavedSqlService
         await this.savedSqlModel.permanentDelete(savedSqlUuid);
     }
 
+    /** @deprecated Superseded by AsyncQueryService.executeAsyncSqlQuery. */
     async getResultJobFromSql(
         user: SessionUser,
         projectUuid: string,
         sql: string,
         limit?: number,
         context: QueryExecutionContext = QueryExecutionContext.SQL_RUNNER,
+        authenticatedAccount: Account | null = null,
     ): Promise<{ jobId: string }> {
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
@@ -616,6 +898,7 @@ export class SavedSqlService
         }
 
         const jobId = await this.schedulerClient.runSql({
+            authMethod: authenticatedAccount?.authentication.type ?? null,
             userUuid: user.userUuid,
             organizationUuid,
             projectUuid,
@@ -627,11 +910,13 @@ export class SavedSqlService
         return { jobId };
     }
 
+    /** @deprecated Superseded by AsyncQueryService.executeAsyncSqlQuery with pivotConfiguration. */
     async getResultJobFromSqlPivotQuery(
         user: SessionUser,
         projectUuid: string,
         body: SqlRunnerPivotQueryBody,
         context?: QueryExecutionContext,
+        authenticatedAccount: Account | null = null,
     ): Promise<{ jobId: string }> {
         const { savedSqlUuid } = body;
         const { organizationUuid } =
@@ -647,11 +932,11 @@ export class SavedSqlService
             if (!savedChart) {
                 throw new Error('Saved chart not found');
             }
-            await this.hasAccess(
-                'view',
-                { user, projectUuid },
-                { savedSqlUuid: savedChart.savedSqlUuid },
-            );
+            if (
+                !(await this.hasChartSpaceAccess(user, savedChart.space.uuid))
+            ) {
+                throw new ForbiddenError();
+            }
         } else {
             // If it's not a saved chart, check if the user has access to run a pivot query
             const auditedAbility = this.createAuditedAbility(user);
@@ -675,6 +960,7 @@ export class SavedSqlService
             }
         }
         const jobId = await this.schedulerClient.runSqlPivotQuery({
+            authMethod: authenticatedAccount?.authentication.type ?? null,
             savedSqlUuid: savedChart?.savedSqlUuid,
             sql: savedChart?.sql || body.sql,
             limit: savedChart?.limit || body.limit,
@@ -691,12 +977,14 @@ export class SavedSqlService
         return { jobId };
     }
 
+    /** @deprecated Superseded by AsyncQueryService.executeAsyncSqlChartQuery. */
     async getSqlChartResultJob(
         user: SessionUser,
         projectUuid: string,
         slug?: string,
         chartUuid?: string,
         context?: QueryExecutionContext,
+        authenticatedAccount: Account | null = null,
     ): Promise<{ jobId: string }> {
         let savedChart;
         if (chartUuid) {
@@ -711,13 +999,12 @@ export class SavedSqlService
             throw new Error('Either chartUuid or slug must be provided');
         }
 
-        await this.hasAccess(
-            'view',
-            { user, projectUuid },
-            { savedSqlUuid: savedChart.savedSqlUuid },
-        );
+        if (!(await this.hasChartSpaceAccess(user, savedChart.space.uuid))) {
+            throw new ForbiddenError();
+        }
 
         const jobId = await this.schedulerClient.runSql({
+            authMethod: authenticatedAccount?.authentication.type ?? null,
             userUuid: user.userUuid,
             organizationUuid: savedChart.organization.organizationUuid,
             projectUuid: savedChart.project.projectUuid,
@@ -799,21 +1086,6 @@ export class SavedSqlService
         }
     }
 
-    private async hasChartSpaceAccess(
-        user: SessionUser,
-        spaceUuid: string,
-    ): Promise<boolean> {
-        try {
-            return await this.spacePermissionService.can(
-                'view',
-                user,
-                spaceUuid,
-            );
-        } catch (e) {
-            return false;
-        }
-    }
-
     private async checkCreateScheduledDeliveryAccess(
         user: SessionUser,
         projectUuid: string,
@@ -839,11 +1111,7 @@ export class SavedSqlService
             throw new ForbiddenError();
         }
 
-        if (!(await this.hasChartSpaceAccess(user, spaceUuid))) {
-            throw new ForbiddenError(
-                "You don't have access to the space this chart belongs to",
-            );
-        }
+        await this.hasAccess('view', { user, projectUuid }, { savedSqlUuid });
 
         return { organizationUuid, spaceUuid };
     }
@@ -853,12 +1121,24 @@ export class SavedSqlService
         projectUuid: string,
         savedSqlUuid: string,
     ): Promise<SchedulerAndTargets[]> {
-        await this.checkCreateScheduledDeliveryAccess(
-            user,
-            projectUuid,
-            savedSqlUuid,
+        const { organizationUuid } =
+            await this.checkCreateScheduledDeliveryAccess(
+                user,
+                projectUuid,
+                savedSqlUuid,
+            );
+        const auditedAbility = this.createAuditedAbility(user);
+        const canManageAll = auditedAbility.can(
+            'manage',
+            subject('ScheduledDeliveries', {
+                organizationUuid,
+                projectUuid,
+            }),
         );
-        return this.schedulerModel.getSqlChartSchedulers(savedSqlUuid);
+        return this.schedulerModel.getSqlChartSchedulers(
+            savedSqlUuid,
+            canManageAll ? undefined : user.userUuid,
+        );
     }
 
     async createScheduler(
@@ -867,11 +1147,27 @@ export class SavedSqlService
         savedSqlUuid: string,
         newScheduler: CreateSchedulerAndTargetsWithoutIds,
     ): Promise<SchedulerAndTargets> {
-        await this.checkCreateScheduledDeliveryAccess(
-            user,
-            projectUuid,
-            savedSqlUuid,
-        );
+        const { organizationUuid } =
+            await this.checkCreateScheduledDeliveryAccess(
+                user,
+                projectUuid,
+                savedSqlUuid,
+            );
+
+        if (newScheduler.format === SchedulerFormat.GSHEETS) {
+            const auditedAbility = this.createAuditedAbility(user);
+            if (
+                auditedAbility.cannot(
+                    'manage',
+                    subject('GoogleSheets', {
+                        organizationUuid,
+                        projectUuid,
+                    }),
+                )
+            ) {
+                throw new ForbiddenError();
+            }
+        }
 
         if (!isValidFrequency(newScheduler.cron)) {
             throw new ParameterError(

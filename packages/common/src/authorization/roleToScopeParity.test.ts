@@ -1,7 +1,8 @@
 /* eslint-disable no-console */
-import { Ability, AbilityBuilder } from '@casl/ability';
+import { Ability, AbilityBuilder, subject } from '@casl/ability';
 import { type OrganizationMemberRole } from '../types/organizationMemberProfile';
 import { ProjectMemberRole } from '../types/projectMemberRole';
+import { AGENT_CAPABILITY_SUBJECTS } from './agentCapabilityScopes';
 import { applyOrganizationMemberStaticAbilities } from './organizationMemberAbility';
 import {
     ORGANIZATION_ADMIN,
@@ -72,19 +73,42 @@ const checkRoleCoveredByScopes = (
  * List of enterprise-only subject names that should be filtered in non-enterprise mode
  */
 const ENTERPRISE_SUBJECTS = new Set([
+    ...AGENT_CAPABILITY_SUBJECTS,
+    'EmbedAiAgent',
+    'EmbedAiAgentDebug',
+    'EmbedCompiledSql',
+    'EmbedDashboardFilters',
+    'EmbedDashboardFilterAddition',
+    'EmbedDashboardParameters',
+    'EmbedCsvExport',
+    'EmbedDashboardCsvExport',
+    'EmbedImageExport',
+    'EmbedPagePdfExport',
+    'EmbedDateZoom',
+    'EmbedExplore',
+    'EmbedUnderlyingData',
+    'EmbedDataApps',
     'MetricsTree',
     'SpotlightTableConfig',
     'AiAgent',
+    'OrganizationAiAgent',
     'AiAgentDocument',
+    'AiAgentSkill',
     'AiAgentThread',
+    'AiAgentThreadContext',
+    'AiDeepResearch',
     'ContentAsCode',
     'PreAggregation',
+    'ExternalConnection',
+    'ExternalSource',
+    'ProjectHomepage',
     // The matching scopes (`view:` + `manage:OrganizationWarehouseCredentials`)
     // are `isEnterprise: true` in scopes.ts, so the scope-build path
     // strips them in non-enterprise mode. Mirror that filter on the
     // role-based side so non-enterprise parity stays clean — at runtime
     // the feature is gated by license anyway.
     'OrganizationWarehouseCredentials',
+    'Roadmap',
 ]);
 
 /**
@@ -130,7 +154,10 @@ const PROJECT_PARITY_IGNORE = new Set([
     // Case 1: org-only subjects.
     '*:OrganizationMemberProfile',
     '*:Organization',
+    '*:OrganizationColorPalette',
     '*:OrganizationDesign',
+    '*:Roadmap',
+    '*:Learn',
     '*:Group',
     '*:InviteLink',
     '*:GitIntegration',
@@ -243,7 +270,14 @@ const testOrgRoleScopeParity = (
         {
             userUuid: member.userUuid,
             organizationUuid: member.organizationUuid,
-            scopes: getAllScopesForRole(role),
+            // Managed analytics is explicit opt-in for project roles, while
+            // organization admins already have organization-wide access.
+            scopes: [
+                ...getAllScopesForRole(role),
+                ...(role === ProjectMemberRole.ADMIN
+                    ? ['view:SystemAnalytics']
+                    : []),
+            ],
             isEnterprise,
         },
         scopeBuilder,
@@ -322,6 +356,84 @@ describe('Role to Scope Parity', () => {
         );
     });
 
+    describe('External connection builder linking', () => {
+        const expectBuilderLinkingCondition = (
+            ability: MemberAbility,
+            context: { organizationUuid?: string; projectUuid?: string },
+        ) => {
+            expect(
+                ability.can(
+                    'view',
+                    subject('ExternalConnection', {
+                        ...context,
+                        allowDataAppBuilderLinking: true,
+                    }),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'view',
+                    subject('ExternalConnection', {
+                        ...context,
+                        allowDataAppBuilderLinking: false,
+                    }),
+                ),
+            ).toBe(false);
+        };
+
+        it('applies the condition to project system and custom roles', () => {
+            const roleBuilder = new AbilityBuilder<MemberAbility>(Ability);
+            projectMemberAbilities.interactive_viewer(
+                PROJECT_INTERACTIVE_VIEWER,
+                roleBuilder,
+            );
+
+            const scopeBuilder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    userUuid: PROJECT_INTERACTIVE_VIEWER.userUuid,
+                    projectUuid: PROJECT_INTERACTIVE_VIEWER.projectUuid,
+                    scopes: ['view:ExternalConnection'],
+                    isEnterprise: true,
+                },
+                scopeBuilder,
+            );
+
+            const context = {
+                projectUuid: PROJECT_INTERACTIVE_VIEWER.projectUuid,
+            };
+            expectBuilderLinkingCondition(roleBuilder.build(), context);
+            expectBuilderLinkingCondition(scopeBuilder.build(), context);
+        });
+
+        it('applies the condition to organization system and custom roles', () => {
+            const roleBuilder = new AbilityBuilder<MemberAbility>(Ability);
+            applyOrganizationMemberStaticAbilities.interactive_viewer(
+                ORGANIZATION_INTERACTIVE_VIEWER,
+                roleBuilder,
+            );
+
+            const scopeBuilder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    userUuid: ORGANIZATION_INTERACTIVE_VIEWER.userUuid,
+                    organizationUuid:
+                        ORGANIZATION_INTERACTIVE_VIEWER.organizationUuid,
+                    scopes: ['view:ExternalConnection'],
+                    isEnterprise: true,
+                },
+                scopeBuilder,
+            );
+
+            const context = {
+                organizationUuid:
+                    ORGANIZATION_INTERACTIVE_VIEWER.organizationUuid,
+            };
+            expectBuilderLinkingCondition(roleBuilder.build(), context);
+            expectBuilderLinkingCondition(scopeBuilder.build(), context);
+        });
+    });
+
     // Coverage assertion. The parity tests above only catch drift on
     // scopes that ARE in some role tier — they can't see scopes that
     // exist in the vocabulary (`scopes.ts`) but appear in NO tier.
@@ -330,7 +442,18 @@ describe('Role to Scope Parity', () => {
     // `BASE_ROLE_SCOPES` for at least one tier — closing the loop on
     // "how did the misc orphans drift in the first place?".
     describe('Scope vocabulary coverage', () => {
-        it('every scope in scopes.ts must appear in at least one role tier', () => {
+        it('every scope except explicit opt-ins appears in a role tier', () => {
+            const explicitOptIns = new Set([
+                // Do not grant organization-wide usage through Project Admin.
+                'view:SystemAnalytics',
+                'view:AgentContentWrite',
+                'view:AgentDelete',
+                'view:AgentPublish',
+                'view:AgentDeployUpload',
+                'view:AgentDbtWriteback',
+                'view:AgentAdministration',
+                'view:AgentExternalTools',
+            ]);
             const allScopeNames = new Set(
                 getScopes({ isEnterprise: true }).map((s) => s.name),
             );
@@ -340,7 +463,7 @@ describe('Role to Scope Parity', () => {
             });
 
             const missing = [...allScopeNames].filter(
-                (s) => !tieredScopes.has(s),
+                (s) => !tieredScopes.has(s) && !explicitOptIns.has(s),
             );
 
             if (missing.length > 0) {
@@ -359,6 +482,7 @@ describe('Role to Scope Parity', () => {
     });
 
     // This is helpful for debugging, but it's not a test
+    // oxlint-disable-next-line vitest-js/no-disabled-tests -- debugging helper, intentionally not run
     describe.skip('Rule Count Analysis', () => {
         it('should report rule counts for documentation', () => {
             console.log('\n=== ROLE PERMISSION RULE COUNTS ===');

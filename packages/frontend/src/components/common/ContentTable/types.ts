@@ -32,6 +32,8 @@ export type ContentTableVirtualizer<
 
 export type ContentTableSortingState = SortingState;
 
+export type ContentTableRow<TData extends RowData> = Row<TData>;
+
 export type ContentTableDensity = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
 
 export type ContentTableHeaderColumn<TData extends RowData> = Omit<
@@ -164,31 +166,26 @@ export type ContentTableOptions<TData extends RowData> = {
         string,
         Partial<ContentTableColumnDef<TData>>
     >;
-    editDisplayMode?: 'cell' | 'row' | 'table' | 'modal' | 'custom';
     emptyState?: {
+        /** Rendered below the message. Use for a primary action like "Create dashboard". */
+        action?: ReactNode;
+        /** Supporting line under the heading. */
+        description?: ReactNode;
         emptyMessage?: ReactNode;
         entityName?: string;
         filteredMessage?: ReactNode;
         hasActiveFilters?: boolean;
         onClearFilters?: () => void;
         search?: string;
+        /** Heading. Overrides emptyMessage/filteredMessage when set. */
+        title?: ReactNode;
     };
     enableBottomToolbar?: boolean;
-    enableColumnActions?: boolean;
-    enableColumnFilters?: boolean;
     enableColumnResizing?: boolean;
-    enableDensityToggle?: boolean;
     enableEditing?: boolean;
-    enableFilterMatchHighlighting?: boolean;
-    enableFilters?: boolean;
-    enableFullScreenToggle?: boolean;
-    enableGlobalFilter?: boolean;
-    enableGlobalFilterModes?: boolean;
-    enableHiding?: boolean;
     enableMultiSort?: boolean;
     enablePagination?: boolean;
     enableRowActions?: boolean;
-    enableRowNumbers?: boolean;
     enableRowSelection?: boolean | ((row: Row<TData>) => boolean);
     enableRowVirtualization?: boolean;
     enableSorting?: boolean;
@@ -209,7 +206,6 @@ export type ContentTableOptions<TData extends RowData> = {
     manualPagination?: boolean;
     manualSorting?: boolean;
     mantineLoadingOverlayProps?: Record<string, unknown>;
-    mantinePaginationProps?: Record<string, unknown>;
     mantinePaperProps?: ContentTableMantineProps<HTMLDivElement>;
     mantineSelectAllCheckboxProps?: Record<string, unknown>;
     mantineSelectCheckboxProps?: Record<string, unknown>;
@@ -256,9 +252,7 @@ export type ContentTableOptions<TData extends RowData> = {
     onRowSelectionChange?: OnChangeFn<RowSelectionState>;
     onSortingChange?: OnChangeFn<SortingState>;
     pageCount?: number;
-    paginationDisplayMode?: 'default' | 'pages';
     positionActionsColumn?: 'first' | 'last';
-    positionGlobalFilter?: 'left' | 'right';
     renderBottomToolbar?: (props: {
         table: ContentTableInstance<TData>;
     }) => ReactNode;
@@ -315,15 +309,3 @@ export type ContentTableInstance<TData extends RowData> = Omit<
 };
 
 export type ContentTableUpdater<TValue> = Updater<TValue>;
-
-export type MRT_ColumnDef<TData extends RowData> = ContentTableColumnDef<TData>;
-export type MRT_Row<TData extends RowData> = Row<TData>;
-export type MRT_SortingState = ContentTableSortingState;
-export type MRT_TableInstance<TData extends RowData> =
-    ContentTableInstance<TData>;
-export type MRT_TableOptions<TData extends RowData> =
-    ContentTableOptions<TData>;
-export type MRT_Virtualizer<
-    TScrollElement extends Element | Window = HTMLDivElement,
-    TItemElement extends Element = HTMLTableRowElement,
-> = ContentTableVirtualizer<TScrollElement, TItemElement>;

@@ -1,17 +1,35 @@
-import { type DashboardFilters } from '@lightdash/common';
+import {
+    type AppColorScheme,
+    type DataAppInsightAction,
+    type DataAppInsightsPayload,
+    type DataAppVizContext,
+    type DashboardFilters,
+    type ExternalFetchRequest,
+    type QueryExecutionContext,
+} from '@lightdash/common';
+import { useComputedColorScheme } from '@mantine/core';
 import {
     forwardRef,
     useCallback,
     useEffect,
     useImperativeHandle,
+    useMemo,
     useRef,
+    useState,
 } from 'react';
+import { v4 as uuidv4 } from 'uuid';
+import { type DeliveryCaptureAccumulator } from './deliveryCapture/deliveryCaptureAccumulator';
 import {
     useAppSdkBridge,
     type ElementSelectedEvent,
+    type ExternalRequestEvent,
     type QueryEvent,
+    type SdkManifest,
 } from './hooks/useAppSdkBridge';
+import { useAppUrlStateSync } from './hooks/useAppUrlStateSync';
+import { useAppViewOutcomes } from './hooks/useAppViewOutcomes';
 import { useIframeScreenshot } from './hooks/useIframeScreenshot';
+import { withColorSchemeParam } from './utils/appIframeUrl';
 
 export type AppIframePreviewHandle = {
     captureScreenshot: () => Promise<File>;
@@ -19,11 +37,17 @@ export type AppIframePreviewHandle = {
 
 type Props = {
     src: string;
+    /** Signed capability for the exact app version served by `src`. */
+    previewToken: string;
     /** Origin the iframe will load from — used to gate the postMessage bridge.
      *  Same value for all preview iframes from the same Lightdash instance
      *  (the configured preview-host), or the parent's own origin in the
      *  same-origin fallback case. */
     expectedPreviewOrigin: string;
+    /** Project the iframe's external-fetch calls run against. */
+    projectUuid: string;
+    /** App the iframe's external-fetch calls are attributed to. */
+    appUuid: string;
     /** Stable identity scope for the SDK capability handshake — typically the
      *  app UUID. Drives the inspector/screenshot availability resets, so a
      *  change here means a new app whose SDK capabilities are unknown and we
@@ -32,6 +56,10 @@ type Props = {
      *  Inspect/Screenshot buttons don't flicker off-then-back-on each time. */
     identityKey: string;
     onQueryEvent?: (event: QueryEvent) => void;
+    /** Reports external-connection fetches for the external-requests inspector
+     *  tab. Left undefined by hosts that don't surface the inspector (embed,
+     *  dashboard tiles). */
+    onExternalRequestEvent?: (event: ExternalRequestEvent) => void;
     onElementSelected?: (event: ElementSelectedEvent) => void;
     /** When true, the iframe-side inspector overlay is active and clicks
      *  are intercepted to produce element-selected events. */
@@ -53,6 +81,25 @@ type Props = {
      *  sits during inspect mode (the toolbar button before any click; the
      *  prompt editor after each click — TipTap yanks focus back on insert). */
     onInspectorCancelled?: () => void;
+    /** Fires when the iframe SDK reports its capability manifest. Old
+     *  bundles never send one — the parent owns the silence timeout that
+     *  classifies them as legacy (see `useSdkUpgradeStatus`). */
+    onSdkManifest?: (manifest: SdkManifest) => void;
+    /**
+     * Called when the iframe acknowledges painting the matching render context.
+     */
+    onVizRendered?: (renderId: string) => void;
+    /** Identity attached to the next viz context push and its acknowledgement. */
+    vizRenderId?: string;
+    /** Called when the iframe SDK requests its initial viz context. */
+    onVizContextRequest?: () => void;
+    /** When true, clicks inside the iframe are intercepted to reveal the query. */
+    lineageEnabled?: boolean;
+    onLineageAvailabilityChange?: (available: boolean) => void;
+    onLineageSelected?: (event: { queryUuid: string }) => void;
+    /** queryUuid whose rendered elements should be outlined (null clears). */
+    lineageHighlightQueryUuid?: string | null;
+    onLineageCancelled?: () => void;
     /** Dashboard filters to merge into every metric-query the iframe runs.
      *  Set by `DashboardDataAppTile`; left undefined by `AppGenerate` where
      *  there's no dashboard context. */
@@ -62,21 +109,83 @@ type Props = {
      *  Set by `DashboardDataAppTile` after a dashboard refresh, mirroring what
      *  chart tiles send; left undefined elsewhere. */
     invalidateCache?: boolean;
+    /** Accumulates a delivery-capture manifest from the bridge's query
+     *  lifecycle events. Set by `MinimalApp` in capture modes only. */
+    deliveryCapture?: DeliveryCaptureAccumulator;
+    /** Tells the iframe SDK this render is a delivery/preview capture, not an
+     *  interactive load, via the `lightdash:sdk:ready` handshake — apps use
+     *  `useDeliveryRender()` to mount every tab's data instead of only the
+     *  visible one. Set by `MinimalApp` in both capture modes. */
+    captureRender?: boolean;
+    /** Overrides the query-execution-context stamped onto every metric
+     *  query the iframe runs, e.g. scheduled-delivery capture. */
+    queryContextOverride?: QueryExecutionContext;
     /** Fired on every iframe `onload` (including the initial about:blank).
      *  Used by `MinimalApp` to gate the screenshot readiness signal. */
     onIframeLoad?: () => void;
+    /** SDK capabilities the host opts into. Closed by default — hosts that
+     *  serve untrusted viewers (embed/JWT) must omit each capability flag.
+     *  `gsheetExport`: enables `exportToSheets()` from the iframe SDK. */
+    capabilities?: { gsheetExport?: boolean };
+    // Render context for data app vizs: the field mapping + host rows, pushed
+    // into the iframe over the SDK bridge. Undefined for ordinary data apps.
+    dataAppVizContext?: DataAppVizContext;
+    /** Enables the restricted bridge contract used by custom chart types. */
+    dataAppVizMode?: boolean;
+    /** Host-owned saved chart identity for the external-connection proxy. */
+    chartContext?: ExternalFetchRequest['chartContext'];
+    /** Rewrites the viz underlying-data virtual route into the real API
+     *  request. Only set by DataAppVizRenderer when the capability is on. */
+    rewriteVizUnderlyingDataRequest?: (intentBody: unknown) => {
+        method: 'POST';
+        path: string;
+        body: unknown;
+    };
+    /** Opens Lightdash's underlying-data dialog for a viz click intent. */
+    onVizUnderlyingDataIntent?: (intentBody: unknown) => void;
+    /** Handles the viz drill-down virtual route. Only set by
+     *  DataAppVizRenderer when the capability is on. */
+    onVizDrillDownIntent?: (intentBody: unknown) => void;
+    /** Handles the viz point-menu virtual route, receiving the iframe's
+     *  current viewport rect so the host can place its menu. */
+    onVizPointMenuIntent?: (
+        intentBody: unknown,
+        iframeRect: DOMRect | null,
+    ) => { shown: boolean };
+    onVizSubtotalsIntent?: (
+        intentBody: unknown,
+    ) => Promise<{ rows: DataAppVizContext['rows'] }>;
+    // Round-trip the app's `useUrlState` controls through the page's `?state=`
+    // param. Leave unset where the page URL isn't the app's share surface
+    // (dashboard tiles, screenshots).
+    urlStateSync?: boolean;
+    /** Pins the scheme the app renders in, ignoring the host's own. Set by
+     *  `MinimalApp` so scheduled screenshots don't depend on whichever theme
+     *  the rendering browser happens to have stored. */
+    forceColorScheme?: AppColorScheme;
+    /** The host's AI analysis of the current view, pushed into the app. */
+    insights?: DataAppInsightsPayload | null;
+    onInsightAction?: (action: DataAppInsightAction) => void;
+    onInsightsInUse?: () => void;
+    onInsightInstructionsChange?: (instructions: string | null) => void;
+    onMountedQueriesChange?: (queryUuids: string[]) => void;
 };
 
 /**
  * Renders a sandboxed app preview iframe with a postMessage fetch proxy.
  *
- * The iframe has `sandbox="allow-scripts allow-modals"` (no `allow-same-origin`),
- * so it cannot access the parent's cookies. `allow-modals` lets generated apps
- * call `window.print()` (needed for PDF Report templates) - it also enables
- * `alert`/`confirm`/`prompt`, which is acceptable here since the iframe is
- * already isolated from parent origin. The SDK inside the iframe routes all
- * API calls through postMessage, and this component's bridge executes them
- * using the current user's session.
+ * The iframe is sandboxed without `allow-same-origin`, so it cannot access the
+ * parent's cookies. `allow-modals` lets generated apps call `window.print()`
+ * (needed for PDF Report templates) - it also enables `alert`/`confirm`/`prompt`,
+ * which is acceptable here since the iframe is already isolated from parent
+ * origin. `allow-downloads` lets generated apps save backend-generated
+ * CSV/XLSX exports. `allow-popups-to-escape-sandbox` lets cards open links in
+ * a new un-sandboxed tab, and `allow-top-navigation-by-user-activation` lets a
+ * clicked link navigate the current tab (e.g. to another dashboard) without
+ * letting app code redirect the page silently. None of these grant
+ * `allow-same-origin`, so the parent session stays inaccessible. The SDK inside
+ * the iframe routes all API calls through postMessage, and this component's
+ * bridge executes them using the current user's session.
  *
  * Exposes a `captureScreenshot()` imperative handle for the parent. The
  * iframe rasterizes its own DOM with html2canvas-pro and posts the PNG
@@ -87,21 +196,128 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
     (
         {
             src,
+            previewToken,
             expectedPreviewOrigin,
+            projectUuid,
+            appUuid,
             identityKey,
             onQueryEvent,
+            onExternalRequestEvent,
             onElementSelected,
             inspectorEnabled,
             onInspectorAvailabilityChange,
             onScreenshotAvailabilityChange,
             onInspectorCancelled,
+            lineageEnabled,
+            onLineageAvailabilityChange,
+            onLineageSelected,
+            lineageHighlightQueryUuid,
+            onLineageCancelled,
             dashboardFilters,
             invalidateCache,
+            deliveryCapture,
+            captureRender,
+            queryContextOverride,
             onIframeLoad,
+            capabilities,
+            dataAppVizContext,
+            dataAppVizMode,
+            chartContext,
+            rewriteVizUnderlyingDataRequest,
+            onVizUnderlyingDataIntent,
+            onVizDrillDownIntent,
+            onVizPointMenuIntent,
+            onVizSubtotalsIntent,
+            urlStateSync,
+            onSdkManifest,
+            onVizRendered,
+            vizRenderId,
+            onVizContextRequest,
+            forceColorScheme,
+            insights,
+            onInsightAction,
+            onInsightsInUse,
+            onInsightInstructionsChange,
+            onMountedQueriesChange,
         },
         ref,
     ) => {
         const iframeRef = useRef<HTMLIFrameElement>(null);
+        // Resolves to an exact light/dark (embed routes force it from
+        // `?theme=`), so this is the scheme the surrounding page renders in.
+        const hostColorScheme = useComputedColorScheme('light');
+        const colorScheme: AppColorScheme = forceColorScheme ?? hostColorScheme;
+        const { applySeed, handleUrlStateChange } = useAppUrlStateSync({
+            appUuid,
+            enabled: urlStateSync === true,
+        });
+        // Latest scheme in a ref so the seed helper stays identity-stable: a
+        // theme toggle must restyle the running app over the bridge, never
+        // change the iframe URL (which would reload it and lose app state).
+        const colorSchemeRef = useRef(colorScheme);
+        colorSchemeRef.current = colorScheme;
+        const applyColorSchemeSeed = useCallback(
+            (baseUrl: string) =>
+                withColorSchemeParam(baseUrl, colorSchemeRef.current),
+            [],
+        );
+        // A refreshed capability must reach the query bridge without reloading
+        // the running app and dropping its state. Ignore token-only URL changes;
+        // version, filter, and manual-refresh changes still navigate with the
+        // latest complete URL (and therefore the latest token).
+        const navigationKey = src.replace(previewToken, '{preview-token}');
+        const [iframeNavigation, setIframeNavigation] = useState(() => ({
+            key: navigationKey,
+            src,
+            id: uuidv4(),
+        }));
+        useEffect(() => {
+            setIframeNavigation((current) =>
+                current.key === navigationKey
+                    ? current
+                    : { key: navigationKey, src, id: uuidv4() },
+            );
+        }, [navigationKey, src]);
+
+        // Seeds are re-latched exactly when the iframe navigates, never on URL
+        // state changes alone — that would reload per filter click.
+        const effectiveSrc = useMemo(() => {
+            const url = new URL(
+                applyColorSchemeSeed(
+                    urlStateSync
+                        ? applySeed(iframeNavigation.src)
+                        : iframeNavigation.src,
+                ),
+            );
+            url.searchParams.set('navigationId', iframeNavigation.id);
+            return url.toString();
+        }, [
+            urlStateSync,
+            applySeed,
+            applyColorSchemeSeed,
+            iframeNavigation.src,
+            iframeNavigation.id,
+        ]);
+        const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+        const recordOutcome = useAppViewOutcomes({
+            projectUuid,
+            appUuid,
+            src: iframeNavigation.src,
+            previewToken,
+            navigationId: iframeNavigation.id,
+        });
+        const handleSdkManifest = useCallback(
+            (manifest: SdkManifest) => {
+                recordOutcome('sdk_started', manifest.navigationId);
+                onSdkManifest?.(manifest);
+            },
+            [recordOutcome, onSdkManifest],
+        );
+        const handleRuntimeError = useCallback(
+            (navigationId: string) =>
+                recordOutcome('runtime_error', navigationId),
+            [recordOutcome],
+        );
         // Memoized so the bridge's message listener doesn't re-attach on every
         // parent render — AppGenerate re-renders on every keystroke (editor's
         // `onUpdate` → `setIsPromptEmpty`) and we don't want to thrash listeners.
@@ -111,17 +327,70 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
         const handleScreenshotAnnounce = useCallback(() => {
             onScreenshotAvailabilityChange?.(true);
         }, [onScreenshotAvailabilityChange]);
-        const { handleIframeLoad, enableInspector, disableInspector } =
-            useAppSdkBridge(
-                iframeRef,
-                expectedPreviewOrigin,
-                onQueryEvent,
-                onElementSelected,
-                handleInspectorAnnounce,
-                handleScreenshotAnnounce,
-                dashboardFilters,
-                invalidateCache,
-            );
+        const handleLineageAnnounce = useCallback(() => {
+            onLineageAvailabilityChange?.(true);
+        }, [onLineageAvailabilityChange]);
+        // Undefined when the host has no menu, so the bridge reports the
+        // capability unavailable; otherwise closes over the live iframe rect.
+        const handleVizPointMenuIntent = useMemo(
+            () =>
+                onVizPointMenuIntent
+                    ? (intentBody: unknown) =>
+                          onVizPointMenuIntent(
+                              intentBody,
+                              iframeRef.current?.getBoundingClientRect() ??
+                                  null,
+                          )
+                    : undefined,
+            [onVizPointMenuIntent],
+        );
+        const {
+            handleIframeLoad,
+            enableInspector,
+            disableInspector,
+            enableLineage,
+            disableLineage,
+            highlightLineage,
+        } = useAppSdkBridge({
+            iframeRef,
+            expectedPreviewOrigin,
+            projectUuid,
+            appUuid,
+            previewToken,
+            onQueryEvent,
+            onElementSelected,
+            onInspectorAvailable: handleInspectorAnnounce,
+            onScreenshotAvailable: handleScreenshotAnnounce,
+            dashboardFilters,
+            invalidateCache,
+            deliveryCapture,
+            captureRender,
+            queryContextOverride,
+            capabilities,
+            onLineageAvailable: handleLineageAnnounce,
+            onLineageSelected,
+            onExternalRequestEvent,
+            dataAppVizContext,
+            dataAppVizMode,
+            chartContext,
+            rewriteVizUnderlyingDataRequest,
+            onVizUnderlyingDataIntent,
+            onVizDrillDownIntent,
+            onVizPointMenuIntent: handleVizPointMenuIntent,
+            onVizSubtotalsIntent,
+            onUrlStateChange: urlStateSync ? handleUrlStateChange : undefined,
+            onSdkManifest: handleSdkManifest,
+            onRuntimeError: handleRuntimeError,
+            onVizRendered,
+            vizRenderId,
+            onVizContextRequest,
+            colorScheme,
+            insights,
+            onInsightAction,
+            onInsightsInUse,
+            onInsightInstructionsChange,
+            onMountedQueriesChange,
+        });
         const { captureScreenshot } = useIframeScreenshot(iframeRef);
 
         useImperativeHandle(ref, () => ({ captureScreenshot }), [
@@ -139,10 +408,12 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
         useEffect(() => {
             onInspectorAvailabilityChange?.(false);
             onScreenshotAvailabilityChange?.(false);
+            onLineageAvailabilityChange?.(false);
         }, [
             identityKey,
             onInspectorAvailabilityChange,
             onScreenshotAvailabilityChange,
+            onLineageAvailabilityChange,
         ]);
 
         // Toggling the prop while the iframe is alive — push the change through.
@@ -151,36 +422,67 @@ const AppIframePreview = forwardRef<AppIframePreviewHandle, Props>(
             else disableInspector();
         }, [inspectorEnabled, enableInspector, disableInspector]);
 
+        useEffect(() => {
+            if (lineageEnabled) enableLineage();
+            else disableLineage();
+        }, [lineageEnabled, enableLineage, disableLineage]);
+
+        useEffect(() => {
+            highlightLineage(lineageHighlightQueryUuid ?? null);
+        }, [lineageHighlightQueryUuid, highlightLineage]);
+
         // Esc-to-cancel. Lives on the parent's window because focus is on the
         // parent (the toolbar button before any click; the editor afterwards) —
         // the iframe never holds focus during inspect mode, so an iframe-side
         // keydown listener would never fire.
         useEffect(() => {
-            if (!inspectorEnabled) return;
+            if (!inspectorEnabled && !lineageEnabled) return;
             const onKey = (e: KeyboardEvent) => {
                 if (e.key === 'Escape') {
-                    onInspectorCancelled?.();
+                    if (inspectorEnabled) onInspectorCancelled?.();
+                    if (lineageEnabled) onLineageCancelled?.();
                 }
             };
             window.addEventListener('keydown', onKey);
             return () => window.removeEventListener('keydown', onKey);
-        }, [inspectorEnabled, onInspectorCancelled]);
+        }, [
+            inspectorEnabled,
+            lineageEnabled,
+            onInspectorCancelled,
+            onLineageCancelled,
+        ]);
 
         // The iframe reloads on every new app version. The useEffect above won't
         // re-fire if `inspectorEnabled` was already true, so re-sync on load.
         const handleLoad = () => {
             handleIframeLoad();
+            setLoadedSrc(effectiveSrc);
             if (inspectorEnabled) enableInspector();
+            if (lineageEnabled) enableLineage();
+            highlightLineage(lineageHighlightQueryUuid ?? null);
             onIframeLoad?.();
         };
 
         return (
             <iframe
+                data-tour-scope="view:DataApp"
+                data-tour-look="1"
+                data-tour-after='[data-tour-anchor="app-row"][data-tour-value="Jaffle pulse"]'
+                data-tour-label="Read Jaffle pulse"
+                data-tour-docs="data-apps.mdx#choosing-a-template:li1"
                 ref={iframeRef}
-                src={src}
-                style={{ width: '100%', height: '100%', border: 'none' }}
+                src={effectiveSrc}
+                style={{
+                    width: '100%',
+                    height: '100%',
+                    border: 'none',
+                    colorScheme,
+                    // Keep the host surface visible until the app applies its theme.
+                    visibility:
+                        loadedSrc === effectiveSrc ? 'visible' : 'hidden',
+                }}
                 title="App preview"
-                sandbox="allow-scripts allow-modals allow-popups"
+                sandbox="allow-scripts allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
                 allow=""
                 onLoad={handleLoad}
             />

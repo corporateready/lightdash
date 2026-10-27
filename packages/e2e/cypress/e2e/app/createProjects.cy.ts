@@ -1,5 +1,6 @@
 import {
     CustomDimensionType,
+    JobStatusType,
     ResultRow,
     SEED_PROJECT,
 } from '@lightdash/common';
@@ -94,7 +95,10 @@ const configureBigqueryWarehouse = (
         'Service Account (JSON key file)',
     ); */
 
-    cy.get('[type="file"]').attachFile(warehouseConfig.bigQuery.keyFile);
+    cy.get('[type="file"]').selectFile(
+        `cypress/fixtures/${warehouseConfig.bigQuery.keyFile}`,
+        { force: true },
+    );
 
     // DBT
     cy.selectMantine('dbt.type', 'dbt local server');
@@ -162,21 +166,40 @@ const configureSnowflakeWarehouse = (
     cy.get('input[name="warehouse.schema"]').type(config.schema);
 };
 
+// The app polls the compile job every 500ms, so 360 polls ≈ 3 minutes
+const waitForCompileJob = (attempt = 0): void => {
+    cy.wait('@jobStatus', { timeout: 30000 }).then(({ response }) => {
+        const job = response?.body?.results;
+        switch (job?.jobStatus) {
+            case JobStatusType.DONE:
+                return;
+            case JobStatusType.ERROR:
+                throw new Error(
+                    `Compile job failed: ${JSON.stringify(job.steps)}`,
+                );
+            default:
+                if (attempt >= 360) {
+                    throw new Error('Compile job did not finish');
+                }
+                waitForCompileJob(attempt + 1);
+        }
+    });
+};
+
 const testCompile = (): Cypress.Chainable<string> => {
     // Compile
-    cy.findByText('Test & deploy project').click();
-    cy.contains('Step 1/3', { timeout: 60000 });
-    cy.contains('Step 2/3', { timeout: 60000 });
-    cy.contains('Successfully synced dbt project!', { timeout: 60000 });
+    cy.intercept('GET', '**/api/v1/jobs/*').as('jobStatus');
+    cy.contains('button', 'Test & deploy project', { timeout: 30_000 })
+        .should('be.enabled')
+        .click();
+    waitForCompileJob();
 
+    cy.url({ timeout: 30000 }).should('include', '/createProjectSettings');
+    cy.contains('Your project has connected successfully!');
     cy.contains(/selected \d+ models/);
     // Configure
     cy.contains('button', 'Save changes').click();
-    cy.url().should('include', '/home', { timeout: 30000 });
-    cy.contains('Welcome, David');
-    cy.findByText('Charts and Dashboards');
-    cy.findByText('get started by creating some charts');
-    cy.wait(1000);
+    cy.url({ timeout: 30000 }).should('include', '/home');
     return cy.url().then(
         (url) =>
             // get new project uuid

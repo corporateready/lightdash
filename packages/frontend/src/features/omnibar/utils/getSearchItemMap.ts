@@ -1,6 +1,8 @@
 import {
     ChartType,
     FieldType,
+    getAppDisplayName,
+    getDocumentUrl,
     getItemId,
     isTableErrorSearchResult,
     SearchItemType,
@@ -12,6 +14,7 @@ import { type SearchItem } from '../types/searchItem';
 export const getSearchItemMap = (
     results: SearchResults,
     projectUuid: string,
+    projectUrlIdentifier = projectUuid,
 ) => {
     const spaces = results.spaces.map<SearchItem>((item) => ({
         type: SearchItemType.SPACE,
@@ -19,7 +22,22 @@ export const getSearchItemMap = (
         item: item,
         searchRank: item.search_rank,
         location: {
-            pathname: `/projects/${projectUuid}/spaces/${item.uuid}`,
+            pathname: `/projects/${projectUrlIdentifier}/spaces/${item.uuid}`,
+        },
+    }));
+
+    const documents = results.documents.map<SearchItem>((item) => ({
+        type: SearchItemType.DOCUMENT,
+        title: item.name,
+        description: item.description ?? undefined,
+        item,
+        searchRank: item.search_rank,
+        location: {
+            pathname: getDocumentUrl(
+                projectUrlIdentifier,
+                item.uuid,
+                item.slug,
+            ),
         },
     }));
 
@@ -30,7 +48,7 @@ export const getSearchItemMap = (
         item: item,
         searchRank: item.search_rank,
         location: {
-            pathname: `/projects/${projectUuid}/dashboards/${item.uuid}`,
+            pathname: `/projects/${projectUrlIdentifier}/dashboards/${item.slug}`,
         },
     }));
 
@@ -40,25 +58,23 @@ export const getSearchItemMap = (
         description: `Dashboard: ${item.dashboardName}`,
         item: item,
         location: {
-            pathname: `/projects/${projectUuid}/dashboards/${item.dashboardUuid}/view/tabs/${item.uuid}`,
+            pathname: `/projects/${projectUrlIdentifier}/dashboards/${item.dashboardSlug}/view/tabs/${item.uuid}`,
         },
     }));
 
     const savedCharts = results.savedCharts.map<SearchItem>((item) => ({
         type: SearchItemType.CHART,
-        icon: 'chart',
         title: item.name,
         description: item.description,
         item: item,
         searchRank: item.search_rank,
         location: {
-            pathname: `/projects/${projectUuid}/saved/${item.uuid}`,
+            pathname: `/projects/${projectUrlIdentifier}/saved/${item.slug}`,
         },
     }));
 
     const sqlCharts = results.sqlCharts.map<SearchItem>((item) => ({
         type: SearchItemType.SQL_CHART,
-        icon: 'chart',
         title: item.name,
         description: item.description || undefined,
         item: item,
@@ -153,17 +169,18 @@ export const getSearchItemMap = (
 
     const dataApps = results.dataApps.map<SearchItem>((item) => ({
         type: SearchItemType.DATA_APP,
-        title: item.name,
+        title: getAppDisplayName(item.name, item.uuid),
         description: item.description || undefined,
         item: item,
         searchRank: item.search_rank,
         location: {
-            pathname: `/projects/${projectUuid}/apps/${item.uuid}/preview`,
+            pathname: `/projects/${projectUuid}/apps/${item.uuid}/view`,
         },
     }));
 
     return {
         spaces,
+        documents,
         dashboards,
         savedCharts,
         sqlCharts,

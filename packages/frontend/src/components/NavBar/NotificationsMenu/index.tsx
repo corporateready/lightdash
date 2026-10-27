@@ -1,12 +1,20 @@
+import { subject } from '@casl/ability';
 import {
+    assertUnreachable,
+    type Notification,
     NotificationResourceType,
     ValidationErrorType,
 } from '@lightdash/common';
-import { Button, getDefaultZIndex, Indicator, Menu } from '@mantine-8/core';
+import { Button, getDefaultZIndex, Indicator, Menu } from '@mantine/core';
 import { IconBell } from '@tabler/icons-react';
-import { type FC } from 'react';
+import { Fragment, type FC, useMemo } from 'react';
+import { useAiAgentOrgPermission } from '../../../ee/features/aiCopilot/hooks/useAiAgentPermission';
+import { useContentReviewAvailability } from '../../../ee/features/contentReview/hooks/useContentReviewAvailability';
 import { useDashboardCommentsCheck } from '../../../features/comments';
 import {
+    AiCreditAllowanceNotifications,
+    AiReviewNotifications,
+    ContentReviewNotifications,
     DashboardCommentsNotifications,
     useGetNotifications,
 } from '../../../features/notifications';
@@ -17,12 +25,15 @@ import {
 } from '../../../hooks/validation/useValidation';
 import useApp from '../../../providers/App/useApp';
 import MantineIcon from '../../common/MantineIcon';
+import { useNavBarMenuProps } from '../NavBarPortalContext';
 import classes from './NotificationsMenu.module.css';
 import { ValidationErrorNotification } from './ValidationErrorNotification';
 
-export const NotificationsMenu: FC<{ projectUuid: string }> = ({
-    projectUuid,
-}) => {
+export const NotificationsMenu: FC<{
+    projectUuid: string;
+    withLabel?: boolean;
+}> = ({ projectUuid, withLabel = false }) => {
+    const menuProps = useNavBarMenuProps();
     const { user } = useApp();
 
     // Validator notifications
@@ -46,6 +57,56 @@ export const NotificationsMenu: FC<{ projectUuid: string }> = ({
     const hasDashboardCommentsNotifications =
         dashboardCommentsNotifications &&
         dashboardCommentsNotifications.length > 0;
+    const canViewAiReviews = useAiAgentOrgPermission({ action: 'manage' });
+    const { data: aiReviewNotifications } = useGetNotifications(
+        NotificationResourceType.AiReview,
+        !!canViewAiReviews,
+    );
+    const hasAiReviewNotifications =
+        aiReviewNotifications && aiReviewNotifications.length > 0;
+    const { isAvailable: canViewContentReviews } =
+        useContentReviewAvailability();
+    const { data: contentReviewNotifications } = useGetNotifications(
+        NotificationResourceType.ContentReview,
+        canViewContentReviews,
+    );
+    const hasContentReviewNotifications =
+        contentReviewNotifications && contentReviewNotifications.length > 0;
+    const isOrgAdmin =
+        user.data?.ability?.can(
+            'manage',
+            subject('Organization', {
+                organizationUuid: user.data.organizationUuid,
+            }),
+        ) ?? false;
+    // Allowance alerts only exist for organizations with a credit contract, so admins can always fetch them.
+    const canViewAiCreditAlerts = isOrgAdmin;
+    const { data: aiCreditAllowanceNotifications } = useGetNotifications(
+        NotificationResourceType.AiCreditAllowance,
+        canViewAiCreditAlerts,
+    );
+    const hasAiCreditAllowanceNotifications =
+        aiCreditAllowanceNotifications &&
+        aiCreditAllowanceNotifications.length > 0;
+    const notifications = useMemo<Notification[]>(
+        () =>
+            [
+                ...(dashboardCommentsNotifications ?? []),
+                ...(aiReviewNotifications ?? []),
+                ...(contentReviewNotifications ?? []),
+                ...(aiCreditAllowanceNotifications ?? []),
+            ].sort(
+                (a, b) =>
+                    new Date(b.createdAt).getTime() -
+                    new Date(a.createdAt).getTime(),
+            ),
+        [
+            aiCreditAllowanceNotifications,
+            aiReviewNotifications,
+            contentReviewNotifications,
+            dashboardCommentsNotifications,
+        ],
+    );
 
     const showNotificationBadge = () => {
         /**
@@ -61,24 +122,77 @@ export const NotificationsMenu: FC<{ projectUuid: string }> = ({
             const hasUnreadComments = dashboardCommentsNotifications?.some(
                 (n) => !n.viewed,
             );
-            return hasUnreadComments;
+            if (hasUnreadComments) return true;
+        }
+
+        if (canViewAiReviews) {
+            const hasUnreadAiReviews = aiReviewNotifications?.some(
+                (n) => !n.viewed,
+            );
+            if (hasUnreadAiReviews) return true;
+        }
+
+        if (canViewContentReviews) {
+            const hasUnreadContentReviews = contentReviewNotifications?.some(
+                (n) => !n.viewed,
+            );
+            if (hasUnreadContentReviews) return true;
+        }
+
+        if (canViewAiCreditAlerts) {
+            const hasUnreadAiCreditAlerts =
+                aiCreditAllowanceNotifications?.some((n) => !n.viewed);
+            if (hasUnreadAiCreditAlerts) return true;
         }
 
         return false;
     };
 
+    const renderNotification = (notification: Notification) => {
+        switch (notification.resourceType) {
+            case NotificationResourceType.DashboardComments:
+                return (
+                    <DashboardCommentsNotifications
+                        notifications={[notification]}
+                        projectUuid={projectUuid}
+                    />
+                );
+            case NotificationResourceType.AiReview:
+                return <AiReviewNotifications notifications={[notification]} />;
+            case NotificationResourceType.ContentReview:
+                return (
+                    <ContentReviewNotifications
+                        notifications={[notification]}
+                    />
+                );
+            case NotificationResourceType.AiCreditAllowance:
+                return (
+                    <AiCreditAllowanceNotifications
+                        notifications={[notification]}
+                    />
+                );
+            default:
+                return assertUnreachable(
+                    notification,
+                    'Unknown notification type',
+                );
+        }
+    };
+
     const shouldDisplayMenu =
-        canViewDashboardComments || canUserManageValidations;
+        canViewDashboardComments ||
+        canUserManageValidations ||
+        canViewAiReviews ||
+        canViewContentReviews ||
+        canViewAiCreditAlerts;
 
     return shouldDisplayMenu ? (
         <Menu
-            withArrow
-            shadow="lg"
             position="bottom-end"
             arrowOffset={16}
             offset={-2}
             zIndex={getDefaultZIndex('max')}
-            portalProps={{ target: '#navbar-header' }}
+            {...menuProps}
         >
             <Menu.Target>
                 <Button
@@ -97,24 +211,34 @@ export const NotificationsMenu: FC<{ projectUuid: string }> = ({
                     >
                         <MantineIcon icon={IconBell} />
                     </Indicator>
+                    {withLabel && 'Notifications'}
                 </Button>
             </Menu.Target>
-            <Menu.Dropdown maw="400px">
+            <Menu.Dropdown
+                maw="min(400px, calc(100vw - 24px))"
+                className={classes.dropdown}
+            >
                 {hasValidationNotifications && (
                     <ValidationErrorNotification
                         projectUuid={projectUuid}
                         validationData={validationErrors}
                     />
                 )}
-                {hasDashboardCommentsNotifications && (
-                    <DashboardCommentsNotifications
-                        notifications={dashboardCommentsNotifications}
-                        projectUuid={projectUuid}
-                    />
+                {notifications.length > 0 && (
+                    <>
+                        {notifications.map((notification) => (
+                            <Fragment key={notification.notificationId}>
+                                {renderNotification(notification)}
+                            </Fragment>
+                        ))}
+                    </>
                 )}
                 {!hasValidationNotifications &&
-                    !hasDashboardCommentsNotifications && (
-                        <Menu.Item>No notifications</Menu.Item>
+                    !hasDashboardCommentsNotifications &&
+                    !hasAiReviewNotifications &&
+                    !hasContentReviewNotifications &&
+                    !hasAiCreditAllowanceNotifications && (
+                        <Menu.Item fz="sm">No notifications</Menu.Item>
                     )}
             </Menu.Dropdown>
         </Menu>

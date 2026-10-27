@@ -15,7 +15,7 @@ filters:         # Dashboard-level filters
 name: "Sales Dashboard"
 slug: sales-dashboard
 spaceSlug: sales
-tabs: []         # Optional tabs for organization
+tabs: []         # Optional tabs for organization; tabs support hidden: true/false
 tiles: []        # Chart and content tiles
 verified: true   # Optional: true/false to verify/unverify on upload, omit to leave unchanged. Admins only.
 version: 1
@@ -48,14 +48,15 @@ tiles:
 
 ### SQL Chart Tile
 
-Display a SQL-based chart:
+Display a SQL chart. The SQL chart must exist before the dashboard references it: upload or create it first, then use its slug as `chartSlug`. See [SQL Chart Reference](./sql-chart-reference.md) for the SQL chart body and workflow.
 
 ```yaml
 tiles:
   - h: 6
     properties:
+      chartName: Custom SQL chart
       chartSlug: custom-sql-chart
-      savedSqlUuid: "abc123-def456"
+      title: Custom SQL chart
     type: sql_chart
     w: 12
     x: 12
@@ -178,12 +179,15 @@ Organize tiles into multiple views:
 ```yaml
 tabs:
   - name: "Overview"
+    hidden: false
     order: 0
     uuid: "b3f1a2c4-d5e6-4f78-9abc-def012345678"
   - name: "Details"
+    hidden: false
     order: 1
     uuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
   - name: "Trends"
+    hidden: false
     order: 2
     uuid: "d5e3c4f6-a7b8-4190-cdef-234567890123"
 
@@ -207,6 +211,44 @@ tiles:
     w: 36
     x: 0
     y: 0
+```
+
+**IMPORTANT:** Tab rendering depends on `tabs` and tile `tabUuid` values:
+
+- If no tabs are defined, all tiles render in a single untabbed dashboard view.
+- If tabs are defined, tiles with `tabUuid: null` render on the default/first tab.
+- Avoid relying on this defaulting behavior. When using tabs, set each tile's `tabUuid` explicitly.
+
+Example: no tabs, so both tiles render together in one untabbed view.
+
+```yaml
+tabs: []
+
+tiles:
+  - tabUuid: null
+    type: saved_chart
+  - tabUuid: null
+    type: saved_chart
+```
+
+Example: tabs are defined, so the `null` tile renders on "Overview" and the other tile renders on "Details".
+
+```yaml
+tabs:
+  - name: "Overview"
+    hidden: false
+    order: 0
+    uuid: "b3f1a2c4-d5e6-4f78-9abc-def012345678"
+  - name: "Details"
+    hidden: false
+    order: 1
+    uuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+
+tiles:
+  - tabUuid: null
+    type: saved_chart
+  - tabUuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+    type: saved_chart
 ```
 
 ## Dashboard Filters
@@ -445,12 +487,15 @@ slug: executive-sales-dashboard
 spaceSlug: leadership
 tabs:
   - name: "Overview"
+    hidden: false
     order: 0
     uuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
   - name: "By Region"
+    hidden: false
     order: 1
     uuid: "f7a5e6b8-c9d0-4312-ef01-456789012345"
   - name: "By Product"
+    hidden: false
     order: 2
     uuid: "a8b6f7c9-d0e1-4423-f012-567890123456"
 

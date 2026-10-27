@@ -1,8 +1,8 @@
 import { type ItemsMap } from '@lightdash/common';
-import { Button, Popover, Textarea } from '@mantine/core';
+import { Button, Textarea, Popover } from '@mantine/core';
 import { IconSparkles } from '@tabler/icons-react';
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router';
+import { useProjectUuid } from '../../../../../hooks/useProjectUuid';
 import MantineIcon from '../../../../common/MantineIcon';
 import { useCustomVis } from '../hooks/useCustomVisAi';
 
@@ -19,9 +19,7 @@ export const GenerateVizWithAi = ({
     editorConfig: string;
     setEditorConfig: (config: string) => void;
 }) => {
-    const { projectUuid } = useParams<{
-        projectUuid: string;
-    }>();
+    const projectUuid = useProjectUuid();
     const [prompt, setPrompt] = useState('');
 
     const { mutate: getCustomVis, data, isLoading } = useCustomVis(projectUuid);
@@ -50,19 +48,13 @@ export const GenerateVizWithAi = ({
     ]);
 
     return (
-        <Popover
-            width="400px"
-            position="bottom"
-            withArrow
-            shadow="md"
-            withinPortal
-        >
+        <Popover width="400px" position="bottom" withArrow>
             <Popover.Target>
                 <Button
-                    compact
+                    size="compact-sm"
                     variant="default"
                     fz="xs"
-                    leftIcon={<MantineIcon icon={IconSparkles} />}
+                    leftSection={<MantineIcon icon={IconSparkles} />}
                 >
                     AI
                 </Button>

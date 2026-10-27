@@ -1,6 +1,5 @@
 import type { AiMcpServer } from '@lightdash/common';
 import {
-    Alert,
     ActionIcon,
     Box,
     Button,
@@ -8,8 +7,9 @@ import {
     Group,
     Stack,
     Text,
+    Tooltip,
     useMantineColorScheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconInfoCircle,
     IconPlugConnected,
@@ -20,6 +20,7 @@ import MarkdownPreview from '@uiw/react-markdown-preview';
 import { useEffect, useState, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import MantineModal from '../../../../components/common/MantineModal';
+import TruncatedText from '../../../../components/common/TruncatedText';
 import {
     rehypeRemoveHeaderLinks,
     useMdEditorStyle,
@@ -30,6 +31,11 @@ import {
     useStartMcpOAuthConnectionMutation,
     useUpdateAgentAiMcpServerToolsMutation,
 } from '../hooks/useProjectAiMcpServers';
+import {
+    estimateMcpToolDefinitionTokens,
+    formatTokenEstimate,
+} from '../utils/mcpToolTokenEstimates';
+import styles from './McpToolTokenEstimate.module.css';
 
 type Props = {
     agentUuid?: string;
@@ -44,6 +50,20 @@ type Props = {
 const shouldBlockTools = (mcpServer: AiMcpServer) =>
     mcpServer.authType === 'oauth' &&
     mcpServer.connectionStatus !== 'connected';
+
+const getConnectionRequiredCopy = (mcpServer: AiMcpServer) => {
+    if (mcpServer.connectionStatus === 'error') {
+        return {
+            message: 'Reconnect to load and configure tools.',
+            actionLabel: 'Reconnect',
+        };
+    }
+
+    return {
+        message: 'Connect your account to load tools.',
+        actionLabel: 'Connect account',
+    };
+};
 
 const ToolDescriptionModal = ({
     opened,
@@ -73,13 +93,13 @@ const ToolDescriptionModal = ({
         >
             <Stack gap="md">
                 <Box>
-                    <Text size="xs" fw={700} c="dimmed" tt="uppercase">
+                    <Text size="xs" fw={600} c="dimmed" tt="uppercase">
                         Tool name
                     </Text>
                     <Text size="sm">{toolName}</Text>
                 </Box>
                 <Box>
-                    <Text size="xs" fw={700} c="dimmed" tt="uppercase" mb="xs">
+                    <Text size="xs" fw={600} c="dimmed" tt="uppercase" mb="xs">
                         Description
                     </Text>
                     <Box data-color-mode={colorScheme}>
@@ -205,11 +225,21 @@ export const AiAgentMcpServerToolsPanel: FC<Props> = ({
         toolsQuery.isLoading,
     ]);
 
-    if (!agentUuid || !isPersistedAttachment) {
+    if (!agentUuid) {
         return (
             <Box py="sm">
                 <Text size="sm" c="dimmed">
-                    Save this agent before configuring MCP tools.
+                    Create this agent before configuring MCP tools.
+                </Text>
+            </Box>
+        );
+    }
+
+    if (!isPersistedAttachment) {
+        return (
+            <Box py="sm">
+                <Text size="sm" c="dimmed">
+                    Saving MCP settings...
                 </Text>
             </Box>
         );
@@ -220,42 +250,34 @@ export const AiAgentMcpServerToolsPanel: FC<Props> = ({
     }
 
     if (isConnectionRequired) {
+        if (mcpServer.connectionStatus === 'connecting') {
+            return null;
+        }
+
+        const connectionRequiredCopy = getConnectionRequiredCopy(mcpServer);
+
         return (
             <Box py="sm">
-                <Alert
-                    color="blue"
-                    variant="light"
-                    icon={<MantineIcon icon={IconInfoCircle} />}
-                    title="Connect your account"
-                >
-                    <Stack gap="sm">
-                        <Text size="sm">
-                            This OAuth MCP needs a personal connection before
-                            tool discovery can run.
-                        </Text>
-                        <Group>
-                            <Button
-                                size="compact-sm"
-                                leftSection={
-                                    <MantineIcon
-                                        icon={IconPlugConnected}
-                                        size="sm"
-                                    />
-                                }
-                                loading={isStartingMcpOAuthConnection}
-                                onClick={() =>
-                                    void startMcpOAuthConnection({
-                                        mcpServerUuid: mcpServer.uuid,
-                                    })
-                                }
-                            >
-                                {mcpServer.connectionStatus === 'error'
-                                    ? 'Reconnect'
-                                    : 'Connect your account'}
-                            </Button>
-                        </Group>
-                    </Stack>
-                </Alert>
+                <Group justify="space-between" align="center" gap="sm">
+                    <Text size="sm" c="dimmed">
+                        {connectionRequiredCopy.message}
+                    </Text>
+                    <Button
+                        size="compact-xs"
+                        variant="default"
+                        leftSection={
+                            <MantineIcon icon={IconPlugConnected} size="sm" />
+                        }
+                        loading={isStartingMcpOAuthConnection}
+                        onClick={() =>
+                            void startMcpOAuthConnection({
+                                mcpServerUuid: mcpServer.uuid,
+                            })
+                        }
+                    >
+                        {connectionRequiredCopy.actionLabel}
+                    </Button>
+                </Group>
             </Box>
         );
     }
@@ -329,25 +351,36 @@ export const AiAgentMcpServerToolsPanel: FC<Props> = ({
                         No tools found for this MCP server yet.
                     </Text>
                 ) : (
-                    <Stack gap="xs">
-                        <Checkbox
-                            label={
-                                <Text size="sm" fw={600} c="ldGray.9">
-                                    Enable all
+                    <Stack gap={0}>
+                        <Group justify="space-between" gap="sm" pb="xs">
+                            <Checkbox
+                                label={
+                                    <Text size="sm" fw={600}>
+                                        Enable all
+                                    </Text>
+                                }
+                                checked={allToolsEnabled}
+                                indeterminate={hasMixedToolSelection}
+                                disabled={isRefreshingTools || isUpdatingTools}
+                                onChange={(event) =>
+                                    void updateTools({
+                                        toolSettings: tools.map((tool) => ({
+                                            toolName: tool.toolName,
+                                            enabled:
+                                                event.currentTarget.checked,
+                                        })),
+                                    })
+                                }
+                            />
+                            <Tooltip
+                                label="Approximate input tokens for each tool definition. Actual usage varies by model and provider."
+                                w={280}
+                            >
+                                <Text className={styles.tokenColumnHeader}>
+                                    Tokens
                                 </Text>
-                            }
-                            checked={allToolsEnabled}
-                            indeterminate={hasMixedToolSelection}
-                            disabled={isRefreshingTools || isUpdatingTools}
-                            onChange={(event) =>
-                                void updateTools({
-                                    toolSettings: tools.map((tool) => ({
-                                        toolName: tool.toolName,
-                                        enabled: event.currentTarget.checked,
-                                    })),
-                                })
-                            }
-                        />
+                            </Tooltip>
+                        </Group>
                         {tools.map((tool) => {
                             const isUpdating =
                                 isUpdatingTools &&
@@ -359,7 +392,11 @@ export const AiAgentMcpServerToolsPanel: FC<Props> = ({
                             const checkboxId = `mcp-tool-${tool.uuid}`;
 
                             return (
-                                <Box key={tool.uuid} py={2} pl="lg">
+                                <Box
+                                    key={tool.uuid}
+                                    py="xs"
+                                    className={styles.toolRow}
+                                >
                                     <Group
                                         align="center"
                                         gap="xs"
@@ -385,26 +422,25 @@ export const AiAgentMcpServerToolsPanel: FC<Props> = ({
                                                 })
                                             }
                                         />
-                                        <Box flex={1}>
-                                            <Group gap={6} wrap="nowrap">
-                                                <Text
+                                        <Box flex={1} miw={0}>
+                                            <Group gap="xxs" wrap="nowrap">
+                                                <Box
                                                     component="label"
                                                     htmlFor={checkboxId}
-                                                    size="sm"
-                                                    fw={700}
-                                                    c="ldGray.9"
-                                                    style={{
-                                                        cursor: isUpdating
-                                                            ? 'not-allowed'
-                                                            : 'pointer',
-                                                    }}
+                                                    miw={0}
+                                                    className={`${styles.toolLabel} ${isUpdating ? styles.toolLabelDisabled : ''}`}
                                                 >
-                                                    {tool.title ||
-                                                        tool.toolName}
-                                                </Text>
+                                                    <TruncatedText
+                                                        maxWidth="100%"
+                                                        fz="sm"
+                                                        fw={600}
+                                                        c="ldGray.9"
+                                                    >
+                                                        {tool.title ||
+                                                            tool.toolName}
+                                                    </TruncatedText>
+                                                </Box>
                                                 <ActionIcon
-                                                    variant="subtle"
-                                                    color="gray"
                                                     size="sm"
                                                     aria-label={`View description for ${tool.title || tool.toolName}`}
                                                     onClick={() =>
@@ -429,6 +465,14 @@ export const AiAgentMcpServerToolsPanel: FC<Props> = ({
                                                 </ActionIcon>
                                             </Group>
                                         </Box>
+                                        <Text className={styles.toolTokenValue}>
+                                            {formatTokenEstimate(
+                                                estimateMcpToolDefinitionTokens(
+                                                    tool,
+                                                    mcpServer.name,
+                                                ),
+                                            )}
+                                        </Text>
                                     </Group>
                                 </Box>
                             );

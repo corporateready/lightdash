@@ -1,25 +1,59 @@
 import {
     ApiErrorPayload,
     assertRegisteredAccount,
+    DEFAULT_DATA_APP_VIZ_LIST_SORT,
     ParameterError,
-    type ApiAppImageUploadResponse,
+    type ApiAppFileUploadResponse,
     type ApiAppImageUrlResponse,
     type ApiAppSchedulersResponse,
+    type ApiAppThumbnailUrlResponse,
     type ApiCancelAppVersionResponse,
     type ApiClarifyAppRequest,
     type ApiClarifyAppResponse,
+    type ApiContentVerificationDeleteResponse,
+    type ApiContentVerificationResponse,
     type ApiCreateAppSchedulerResponse,
+    type ApiDataAppActivityResponse,
+    type ApiDataAppVizDeleteImpactResponse,
+    type ApiDataAppVizPreviewTokenResponse,
+    type ApiDataAppVizRenderMetadataResponse,
+    type ApiDataAppVizUpgradeImpactResponse,
     type ApiDeleteAppResponse,
+    type ApiDismissAddAnalysisOfferResponse,
+    type ApiDuplicateAppRequest,
     type ApiDuplicateAppResponse,
+    type ApiEmbedProjectAppsResponse,
     type ApiGenerateAppResponse,
+    type ApiGetAppCodeResponse,
     type ApiGetAppResponse,
+    type ApiGetDataAppAuthoringContextResponse,
+    type ApiGetDataAppVizResponse,
+    type ApiImportAppCodeResponse,
+    type ApiInstallRegistryChartTypeResponse,
+    type ApiListDataAppVizsResponse,
+    type ApiListRegistryChartTypesResponse,
     type ApiMyAppsResponse,
     type ApiPreviewTokenResponse,
+    type ApiPromoteAppDiffResponse,
+    type ApiPromoteAppResponse,
     type ApiRestoreAppVersionResponse,
+    type ApiSuccessEmpty,
     type ApiTogglePinnedItem,
     type ApiUpdateAppRequest,
     type ApiUpdateAppResponse,
+    type ApiUpgradeAppResponse,
+    type DataAppActivityFilters,
+    type DataAppViewContext,
+    type DataAppVizListSortBy,
+    type DataAppVizListSortDirection,
     type GenerateAppRequestBody,
+    type ImportAppCodeRequestBody,
+    type InstallRegistryChartTypeBody,
+    type MyAppsSortBy,
+    type RecordDataAppViewOutcome,
+    type UpgradeAppRequestBody,
+    type UUID,
+    type UuidOrSlug,
 } from '@lightdash/common';
 import {
     Body,
@@ -39,6 +73,7 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../../auth/account';
+import { requireOAuthScopeOperation } from '../../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -46,6 +81,7 @@ import {
 } from '../../controllers/authentication';
 import { BaseController } from '../../controllers/baseController';
 import { AppGenerateService } from '../services/AppGenerateService/AppGenerateService';
+import { validateDateFilter, validateUuidFilter } from './filterValidation';
 
 @Route('/api/v1/ee/projects/{projectUuid}/apps')
 @Hidden()
@@ -66,7 +102,7 @@ export class AppGenerateController extends BaseController {
             toSessionUser(req.account),
             projectUuid,
             body.prompt,
-            body.imageIds ?? [],
+            body.fileIds ?? body.imageIds ?? [],
             body.appUuid,
             body.charts,
             body.dashboard,
@@ -74,11 +110,445 @@ export class AppGenerateController extends BaseController {
             body.clarifications,
             body.spaceUuid,
             body.claudeModel,
-            body.designUuid,
+            {
+                // The builder creates unnamed; the auto-namer fills it mid-build.
+                name: null,
+                creationExperience: body.creationExperience,
+                designUuidInput: body.designUuid,
+                externalConnections: body.externalConnections,
+                codexModelInput: body.codexModel,
+                vizContext: body.vizContext,
+            },
         );
         return {
             status: 'ok',
             results: result,
+        };
+    }
+
+    /**
+     * List the project's data apps (for the embed config allowlist picker
+     * and the CLI's project-wide listing). Custom chart types are never
+     * included — they have their own listing at /chart-types.
+     * @summary List project data apps
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/')
+    @OperationId('listProjectApps')
+    async listProjectApps(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+    ): Promise<ApiEmbedProjectAppsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results = await this.getAppGenerateService().listAppsForProject(
+            toSessionUser(req.account),
+            projectUuid,
+            'exclude',
+        );
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * List the project's custom chart types (for the CLI's
+     * chart-types-as-code listing). Same shape as the data apps listing;
+     * a 404 tells older CLIs the server predates the split.
+     * @summary List project custom chart types
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/chart-types')
+    @OperationId('listProjectChartTypes')
+    async listProjectChartTypes(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+    ): Promise<ApiEmbedProjectAppsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results = await this.getAppGenerateService().listAppsForProject(
+            toSessionUser(req.account),
+            projectUuid,
+            'only',
+        );
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * The installable chart type catalog from the configured chart
+     * registry, merged with this project's install state.
+     * @summary List installable chart types from the chart registry
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/registry/charts')
+    @OperationId('listRegistryChartTypes')
+    async listRegistryChartTypes(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+    ): Promise<ApiListRegistryChartTypesResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results =
+            await this.getAppGenerateService().listRegistryChartTypes(
+                toSessionUser(req.account),
+                projectUuid,
+            );
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * Install a chart type from the chart registry, or append a new version
+     * when it's already installed at an older registry version.
+     * @summary Install or upgrade a chart type from the chart registry
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/registry/charts/{chartSlug}/install')
+    @OperationId('installRegistryChartType')
+    async installRegistryChartType(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() chartSlug: string,
+        @Body() body?: InstallRegistryChartTypeBody,
+    ): Promise<ApiInstallRegistryChartTypeResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results =
+            await this.getAppGenerateService().installRegistryChartType(
+                toSessionUser(req.account),
+                projectUuid,
+                chartSlug,
+                body,
+            );
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * @summary List project data app visualizations
+     * @param sortBy Order by creation time (the default) or by name
+     * @param sortDirection Defaults to desc
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations')
+    @OperationId('listDataAppVisualizations')
+    async listDataAppVisualizations(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Query() page?: number,
+        @Query() pageSize?: number,
+        @Query() search?: string,
+        @Query() sortBy?: DataAppVizListSortBy,
+        @Query() sortDirection?: DataAppVizListSortDirection,
+    ): Promise<ApiListDataAppVizsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results =
+            await this.getAppGenerateService().listDataAppVisualizations(
+                toSessionUser(req.account),
+                projectUuid,
+                page && pageSize ? { page, pageSize } : undefined,
+                search,
+                {
+                    sortBy: sortBy ?? DEFAULT_DATA_APP_VIZ_LIST_SORT.sortBy,
+                    sortDirection:
+                        sortDirection ??
+                        DEFAULT_DATA_APP_VIZ_LIST_SORT.sortDirection,
+                },
+            );
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * @summary Get a data app visualization
+     * @param version Answer with this version's schema instead of the latest ready one
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}')
+    @OperationId('getDataAppVisualization')
+    async getDataAppVisualization(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() dataAppVizUuid: string,
+        @Query() version?: number,
+    ): Promise<ApiGetDataAppVizResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const result =
+            await this.getAppGenerateService().getDataAppVisualization(
+                toSessionUser(req.account),
+                projectUuid,
+                dataAppVizUuid,
+                version,
+            );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}/delete-impact')
+    @OperationId('getDataAppVizDeleteImpact')
+    async getDataAppVizDeleteImpact(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: UUID,
+    ): Promise<ApiDataAppVizDeleteImpactResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results:
+                await this.getAppGenerateService().getDataAppVizDeleteImpact(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    dataAppVizUuid,
+                ),
+        };
+    }
+
+    /**
+     * @summary Get chart type upgrade impact
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}/upgrade-impact')
+    @OperationId('getDataAppVizUpgradeImpact')
+    async getDataAppVizUpgradeImpact(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: UUID,
+    ): Promise<ApiDataAppVizUpgradeImpactResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results:
+                await this.getAppGenerateService().getDataAppVizUpgradeImpact(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    dataAppVizUuid,
+                ),
+        };
+    }
+
+    /**
+     * @summary Get data app visualization render metadata
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}/render-metadata')
+    @OperationId('getDataAppVizRenderMetadata')
+    async getDataAppVizRenderMetadata(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() dataAppVizUuid: string,
+        @Query() version?: number,
+    ): Promise<ApiDataAppVizRenderMetadataResponse> {
+        assertRegisteredAccount(req.account);
+        const result =
+            await this.getAppGenerateService().getDataAppVizRenderMetadata(
+                toSessionUser(req.account),
+                projectUuid,
+                dataAppVizUuid,
+                version,
+            );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * @summary Get a data app visualization preview token
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}/versions/{version}/preview-token')
+    @OperationId('getDataAppVizPreviewToken')
+    async getDataAppVizPreviewToken(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() dataAppVizUuid: string,
+        @Path() version: number,
+    ): Promise<ApiDataAppVizPreviewTokenResponse> {
+        assertRegisteredAccount(req.account);
+        const token =
+            await this.getAppGenerateService().getDataAppVizPreviewToken(
+                toSessionUser(req.account),
+                projectUuid,
+                dataAppVizUuid,
+                version,
+            );
+        return {
+            status: 'ok',
+            results: { token },
+        };
+    }
+
+    /**
+     * @summary Get data app visualization render metadata for a saved chart
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'AppGenerateController.getChartDataAppVizRenderMetadata',
+        ),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Get(
+        '/visualizations/{dataAppVizUuid}/charts/{savedChartUuid}/render-metadata',
+    )
+    @OperationId('getChartDataAppVizRenderMetadata')
+    async getChartDataAppVizRenderMetadata(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() savedChartUuid: UUID,
+        @Path() dataAppVizUuid: string,
+        @Query() chartVersionUuid?: UUID,
+    ): Promise<ApiDataAppVizRenderMetadataResponse> {
+        assertRegisteredAccount(req.account);
+        const result =
+            await this.getAppGenerateService().getChartDataAppVizRenderMetadata(
+                toSessionUser(req.account),
+                projectUuid,
+                savedChartUuid,
+                dataAppVizUuid,
+                chartVersionUuid,
+            );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * @summary Get a data app visualization preview token for a saved chart
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'AppGenerateController.getChartDataAppVizPreviewToken',
+        ),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Get(
+        '/visualizations/{dataAppVizUuid}/charts/{savedChartUuid}/versions/{version}/preview-token',
+    )
+    @OperationId('getChartDataAppVizPreviewToken')
+    async getChartDataAppVizPreviewToken(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() savedChartUuid: UUID,
+        @Path() dataAppVizUuid: string,
+        @Path() version: number,
+        @Query() chartVersionUuid?: UUID,
+    ): Promise<ApiDataAppVizPreviewTokenResponse> {
+        assertRegisteredAccount(req.account);
+        const token =
+            await this.getAppGenerateService().getChartDataAppVizPreviewToken(
+                toSessionUser(req.account),
+                projectUuid,
+                savedChartUuid,
+                dataAppVizUuid,
+                version,
+                chartVersionUuid,
+            );
+        return {
+            status: 'ok',
+            results: { token },
+        };
+    }
+
+    /**
+     * @summary Get data app visualization render metadata for a Document chart
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get(
+        '/visualizations/{dataAppVizUuid}/documents/{documentUuid}/charts/{chartId}/render-metadata',
+    )
+    @OperationId('getDocumentDataAppVizRenderMetadata')
+    async getDocumentDataAppVizRenderMetadata(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: string,
+        @Path() documentUuid: UUID,
+        @Path() chartId: string,
+        @Query() documentVersionUuid: UUID,
+    ): Promise<ApiDataAppVizRenderMetadataResponse> {
+        assertRegisteredAccount(req.account);
+        return {
+            status: 'ok',
+            results:
+                await this.getAppGenerateService().getDocumentDataAppVizRenderMetadata(
+                    req.account,
+                    projectUuid,
+                    {
+                        documentUuid,
+                        versionUuid: documentVersionUuid,
+                        chartId,
+                    },
+                    dataAppVizUuid,
+                ),
+        };
+    }
+
+    /**
+     * @summary Get a data app visualization preview token for a Document chart
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get(
+        '/visualizations/{dataAppVizUuid}/documents/{documentUuid}/charts/{chartId}/versions/{version}/preview-token',
+    )
+    @OperationId('getDocumentDataAppVizPreviewToken')
+    async getDocumentDataAppVizPreviewToken(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: string,
+        @Path() documentUuid: UUID,
+        @Path() chartId: string,
+        @Path() version: number,
+        @Query() documentVersionUuid: UUID,
+    ): Promise<ApiDataAppVizPreviewTokenResponse> {
+        assertRegisteredAccount(req.account);
+        const token =
+            await this.getAppGenerateService().getDocumentDataAppVizPreviewToken(
+                req.account,
+                projectUuid,
+                {
+                    documentUuid,
+                    versionUuid: documentVersionUuid,
+                    chartId,
+                },
+                dataAppVizUuid,
+                version,
+            );
+        return {
+            status: 'ok',
+            results: { token },
         };
     }
 
@@ -107,7 +577,7 @@ export class AppGenerateController extends BaseController {
             body.template,
             body.charts,
             body.dashboard,
-            body.imageIds,
+            body.fileIds ?? body.imageIds,
         );
         return {
             status: 'ok',
@@ -116,10 +586,33 @@ export class AppGenerateController extends BaseController {
     }
 
     /**
+     * Upload a file attachment for a data app generation request.
+     * Send raw bytes with the appropriate Content-Type header; pass the
+     * original filename via the `filename` query parameter. Supported:
+     * images (PNG, JPEG, GIF, WEBP), PDFs, and text-based files (JSON,
+     * CSV, Markdown, XML/TWB, YAML, code, …).
+     * @summary Upload app file
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/upload-file')
+    @OperationId('uploadAppFile')
+    async uploadFile(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+        @Query() filename?: string,
+        @Query() kind?: 'screenshot',
+    ): Promise<ApiAppFileUploadResponse> {
+        this.setStatus(200);
+        return this.handleUploadFile(req, projectUuid, appUuid, filename, kind);
+    }
+
+    /**
      * Upload an image for a data app generation request.
-     * Send raw image bytes with the appropriate Content-Type header.
-     * The request body is streamed directly to S3 without buffering.
      * @summary Upload app image
+     * @deprecated Use the upload-file endpoint — this alias remains for older
+     * clients and accepts the same payloads.
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
@@ -129,10 +622,49 @@ export class AppGenerateController extends BaseController {
         @Request() req: express.Request,
         @Path() projectUuid: string,
         @Path() appUuid: string,
+        @Query() filename?: string,
         @Query() kind?: 'screenshot',
-    ): Promise<ApiAppImageUploadResponse> {
+    ): Promise<ApiAppFileUploadResponse> {
+        this.setStatus(200);
+        return this.handleUploadFile(req, projectUuid, appUuid, filename, kind);
+    }
+
+    /**
+     * Get project context for authoring a new data app locally.
+     * @summary Get data app authoring context
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/authoring-context')
+    @OperationId('getDataAppAuthoringContext')
+    async getDataAppAuthoringContext(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Query() slug: string,
+        @Query() designUuid?: string,
+    ): Promise<ApiGetDataAppAuthoringContextResponse> {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
+        return {
+            status: 'ok',
+            results:
+                await this.getAppGenerateService().getDataAppAuthoringContext(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slug,
+                    designUuid ?? null,
+                ),
+        };
+    }
+
+    private async handleUploadFile(
+        req: express.Request,
+        projectUuid: string,
+        appUuid: string,
+        filename?: string,
+        kind?: 'screenshot',
+    ): Promise<ApiAppFileUploadResponse> {
+        assertRegisteredAccount(req.account);
         const mimeType = req.headers['content-type'];
         if (!mimeType) {
             throw new ParameterError('Content-Type header is required');
@@ -146,13 +678,14 @@ export class AppGenerateController extends BaseController {
                 'Content-Length must be a positive integer',
             );
         }
-        const result = await this.getAppGenerateService().uploadImage(
+        const result = await this.getAppGenerateService().uploadFile(
             toSessionUser(req.account),
             projectUuid,
             mimeType,
             req,
             contentLength,
             appUuid,
+            filename,
             kind,
         );
         return {
@@ -165,14 +698,18 @@ export class AppGenerateController extends BaseController {
      * Get an app with its version history, paginated backwards.
      * @summary Get app with versions
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('AppGenerateController.getApp'),
+    ])
     @SuccessResponse('200', 'Success')
-    @Get('/{appUuid}')
+    @Get('/{appUuidOrSlug}')
     @OperationId('getApp')
     async getApp(
         @Request() req: express.Request,
         @Path() projectUuid: string,
-        @Path() appUuid: string,
+        @Path() appUuidOrSlug: UuidOrSlug,
         @Query() beforeVersion?: number,
         @Query() limit?: number,
     ): Promise<ApiGetAppResponse> {
@@ -180,7 +717,7 @@ export class AppGenerateController extends BaseController {
         const result = await this.getAppGenerateService().getAppVersions(
             toSessionUser(req.account),
             projectUuid,
-            appUuid,
+            appUuidOrSlug,
             { beforeVersion, limit },
         );
         return {
@@ -211,10 +748,45 @@ export class AppGenerateController extends BaseController {
             projectUuid,
             appUuid,
             body.prompt,
-            body.imageIds ?? [],
+            body.fileIds ?? body.imageIds ?? [],
             body.charts,
             body.dashboard,
             body.claudeModel,
+            {
+                creationExperience: body.creationExperience,
+                designUuidInput: body.designUuid,
+                externalConnections: body.externalConnections,
+                codexModelInput: body.codexModel,
+                vizContext: body.vizContext,
+            },
+        );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * Clear the coding agent's context by starting a new thread on the app.
+     * The next prompt starts a fresh agent session; versions and the sandbox
+     * are unchanged. Refused while a version is building.
+     * @summary Clear agent context
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/threads')
+    @OperationId('clearAppAgentContext')
+    async clearAppAgentContext(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() appUuid: UUID,
+    ): Promise<ApiGetAppResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const result = await this.getAppGenerateService().clearAgentContext(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
         );
         return {
             status: 'ok',
@@ -295,9 +867,69 @@ export class AppGenerateController extends BaseController {
         @Request() req: express.Request,
         @Path() projectUuid: string,
         @Path() appUuid: string,
+        @Body() body?: ApiDuplicateAppRequest,
     ): Promise<ApiDuplicateAppResponse> {
         assertRegisteredAccount(req.account);
         const result = await this.getAppGenerateService().duplicateApp(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+            body,
+        );
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * Rebuild this app on the current template image (fresh sandbox, latest
+     * SDK and skills). The body carries what the running bundle self-reported
+     * so the upgrade agent can offer the newly available features.
+     * @summary Upgrade app to the latest template
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/upgrade')
+    @OperationId('upgradeApp')
+    async upgradeApp(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+        @Body() body: UpgradeAppRequestBody,
+    ): Promise<ApiUpgradeAppResponse> {
+        assertRegisteredAccount(req.account);
+        const result = await this.getAppGenerateService().upgradeApp(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+            body,
+        );
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * Preview what promoting this app into its upstream (production) project
+     * will do: create a new production app or update the linked one, and which
+     * space it will land in.
+     * @summary Get data app promotion diff
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/{appUuid}/promoteDiff')
+    @OperationId('getAppPromoteDiff')
+    async getAppPromoteDiff(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+    ): Promise<ApiPromoteAppDiffResponse> {
+        assertRegisteredAccount(req.account);
+        const results = await this.getAppGenerateService().getPromoteAppDiff(
             toSessionUser(req.account),
             projectUuid,
             appUuid,
@@ -305,7 +937,97 @@ export class AppGenerateController extends BaseController {
         this.setStatus(200);
         return {
             status: 'ok',
-            results: result,
+            results,
+        };
+    }
+
+    /**
+     * Promote this app from a preview project into its upstream (production)
+     * project. Snapshots the latest ready version as a new production version.
+     * @summary Promote data app to production
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/promote')
+    @OperationId('promoteApp')
+    async promoteApp(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+    ): Promise<ApiPromoteAppResponse> {
+        assertRegisteredAccount(req.account);
+        const results = await this.getAppGenerateService().promoteApp(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+        );
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * Verify a data app
+     * @summary Verify data app
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/verification')
+    @OperationId('verifyDataApp')
+    async verifyDataApp(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: UUID,
+    ): Promise<ApiContentVerificationResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getAppGenerateService().verifyDataApp(
+                toSessionUser(req.account),
+                projectUuid,
+                appUuid,
+            ),
+        };
+    }
+
+    /**
+     * Remove verification from a data app
+     * @summary Unverify data app
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Delete('/{appUuid}/verification')
+    @OperationId('unverifyDataApp')
+    async unverifyDataApp(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: UUID,
+    ): Promise<ApiContentVerificationDeleteResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        await this.getAppGenerateService().unverifyDataApp(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+        );
+        return {
+            status: 'ok',
+            results: undefined,
         };
     }
 
@@ -333,6 +1055,33 @@ export class AppGenerateController extends BaseController {
         return {
             status: 'ok',
             results: result,
+        };
+    }
+
+    /**
+     * Dismiss the builder-side "add AI analysis" offer for this app, for
+     * everyone who builds it. One-way: the offer also disappears on its own
+     * once a build wires up the analysis surface.
+     * @summary Dismiss the add-AI-analysis offer
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/analysis-offer/dismiss')
+    @OperationId('dismissAddAnalysisOffer')
+    async dismissAddAnalysisOffer(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: UUID,
+    ): Promise<ApiDismissAddAnalysisOfferResponse> {
+        assertRegisteredAccount(req.account);
+        await this.getAppGenerateService().dismissAddAnalysisOffer(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+        );
+        return {
+            status: 'ok',
+            results: undefined,
         };
     }
 
@@ -392,7 +1141,11 @@ export class AppGenerateController extends BaseController {
      * Mints a short-lived JWT for accessing an app version preview in an iframe.
      * @summary Get preview token
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('AppGenerateController.getPreviewToken'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/{appUuid}/versions/{version}/preview-token')
     @OperationId('getAppPreviewToken')
@@ -401,6 +1154,7 @@ export class AppGenerateController extends BaseController {
         @Path() projectUuid: string,
         @Path() appUuid: string,
         @Path() version: number,
+        @Query() viewContext: DataAppViewContext = 'unknown',
     ): Promise<ApiPreviewTokenResponse> {
         assertRegisteredAccount(req.account);
         const token = await this.getAppGenerateService().getPreviewToken(
@@ -408,10 +1162,88 @@ export class AppGenerateController extends BaseController {
             projectUuid,
             appUuid,
             version,
+            viewContext,
         );
         return {
             status: 'ok',
             results: { token },
+        };
+    }
+
+    /**
+     * Records a technical observation authorized by an exact-version preview token.
+     * @summary Record app outcome
+     */
+    @Post('/{appUuid}/versions/{version}/view-outcome')
+    @SuccessResponse('200', 'Success')
+    @OperationId('recordDataAppViewOutcome')
+    async recordViewOutcome(
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+        @Path() version: number,
+        @Body() body: RecordDataAppViewOutcome,
+    ): Promise<ApiSuccessEmpty> {
+        this.getAppGenerateService().recordViewOutcome(
+            projectUuid,
+            appUuid,
+            version,
+            body,
+        );
+        return { status: 'ok', results: undefined };
+    }
+
+    /**
+     * Downloads the source code for a data app version.
+     * @summary Get app code
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/{appUuidOrSlug}/download')
+    @OperationId('getAppCode')
+    async getAppCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuidOrSlug: UuidOrSlug,
+        @Query() version?: number,
+    ): Promise<ApiGetAppCodeResponse> {
+        assertRegisteredAccount(req.account);
+        return {
+            status: 'ok',
+            results: await this.getAppGenerateService().getAppCode(
+                toSessionUser(req.account),
+                projectUuid,
+                appUuidOrSlug,
+                version,
+            ),
+        };
+    }
+
+    /**
+     * Import source code for a data app version.
+     * @summary Import app code
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('AppGenerateController.importAppCode'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/upload')
+    @OperationId('importAppCode')
+    async importAppCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: ImportAppCodeRequestBody,
+    ): Promise<ApiImportAppCodeResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getAppGenerateService().importAppCode(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+            ),
         };
     }
 
@@ -439,10 +1271,138 @@ export class AppGenerateController extends BaseController {
     }
 
     /**
-     * List schedulers for a data app
-     * @summary List app schedulers
+     * Save a PNG as the thumbnail of one version of a data app
+     * @summary Upload app thumbnail
+     * @param version the version to save it for; defaults to the latest ready version
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/{appUuid}/thumbnail')
+    @OperationId('uploadAppThumbnail')
+    async uploadThumbnail(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+        @Query() version?: number,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        const mimeType = req.headers['content-type'];
+        if (!mimeType) {
+            throw new ParameterError('Content-Type header is required');
+        }
+        if (!req.headers['content-length']) {
+            throw new ParameterError('Content-Length header is required');
+        }
+        const contentLength = parseInt(req.headers['content-length'], 10);
+        if (Number.isNaN(contentLength) || contentLength <= 0) {
+            throw new ParameterError(
+                'Content-Length must be a positive integer',
+            );
+        }
+
+        await this.getAppGenerateService().uploadThumbnail(
+            toSessionUser(req.account),
+            projectUuid,
+            mimeType,
+            req,
+            contentLength,
+            appUuid,
+            version ?? null,
+        );
+
+        return {
+            status: 'ok',
+            results: undefined,
+        };
+    }
+
+    /**
+     * Remove the thumbnail of one version of a data app
+     * @summary Delete app thumbnail
+     * @param version the version to remove it from; defaults to the latest ready version
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Delete('/{appUuid}/thumbnail')
+    @OperationId('deleteAppThumbnail')
+    async deleteAppThumbnail(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+        @Query() version?: number,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        await this.getAppGenerateService().deleteThumbnail(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+            version ?? null,
+        );
+        return {
+            status: 'ok',
+            results: undefined,
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/{appUuid}/thumbnail')
+    @OperationId('getAppThumbnailUrl')
+    async getAppThumbnailUrl(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() appUuid: string,
+    ): Promise<ApiAppThumbnailUrlResponse> {
+        assertRegisteredAccount(req.account);
+        const result = await this.getAppGenerateService().getThumbnailUrl(
+            toSessionUser(req.account),
+            projectUuid,
+            appUuid,
+        );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * Get a short-lived URL for the thumbnail of one version of a data app
+     * @summary Get app version thumbnail
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/{appUuid}/versions/{version}/thumbnail')
+    @OperationId('getAppVersionThumbnailUrl')
+    async getAppVersionThumbnailUrl(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() appUuid: UUID,
+        @Path() version: number,
+    ): Promise<ApiAppThumbnailUrlResponse> {
+        assertRegisteredAccount(req.account);
+        const result =
+            await this.getAppGenerateService().getVersionThumbnailUrl(
+                toSessionUser(req.account),
+                projectUuid,
+                appUuid,
+                version,
+            );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * List schedulers for a data app
+     * @summary List app schedulers
+     * @param includeLatestRun include the most recent run for each scheduler
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('AppGenerateController.getAppSchedulers'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/{appUuid}/schedulers')
     @OperationId('getAppSchedulers')
@@ -450,6 +1410,7 @@ export class AppGenerateController extends BaseController {
         @Request() req: express.Request,
         @Path() projectUuid: string,
         @Path() appUuid: string,
+        @Query() includeLatestRun?: boolean,
     ): Promise<ApiAppSchedulersResponse> {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
@@ -457,7 +1418,11 @@ export class AppGenerateController extends BaseController {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .getAppSchedulers(toSessionUser(req.account), appUuid),
+                .getAppSchedulers(
+                    toSessionUser(req.account),
+                    appUuid,
+                    includeLatestRun,
+                ),
         };
     }
 
@@ -513,6 +1478,10 @@ export class UserAppsController extends BaseController {
         @Request() req: express.Request,
         @Query() page?: number,
         @Query() pageSize?: number,
+        @Query() excludePreviewProjects?: boolean,
+        @Query() projectUuids?: string[],
+        @Query() search?: string,
+        @Query() sortBy?: MyAppsSortBy,
     ): Promise<ApiMyAppsResponse> {
         assertRegisteredAccount(req.account);
         const result = await this.services
@@ -520,10 +1489,74 @@ export class UserAppsController extends BaseController {
             .listMyApps(
                 toSessionUser(req.account),
                 page && pageSize ? { page, pageSize } : undefined,
+                { excludePreviewProjects, projectUuids, search, sortBy },
             );
         return {
             status: 'ok',
             results: result,
+        };
+    }
+}
+
+const ACTIVITY_MAX_PAGE_SIZE = 100;
+
+@Route('/api/v1/ee/org/apps')
+@Hidden()
+@Response<ApiErrorPayload>('default', 'Error')
+export class OrgAppsController extends BaseController {
+    /**
+     * List every data app generation across the organization — who built what,
+     * when, and with which model. Org admins only; the `manage:Organization`
+     * check lives in `AppGenerateService.getOrganizationActivity`.
+     * @summary Get data app activity
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/activity')
+    @OperationId('getDataAppActivity')
+    async getDataAppActivity(
+        @Request() req: express.Request,
+        // Pagination
+        @Query() page?: number,
+        @Query() pageSize?: number,
+        // Filtering
+        @Query() projectUuids?: DataAppActivityFilters['projectUuids'],
+        @Query() userUuids?: DataAppActivityFilters['userUuids'],
+        @Query() models?: DataAppActivityFilters['models'],
+        @Query() dateFrom?: DataAppActivityFilters['dateFrom'],
+        @Query() dateTo?: DataAppActivityFilters['dateTo'],
+        @Query() dataAppVizsFilter?: 'exclude' | 'only',
+    ): Promise<ApiDataAppActivityResponse> {
+        assertRegisteredAccount(req.account);
+        validateUuidFilter('projectUuids', projectUuids);
+        validateUuidFilter('userUuids', userUuids);
+        validateDateFilter('dateFrom', dateFrom);
+        validateDateFilter('dateTo', dateTo);
+        // Always paginate: the log grows without bound and every row carries a
+        // full prompt, so an unpaginated read would pull the org's entire
+        // generation history in one response.
+        const paginateArgs = {
+            page: page ?? 1,
+            pageSize: Math.min(pageSize ?? 50, ACTIVITY_MAX_PAGE_SIZE),
+        };
+        const filters: DataAppActivityFilters = {
+            ...(projectUuids && { projectUuids }),
+            ...(userUuids && { userUuids }),
+            ...(models && { models }),
+            ...(dateFrom && { dateFrom }),
+            ...(dateTo && { dateTo }),
+            ...(dataAppVizsFilter && { dataAppVizsFilter }),
+        };
+        const results = await this.services
+            .getAppGenerateService<AppGenerateService>()
+            .getOrganizationActivity(
+                toSessionUser(req.account),
+                paginateArgs,
+                filters,
+            );
+        return {
+            status: 'ok',
+            results,
         };
     }
 }

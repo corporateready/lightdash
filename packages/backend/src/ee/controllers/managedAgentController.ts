@@ -5,8 +5,11 @@ import {
     ManagedAgentActionType,
     ManagedAgentRun,
     ManagedAgentRunsListResponse,
+    ManagedAgentRuntimeInfo,
     ManagedAgentSettings,
+    ManagedAgentTargetType,
     UpdateManagedAgentSettings,
+    type UUID,
 } from '@lightdash/common';
 import {
     Body,
@@ -39,6 +42,22 @@ import { ManagedAgentService } from '../services/ManagedAgentService/ManagedAgen
 export class ManagedAgentController extends BaseController {
     private getManagedAgentService() {
         return this.services.getManagedAgentService<ManagedAgentService>();
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Get('/runtime')
+    @OperationId('getManagedAgentRuntime')
+    async getRuntimeInfo(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+    ): Promise<{ status: 'ok'; results: ManagedAgentRuntimeInfo }> {
+        assertRegisteredAccount(req.account);
+        const results = await this.getManagedAgentService().getRuntimeInfo(
+            req.account,
+            projectUuid,
+        );
+        this.setStatus(200);
+        return { status: 'ok', results };
     }
 
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
@@ -136,18 +155,52 @@ export class ManagedAgentController extends BaseController {
         @Path() projectUuid: string,
         @Query() date?: string,
         @Query() actionType?: string,
+        @Query() actionTypes?: string[],
+        @Query() targetTypes?: string[],
+        @Query() search?: string,
+        @Query() dateFrom?: string,
+        @Query() dateTo?: string,
         @Query() sessionId?: string,
         @Query() runUuid?: string,
+        @Query() limit?: number,
     ): Promise<{ status: 'ok'; results: ManagedAgentAction[] }> {
         assertRegisteredAccount(req.account);
+        const validActionTypes = [
+            ...(actionTypes ?? []),
+            ...(actionType ? [actionType] : []),
+        ].filter((type): type is ManagedAgentActionType =>
+            Object.values(ManagedAgentActionType).includes(
+                type as ManagedAgentActionType,
+            ),
+        );
+        const validTargetTypes = (targetTypes ?? []).filter(
+            (type): type is ManagedAgentTargetType =>
+                Object.values(ManagedAgentTargetType).includes(
+                    type as ManagedAgentTargetType,
+                ),
+        );
         const results = await this.getManagedAgentService().getActions(
             toSessionUser(req.account),
             projectUuid,
             {
                 date,
-                actionType: actionType as ManagedAgentActionType | undefined,
+                dateFrom,
+                dateTo,
+                actionTypes:
+                    validActionTypes.length > 0 ? validActionTypes : undefined,
+                targetTypes:
+                    validTargetTypes.length > 0 ? validTargetTypes : undefined,
+                // Cap the ILIKE needle so user input cannot produce an
+                // arbitrarily large pattern
+                search: search?.trim()
+                    ? search.trim().slice(0, 200)
+                    : undefined,
                 sessionId,
                 runUuid,
+                limit:
+                    limit !== undefined && Number.isFinite(limit)
+                        ? Math.min(Math.max(Math.floor(limit), 1), 500)
+                        : undefined,
             },
         );
         this.setStatus(200);

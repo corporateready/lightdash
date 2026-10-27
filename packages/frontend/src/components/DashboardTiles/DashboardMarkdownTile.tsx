@@ -2,14 +2,17 @@ import {
     MARKDOWN_TILE_CLASS,
     type DashboardMarkdownTile,
 } from '@lightdash/common';
-import { Box, Menu, useMantineColorScheme } from '@mantine-8/core';
+import { Box, Menu, useMantineColorScheme } from '@mantine/core';
 import { IconCopy } from '@tabler/icons-react';
 import MarkdownPreview from '@uiw/react-markdown-preview';
 import React, { useCallback, useMemo, useState, type FC } from 'react';
-import { useParams } from 'react-router';
 import rehypeExternalLinks from 'rehype-external-links';
 import { v4 as uuid4 } from 'uuid';
 import { DashboardTileComments } from '../../features/comments';
+import {
+    selectDashboardTiles,
+    useDashboardSelector,
+} from '../../features/dashboard/store';
 import { appendNewTilesToBottom } from '../../hooks/dashboard/useDashboard';
 import useDashboardStorage from '../../hooks/dashboard/useDashboardStorage';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
@@ -19,7 +22,7 @@ import TileBase from './TileBase/index';
 
 export type Props = Pick<
     React.ComponentProps<typeof TileBase>,
-    'tile' | 'onEdit' | 'onDelete' | 'isEditMode'
+    'tile' | 'onEdit' | 'onDelete' | 'isEditMode' | 'minimal'
 > & {
     tile: DashboardMarkdownTile;
 };
@@ -39,14 +42,14 @@ const MarkdownTile: FC<Props> = (props) => {
     const showComments = useDashboardContext(
         (c) => c.dashboardCommentsCheck?.canViewDashboardComments,
     );
-    const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
+    const dashboardTiles = useDashboardSelector(selectDashboardTiles);
     const { getUnsavedDashboardTiles } = useDashboardStorage();
     const tileHasComments = useDashboardContext((c) => c.hasTileComments(uuid));
     const setDashboardTiles = useDashboardContext((c) => c.setDashboardTiles);
     const setHaveTilesChanged = useDashboardContext(
         (c) => c.setHaveTilesChanged,
     );
-    const { dashboardUuid } = useParams<{ dashboardUuid: string }>();
+    const dashboardUuid = useDashboardContext((c) => c.dashboard?.uuid);
 
     const dashboardComments = useMemo(
         () =>

@@ -1,16 +1,18 @@
 import {
     ContentType,
+    getAppDisplayName,
     type ApiContentResponse,
     type ApiError,
     type DashboardDataAppTileProperties,
 } from '@lightdash/common';
-import { Loader, Select, Stack, Text, TextInput } from '@mantine-8/core';
-import { useDebouncedValue } from '@mantine-8/hooks';
+import { Loader, Select, Stack, Text, TextInput } from '@mantine/core';
 import { type UseFormReturnType } from '@mantine/form';
+import { useDebouncedValue } from '@mantine/hooks';
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
-import { useParams } from 'react-router';
-import { lightdashApi } from '../../../api';
+import { type LightdashApi } from '../../../api';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 
 interface DataAppTileFormProps {
     form: UseFormReturnType<DashboardDataAppTileProperties['properties']>;
@@ -18,26 +20,35 @@ interface DataAppTileFormProps {
 
 const DATA_APP_PICKER_PAGE_SIZE = 100;
 
-const fetchDataAppContent = (projectUuid: string, search: string) => {
+const fetchDataAppContent = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    search: string,
+) => {
     const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
     return lightdashApi<ApiContentResponse['results']>({
         version: 'v2',
-        url: `/content?projectUuids=${projectUuid}&contentTypes=${ContentType.DATA_APP}&pageSize=${DATA_APP_PICKER_PAGE_SIZE}&page=1${searchParam}`,
+        url: `/content?projectUuids=${projectUuid}&contentTypes=${ContentType.DATA_APP}&dataAppVizsFilter=exclude&pageSize=${DATA_APP_PICKER_PAGE_SIZE}&page=1${searchParam}`,
         method: 'GET',
         body: undefined,
     });
 };
 
-const useProjectDataApps = (projectUuid: string | undefined, search: string) =>
-    useQuery<ApiContentResponse['results'], ApiError>({
+const useProjectDataApps = (
+    projectUuid: string | undefined,
+    search: string,
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiContentResponse['results'], ApiError>({
         queryKey: ['data-app-picker', projectUuid, search],
-        queryFn: () => fetchDataAppContent(projectUuid!, search),
+        queryFn: () => fetchDataAppContent(lightdashApi, projectUuid!, search),
         enabled: !!projectUuid,
         keepPreviousData: true,
     });
+};
 
 const DataAppTileForm = ({ form }: DataAppTileFormProps) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const [searchValue, setSearchValue] = useState('');
     const [debouncedSearch] = useDebouncedValue(searchValue, 300);
     const { data, isLoading, isFetching, error } = useProjectDataApps(
@@ -51,7 +62,7 @@ const DataAppTileForm = ({ form }: DataAppTileFormProps) => {
             .filter((item) => item.contentType === ContentType.DATA_APP)
             .map((item) => ({
                 value: item.uuid,
-                label: item.name || 'Untitled app',
+                label: getAppDisplayName(item.name, item.uuid),
             }));
     }, [data]);
 

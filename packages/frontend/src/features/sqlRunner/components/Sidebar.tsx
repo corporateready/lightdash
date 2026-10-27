@@ -1,28 +1,20 @@
 import { ChartKind } from '@lightdash/common';
-import {
-    ActionIcon,
-    Group,
-    ScrollArea,
-    Stack,
-    Title,
-    Tooltip,
-} from '@mantine/core';
-import { IconLayoutSidebarLeftCollapse, IconReload } from '@tabler/icons-react';
+import { ScrollArea, Stack, Title } from '@mantine/core';
 import { type FC } from 'react';
-import MantineIcon from '../../../components/common/MantineIcon';
 import { VisualizationConfigPanel } from '../../../components/DataViz/VisualizationConfigPanel';
+import { useProject } from '../../../hooks/useProject';
+import scrollAreaClasses from '../../../styles/ScrollArea.module.css';
 import { useRefreshTables } from '../hooks/useTables';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { setSelectedChartType, SidebarTabs } from '../store/sqlRunnerSlice';
+import { ConnectionHeader } from './ConnectionHeader';
+import classes from './Sidebar.module.css';
 import { TablesPanel } from './TablesPanel';
 
-type Props = {
-    setSidebarOpen: (isOpen: boolean) => void;
-};
-
-export const Sidebar: FC<Props> = ({ setSidebarOpen }) => {
+export const Sidebar: FC = () => {
     const dispatch = useAppDispatch();
     const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
+    const { data: project } = useProject(projectUuid);
 
     const {
         mutate: updateTables,
@@ -37,67 +29,37 @@ export const Sidebar: FC<Props> = ({ setSidebarOpen }) => {
         (state) => state.sqlRunner.activeSidebarTab,
     );
     const sqlColumns = useAppSelector((state) => state.sqlRunner.sqlColumns);
+    const isTablesTab = activeSidebarTab === SidebarTabs.TABLES;
 
     return (
-        <Stack spacing="xs" sx={{ flex: 1, overflow: 'hidden' }}>
-            <Group position="apart" p="sm">
-                <Group noWrap spacing="xs">
-                    <Title order={5} fz="sm" c="ldGray.6">
-                        {activeSidebarTab === SidebarTabs.TABLES
-                            ? 'TABLES'
-                            : 'VISUALIZATION'}
-                    </Title>
-                    {activeSidebarTab === SidebarTabs.TABLES && (
-                        <Tooltip
-                            variant="xs"
-                            label="Refresh tables"
-                            position="right"
-                        >
-                            <ActionIcon
-                                size="xs"
-                                onClick={() => updateTables()}
-                            >
-                                <MantineIcon icon={IconReload}></MantineIcon>
-                            </ActionIcon>
-                        </Tooltip>
-                    )}
-                </Group>
-                <Tooltip variant="xs" label="Close sidebar" position="left">
-                    <ActionIcon size="xs">
-                        <MantineIcon
-                            icon={IconLayoutSidebarLeftCollapse}
-                            onClick={() => setSidebarOpen(false)}
-                        />
-                    </ActionIcon>
-                </Tooltip>
-            </Group>
+        <Stack gap="sm" className={classes.root}>
+            {!isTablesTab && <Title order={4}>Chart</Title>}
 
-            <Stack
-                display={
-                    activeSidebarTab === SidebarTabs.TABLES ? 'inherit' : 'none'
-                }
-                sx={{ flex: 1, overflow: 'hidden' }}
-            >
+            <Stack gap="xs" className={classes.panel} data-active={isTablesTab}>
+                {project && (
+                    <ConnectionHeader
+                        name={project.name}
+                        warehouseType={
+                            project.warehouseConnection?.type ?? null
+                        }
+                        connections={null}
+                    />
+                )}
                 <TablesPanel
                     isLoading={isLoading}
                     error={error?.error.message || null}
+                    onRefresh={() => updateTables()}
                 />
             </Stack>
 
             <ScrollArea
                 offsetScrollbars
-                variant="primary"
-                className="only-vertical"
-                px="sm"
-                sx={{
-                    flex: 1,
-                    display:
-                        activeSidebarTab === SidebarTabs.VISUALIZATION
-                            ? 'inherit'
-                            : 'none',
-                }}
+                scrollbars="y"
+                classNames={{ content: scrollAreaClasses.verticalContent }}
+                className={classes.panel}
+                data-active={!isTablesTab}
             >
-                <Stack sx={{ flex: 1, overflow: 'hidden' }}>
+                <Stack className={classes.panel}>
                     <VisualizationConfigPanel
                         selectedChartType={selectedChartType || ChartKind.TABLE}
                         setSelectedChartType={(value) =>

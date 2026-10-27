@@ -1,4 +1,5 @@
-import { type ModalProps } from '@mantine-8/core';
+import { getAppDisplayName } from '@lightdash/common';
+import { type ModalProps } from '@mantine/core';
 import { type FC } from 'react';
 import { useDeleteApp } from '../../../features/apps/hooks/useDeleteApp';
 import useApp from '../../../providers/App/useApp';
@@ -41,7 +42,7 @@ const AppDeleteModal: FC<AppDeleteModalProps> = ({
             title="Delete app"
             variant="delete"
             resourceType="app"
-            resourceLabel={name || `Untitled app ${uuid.slice(0, 8)}`}
+            resourceLabel={getAppDisplayName(name, uuid)}
             description={description}
             onConfirm={handleConfirm}
             confirmLoading={isDeleting}

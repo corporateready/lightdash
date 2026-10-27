@@ -1,10 +1,10 @@
 import {
     DimensionType,
     FieldType,
-    formatDate,
+    getAllowedParameterValue,
     getItemId,
-    parseDate,
-    TimeFrames,
+    isLightdashParameterOption,
+    resolveParameterDefault,
     type FilterableItem,
     type LightdashProjectParameter,
     type ParametersValuesMap,
@@ -15,11 +15,11 @@ import {
     Group,
     MultiSelect,
     Select,
+    Text,
+    type ComboboxItem,
     type ComboboxItemGroup,
-} from '@mantine-8/core';
-import { DatePickerInput } from '@mantine/dates';
+} from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
-import uniq from 'lodash/uniq';
 import React, {
     useCallback,
     useEffect,
@@ -34,6 +34,7 @@ import {
     MAX_AUTOCOMPLETE_RESULTS,
     useFieldValuesSafely,
 } from '../../../hooks/useFieldValues';
+import ParameterDateInput from './ParameterDateInput';
 import styles from './ParameterInput.module.css';
 
 type ParameterInputProps = {
@@ -63,7 +64,7 @@ const getDimensionType = (paramType: string | undefined): DimensionType => {
 export const ParameterInput: FC<ParameterInputProps> = ({
     paramKey,
     parameter,
-    value,
+    value: rawValue,
     onParameterChange,
     size,
     projectUuid,
@@ -71,6 +72,14 @@ export const ParameterInput: FC<ParameterInputProps> = ({
     disabled,
     isError,
 }) => {
+    // A value outside the parameter's fixed options is treated as unset
+    const value = useMemo(
+        () =>
+            rawValue == null
+                ? null
+                : getAllowedParameterValue(parameter, rawValue),
+        [parameter, rawValue],
+    );
     const multiSelectRef = useRef<HTMLInputElement>(null);
 
     const [search, setSearch] = useState('');
@@ -120,7 +129,7 @@ export const ParameterInput: FC<ParameterInputProps> = ({
         parameterValues,
     );
 
-    const { results: resultsSet, refreshedAt, refetch } = fieldValuesResult;
+    const { results, refreshedAt, refetch } = fieldValuesResult;
 
     useEffect(() => {
         if (forceRefresh && shouldFetch && refetch) {
@@ -130,15 +139,29 @@ export const ParameterInput: FC<ParameterInputProps> = ({
     }, [forceRefresh, refetch, shouldFetch]);
 
     const fetchedResults = useMemo(
-        () => (shouldFetch && resultsSet ? [...resultsSet] : []),
-        [resultsSet, shouldFetch],
+        () =>
+            shouldFetch && results
+                ? results.map(({ value: resultValue }) => resultValue)
+                : [],
+        [results, shouldFetch],
     );
 
+    const fetchedLabelMap = useMemo(() => {
+        const map = new Map<string, string>();
+        if (shouldFetch && results) {
+            results.forEach(({ value: resultValue, label }) => {
+                if (label !== undefined) map.set(resultValue, label);
+            });
+        }
+        return map;
+    }, [results, shouldFetch]);
+
     const placeholder = useMemo(() => {
-        const defaultValues = parameter.default
-            ? Array.isArray(parameter.default)
-                ? parameter.default
-                : [parameter.default]
+        const resolvedDefault = resolveParameterDefault(parameter);
+        const defaultValues = resolvedDefault
+            ? Array.isArray(resolvedDefault)
+                ? resolvedDefault
+                : [resolvedDefault]
             : undefined;
         return defaultValues
             ? `${
@@ -181,12 +204,20 @@ export const ParameterInput: FC<ParameterInputProps> = ({
 
         // Add custom values if allowed
         if (parameter.allow_custom_values) {
-            // Needed because current values are not in the same group as parameter options
+            // Filter out current values already covered by fetched results or parameterOptions
+            // For labeled options, compare against the option's value field
             const filteredCurrentValues = currentValues.filter(
-                (option) => !fetchedResults.includes(String(option)),
+                (option, index, self) =>
+                    self.indexOf(option) === index && // deduplicate within currentValues
+                    !fetchedResults.includes(String(option)) &&
+                    !parameterOptions.some((opt) =>
+                        isLightdashParameterOption(opt)
+                            ? String(opt.value) === String(option)
+                            : String(opt) === String(option),
+                    ),
             );
 
-            return uniq([...parameterOptions, ...filteredCurrentValues]);
+            return [...parameterOptions, ...filteredCurrentValues];
         }
 
         // Always return a copy to avoid Redux immutability issues
@@ -260,16 +291,24 @@ export const ParameterInput: FC<ParameterInputProps> = ({
         const baseItems = shouldFetch
             ? optionsData.filter(
                   (option) =>
-                      option !== '__refresh__' && option !== '__create__',
+                      typeof option === 'object' ||
+                      (option !== '__refresh__' && option !== '__create__'),
               )
             : optionsData;
 
-        const regularItems = [...baseItems] // Create a copy to avoid mutating Redux state
-            .sort((a, b) => String(a).localeCompare(String(b)))
-            .map((option) => ({
+        // Static options keep the order they were authored in YAML
+        const regularItems = baseItems.map((option) => {
+            if (isLightdashParameterOption(option)) {
+                return {
+                    value: String(option.value),
+                    label: option.label,
+                };
+            }
+            return {
                 value: String(option),
                 label: formatDisplayValue(String(option)),
-            }));
+            };
+        });
 
         const fetchedItems =
             fetchedResults.length > 0
@@ -277,14 +316,38 @@ export const ParameterInput: FC<ParameterInputProps> = ({
                       {
                           group: 'Dimension values',
                           items: [...fetchedResults] // Create a copy to avoid mutating Redux state
-                              .sort((a, b) => a.localeCompare(b))
+                              .sort((a, b) => {
+                                  const aLabel = fetchedLabelMap.get(a) ?? a;
+                                  const bLabel = fetchedLabelMap.get(b) ?? b;
+                                  return aLabel.localeCompare(bLabel);
+                              })
                               .map((option) => ({
                                   value: option,
-                                  label: formatDisplayValue(option),
+                                  label:
+                                      fetchedLabelMap.get(option) ??
+                                      formatDisplayValue(option),
                               })),
-                      } satisfies ComboboxItemGroup,
+                      } satisfies ComboboxItemGroup<ComboboxItem>,
                   ]
                 : [];
+
+        const resolvedDefault = resolveParameterDefault(parameter);
+        const defaultValues =
+            resolvedDefault === undefined
+                ? []
+                : Array.isArray(resolvedDefault)
+                  ? resolvedDefault
+                  : [resolvedDefault];
+        const existingValues = new Set([
+            ...regularItems.map((item) => item.value),
+            ...fetchedResults,
+        ]);
+        const defaultItems = [...new Set(defaultValues.map(String))]
+            .filter((value) => value !== '' && !existingValues.has(value))
+            .map((value) => ({
+                value,
+                label: `${formatDisplayValue(value)} (default)`,
+            }));
 
         const specialItems = [];
 
@@ -315,12 +378,18 @@ export const ParameterInput: FC<ParameterInputProps> = ({
             });
         }
 
-        return [...regularItems, ...fetchedItems, ...specialItems];
+        return [
+            ...regularItems,
+            ...defaultItems,
+            ...fetchedItems,
+            ...specialItems,
+        ];
     }, [
         fetchedResults,
+        fetchedLabelMap,
         shouldFetch,
         optionsData,
-        parameter.allow_custom_values,
+        parameter,
         search,
     ]);
 
@@ -334,30 +403,45 @@ export const ParameterInput: FC<ParameterInputProps> = ({
                 }Options loaded at ${refreshedAt.toLocaleTimeString()} - ↻ Click to refresh`;
 
                 return (
-                    <Box fz={11} className={styles.refreshItem}>
+                    <Box fz="xs" className={styles.refreshItem}>
                         {refreshLabel}
                     </Box>
                 );
             }
-            if (option.value === '__create__') {
+            if (
+                option.value === '__create__' &&
+                parameter.allow_custom_values
+            ) {
                 // Extract the query from the label (e.g., 'Add "query"' -> 'query')
                 const query = option.label.match(/^Add "(.+)"$/)?.[1] || '';
                 return (
-                    <div className={styles.createItem}>
-                        <Group gap="xxs" c="blue" fz="sm">
+                    <Box className={styles.createItem} miw={0} w="100%">
+                        <Group gap="xxs" c="blue" fz="inherit" wrap="nowrap">
                             <MantineIcon
                                 icon={IconPlus}
                                 color="blue"
                                 size="sm"
+                                className={styles.createIcon}
                             />
-                            Add "{query}"
+                            <Text truncate size="inherit" title={option.label}>
+                                Add "{query}"
+                            </Text>
                         </Group>
-                    </div>
+                    </Box>
                 );
             }
-            return <div>{option.label}</div>;
+            return (
+                <Text truncate size="inherit" title={option.label}>
+                    {option.label}
+                </Text>
+            );
         },
-        [shouldFetch, refreshedAt, searchedMaxResults],
+        [
+            shouldFetch,
+            refreshedAt,
+            searchedMaxResults,
+            parameter.allow_custom_values,
+        ],
     );
 
     const handleChange = useCallback(
@@ -437,47 +521,17 @@ export const ParameterInput: FC<ParameterInputProps> = ({
         ],
     );
 
-    // Render DateInput for date type parameters (single value only - multiple dates not yet supported)
+    // Date parameters use a dedicated input (single value only - multiple dates not yet supported)
     if (parameter.type === 'date' && !parameter.multiple) {
-        // Convert current ISO string value to Date object
-        const currentDate =
-            currentDateValues.length > 0
-                ? parseDate(currentDateValues[0], TimeFrames.DAY)
-                : null;
-
-        // Reasonable date range constraints
-        const minDate = new Date(1900, 0, 1); // January 1, 1900
-        const maxDate = new Date(2100, 11, 31); // December 31, 2100
-
-        const defaultValue =
-            typeof parameter.default === 'string'
-                ? new Date(parameter.default)
-                : null;
-
         return (
-            <DatePickerInput
-                value={currentDate || defaultValue}
-                onChange={(date: Date | null) => {
-                    if (date) {
-                        // Convert Date object to ISO string (YYYY-MM-DD)
-                        const isoString = formatDate(date, TimeFrames.DAY);
-                        onParameterChange(paramKey, isoString);
-                    } else {
-                        onParameterChange(paramKey, null);
-                    }
-                }}
-                firstDayOfWeek={0}
+            <ParameterDateInput
+                paramKey={paramKey}
+                parameter={parameter}
+                currentValue={currentDateValues[0] ?? null}
+                onParameterChange={onParameterChange}
                 size={size}
-                clearable
                 disabled={disabled}
-                error={isError}
-                minDate={minDate}
-                maxDate={maxDate}
-                popoverProps={{
-                    shadow: 'sm',
-                    withinPortal: false,
-                    zIndex: 10000,
-                }}
+                isError={isError}
             />
         );
     }
@@ -508,11 +562,15 @@ export const ParameterInput: FC<ParameterInputProps> = ({
                 error={isError}
                 hidePickedOptions
                 maxDropdownHeight={200}
-                renderOption={
-                    shouldFetch || parameter.allow_custom_values
-                        ? renderOption
-                        : undefined
-                }
+                scrollAreaProps={{
+                    type: 'always',
+                    scrollbars: 'y',
+                    classNames: {
+                        root: styles.optionsScrollArea,
+                        content: styles.optionsContent,
+                    },
+                }}
+                renderOption={renderOption}
                 comboboxProps={{
                     withinPortal: false,
                     zIndex: 10000,
@@ -546,11 +604,15 @@ export const ParameterInput: FC<ParameterInputProps> = ({
             disabled={disabled}
             error={isError}
             maxDropdownHeight={200}
-            renderOption={
-                shouldFetch || parameter.allow_custom_values
-                    ? renderOption
-                    : undefined
-            }
+            scrollAreaProps={{
+                type: 'always',
+                scrollbars: 'y',
+                classNames: {
+                    root: styles.optionsScrollArea,
+                    content: styles.optionsContent,
+                },
+            }}
+            renderOption={renderOption}
             comboboxProps={{
                 withinPortal: false,
                 zIndex: 10000,

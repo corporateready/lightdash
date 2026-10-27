@@ -1,35 +1,22 @@
 import {
     ActionIcon,
-    Button,
     Group,
     TextInput,
     Tooltip,
     useMantineTheme,
     type GroupProps,
-} from '@mantine-8/core';
-import { IconPlus, IconSearch, IconX } from '@tabler/icons-react';
+} from '@mantine/core';
+import { IconSearch, IconX } from '@tabler/icons-react';
 import { memo, type FC } from 'react';
 import MantineIcon from '../../common/MantineIcon';
 
 type UsersTopToolbarProps = GroupProps & {
     search: string;
     setSearch: (value: string) => void;
-    isFetching: boolean;
-    currentResultsCount: number;
-    canInvite: boolean;
-    onInviteClick: () => void;
 };
 
 export const UsersTopToolbar: FC<UsersTopToolbarProps> = memo(
-    ({
-        search,
-        setSearch,
-        isFetching,
-        currentResultsCount,
-        canInvite,
-        onInviteClick,
-        ...props
-    }) => {
+    ({ search, setSearch, ...props }) => {
         const theme = useMantineTheme();
 
         return (
@@ -39,24 +26,20 @@ export const UsersTopToolbar: FC<UsersTopToolbarProps> = memo(
                 wrap="nowrap"
                 {...props}
             >
-                <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                    <Tooltip
-                        withinPortal
-                        variant="xs"
-                        label="Search by name, email, or role"
-                    >
+                <Group gap="xs" wrap="nowrap" flex={1} miw={0}>
+                    <Tooltip label="Search by name, email, or role">
                         <TextInput
                             data-testid="org-users-search-input"
                             size="xs"
-                            radius="md"
                             type="search"
+                            aria-label="Search users by name, email, or role"
                             variant="default"
                             placeholder="Search users by name, email, or role"
                             value={search ?? ''}
                             leftSection={
                                 <MantineIcon
                                     size="md"
-                                    color="ldGray.6"
+                                    color="dimmed"
                                     icon={IconSearch}
                                 />
                             }
@@ -64,6 +47,7 @@ export const UsersTopToolbar: FC<UsersTopToolbarProps> = memo(
                             rightSection={
                                 search && (
                                     <ActionIcon
+                                        aria-label="Clear search"
                                         onClick={() => setSearch('')}
                                         variant="transparent"
                                         size="xs"
@@ -73,22 +57,12 @@ export const UsersTopToolbar: FC<UsersTopToolbarProps> = memo(
                                     </ActionIcon>
                                 )
                             }
-                            miw={350}
+                            miw={{ base: 0, sm: 350 }}
+                            w={{ base: '100%', sm: 'auto' }}
                             maw={400}
                         />
                     </Tooltip>
                 </Group>
-
-                {canInvite && (
-                    <Button
-                        size="xs"
-                        leftSection={<MantineIcon icon={IconPlus} />}
-                        onClick={onInviteClick}
-                        style={{ flexShrink: 0 }}
-                    >
-                        Add user
-                    </Button>
-                )}
             </Group>
         );
     },

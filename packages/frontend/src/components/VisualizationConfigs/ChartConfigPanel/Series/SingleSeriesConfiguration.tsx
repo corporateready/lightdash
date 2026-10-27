@@ -1,7 +1,7 @@
 import { type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import {
     CartesianSeriesType,
-    ChartType,
+    getReadableTextColor,
     type CartesianChartLayout,
     type Series,
 } from '@lightdash/common';
@@ -25,9 +25,13 @@ import {
 } from '@tabler/icons-react';
 import { type FC } from 'react';
 import type useCartesianChartConfig from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
+import { useCartesianEditorActions } from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
 import { calculateSeriesLikeIdentifier } from '../../../../hooks/useChartColorConfig/utils';
 import MantineIcon from '../../../common/MantineIcon';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import {
+    useSeriesColor,
+    useVisualizationInputs,
+} from '../../../LightdashVisualization/useVisualizationContext';
 import ColorSelector from '../../ColorSelector';
 import { EditableText } from '../../common/EditableText';
 import { GrabIcon } from '../../common/GrabIcon';
@@ -63,14 +67,21 @@ const SingleSeriesConfiguration: FC<Props> = ({
     dragHandleProps,
     isDragDisabled,
 }) => {
-    const { visualizationConfig, colorPalette, getSeriesColor } =
-        useVisualizationContext();
+    const { colorPalette } = useVisualizationInputs();
+    const getSeriesColor = useSeriesColor();
+    const { mergeMetadata } = useCartesianEditorActions();
     const { hovered, ref } = useHover();
 
     const type =
         series.type === CartesianSeriesType.LINE && !!series.areaStyle
             ? CartesianSeriesType.AREA
             : series.type;
+    const seriesColor = getSeriesColor(series);
+    const automaticLabelColor =
+        series.type === CartesianSeriesType.BAR &&
+        series.label?.position === 'inside'
+            ? getReadableTextColor(seriesColor)
+            : seriesColor;
     const [seriesValue, setSeriesValue] = useDebouncedState(
         getSingleSeries(series)?.name || seriesLabel,
         200,
@@ -78,14 +89,8 @@ const SingleSeriesConfiguration: FC<Props> = ({
 
     return (
         <Box>
-            <Group position="apart">
-                <Group
-                    spacing="two"
-                    ref={ref}
-                    sx={{
-                        flexGrow: 1,
-                    }}
-                >
+            <Group justify="space-between">
+                <Group gap="two" ref={ref} flex={1}>
                     {isGrouped && (
                         <GrabIcon
                             dragHandleProps={dragHandleProps}
@@ -96,7 +101,7 @@ const SingleSeriesConfiguration: FC<Props> = ({
                     )}
                     {isGrouped && (
                         <ColorSelector
-                            color={getSeriesColor(series)}
+                            color={seriesColor}
                             swatches={colorPalette}
                             withAlpha
                             onColorChange={(color) => {
@@ -108,29 +113,12 @@ const SingleSeriesConfiguration: FC<Props> = ({
                                     calculateSeriesLikeIdentifier(series).join(
                                         '.',
                                     );
-
-                                if (
-                                    visualizationConfig.chartType ===
-                                    ChartType.CARTESIAN
-                                ) {
-                                    const { updateMetadata } =
-                                        visualizationConfig.chartConfig;
-
-                                    updateMetadata({
-                                        ...visualizationConfig.chartConfig
-                                            .dirtyMetadata,
-                                        [serieId]: { color },
-                                    });
-                                }
+                                mergeMetadata({ [serieId]: { color } });
                             }}
                         />
                     )}
                     {!isSingle && isGrouped && (
-                        <Box
-                            style={{
-                                flexGrow: 1,
-                            }}
-                        >
+                        <Box flex={1}>
                             <EditableText
                                 disabled={series.hidden}
                                 defaultValue={seriesValue}
@@ -147,7 +135,7 @@ const SingleSeriesConfiguration: FC<Props> = ({
                     )}
                 </Group>
 
-                <Group spacing="one">
+                <Group gap="one">
                     {isGrouped && (
                         <ActionIcon
                             onClick={() => {
@@ -172,9 +160,9 @@ const SingleSeriesConfiguration: FC<Props> = ({
                     )}
                 </Group>
             </Group>
-            <Collapse in={!isCollapsable || isOpen || false}>
-                <Stack ml="lg" spacing="xs">
-                    <Group spacing="xs" noWrap>
+            <Collapse expanded={!isCollapsable || isOpen || false}>
+                <Stack ml="lg" gap="xs">
+                    <Group gap="xs" wrap="nowrap">
                         <ChartTypeSelect
                             showLabel={!isGrouped}
                             chartValue={type}
@@ -196,6 +184,7 @@ const SingleSeriesConfiguration: FC<Props> = ({
                         />
 
                         <Select
+                            allowDeselect={false}
                             label={!isGrouped && 'Axis'}
                             value={String(series.yAxisIndex)}
                             data={[
@@ -216,6 +205,7 @@ const SingleSeriesConfiguration: FC<Props> = ({
                             }}
                         />
                         <Select
+                            allowDeselect={false}
                             label={!isGrouped && 'Value labels'}
                             value={series.label?.position || 'hidden'}
                             data={[
@@ -228,16 +218,9 @@ const SingleSeriesConfiguration: FC<Props> = ({
                             ]}
                             rightSection={
                                 series.label?.show ? (
-                                    <Popover
-                                        position="bottom-end"
-                                        shadow="md"
-                                        withinPortal
-                                    >
+                                    <Popover position="bottom-end">
                                         <Popover.Target>
-                                            <ActionIcon
-                                                variant="subtle"
-                                                size="xs"
-                                            >
+                                            <ActionIcon size="xs">
                                                 <MantineIcon
                                                     icon={IconSettings}
                                                     color="gray.6"
@@ -245,7 +228,7 @@ const SingleSeriesConfiguration: FC<Props> = ({
                                             </ActionIcon>
                                         </Popover.Target>
                                         <Popover.Dropdown>
-                                            <Stack spacing="xs">
+                                            <Stack gap="xs">
                                                 <Checkbox
                                                     size="xs"
                                                     checked={
@@ -321,8 +304,12 @@ const SingleSeriesConfiguration: FC<Props> = ({
                                     ...series,
                                     label:
                                         value === 'hidden'
-                                            ? { show: false }
+                                            ? {
+                                                  ...series.label,
+                                                  show: false,
+                                              }
                                             : {
+                                                  ...series.label,
                                                   show: true,
                                                   position: value as any,
                                                   showValue:
@@ -335,15 +322,54 @@ const SingleSeriesConfiguration: FC<Props> = ({
                                                       series.label
                                                           ?.showSeriesName ??
                                                       false,
+                                                  showOverlappingLabels:
+                                                      series.label
+                                                          ?.showOverlappingLabels ??
+                                                      false,
                                               },
                                 });
                             }}
                         />
+                        {series.label?.show && (
+                            <Box mt={!isGrouped ? 'lg' : undefined}>
+                                <ColorSelector
+                                    color={series.label.color}
+                                    defaultColor={automaticLabelColor}
+                                    swatches={colorPalette}
+                                    withAlpha
+                                    ariaLabel="Select value label color"
+                                    onColorChange={(color) => {
+                                        updateSingleSeries({
+                                            ...series,
+                                            label: {
+                                                ...series.label,
+                                                color,
+                                            },
+                                        });
+                                    }}
+                                    onColorReset={
+                                        series.label.color
+                                            ? () => {
+                                                  updateSingleSeries({
+                                                      ...series,
+                                                      label: {
+                                                          ...series.label,
+                                                          color: undefined,
+                                                      },
+                                                  });
+                                              }
+                                            : undefined
+                                    }
+                                    resetLabel="Use automatic color"
+                                />
+                            </Box>
+                        )}
                     </Group>
                     {(type === CartesianSeriesType.LINE ||
                         type === CartesianSeriesType.AREA) && (
-                        <Group spacing="xs">
+                        <Group gap="xs">
                             <Checkbox
+                                size="xs"
                                 checked={Boolean(series.showSymbol)}
                                 label="Show symbol"
                                 onChange={() => {
@@ -354,6 +380,7 @@ const SingleSeriesConfiguration: FC<Props> = ({
                                 }}
                             />
                             <Checkbox
+                                size="xs"
                                 checked={series.smooth}
                                 label="Smooth"
                                 onChange={() => {

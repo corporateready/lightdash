@@ -1,19 +1,19 @@
-import { FeatureFlags } from '@lightdash/common';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
+import { Limit } from '../components/ExportResults/types';
 import {
     explorerActions,
     selectUnpivotedQueryArgs,
     useExplorerDispatch,
     useExplorerSelector,
 } from '../features/explorer/store';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import { useExplorerQueryManager } from './useExplorerQueryManager';
 import {
     executeQueryAndWaitForResults,
     useCancelQuery,
     type QueryResultsProps,
 } from './useQueryResults';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
 
 /**
  * Public API for Explorer query management
@@ -26,6 +26,7 @@ import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
  * For effects/orchestration, use useExplorerQueryEffects at the root.
  */
 export const useExplorerQuery = () => {
+    const lightdashApi = useLightdashApi();
     // Get all state and runQuery from manager (single source of truth)
     const manager = useExplorerQueryManager();
     const { queryResults, validQueryArgs, unpivotedQueryResults } = manager;
@@ -37,10 +38,6 @@ export const useExplorerQuery = () => {
     const projectUuid = manager.projectUuid;
     const unpivotedQueryArgs = useExplorerSelector(selectUnpivotedQueryArgs);
     const unpivotedEnabled = !!unpivotedQueryArgs;
-
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
 
     // Action: Reset query results
     const resetQueryResults = useCallback(() => {
@@ -67,17 +64,26 @@ export const useExplorerQuery = () => {
 
     // Action: Get download query UUID
     const getDownloadQueryUuid = useCallback(
-        async (limit: number | null, exportPivotedResults: boolean = false) => {
+        async (
+            limit: number | null,
+            exportPivotedResults: boolean = false,
+            limitType?: Limit,
+        ) => {
             // When unpivotedResultsEnabled it means that queryResults are pivoted results
             // therefore we need to use unpivotedQueryResults if we want to download raw results
+            const useTableQuery = limitType === Limit.TABLE;
             let queryUuid =
-                unpivotedEnabled && !exportPivotedResults
+                !useTableQuery && unpivotedEnabled && !exportPivotedResults
                     ? unpivotedQueryResults.queryUuid
                     : queryResults.queryUuid;
 
-            if (limit === null || limit !== queryResults.totalResults) {
-                const shouldPivot =
-                    exportPivotedResults && !!useSqlPivotResults?.enabled;
+            if (
+                !useTableQuery &&
+                (limitType !== undefined ||
+                    limit === null ||
+                    limit !== queryResults.totalResults)
+            ) {
+                const shouldPivot = exportPivotedResults;
                 const queryArgsWithLimit: QueryResultsProps | null =
                     validQueryArgs
                         ? {
@@ -89,8 +95,10 @@ export const useExplorerQuery = () => {
                                   : undefined,
                           }
                         : null;
-                const downloadQuery =
-                    await executeQueryAndWaitForResults(queryArgsWithLimit);
+                const downloadQuery = await executeQueryAndWaitForResults(
+                    lightdashApi,
+                    queryArgsWithLimit,
+                );
                 queryUuid = downloadQuery.queryUuid;
             }
             if (!queryUuid) {
@@ -104,7 +112,7 @@ export const useExplorerQuery = () => {
             queryResults.queryUuid,
             queryResults.totalResults,
             validQueryArgs,
-            useSqlPivotResults?.enabled,
+            lightdashApi,
         ],
     );
 

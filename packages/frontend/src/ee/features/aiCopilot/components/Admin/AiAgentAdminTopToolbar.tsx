@@ -3,12 +3,13 @@ import {
     Button,
     Divider,
     Group,
+    Switch,
     Text,
     useMantineTheme,
     type GroupProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconTrash } from '@tabler/icons-react';
-import { memo, type FC } from 'react';
+import { memo, useCallback, useState, type FC } from 'react';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import { type useAiAgentAdminFilters } from '../../hooks/useAiAgentAdminFilters';
 import AgentsFilter from './AgentsFilter';
@@ -16,6 +17,7 @@ import { FeedbackFilter } from './FeedbackFilter';
 import ProjectsFilter from './ProjectsFilter';
 import { SearchFilter } from './SearchFilter';
 import { SourceFilter } from './SourceFilter';
+import UsersFilter from './UsersFilter';
 
 type AiAgentAdminTopToolbarProps = GroupProps &
     Pick<
@@ -23,13 +25,17 @@ type AiAgentAdminTopToolbarProps = GroupProps &
         | 'search'
         | 'selectedProjectUuids'
         | 'selectedAgentUuids'
+        | 'selectedUserUuids'
         | 'selectedSource'
         | 'selectedFeedback'
         | 'setSearch'
         | 'setSelectedProjectUuids'
         | 'setSelectedAgentUuids'
+        | 'setSelectedUserUuids'
         | 'setSelectedSource'
         | 'setSelectedFeedback'
+        | 'hidePreviewProjects'
+        | 'setHidePreviewProjects'
     > & {
         totalResults: number;
         isFetching: boolean;
@@ -47,10 +53,14 @@ export const AiAgentAdminTopToolbar: FC<AiAgentAdminTopToolbarProps> = memo(
         setSelectedProjectUuids,
         selectedAgentUuids,
         setSelectedAgentUuids,
+        selectedUserUuids,
+        setSelectedUserUuids,
         selectedSource,
         setSelectedSource,
         selectedFeedback,
         setSelectedFeedback,
+        hidePreviewProjects,
+        setHidePreviewProjects,
         totalResults,
         isFetching,
         hasNextPage,
@@ -60,6 +70,12 @@ export const AiAgentAdminTopToolbar: FC<AiAgentAdminTopToolbarProps> = memo(
         ...props
     }) => {
         const theme = useMantineTheme();
+        const [searchInputKey, setSearchInputKey] = useState(0);
+
+        const handleClearFilters = useCallback(() => {
+            onClearFilters?.();
+            setSearchInputKey((key) => key + 1);
+        }, [onClearFilters]);
 
         return (
             <Box>
@@ -70,73 +86,59 @@ export const AiAgentAdminTopToolbar: FC<AiAgentAdminTopToolbarProps> = memo(
                 >
                     <Group gap="xs">
                         <SearchFilter
-                            search={search}
+                            key={searchInputKey}
+                            search={searchInputKey === 0 ? search : undefined}
                             setSearch={setSearch}
                             placeholder="Search threads by title"
+                            debounceMs={300}
                         />
 
-                        <Divider
-                            orientation="vertical"
-                            w={1}
-                            h={20}
-                            style={{
-                                alignSelf: 'center',
-                            }}
-                        />
+                        <Divider orientation="vertical" w={1} h={20} />
                         <ProjectsFilter
                             selectedProjectUuids={selectedProjectUuids}
                             setSelectedProjectUuids={setSelectedProjectUuids}
+                            hidePreviewProjects={hidePreviewProjects}
                         />
 
-                        <Divider
-                            orientation="vertical"
-                            w={1}
-                            h={20}
-                            style={{
-                                alignSelf: 'center',
-                            }}
-                        />
+                        <Divider orientation="vertical" w={1} h={20} />
                         <AgentsFilter
                             selectedAgentUuids={selectedAgentUuids}
                             setSelectedAgentUuids={setSelectedAgentUuids}
                             selectedProjectUuids={selectedProjectUuids}
+                            hidePreviewProjects={hidePreviewProjects}
                         />
-                        <Divider
-                            orientation="vertical"
-                            w={1}
-                            h={20}
-                            style={{
-                                alignSelf: 'center',
-                            }}
+                        <Divider orientation="vertical" w={1} h={20} />
+                        <UsersFilter
+                            selectedUserUuids={selectedUserUuids}
+                            setSelectedUserUuids={setSelectedUserUuids}
                         />
+                        <Divider orientation="vertical" w={1} h={20} />
                         <FeedbackFilter
                             selectedFeedback={selectedFeedback}
                             setSelectedFeedback={setSelectedFeedback}
                         />
 
-                        <Divider
-                            orientation="vertical"
-                            w={1}
-                            h={20}
-                            style={{
-                                alignSelf: 'center',
-                            }}
-                        />
+                        <Divider orientation="vertical" w={1} h={20} />
                         <SourceFilter
                             selectedSource={selectedSource}
                             setSelectedSource={setSelectedSource}
                         />
 
+                        <Divider orientation="vertical" w={1} h={20} />
+                        <Switch
+                            size="xs"
+                            label="Hide preview projects"
+                            checked={hidePreviewProjects}
+                            onChange={(event) =>
+                                setHidePreviewProjects(
+                                    event.currentTarget.checked,
+                                )
+                            }
+                        />
+
                         {hasActiveFilters && onClearFilters && (
                             <>
-                                <Divider
-                                    orientation="vertical"
-                                    w={1}
-                                    h={20}
-                                    style={{
-                                        alignSelf: 'center',
-                                    }}
-                                />
+                                <Divider orientation="vertical" w={1} h={20} />
                                 <Button
                                     variant="subtle"
                                     size="xs"
@@ -146,7 +148,7 @@ export const AiAgentAdminTopToolbar: FC<AiAgentAdminTopToolbarProps> = memo(
                                             size="sm"
                                         />
                                     }
-                                    onClick={onClearFilters}
+                                    onClick={handleClearFilters}
                                 >
                                     Clear all filters
                                 </Button>

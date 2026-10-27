@@ -1,24 +1,70 @@
-import { MonthPickerInput, type MonthPickerInputProps } from '@mantine/dates';
+import {
+    MonthPicker,
+    MonthPickerInput,
+    type MonthPickerInputProps,
+} from '@mantine/dates';
 import { useDisclosure } from '@mantine/hooks';
-import dayjs from 'dayjs';
 import { type FC } from 'react';
+import InvalidDateInput from './InvalidDateInput';
+import { formatMantineDate, parseMantineDate } from './mantineDateAdapter';
 
-type Props = Omit<MonthPickerInputProps, 'value' | 'onChange'> & {
+type Props = Omit<
+    MonthPickerInputProps,
+    'value' | 'defaultValue' | 'onChange' | 'minDate' | 'maxDate'
+> & {
     value: Date | null;
     onChange: (value: Date) => void;
+    invalidValue?: string;
 };
 
-const FilterMonthAndYearPicker: FC<Props> = ({ value, onChange, ...props }) => {
+const FilterMonthAndYearPicker: FC<Props> = ({
+    value,
+    onChange,
+    invalidValue,
+    ...props
+}) => {
     const [isPopoverOpen, { open, close, toggle }] = useDisclosure();
 
-    const yearValue = value ? dayjs(value).toDate() : null;
+    const yearValue = formatMantineDate(value);
+    const handleChange = (mantineValue: unknown) => {
+        if (typeof mantineValue !== 'string') return;
+        const date = parseMantineDate(mantineValue);
+        if (!date) return;
+        onChange(date);
+        close();
+    };
+
+    if (invalidValue) {
+        return (
+            <InvalidDateInput
+                value={invalidValue}
+                disabled={props.disabled}
+                popoverProps={props.popoverProps}
+                autoFocus={props.autoFocus}
+            >
+                {({ close: closeInvalidInput }) => (
+                    <MonthPicker
+                        value={null}
+                        minDate="1000-01-01"
+                        maxDate="9999-12-31"
+                        onChange={(date) => {
+                            const parsedDate = parseMantineDate(date);
+                            if (!parsedDate) return;
+                            onChange(parsedDate);
+                            closeInvalidInput();
+                        }}
+                    />
+                )}
+            </InvalidDateInput>
+        );
+    }
 
     return (
         <MonthPickerInput
             w="100%"
             size="xs"
-            minDate={dayjs().year(1000).toDate()}
-            maxDate={dayjs().year(9999).toDate()}
+            minDate="1000-01-01"
+            maxDate="9999-12-31"
             onClick={toggle}
             {...props}
             popoverProps={{
@@ -37,11 +83,7 @@ const FilterMonthAndYearPicker: FC<Props> = ({ value, onChange, ...props }) => {
                 },
             }}
             value={yearValue}
-            onChange={(date) => {
-                if (!date || Array.isArray(date)) return;
-                onChange(date);
-                close();
-            }}
+            onChange={handleChange}
         />
     );
 };

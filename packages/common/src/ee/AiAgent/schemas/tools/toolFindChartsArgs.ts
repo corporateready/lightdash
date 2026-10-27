@@ -1,6 +1,10 @@
 import { z } from 'zod';
-import { baseOutputMetadataSchema } from '../outputMetadata';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
+import { findContentChartItemSchema } from './toolFindContentArgs';
 
 export const TOOL_FIND_CHARTS_DESCRIPTION = `Tool: "findCharts"
 Purpose:
@@ -15,9 +19,7 @@ Usage tips:
 - Returns chart URLs when available
 `;
 
-export const toolFindChartsArgsSchema = createToolSchema({
-    description: TOOL_FIND_CHARTS_DESCRIPTION,
-})
+export const toolFindChartsArgsSchema = createToolSchema()
     .extend({
         chartSearchQueries: z.array(
             z.object({
@@ -38,9 +40,25 @@ export const toolFindChartsArgsSchemaTransformed = toolFindChartsArgsSchema;
 
 export type ToolFindChartsArgsTransformed = ToolFindChartsArgs;
 
-export const toolFindChartsOutputSchema = z.object({
-    result: z.string(),
-    metadata: baseOutputMetadataSchema,
+export const toolFindChartsStructuredContentSchema = z.object({
+    searchResults: z
+        .array(
+            z.object({
+                searchQuery: z.string(),
+                charts: z
+                    .array(findContentChartItemSchema)
+                    .describe('Matching charts, verified first.'),
+            }),
+        )
+        .describe('One entry per search query, in the order given.'),
 });
 
+export const toolFindChartsOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema,
+    structuredContent: toolFindChartsStructuredContentSchema,
+});
+
+export type ToolFindChartsStructuredContent = z.infer<
+    typeof toolFindChartsStructuredContentSchema
+>;
 export type ToolFindChartsOutput = z.infer<typeof toolFindChartsOutputSchema>;

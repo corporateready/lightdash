@@ -16,31 +16,35 @@ import {
     Stack,
     Text,
     type ModalProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconArrowsExchange } from '@tabler/icons-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState, type FC } from 'react';
-import { lightdashApi } from '../../../api';
+import { type LightdashApi } from '../../../api';
 import { pollJobStatus } from '../../../features/scheduler/hooks/useScheduler';
 import useToaster from '../../../hooks/toaster/useToaster';
 import { useExplores } from '../../../hooks/useExplores';
 import useApp from '../../../providers/App/useApp';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 import Callout from '../Callout';
 import MantineModal from '../MantineModal';
 
-const renameChartExplore = async ({
-    projectUuid,
-    chartUuid,
-    from,
-    to,
-    fixAll,
-}: {
-    projectUuid: string;
-    chartUuid: string;
-    from: string;
-    to: string;
-    fixAll: boolean;
-}) => {
+const renameChartExplore = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        chartUuid,
+        from,
+        to,
+        fixAll,
+    }: {
+        projectUuid: string;
+        chartUuid: string;
+        from: string;
+        to: string;
+        fixAll: boolean;
+    },
+) => {
     return lightdashApi<ApiJobScheduledResponse['results']>({
         url: `/projects/${projectUuid}/rename/chart/${chartUuid}`,
         method: 'POST',
@@ -61,6 +65,7 @@ interface ChangeChartExploreModalProps extends Pick<
     chartUuid: string;
     currentExploreName: string;
     hasUnsavedChanges: boolean;
+    candidateExploreNames?: string[];
 }
 
 const FORM_ID = 'change-chart-explore-form';
@@ -72,7 +77,9 @@ const ChangeChartExploreModal: FC<ChangeChartExploreModalProps> = ({
     chartUuid,
     currentExploreName,
     hasUnsavedChanges,
+    candidateExploreNames,
 }) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { user } = useApp();
     const [selectedExplore, setSelectedExplore] = useState<string | null>(null);
@@ -94,17 +101,22 @@ const ChangeChartExploreModal: FC<ChangeChartExploreModalProps> = ({
         true,
     );
 
-    const exploreOptions = useMemo(
-        () =>
-            (explores ?? [])
-                .filter((e) => !isSummaryExploreError(e))
-                .map((e) => ({
-                    value: e.name,
-                    label: e.label ?? e.name,
-                }))
-                .sort((a, b) => a.label.localeCompare(b.label)),
-        [explores],
-    );
+    const exploreOptions = useMemo(() => {
+        const candidateSet = candidateExploreNames
+            ? new Set(candidateExploreNames)
+            : undefined;
+        return (explores ?? [])
+            .reduce<{ value: string; label: string }[]>((acc, e) => {
+                if (
+                    !isSummaryExploreError(e) &&
+                    (candidateSet === undefined || candidateSet.has(e.name))
+                ) {
+                    acc.push({ value: e.name, label: e.label ?? e.name });
+                }
+                return acc;
+            }, [])
+            .sort((a, b) => a.label.localeCompare(b.label));
+    }, [candidateExploreNames, explores]);
 
     const { mutateAsync: rename, isLoading: isRenaming } = useMutation<
         ApiJobScheduledResponse['results'],
@@ -113,7 +125,7 @@ const ChangeChartExploreModal: FC<ChangeChartExploreModalProps> = ({
     >({
         mutationKey: ['change-chart-explore', chartUuid],
         mutationFn: (data) =>
-            renameChartExplore({
+            renameChartExplore(lightdashApi, {
                 projectUuid,
                 chartUuid,
                 ...data,
@@ -153,7 +165,7 @@ const ChangeChartExploreModal: FC<ChangeChartExploreModalProps> = ({
                     key: 'change_chart_explore_fixall_toast',
                     title: `Updating other charts using "${currentExploreName}"...`,
                 });
-                pollJobStatus(result.jobId)
+                pollJobStatus(lightdashApi, result.jobId)
                     .then((status) => {
                         const totalCharts =
                             status?.results?.charts?.length || 0;

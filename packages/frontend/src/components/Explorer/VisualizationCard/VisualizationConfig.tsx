@@ -1,18 +1,13 @@
 import { assertUnreachable, ChartType } from '@lightdash/common';
-import {
-    ActionIcon,
-    Divider,
-    Group,
-    Loader,
-    ScrollArea,
-    Text,
-    Tooltip,
-} from '@mantine/core';
-import { IconX } from '@tabler/icons-react';
+import { Loader, ScrollArea, Text } from '@mantine/core';
 import { lazy, Suspense, useMemo, type FC } from 'react';
-import MantineIcon from '../../common/MantineIcon';
+import scrollAreaClasses from '../../../styles/ScrollArea.module.css';
+import Callout from '../../common/Callout';
 import { ConfigTabs as BigNumberConfigTabs } from '../../VisualizationConfigs/BigNumberConfig/BigNumberConfigTabs';
 import { ConfigTabs as ChartConfigTabs } from '../../VisualizationConfigs/ChartConfigPanel/ConfigTabs';
+import { useIsVegaEditorAvailable } from '../../VisualizationConfigs/ChartConfigPanel/CustomVis/useIsVegaEditorAvailable';
+import { Config } from '../../VisualizationConfigs/common/Config';
+import { ConfigTabs as DataAppVizConfigTabs } from '../../VisualizationConfigs/DataAppVizConfig/DataAppVizConfigTabs';
 import { ConfigTabs as FunnelChartConfigTabs } from '../../VisualizationConfigs/FunnelChartConfig/FunnelChartConfigTabs';
 import { ConfigTabs as GaugeConfigTabs } from '../../VisualizationConfigs/GaugeConfig/GaugeConfigTabs';
 import { ConfigTabs as MapConfigTabs } from '../../VisualizationConfigs/MapConfig';
@@ -20,7 +15,7 @@ import { ConfigTabs as PieChartConfigTabs } from '../../VisualizationConfigs/Pie
 import { ConfigTabs as SankeyConfigTabs } from '../../VisualizationConfigs/SankeyConfig/SankeyConfigTabs';
 import { ConfigTabs as TableConfigTabs } from '../../VisualizationConfigs/TableConfigPanel/TableConfigTabs';
 import { ConfigTabs as TreemapConfigTabs } from '../../VisualizationConfigs/TreemapConfig/TreemapConfigTabs';
-import VisualizationCardOptions from '../VisualizationCardOptions';
+import classes from './VisualizationConfig.module.css';
 
 // Lazy load CustomVisConfig as it includes the heavy Monaco editor
 const CustomVisConfigTabsLazy = lazy(() =>
@@ -29,12 +24,24 @@ const CustomVisConfigTabsLazy = lazy(() =>
     ),
 );
 
+const VegaEditorUnavailable: FC = () => (
+    <Config>
+        <Config.Section>
+            <Callout variant="info" hideIcon p="xs">
+                <Text fz="xs">
+                    Vega charts can't be edited in embedded views.
+                </Text>
+            </Callout>
+        </Config.Section>
+    </Config>
+);
+
 type Props = {
     chartType: ChartType;
-    onClose: () => void;
 };
 
-const VisualizationConfig: FC<Props> = ({ chartType, onClose }) => {
+const VisualizationConfig: FC<Props> = ({ chartType }) => {
+    const isVegaEditorAvailable = useIsVegaEditorAvailable();
     const ConfigTab = useMemo(() => {
         switch (chartType) {
             case ChartType.BIG_NUMBER:
@@ -54,6 +61,7 @@ const VisualizationConfig: FC<Props> = ({ chartType, onClose }) => {
             case ChartType.MAP:
                 return MapConfigTabs;
             case ChartType.CUSTOM:
+                if (!isVegaEditorAvailable) return VegaEditorUnavailable;
                 // Return a wrapper component that handles lazy loading
                 return () => (
                     <Suspense fallback={<Loader size="sm" />}>
@@ -62,47 +70,29 @@ const VisualizationConfig: FC<Props> = ({ chartType, onClose }) => {
                 );
             case ChartType.SANKEY:
                 return SankeyConfigTabs;
+            case ChartType.DATA_APP_VIZ:
+                return DataAppVizConfigTabs;
             default:
                 return assertUnreachable(
                     chartType,
                     `Chart type ${chartType} not supported`,
                 );
         }
-    }, [chartType]);
+    }, [chartType, isVegaEditorAvailable]);
 
     return (
-        <>
-            <Group position="apart">
-                <Text fz={16} fw={600}>
-                    Configure chart
-                </Text>
-
-                <Tooltip label="Close visualization config" position="right">
-                    <ActionIcon size="sm" onClick={onClose}>
-                        <MantineIcon icon={IconX} />
-                    </ActionIcon>
-                </Tooltip>
-            </Group>
-
-            <Divider />
-
-            <Group>
-                <Text fw={600}>Chart type</Text>
-
-                <VisualizationCardOptions />
-            </Group>
-
-            <ScrollArea
-                offsetScrollbars
-                variant="primary"
-                className="only-vertical"
-                sx={{ flex: 1 }}
-                type="hover"
-                scrollbarSize={8}
-            >
-                <ConfigTab />
-            </ScrollArea>
-        </>
+        <ScrollArea
+            className={classes.scrollArea}
+            offsetScrollbars
+            scrollbars="y"
+            classNames={{
+                content: scrollAreaClasses.verticalContent,
+            }}
+            type="hover"
+            scrollbarSize={8}
+        >
+            <ConfigTab />
+        </ScrollArea>
     );
 };
 

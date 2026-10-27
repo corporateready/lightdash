@@ -5,6 +5,7 @@ import {
     type CartesianChartConfig,
     type ChartConfig,
     type ChartType,
+    type DataAppVizChartConfig,
     type CreateSavedChartVersion,
     type CustomDimension,
     type CustomFormat,
@@ -32,6 +33,12 @@ import {
     type TreemapChartConfig,
 } from '@lightdash/common';
 import { type QueryResultsProps } from '../../hooks/useQueryResults';
+
+export type PendingQueryCostConfirmation = {
+    args: QueryResultsProps;
+    totalBytesProcessed: number;
+    confirmEstimatedBytesAbove: number;
+};
 
 export enum ExplorerSection {
     FILTERS = 'FILTERS',
@@ -75,7 +82,7 @@ export enum ActionType {
 
 export type ChartConfigCache<T = AnyType> = {
     chartConfig: T;
-    pivotConfig?: { columns: string[] };
+    pivotConfig?: SavedChart['pivotConfig'];
 };
 
 /**
@@ -106,6 +113,7 @@ export type ConfigCacheMap = {
     [ChartType.MAP]: MapChartConfigCache;
     [ChartType.CUSTOM]: ChartConfigCache<CustomVisConfig['config']>;
     [ChartType.SANKEY]: ChartConfigCache<SankeyChartConfig['config']>;
+    [ChartType.DATA_APP_VIZ]: ChartConfigCache<DataAppVizChartConfig['config']>;
 };
 
 export type Action =
@@ -253,6 +261,23 @@ export type PreAggregateCheck =
           result: PreAggregateCheckResult;
       };
 
+export type ChartSidebarStep = 'choose' | 'configure';
+
+export type ChartTypeAuthoringState = {
+    /** The chart type being revised; null while a new one is authored. */
+    dataAppVizUuid: string | null;
+    /** The older version the builder previews; null follows the current one. */
+    viewedVersion: number | null;
+    /** The type was created by this session, so cancelling may discard it. */
+    createdInSession: boolean;
+    /** What the chart and the sidebar showed before, restored on cancel. */
+    previous: {
+        chartSidebarStep: ChartSidebarStep;
+        chartConfig: CreateSavedChartVersion['chartConfig'];
+        pivotConfig: CreateSavedChartVersion['pivotConfig'];
+    };
+};
+
 export interface ExplorerReduceState {
     expandedSections: ExplorerSection[];
     metadata?: {
@@ -260,6 +285,10 @@ export interface ExplorerReduceState {
         tableCalculations?: TableCalculationMetadata[];
     };
     isVisualizationConfigOpen?: boolean;
+    /** Which step the chart gallery sidebar shows when it is open. */
+    chartSidebarStep: ChartSidebarStep;
+    /** A chart type being authored in place of the chart; null otherwise. */
+    chartTypeAuthoring: ChartTypeAuthoringState | null;
     isMinimal?: boolean;
     isEditMode?: boolean;
     unsavedChartVersion: CreateSavedChartVersion;
@@ -281,8 +310,11 @@ export interface ExplorerReduceState {
         additionalMetric: {
             isOpen: boolean;
             isEditing?: boolean;
-            item?: Dimension | AdditionalMetric | CustomDimension;
+            item?: Dimension | AdditionalMetric | CustomDimension | Metric;
             type?: MetricType;
+            label?: string;
+            /** Merge source that owns this custom metric. */
+            mergeSourceId?: string;
         };
         customDimension: {
             isOpen: boolean;
@@ -322,6 +354,8 @@ export interface ExplorerReduceState {
         unpivotedQueryUuidHistory: string[];
         // Flag to trigger a query execution from components (works regardless of auto-fetch setting)
         pendingFetch: boolean;
+        // A query held back because its dry-run estimate needs confirming
+        pendingCostConfirmation: PendingQueryCostConfirmation | null;
     };
     fromDashboard?: string;
     isExploreFromHere?: boolean;

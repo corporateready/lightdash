@@ -1,6 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call */
 // This rule is failing in CI but passes locally
-import { JWT_HEADER_NAME, NotFoundError } from '@lightdash/common';
+import {
+    EMBED_DASHBOARD_HEADER_NAME,
+    JWT_HEADER_NAME,
+    NotFoundError,
+} from '@lightdash/common';
 import { NextFunction, Request, Response } from 'express';
 import { fromJwt } from '../../auth/account';
 import { requestContextFromExpress } from '../../auth/account/requestContext';
@@ -18,22 +22,39 @@ import { logAuditEvent } from '../../logging/winston';
  * We don't have the parsed routes yet, so we get the path params in a
  * cheap and dirty way. Long-term, we'll use org-level JWTs rather than project-level.
  */
-const parseProjectUuid = (req: Pick<Request, 'query' | 'path'>) => {
-    if (req.query.projectUuid) {
-        return req.query.projectUuid as string;
+const getSingleQueryValue = (value: unknown): string | undefined => {
+    if (typeof value === 'string') {
+        return value;
     }
 
-    const pathParts = req.path.split('/');
+    if (
+        Array.isArray(value) &&
+        value.length === 1 &&
+        typeof value[0] === 'string'
+    ) {
+        return value[0];
+    }
+
+    return undefined;
+};
+
+const getPathProjectUuid = (path: string): string | undefined => {
+    const pathParts = path.split('/');
     const projectParams = ['embed', 'projects'];
     const projectUuidIndex =
         pathParts.findIndex((part) => projectParams.includes(part)) + 1;
 
-    if (projectUuidIndex < 1) {
+    if (projectUuidIndex < 1 || !pathParts[projectUuidIndex]) {
         return undefined;
     }
 
     return pathParts[projectUuidIndex];
 };
+
+const parseProjectUuid = (req: Pick<Request, 'query' | 'path'>) =>
+    getPathProjectUuid(req.path) ??
+    getSingleQueryValue(req.query.projectUuid) ??
+    getSingleQueryValue(req.query.projectUuids);
 
 // This is the only embed endpoint that requires a user to be authenticated.
 // All other embed endpoints run off of the JWT.
@@ -92,12 +113,21 @@ export async function jwtAuthMiddleware(
             return;
         }
 
+        const requestedDashboardUuid = req.headers[EMBED_DASHBOARD_HEADER_NAME];
+
         // Get embed configuration from database
         req.account = await embedService.getAccountFromJwt(
             projectUuid,
             embedToken,
+            typeof requestedDashboardUuid === 'string'
+                ? { dashboardUuid: requestedDashboardUuid }
+                : undefined,
         );
         req.account.requestContext = requestContextFromExpress(req);
+        if (req.account.embedWriteUser) {
+            req.account.embedWriteUser.requestContext =
+                req.account.requestContext;
+        }
 
         // Not the greatest, but passport expects this to return a typeguard: this is AuthenticatedRequest.
         // AuthenticatedRequest is not defined and TS won't let us use `this` in a typeguard outside of a class.

@@ -1,5 +1,7 @@
+import { type AiAgentBattleProfile } from '@lightdash/common';
 import {
     ActionIcon,
+    Box,
     Center,
     Group,
     Pill,
@@ -8,22 +10,60 @@ import {
     Stack,
     Text,
     Title,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
-import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
-import { useOutletContext, useParams, useSearchParams } from 'react-router';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
+import {
+    useNavigate,
+    useOutletContext,
+    useParams,
+    useSearchParams,
+} from 'react-router';
 import { LightdashUserAvatar } from '../../../components/Avatar';
 import MantineIcon from '../../../components/common/MantineIcon';
 import { getModelKey } from '../../../components/common/ModelSelector/utils';
+import { useAiAccessGate } from '../../../features/aiAccess/useAiAccessGate';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import useTracking from '../../../providers/Tracking/useTracking';
+import { EventName } from '../../../types/Events';
 import { AiAgentNewThreadMcpConnections } from '../../features/aiCopilot/components/AiAgentNewThreadMcpConnections';
+import {
+    BattleModeSetup,
+    type BattleType,
+} from '../../features/aiCopilot/components/Battle/BattleModeSetup';
 import { AgentChatInput } from '../../features/aiCopilot/components/ChatElements/AgentChatInput';
+import {
+    mergeAiPromptContextInput,
+    mergeAiPromptContextItems,
+} from '../../features/aiCopilot/components/ChatElements/contentMentions';
+import { getPromptContextItemKey } from '../../features/aiCopilot/components/ChatElements/contentReferenceUtils';
 import { ChatElementsUtils } from '../../features/aiCopilot/components/ChatElements/utils';
 import { DefaultAgentButton } from '../../features/aiCopilot/components/DefaultAgentButton/DefaultAgentButton';
 import { usePendingPrompt } from '../../features/aiCopilot/components/PendingPromptContext/PendingPromptContext';
 import { PinnedContextCard } from '../../features/aiCopilot/components/PinnedContextCard/PinnedContextCard';
 import { SuggestedQuestions } from '../../features/aiCopilot/components/SuggestedQuestions/SuggestedQuestions';
+import { ThreadRetentionNotice } from '../../features/aiCopilot/components/ThreadRetentionNotice';
+import { type StartDeepResearchArgs } from '../../features/aiCopilot/deepResearch/types';
+import { getAiAgentPageBase } from '../../features/aiCopilot/hooks/aiAgentRouting';
+import { useEmitEmbedAiAgentThreadChange } from '../../features/aiCopilot/hooks/embedAiAgentThreadChange';
+import { useAiAgentBattleModeEnabled } from '../../features/aiCopilot/hooks/useAiAgentBattleModeEnabled';
+import {
+    getAiAgentModelConfig,
+    getModelOptionByKey,
+    useAiAgentModelSelection,
+} from '../../features/aiCopilot/hooks/useAiAgentModelSelection';
+import { useAiAgentQueryPathBattleAvailable } from '../../features/aiCopilot/hooks/useAiAgentQueryPathBattleAvailable';
+import { useAiAgentSpeedBattleAvailable } from '../../features/aiCopilot/hooks/useAiAgentSpeedBattleAvailable';
 import { useAiAgentSqlModeAvailable } from '../../features/aiCopilot/hooks/useAiAgentSqlModeAvailable';
-import { useModelOptions } from '../../features/aiCopilot/hooks/useModelOptions';
+import { useStartDeepResearchForThreadMutation } from '../../features/aiCopilot/hooks/useDeepResearch';
+import { useDeepResearchAccess } from '../../features/aiCopilot/hooks/useDeepResearchAccess';
 import { usePinnedContext } from '../../features/aiCopilot/hooks/usePinnedContext';
 import {
     useCreateAgentThreadMutation,
@@ -31,112 +71,351 @@ import {
 } from '../../features/aiCopilot/hooks/useProjectAiAgents';
 import { setThreadSqlMode } from '../../features/aiCopilot/store/aiAgentThreadModeSlice';
 import { useAiAgentStoreDispatch } from '../../features/aiCopilot/store/hooks';
+import { type AiAgentToolResult } from '../../features/aiCopilot/types';
+import { getDashboardNavigationUrlFromContentToolResult } from '../../features/aiCopilot/utils/contentToolResultNavigation';
+import { getThreadSetupRequestFields } from '../../providers/Embed/embedAiAgentThreadSetup';
+import useEmbed from '../../providers/Embed/useEmbed';
+import useIsEmbedded from '../../providers/Embed/useIsEmbedded';
 import { type AgentContext } from './AgentPage';
+import styles from './AiAgentNewThreadPage.module.css';
+
+/**
+ * Walkthrough result for manage:AiAgent: the new agent's page, which
+ * creating it opens.
+ */
+const agentTourProps = {
+    'data-tour-scope': 'manage:AiAgent',
+    'data-tour-step': '1',
+    'data-tour-route': '/projects/:projectUuid/ai-agents/:agentUuid',
+    'data-tour-label': 'Your agent is ready to ask',
+    'data-tour-docs': 'agents/set-up-agents.mdx#intro:1',
+    'data-tour-return': 'none',
+    'data-tour-resultdocs': 'agents/set-up-agents.mdx#data-access:1',
+};
+
+const battleProfileA: Record<BattleType, AiAgentBattleProfile | undefined> = {
+    speed: 'fast',
+    queryPath: 'classic',
+    models: undefined,
+};
+
+const battleProfileB: Record<BattleType, AiAgentBattleProfile | undefined> = {
+    speed: 'baseline',
+    queryPath: 'composer',
+    models: undefined,
+};
+
+const resolveBattleType = (
+    choice: BattleType,
+    {
+        speedBattleAvailable,
+        queryPathBattleAvailable,
+    }: { speedBattleAvailable: boolean; queryPathBattleAvailable: boolean },
+): BattleType => {
+    const available: Record<BattleType, boolean> = {
+        speed: speedBattleAvailable,
+        queryPath: queryPathBattleAvailable,
+        models: true,
+    };
+    if (available[choice]) return choice;
+    if (available.speed) return 'speed';
+    if (available.queryPath) return 'queryPath';
+    return 'models';
+};
 
 const AiAgentNewThreadPage: FC = () => {
-    const { agentUuid, projectUuid } = useParams();
+    const { agentUuid } = useParams();
+    const projectUuid = useProjectUuid();
+    const accessGate = useAiAccessGate(projectUuid);
+    const { track } = useTracking();
+    const isEmbed = useIsEmbedded();
+    const { aiAgentThreadSetup } = useEmbed();
+    const emitEmbedAiAgentThreadChange = useEmitEmbedAiAgentThreadChange();
     const [searchParams] = useSearchParams();
     const chartUuid = searchParams.get('chartUuid');
     const dashboardUuid = searchParams.get('dashboardUuid');
+    const dataAppUuid = searchParams.get('dataAppUuid');
+    const documentUuid = searchParams.get('documentUuid');
 
-    const { contextInput, previewItems } = usePinnedContext({
+    const {
+        contextInput,
+        previewItems,
+        contentMentionItems,
+        isReady: isPinnedContextReady,
+    } = usePinnedContext({
         projectUuid,
-        chartUuid,
-        dashboardUuid,
+        chartUuidOrSlug: chartUuid,
+        dashboardUuidOrSlug: dashboardUuid,
+        dataAppUuidOrSlug: dataAppUuid,
+        documentUuid,
     });
 
+    const { agent, agents, navigateFromAgentChat } =
+        useOutletContext<AgentContext>();
+    const navigate = useNavigate();
+    const battleModeAvailable = useAiAgentBattleModeEnabled() && !isEmbed;
+    const [battleMode, setBattleMode] = useState(false);
+    const speedBattleAvailable = useAiAgentSpeedBattleAvailable();
+    const [battleTypeChoice, setBattleType] = useState<BattleType>('speed');
+    const queryPathBattleAvailable =
+        useAiAgentQueryPathBattleAvailable() && agent.enableDataAccess;
+    const battleType = resolveBattleType(battleTypeChoice, {
+        speedBattleAvailable,
+        queryPathBattleAvailable,
+    });
+    const [battleModelBKey, setBattleModelBKey] = useState<string | null>(null);
     const sqlModeAvailable = useAiAgentSqlModeAvailable(projectUuid);
-    const [sqlMode, setSqlMode] = useState(false);
+    const canStartDeepResearch = useDeepResearchAccess(projectUuid);
+    const [sqlModeOverride, setSqlModeOverride] = useState<boolean>();
+    const sqlMode = sqlModeOverride ?? agent.enableSqlMode;
     const dispatch = useAiAgentStoreDispatch();
+    useEffect(() => {
+        setSqlModeOverride(undefined);
+    }, [agent.uuid]);
+    const createdThreadRef = useRef<{
+        uuid: string;
+        title: string;
+    } | null>(null);
+
+    const handleToolResult = useCallback(
+        (toolResult: AiAgentToolResult) => {
+            if (!projectUuid) return;
+
+            const dashboardUrl = getDashboardNavigationUrlFromContentToolResult(
+                projectUuid,
+                toolResult,
+            );
+            if (!dashboardUrl || isEmbed) return;
+
+            navigateFromAgentChat(dashboardUrl, {
+                threadUuid: createdThreadRef.current?.uuid,
+                title: createdThreadRef.current?.title,
+            });
+        },
+        [isEmbed, navigateFromAgentChat, projectUuid],
+    );
 
     const { mutateAsync: createAgentThread, isLoading: isCreatingThread } =
-        useCreateAgentThreadMutation(agentUuid, projectUuid!, {
+        useCreateAgentThreadMutation(projectUuid!, {
             // Seed the per-thread slice with the user's choice so subsequent
             // prompts in this thread default to the same state. Navigation
             // still happens (we only override the slice, not the routing).
-            onCreated: (thread) =>
+            onCreated: (thread) => {
+                createdThreadRef.current = {
+                    uuid: thread.uuid,
+                    title: thread.firstMessage.message,
+                };
+                if (isEmbed && projectUuid && agentUuid) {
+                    emitEmbedAiAgentThreadChange({
+                        projectUuid,
+                        agentUuid,
+                        threadUuid: thread.uuid,
+                    });
+                }
                 dispatch(
                     setThreadSqlMode({
                         threadUuid: thread.uuid,
                         enabled: sqlModeAvailable && sqlMode,
                     }),
-                ),
+                );
+            },
+            onToolResult: handleToolResult,
         });
-    const { agent } = useOutletContext<AgentContext>();
+    const {
+        mutateAsync: createBattleThread,
+        isLoading: isCreatingBattleThreads,
+    } = useCreateAgentThreadMutation(projectUuid!, {
+        skipNavigation: true,
+        onToolResult: handleToolResult,
+    });
     const { data: verifiedQuestions } = useVerifiedQuestions(
         projectUuid,
         agentUuid,
     );
-    const { data: modelOptions } = useModelOptions({ projectUuid, agentUuid });
-
-    const [selectedModelKey, setSelectedModelKey] = useState<string | null>(
-        null,
-    );
-    const [extendedThinking, setExtendedThinking] = useState(false);
-
-    const handleSelectedModelKeyChange = useCallback(
-        (modelKey: string) => {
-            setSelectedModelKey(modelKey);
-            const model = modelOptions?.find(
-                (m) => getModelKey(m) === modelKey,
-            );
-            if (model && !model.supportsReasoning) {
-                setExtendedThinking(false);
-            }
-        },
-        [modelOptions, setExtendedThinking],
+    const startDeepResearch = useStartDeepResearchForThreadMutation(
+        projectUuid!,
     );
 
-    // Initialize to default model when data loads
-    useEffect(() => {
-        if (modelOptions && !selectedModelKey) {
-            const defaultModel = modelOptions.find((m) => m.default);
-            if (defaultModel) {
-                handleSelectedModelKeyChange(getModelKey(defaultModel));
-            }
-        }
-    }, [modelOptions, selectedModelKey, handleSelectedModelKeyChange]);
-
-    // Only enable extended thinking toggle when selected model supports reasoning
-    const selectedModel = useMemo(
-        () => modelOptions?.find((m) => getModelKey(m) === selectedModelKey),
-        [modelOptions, selectedModelKey],
+    const {
+        agentDefault,
+        explicitModelConfig,
+        extendedThinking,
+        handleExtendedThinkingChange,
+        handleSelectedModelKeyChange,
+        modelOptions,
+        selectedModel,
+        selectedModelKey,
+        showExtendedThinking,
+    } = useAiAgentModelSelection({
+        projectUuid,
+        agentUuid,
+        defaultModelConfig: agent.modelConfig,
+        organizationSettingsEnabled: !isEmbed,
+    });
+    const battleModels = useMemo(
+        () => modelOptions?.filter((model) => !model.deprecated) ?? [],
+        [modelOptions],
     );
-    const showExtendedThinking = selectedModel?.supportsReasoning ?? false;
+    const showBattleSetup = battleModeAvailable && battleModels.length > 0;
+    // Model B defaults to the first option that isn't model A, and falls
+    // back to that whenever A is changed to match the current B.
+    const effectiveBattleModelBKey =
+        (battleModelBKey !== selectedModelKey ? battleModelBKey : null) ??
+        battleModels.map(getModelKey).find((key) => key !== selectedModelKey) ??
+        null;
+    const isBattle = showBattleSetup && battleMode;
 
     const { pendingPrompt, setPendingPrompt } = usePendingPrompt();
+    const [composerSeedKey, setComposerSeedKey] = useState(0);
+    const handleSuggestedPrompt = useCallback(
+        (prompt: string) => {
+            setPendingPrompt(prompt);
+            setComposerSeedKey((key) => key + 1);
+        },
+        [setPendingPrompt],
+    );
 
     const onSubmit = useCallback(
-        ({ message, toolHints }: { message: string; toolHints: string[] }) => {
+        ({
+            message,
+            toolHints,
+            context,
+            optimisticContext,
+        }: {
+            message: string;
+            toolHints: string[];
+            context?: typeof contextInput;
+            optimisticContext?: typeof previewItems;
+        }) => {
+            if (!agentUuid) return;
+            if (!isPinnedContextReady) return;
             setPendingPrompt('');
+            const mergedContext = mergeAiPromptContextInput(
+                contextInput,
+                context,
+            );
+            const mergedOptimisticContext = mergeAiPromptContextItems(
+                previewItems,
+                optimisticContext,
+            );
+            if (isBattle && projectUuid) {
+                const modelB = getModelOptionByKey(
+                    battleModels,
+                    effectiveBattleModelBKey,
+                );
+                track({
+                    name: EventName.AI_AGENT_BATTLE_STARTED,
+                    properties: {
+                        projectId: projectUuid,
+                        aiAgentId: agentUuid,
+                        modelA: selectedModel
+                            ? getModelKey(selectedModel)
+                            : null,
+                        modelB: modelB ? getModelKey(modelB) : null,
+                        battleType,
+                    },
+                });
+                const shared = {
+                    agentUuid,
+                    prompt: message,
+                    context: mergedContext,
+                    optimisticContext: mergedOptimisticContext,
+                    enableSqlMode: sqlModeAvailable && sqlMode,
+                    toolHints,
+                };
+                const modelAConfig = getAiAgentModelConfig(
+                    selectedModel,
+                    false,
+                );
+                void Promise.all([
+                    createBattleThread({
+                        ...shared,
+                        modelConfig: modelAConfig,
+                        battleProfile: battleProfileA[battleType],
+                    }),
+                    createBattleThread({
+                        ...shared,
+                        modelConfig:
+                            battleType === 'models'
+                                ? getAiAgentModelConfig(modelB, false)
+                                : modelAConfig,
+                        battleProfile: battleProfileB[battleType],
+                    }),
+                ]).then(([threadA, threadB]) =>
+                    navigate(
+                        `${getAiAgentPageBase(projectUuid, isEmbed)}/${agentUuid}/threads/battle/${threadA.uuid}/${threadB.uuid}`,
+                    ),
+                );
+                return;
+            }
             void createAgentThread({
+                agentUuid,
                 prompt: message,
-                context: contextInput.length > 0 ? contextInput : undefined,
-                optimisticContext:
-                    previewItems.length > 0 ? previewItems : undefined,
+                context: mergedContext,
+                optimisticContext: mergedOptimisticContext,
                 enableSqlMode: sqlModeAvailable && sqlMode,
                 toolHints,
-                modelConfig: selectedModel
-                    ? {
-                          modelName: selectedModel.name,
-                          modelProvider: selectedModel.provider,
-                          reasoning: showExtendedThinking
-                              ? extendedThinking
-                              : undefined,
-                      }
-                    : undefined,
+                modelConfig: explicitModelConfig,
+                ...getThreadSetupRequestFields(aiAgentThreadSetup),
             });
         },
         [
+            agentUuid,
             setPendingPrompt,
             createAgentThread,
+            createBattleThread,
             contextInput,
             previewItems,
             sqlModeAvailable,
             sqlMode,
+            explicitModelConfig,
+            isPinnedContextReady,
+            isBattle,
+            projectUuid,
             selectedModel,
-            showExtendedThinking,
-            extendedThinking,
+            battleModels,
+            effectiveBattleModelBKey,
+            battleType,
+            navigate,
+            track,
+            isEmbed,
+            aiAgentThreadSetup,
+        ],
+    );
+
+    const onStartDeepResearch = useCallback(
+        async ({ question }: StartDeepResearchArgs) => {
+            if (!agentUuid || !isPinnedContextReady || !canStartDeepResearch) {
+                return;
+            }
+            setPendingPrompt('');
+            const thread = await createAgentThread({
+                agentUuid,
+                prompt: question,
+                context: contextInput,
+                optimisticContext: previewItems,
+                modelConfig: explicitModelConfig,
+                skipAgentResponse: true,
+                ...getThreadSetupRequestFields(aiAgentThreadSetup),
+            });
+            await startDeepResearch.mutateAsync({
+                question,
+                agentUuid,
+                threadUuid: thread.uuid,
+                promptUuid: thread.firstMessage.uuid,
+            });
+        },
+        [
+            agentUuid,
+            canStartDeepResearch,
+            contextInput,
+            createAgentThread,
+            isPinnedContextReady,
+            explicitModelConfig,
+            previewItems,
+            setPendingPrompt,
+            startDeepResearch,
+            aiAgentThreadSetup,
         ],
     );
 
@@ -149,28 +428,41 @@ const AiAgentNewThreadPage: FC = () => {
                 {...ChatElementsUtils.centeredElementProps}
                 h="unset"
             >
-                <Stack flex={1} py="xl">
-                    <Stack align="center" gap="xxs">
-                        <LightdashUserAvatar
-                            size="lg"
-                            name={agent.name || 'AI'}
-                            src={agent.imageUrl}
-                        />
-                        <Group justify="center" gap={2}>
-                            <Title order={4} ta="center">
+                <Stack flex={1} py="lg">
+                    <Stack
+                        align="center"
+                        gap={6}
+                        data-tour-scope="view:AiAgent"
+                        data-tour-step="1"
+                        data-tour-route="/projects/:projectUuid/ai-agents/:agentUuid"
+                        data-tour-label="Explore an AI agent"
+                        data-tour-docs="agents.mdx#intro:1"
+                        data-tour-return="none"
+                        data-tour-resultdocs="agents/use-ai-agents.mdx#core-capabilities:li1"
+                    >
+                        <Box className={styles.agentAvatarWrap}>
+                            <LightdashUserAvatar
+                                size="lg"
+                                name={agent.name || 'AI'}
+                                src={agent.imageUrl}
+                            />
+                            {!isEmbed && (
+                                <DefaultAgentButton
+                                    projectUuid={projectUuid}
+                                    agentUuid={agent.uuid}
+                                    size="xs"
+                                    className={styles.defaultAgentBadge}
+                                />
+                            )}
+                        </Box>
+                        <Group justify="center" gap={4}>
+                            <Title order={4} ta="center" {...agentTourProps}>
                                 {agent.name}
                             </Title>
-                            <DefaultAgentButton
-                                projectUuid={projectUuid}
-                                agentUuid={agent.uuid}
-                            />
-                            {agent.instruction && (
+                            {!isEmbed && agent.instruction && (
                                 <Popover withArrow>
                                     <Popover.Target>
-                                        <ActionIcon
-                                            variant="subtle"
-                                            color="ldGray.6"
-                                        >
+                                        <ActionIcon>
                                             <MantineIcon
                                                 icon={IconInfoCircle}
                                             />
@@ -185,9 +477,9 @@ const AiAgentNewThreadPage: FC = () => {
                                         >
                                             <Text
                                                 size="sm"
-                                                style={{
-                                                    whiteSpace: 'pre-wrap',
-                                                }}
+                                                className={
+                                                    styles.agentInstruction
+                                                }
                                             >
                                                 {agent.instruction}
                                             </Text>
@@ -199,10 +491,14 @@ const AiAgentNewThreadPage: FC = () => {
                         {agent.description && (
                             <Text
                                 size="sm"
-                                c="ldGray.6"
+                                c="dimmed"
                                 ta="center"
                                 maw={600}
-                                style={{ whiteSpace: 'pre-wrap' }}
+                                className={styles.agentDescription}
+                                data-tour-scope="view:AiAgent"
+                                data-tour-result="1"
+                                data-tour-label="Read the agent description"
+                                data-tour-docs="agents/effective-analytics-with-agents.mdx#think-specialized-not-general:1"
                             >
                                 {agent.description}
                             </Text>
@@ -216,12 +512,18 @@ const AiAgentNewThreadPage: FC = () => {
                                 ))}
                             </Group>
                         )}
+                        <ThreadRetentionNotice
+                            agentThreadRetentionHours={
+                                agent.threadRetentionHours ?? null
+                            }
+                        />
                     </Stack>
 
                     {projectUuid && agentUuid && (
                         <AiAgentNewThreadMcpConnections
                             projectUuid={projectUuid}
                             agentUuid={agentUuid}
+                            onSuggestedPrompt={handleSuggestedPrompt}
                         />
                     )}
 
@@ -243,43 +545,81 @@ const AiAgentNewThreadPage: FC = () => {
                             <Group gap="xs" wrap="wrap">
                                 {previewItems.map((item) => (
                                     <PinnedContextCard
-                                        key={`${item.type}-${
-                                            item.type === 'chart'
-                                                ? item.chartUuid
-                                                : item.dashboardUuid
-                                        }`}
+                                        key={getPromptContextItemKey(item)}
                                         item={item}
                                         projectUuid={projectUuid}
+                                        previewScope={null}
                                     />
                                 ))}
                             </Group>
                         </Stack>
                     )}
 
-                    <AgentChatInput
-                        onSubmit={onSubmit}
-                        loading={isCreatingThread}
-                        placeholder={`Ask ${agent.name} anything about your data...`}
-                        projectUuid={projectUuid}
-                        agentUuid={agent.uuid}
-                        models={modelOptions}
-                        selectedModelId={selectedModelKey}
-                        onModelChange={handleSelectedModelKeyChange}
-                        extendedThinking={
-                            showExtendedThinking ? extendedThinking : undefined
-                        }
-                        onExtendedThinkingChange={
-                            showExtendedThinking
-                                ? setExtendedThinking
-                                : undefined
-                        }
-                        sqlMode={sqlModeAvailable ? sqlMode : undefined}
-                        onSqlModeChange={
-                            sqlModeAvailable ? setSqlMode : undefined
-                        }
-                        defaultValue={pendingPrompt}
-                        onValueChange={setPendingPrompt}
-                    />
+                    <Stack mih={320}>
+                        {showBattleSetup && !accessGate.disabled && (
+                            <BattleModeSetup
+                                enabled={battleMode}
+                                onEnabledChange={setBattleMode}
+                                battleType={battleType}
+                                onBattleTypeChange={setBattleType}
+                                speedBattleAvailable={speedBattleAvailable}
+                                queryPathBattleAvailable={
+                                    queryPathBattleAvailable
+                                }
+                                models={battleModels}
+                                modelAKey={selectedModelKey}
+                                modelBKey={effectiveBattleModelBKey}
+                                onModelAChange={handleSelectedModelKeyChange}
+                                onModelBChange={setBattleModelBKey}
+                            />
+                        )}
+
+                        <AgentChatInput
+                            key={composerSeedKey}
+                            onSubmit={onSubmit}
+                            onStartDeepResearch={
+                                canStartDeepResearch && !isBattle
+                                    ? onStartDeepResearch
+                                    : undefined
+                            }
+                            loading={
+                                isCreatingThread || isCreatingBattleThreads
+                            }
+                            disabled={!isPinnedContextReady}
+                            placeholder={
+                                isBattle
+                                    ? `Ask both models anything about your data...`
+                                    : `Ask ${agent.name} anything about your data...`
+                            }
+                            projectUuid={projectUuid}
+                            agentUuid={agent.uuid}
+                            agents={isEmbed ? undefined : agents}
+                            selectedAgent={agent}
+                            models={isBattle ? undefined : modelOptions}
+                            selectedModelId={selectedModelKey}
+                            onModelChange={handleSelectedModelKeyChange}
+                            extendedThinking={
+                                showExtendedThinking && !isBattle
+                                    ? extendedThinking
+                                    : undefined
+                            }
+                            onExtendedThinkingChange={
+                                showExtendedThinking && !isBattle
+                                    ? handleExtendedThinkingChange
+                                    : undefined
+                            }
+                            agentDefault={isBattle ? undefined : agentDefault}
+                            sqlMode={sqlModeAvailable ? sqlMode : undefined}
+                            onSqlModeChange={
+                                sqlModeAvailable
+                                    ? setSqlModeOverride
+                                    : undefined
+                            }
+                            defaultValue={pendingPrompt}
+                            onValueChange={setPendingPrompt}
+                            contentMentionPriorityItems={contentMentionItems}
+                        />
+                    </Stack>
                 </Stack>
             </Stack>
         </Center>

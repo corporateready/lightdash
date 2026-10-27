@@ -1,30 +1,33 @@
+import { FeatureFlags, type TimezoneSetting } from '@lightdash/common';
 import {
     Box,
     Button,
     Group,
     Kbd,
-    rgba,
-    Text,
     Tooltip,
     type MantineSize,
-} from '@mantine-8/core';
-import { useHotkeys, useOs } from '@mantine-8/hooks';
-import { IconPlayerPlay, IconX } from '@tabler/icons-react';
+} from '@mantine/core';
+import { useHotkeys, useOs } from '@mantine/hooks';
+import { IconPlayerPlay } from '@tabler/icons-react';
 import { memo, useCallback, useTransition, type FC } from 'react';
 import {
     explorerActions,
     selectIsValidQuery,
     selectPreAggVisible,
     selectQueryLimit,
+    selectTimezone,
     useExplorerDispatch,
     useExplorerSelector,
 } from '../features/explorer/store';
+import { useMergeSetup } from '../features/mergeQuery/hooks/useMergeSetup';
 import useHealth from '../hooks/health/useHealth';
 import { useExplorerQuery } from '../hooks/useExplorerQuery';
+import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 import useTracking from '../providers/Tracking/useTracking';
 import { EventName } from '../types/Events';
 import MantineIcon from './common/MantineIcon';
 import PreAggregateStatusBadge from './PreAggregateStatusBadge';
+import { ExplorerQueryCostEstimateBadge } from './QueryCostEstimate/ExplorerQueryCostEstimate';
 import RunQuerySettings from './RunQuerySettings';
 
 export const RefreshButton: FC<{ size?: MantineSize }> = memo(({ size }) => {
@@ -39,6 +42,18 @@ export const RefreshButton: FC<{ size?: MantineSize }> = memo(({ size }) => {
     const isValidQuery = useExplorerSelector(selectIsValidQuery);
     const dispatch = useExplorerDispatch();
     const preAggVisible = useExplorerSelector(selectPreAggVisible);
+    const timezone = useExplorerSelector(selectTimezone);
+
+    const { data: timezoneSupportFlag } = useServerFeatureFlag(
+        FeatureFlags.EnableTimezoneSupport,
+    );
+
+    const setTimeZone = useCallback(
+        (newTimezone: TimezoneSetting) => {
+            dispatch(explorerActions.setTimeZone(newTimezone));
+        },
+        [dispatch],
+    );
 
     // Get query state and actions from hooks
     const { isLoading, fetchResults, cancelQuery } = useExplorerQuery();
@@ -50,102 +65,112 @@ export const RefreshButton: FC<{ size?: MantineSize }> = memo(({ size }) => {
         [dispatch],
     );
 
-    const canRunQuery = isValidQuery;
+    // A configured merge is what the explorer runs, so this is the control that
+    // runs it. Two run buttons for one result is how you end up with a chart
+    // showing the answer to a question nobody asked.
+    const merge = useMergeSetup();
+    const canRunQuery = merge.isMerging ? merge.canRun : isValidQuery;
+    // A merge blocks the run for a reason it can name; a silently disabled
+    // button makes the user hunt the sidebar for it.
+    const mergeBlockedReason =
+        merge.isMerging && !merge.canRun ? merge.blockingReason : null;
 
     const { track } = useTracking();
 
     const onClick = useCallback(() => {
-        if (canRunQuery) {
+        if (!canRunQuery) return;
+        if (merge.isMerging) {
+            merge.handleRun();
+        } else {
             fetchResults();
-            track({ name: EventName.RUN_QUERY_BUTTON_CLICKED });
         }
-    }, [fetchResults, track, canRunQuery]);
+        track({ name: EventName.RUN_QUERY_BUTTON_CLICKED });
+    }, [fetchResults, track, canRunQuery, merge]);
 
     useHotkeys([['mod + enter', onClick, { preventDefault: true }]]);
 
+    const isRunning = isLoading || !!merge.isRunning;
+
     return (
-        <Box pos="relative">
-            <Button.Group>
-                <Tooltip
-                    label={
-                        <Group gap="xxs">
-                            <Kbd fw={600}>
-                                {os === 'macos' || os === 'ios' ? '⌘' : 'ctrl'}
-                            </Kbd>
-
-                            <Text fw={600}>+</Text>
-
-                            <Kbd fw={600}>Enter</Kbd>
-                        </Group>
-                    }
-                    position="bottom"
-                    withArrow
-                    withinPortal
-                    disabled={isLoading || !isValidQuery}
-                >
-                    <Button
-                        size={size}
-                        pr={limit ? 'xs' : undefined}
-                        disabled={!isValidQuery}
-                        leftSection={<MantineIcon icon={IconPlayerPlay} />}
-                        loading={isLoading}
-                        onClick={onClick}
-                        style={(theme) => ({
-                            flex: 1,
-                            borderRight: isValidQuery
-                                ? `1px solid ${rgba(theme.colors.ldGray[5], 0.6)}`
-                                : undefined,
-                            borderTopRightRadius: 0,
-                            borderBottomRightRadius: 0,
-                        })}
-                        data-testid="RefreshButton/RunQueryButton"
-                    >
-                        Run query ({limit})
-                    </Button>
-                </Tooltip>
-
-                {isLoading ? (
+        <Group gap="xs" wrap="nowrap">
+            <ExplorerQueryCostEstimateBadge />
+            <Box pos="relative">
+                <Button.Group>
                     <Tooltip
-                        label={'Cancel query'}
+                        label={
+                            mergeBlockedReason ?? (
+                                <Group gap={4} wrap="nowrap">
+                                    <Kbd size="xs">
+                                        {os === 'macos' || os === 'ios'
+                                            ? '⌘'
+                                            : 'Ctrl'}
+                                    </Kbd>
+                                    <Kbd size="xs">↵</Kbd>
+                                </Group>
+                            )
+                        }
                         position="bottom"
-                        withArrow
-                        withinPortal
+                        disabled={
+                            isRunning || (!canRunQuery && !mergeBlockedReason)
+                        }
                     >
                         <Button
                             size={size}
-                            p="xs"
-                            onClick={() =>
-                                startTransition(() => {
-                                    cancelQuery();
-                                })
+                            // data-disabled keeps the button hoverable so the
+                            // tooltip can say why the merge cannot run yet.
+                            disabled={!canRunQuery && !mergeBlockedReason}
+                            data-disabled={
+                                mergeBlockedReason ? true : undefined
                             }
-                            style={{
-                                borderTopLeftRadius: 0,
-                                borderBottomLeftRadius: 0,
-                            }}
+                            aria-disabled={
+                                mergeBlockedReason ? true : undefined
+                            }
+                            leftSection={<MantineIcon icon={IconPlayerPlay} />}
+                            loading={isRunning}
+                            onClick={onClick}
+                            data-testid="RefreshButton/RunQueryButton"
+                            // Anchor for scope walkthroughs (data-tour-via), and
+                            // the action of the manage:Explore walkthrough: a
+                            // query of one's own is what the scope unlocks.
+                            // See scripts/scope-tours.
+                            data-tour-anchor="run-query"
+                            data-tour-hint="Run the query"
+                            data-tour-scope="manage:Explore"
+                            data-tour-step="2"
+                            data-tour-route="/projects/:projectUuid/tables/:tableName"
+                            data-tour-label="Run the query"
+                            data-tour-title="Explore data"
+                            data-tour-interactive="true"
+                            data-tour-via='[data-tour-nav="new"] >> [data-tour-nav="new-chart"] >> [data-tour-anchor="explore-table"] >> [data-tour-anchor="explore-metric"] >> [data-tour-anchor="explore-dimension"]'
+                            data-tour-docs="explore/explore-view.mdx#select-your-fields:li3"
                         >
-                            <MantineIcon icon={IconX} size="sm" />
+                            Run query
                         </Button>
                     </Tooltip>
-                ) : (
+
                     <RunQuerySettings
-                        disabled={!isValidQuery}
+                        disabled={!canRunQuery}
                         size={size}
                         maxLimit={maxLimit}
                         limit={limit}
                         onLimitChange={setRowLimit}
                         showAutoFetchSetting
                         showPreAggregateSetting={preAggVisible}
-                        targetProps={{
-                            style: {
-                                borderTopLeftRadius: 0,
-                                borderBottomLeftRadius: 0,
-                            },
-                        }}
+                        showTimezoneSetting={
+                            timezoneSupportFlag?.enabled ?? false
+                        }
+                        timezone={timezone ?? undefined}
+                        onTimezoneChange={setTimeZone}
+                        isQueryRunning={isLoading}
+                        onCancelQuery={() =>
+                            startTransition(() => {
+                                cancelQuery();
+                            })
+                        }
                     />
-                )}
-            </Button.Group>
-            <PreAggregateStatusBadge />
-        </Box>
+                </Button.Group>
+                <PreAggregateStatusBadge />
+            </Box>
+        </Group>
     );
 });

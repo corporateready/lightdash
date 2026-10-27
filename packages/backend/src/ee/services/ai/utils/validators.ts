@@ -7,19 +7,30 @@ import {
     convertAdditionalMetric,
     convertAiTableCalcsSchemaToTableCalcs,
     CustomMetricBaseTransformed,
+    DataAppVizSchema,
+    DataAppVizSelectedFields,
     dateFilterSchema,
+    DEFAULT_FILTER_CASE_SENSITIVE,
     DependencyNode,
     detectCircularDependencies,
     Explore,
+    FilterOperator,
     FilterRule,
     Filters,
     FilterType,
+    formatFilterExamplesAsJsonLines,
     getCustomMetricType,
+    getDataAppVizChartConfigErrors,
     getErrorMessage,
+    getExploreParameterDefinitions,
+    getExploreParameterReferences,
     getFields,
+    getFilterExamples,
     getFilterRulesFromGroup,
     getFilterTypeFromItemType,
     getItemId,
+    getItemLabelWithoutTableName,
+    getParameterOptionValues,
     isAdditionalMetric,
     isDimension,
     isMetric,
@@ -28,6 +39,8 @@ import {
     MetricType,
     nullaryWindowFunctions,
     numberFilterSchema,
+    ParameterDefinitions,
+    ParametersValuesMap,
     renderFilterRuleSql,
     renderFilterRuleSqlFromField,
     renderTableCalculationFilterRuleSql,
@@ -36,15 +49,23 @@ import {
     TableCalcSchema,
     TableCalcsSchema,
     TableCalculation,
-    ToolRunQueryArgsTransformed,
+    ToolRunQueryBuiltinChartConfig,
+    ToolRunQueryCustomChartTypeConfig,
     ToolSortField,
     TransformedCustomMetric,
+    UnitOfTime,
+    unitOfTimeSupportsToDate,
     WeekDay,
     WindowFunctionType,
+    withLeadingEquals,
 } from '@lightdash/common';
+import { extractColumnRefs, parse as parseFormula } from '@lightdash/formula';
+import { z } from 'zod';
 import Logger from '../../../../logging/logger';
+import { AiAgentUnknownFieldsError } from './AiAgentUnknownFieldsError';
 import { populateCustomMetricsSQL } from './populateCustomMetricsSQL';
 import { serializeData } from './serializeData';
+import { suggestClosestFieldIds } from './suggestClosestFieldIds';
 /**
  * Validate that all selected fields exist in the explore, custom metrics or table calculations
  * @param explore
@@ -80,7 +101,11 @@ ${nonExploreFields.join('\n')}
             `[AiAgent][Validate Selected Fields Existence] ${errorMessage}`,
         );
 
-        throw new AiAgentValidatorError(errorMessage);
+        throw new AiAgentUnknownFieldsError(
+            errorMessage,
+            explore,
+            nonExploreFields,
+        );
     }
 }
 
@@ -122,8 +147,28 @@ export function validateCustomMetricsDefinition(
         );
 
         if (!field) {
+            // The transform strips the "<table>_" prefix from baseDimensionName,
+            // so show the field id we actually looked for and list the real
+            // dimensions — the agent can then correct in one step instead of
+            // guessing an id/primary-key column the explore may not expose.
+            const expectedFieldId = getItemId({
+                name: metric.baseDimensionName,
+                table: metric.table,
+            });
+            const availableDimensions = exploreFields
+                .filter(isDimension)
+                .map(getItemId);
+            const shown = availableDimensions.slice(0, 50);
+            const more =
+                availableDimensions.length > shown.length
+                    ? ` (and ${
+                          availableDimensions.length - shown.length
+                      } more — use grepFields to search them)`
+                    : '';
             errors.push(
-                `Error: the base dimension name "${metric.baseDimensionName}" does not exist in the explore.`,
+                `Error: base dimension "${expectedFieldId}" does not exist in the explore "${metric.table}". ` +
+                    `baseDimensionName must be an existing dimension (do not invent an id/primary-key column). ` +
+                    `Available dimensions: ${shown.join(', ')}${more}`,
             );
             return;
         }
@@ -161,6 +206,310 @@ export function validateCustomMetricsDefinition(
     }
 }
 
+const getAvailableFilterOperators = (
+    filterType: FilterType,
+): FilterOperator[] =>
+    Array.from(
+        new Set(
+            getFilterExamples({
+                fieldId: 'field_id',
+                fieldType: filterType,
+                fieldFilterType: filterType,
+            }).map((example) => example.operator),
+        ),
+    );
+
+const stringifyReceivedValue = (value: unknown): string => {
+    try {
+        return JSON.stringify(value) ?? String(value);
+    } catch {
+        return String(value);
+    }
+};
+
+const getFilterFieldLabel = (
+    field: CompiledField | AdditionalMetric | TableCalculation,
+): string => {
+    const label = isAdditionalMetric(field)
+        ? field.label
+        : getItemLabelWithoutTableName(field);
+
+    return label || getItemId(field);
+};
+
+const valuesDescription = (values: unknown): string =>
+    values === undefined ? 'omitted' : stringifyReceivedValue(values);
+
+const settingsDescription = (settings: unknown): string =>
+    settings === undefined ? 'undefined' : stringifyReceivedValue(settings);
+
+const isPresenceFilterOperator = (operator: FilterOperator): boolean =>
+    [FilterOperator.NULL, FilterOperator.NOT_NULL].includes(operator);
+
+const shouldIncludeFilterValues = (filterRule: FilterRule): boolean =>
+    filterRule.values !== undefined &&
+    (!isPresenceFilterOperator(filterRule.operator) ||
+        !Array.isArray(filterRule.values) ||
+        filterRule.values.length > 0);
+
+const hasOnlyValuesOfType = (
+    values: unknown,
+    valueType: 'boolean' | 'number' | 'string',
+): boolean =>
+    Array.isArray(values) &&
+    values.every((value) => typeof value === valueType);
+
+const hasLength = (values: unknown, length: number): boolean =>
+    Array.isArray(values) && values.length === length;
+
+const relativeDateUnitSchema = z.union([
+    z.literal(UnitOfTime.days),
+    z.literal(UnitOfTime.weeks),
+    z.literal(UnitOfTime.months),
+    z.literal(UnitOfTime.quarters),
+    z.literal(UnitOfTime.years),
+]);
+
+const dateSettingsSchema = z
+    .object({
+        completed: z.boolean(),
+        unitOfTime: relativeDateUnitSchema,
+    })
+    .strict();
+
+const currentDateSettingsSchema = z
+    .object({
+        completed: z.literal(false),
+        unitOfTime: relativeDateUnitSchema,
+        toDate: z.literal(true).optional(),
+        excludeToday: z.literal(true).optional(),
+    })
+    .strict()
+    .refine(
+        (settings) =>
+            settings.excludeToday === undefined || settings.toDate === true,
+    )
+    .refine(
+        (settings) =>
+            settings.toDate === undefined ||
+            unitOfTimeSupportsToDate(settings.unitOfTime),
+    );
+
+const dateOrDateTimeSchema = z.union([
+    z.string().date(),
+    z.string().datetime(),
+]);
+
+const hasDateSettings = (settings: unknown): boolean =>
+    dateSettingsSchema.safeParse(settings).success;
+
+const hasCurrentDateSettings = (settings: unknown): boolean =>
+    currentDateSettingsSchema.safeParse(settings).success;
+
+const isIsoDateOrDateTime = (value: unknown): value is string =>
+    dateOrDateTimeSchema.safeParse(value).success;
+
+const hasOnlyIsoDateValues = (values: unknown): boolean =>
+    Array.isArray(values) && values.every(isIsoDateOrDateTime);
+
+const hasCurrentDateValue = (values: unknown): boolean =>
+    Array.isArray(values) && values.length === 1 && values[0] === 1;
+
+const getFilterRuleProblem = (
+    filterRule: FilterRule,
+    filterType: FilterType,
+): string => {
+    const availableOperators = getAvailableFilterOperators(filterType);
+
+    if (!availableOperators.includes(filterRule.operator)) {
+        return `"${filterRule.operator}" is not available for ${filterType} fields. Available operators: ${availableOperators.join(', ')}.`;
+    }
+
+    if (
+        isPresenceFilterOperator(filterRule.operator) &&
+        (shouldIncludeFilterValues(filterRule) ||
+            filterRule.settings !== undefined)
+    ) {
+        return `"${filterRule.operator}" is a presence operator and must not include values or settings. Received values=${valuesDescription(filterRule.values)} settings=${settingsDescription(filterRule.settings)}.`;
+    }
+
+    if (filterType !== FilterType.DATE && filterRule.settings !== undefined) {
+        return `"settings" is only valid for relative or current date filters. Remove settings from this ${filterType} filter. Received settings=${settingsDescription(filterRule.settings)}.`;
+    }
+
+    if (
+        filterType === FilterType.DATE &&
+        ![
+            FilterOperator.IN_THE_PAST,
+            FilterOperator.NOT_IN_THE_PAST,
+            FilterOperator.IN_THE_NEXT,
+            FilterOperator.IN_THE_CURRENT,
+            FilterOperator.NOT_IN_THE_CURRENT,
+        ].includes(filterRule.operator) &&
+        filterRule.settings !== undefined
+    ) {
+        return `"settings" is only valid for relative or current date filters. Remove settings when using "${filterRule.operator}". Received settings=${settingsDescription(filterRule.settings)}.`;
+    }
+
+    switch (filterType) {
+        case FilterType.BOOLEAN:
+            if (
+                [FilterOperator.EQUALS, FilterOperator.NOT_EQUALS].includes(
+                    filterRule.operator,
+                ) &&
+                (!hasLength(filterRule.values, 1) ||
+                    !hasOnlyValuesOfType(filterRule.values, 'boolean'))
+            ) {
+                return `"${filterRule.operator}" is a valid boolean operator, but values must be an array with exactly one boolean. Received ${valuesDescription(filterRule.values)}.`;
+            }
+            break;
+        case FilterType.STRING:
+            if (
+                ![FilterOperator.NULL, FilterOperator.NOT_NULL].includes(
+                    filterRule.operator,
+                ) &&
+                !hasOnlyValuesOfType(filterRule.values, 'string')
+            ) {
+                return `"${filterRule.operator}" is a valid string operator, but values must be an array of strings. Received ${valuesDescription(filterRule.values)}.`;
+            }
+            break;
+        case FilterType.NUMBER:
+            if (
+                [
+                    FilterOperator.LESS_THAN,
+                    FilterOperator.LESS_THAN_OR_EQUAL,
+                    FilterOperator.GREATER_THAN,
+                    FilterOperator.GREATER_THAN_OR_EQUAL,
+                ].includes(filterRule.operator) &&
+                (!hasLength(filterRule.values, 1) ||
+                    !hasOnlyValuesOfType(filterRule.values, 'number'))
+            ) {
+                return `"${filterRule.operator}" is a valid number operator, but values must be an array with exactly one number. Received ${valuesDescription(filterRule.values)}.`;
+            }
+
+            if (
+                [
+                    FilterOperator.IN_BETWEEN,
+                    FilterOperator.NOT_IN_BETWEEN,
+                ].includes(filterRule.operator) &&
+                (!hasLength(filterRule.values, 2) ||
+                    !hasOnlyValuesOfType(filterRule.values, 'number'))
+            ) {
+                return `"${filterRule.operator}" is a valid number operator, but values must be an array with exactly two numbers. Received ${valuesDescription(filterRule.values)}.`;
+            }
+
+            if (
+                [FilterOperator.EQUALS, FilterOperator.NOT_EQUALS].includes(
+                    filterRule.operator,
+                ) &&
+                !hasOnlyValuesOfType(filterRule.values, 'number')
+            ) {
+                return `"${filterRule.operator}" is a valid number operator, but values must be an array of numbers. Received ${valuesDescription(filterRule.values)}.`;
+            }
+            break;
+        case FilterType.DATE:
+            if (
+                [FilterOperator.EQUALS, FilterOperator.NOT_EQUALS].includes(
+                    filterRule.operator,
+                ) &&
+                !hasOnlyIsoDateValues(filterRule.values)
+            ) {
+                return `"${filterRule.operator}" is a valid date operator, but values must be ISO date/datetime strings. Received ${valuesDescription(filterRule.values)}.`;
+            }
+
+            if (
+                [
+                    FilterOperator.LESS_THAN,
+                    FilterOperator.LESS_THAN_OR_EQUAL,
+                    FilterOperator.GREATER_THAN,
+                    FilterOperator.GREATER_THAN_OR_EQUAL,
+                ].includes(filterRule.operator) &&
+                (!hasLength(filterRule.values, 1) ||
+                    !hasOnlyIsoDateValues(filterRule.values))
+            ) {
+                return `"${filterRule.operator}" is a valid date operator, but values must be an array with exactly one ISO date/datetime string. Received ${valuesDescription(filterRule.values)}.`;
+            }
+
+            if (
+                filterRule.operator === FilterOperator.IN_BETWEEN &&
+                (!hasLength(filterRule.values, 2) ||
+                    !hasOnlyIsoDateValues(filterRule.values))
+            ) {
+                return `"${filterRule.operator}" is a valid date operator, but values must be an array with exactly two ISO date/datetime strings. Received ${valuesDescription(filterRule.values)}.`;
+            }
+
+            if (
+                [
+                    FilterOperator.IN_THE_CURRENT,
+                    FilterOperator.NOT_IN_THE_CURRENT,
+                ].includes(filterRule.operator) &&
+                (!hasCurrentDateValue(filterRule.values) ||
+                    !hasCurrentDateSettings(filterRule.settings))
+            ) {
+                return `"${filterRule.operator}" is a valid date operator, but values must be [1] and settings must include completed=false and unitOfTime, with optional toDate=true only with weeks, months, quarters, or years, and excludeToday=true only with toDate. Received values=${valuesDescription(filterRule.values)} settings=${settingsDescription(filterRule.settings)}.`;
+            }
+
+            if (
+                [
+                    FilterOperator.IN_THE_PAST,
+                    FilterOperator.NOT_IN_THE_PAST,
+                    FilterOperator.IN_THE_NEXT,
+                ].includes(filterRule.operator) &&
+                (!hasLength(filterRule.values, 1) ||
+                    !hasOnlyValuesOfType(filterRule.values, 'number') ||
+                    !hasDateSettings(filterRule.settings))
+            ) {
+                return `"${filterRule.operator}" is a valid date operator, but values must be one number and settings must include completed and unitOfTime. Received values=${valuesDescription(filterRule.values)} settings=${settingsDescription(filterRule.settings)}.`;
+            }
+            break;
+        default:
+            return assertUnreachable(
+                filterType,
+                `Invalid field type: ${filterType}`,
+            );
+    }
+
+    return `The filter JSON does not match any supported ${filterType} filter combination.`;
+};
+
+const formatFilterRuleValidationError = (
+    filterRule: FilterRule,
+    field: CompiledField | AdditionalMetric | TableCalculation,
+    filterType: FilterType,
+): string => {
+    const examples = formatFilterExamplesAsJsonLines(
+        getFilterExamples({
+            fieldId: filterRule.target.fieldId,
+            fieldType: field.type ?? filterType,
+            fieldFilterType: filterType,
+        }),
+    );
+
+    return `Invalid filter for field "${filterRule.target.fieldId}" (${getFilterFieldLabel(field)}).
+
+Problem: ${getFilterRuleProblem(filterRule, filterType)}
+
+For ${filterType} fields, these are all available filter combinations:
+${examples}`;
+};
+
+const getFilterSchemaInput = (
+    filterRule: FilterRule,
+    field: CompiledField | AdditionalMetric | TableCalculation,
+    fieldFilterType: FilterType,
+) => ({
+    fieldId: filterRule.target.fieldId,
+    fieldType: field.type,
+    fieldFilterType,
+    operator: filterRule.operator,
+    ...(shouldIncludeFilterValues(filterRule)
+        ? { values: filterRule.values }
+        : {}),
+    ...(filterRule.settings !== undefined
+        ? { settings: filterRule.settings }
+        : {}),
+});
+
 function validateFilterRule(
     filterRule: FilterRule,
     field: CompiledField | AdditionalMetric | TableCalculation,
@@ -173,66 +522,65 @@ function validateFilterRule(
 
     switch (filterType) {
         case FilterType.BOOLEAN:
-            const parsedBooleanFilterRule = booleanFilterSchema.safeParse({
-                fieldId: filterRule.target.fieldId,
-                fieldType: field.type,
-                fieldFilterType: 'boolean',
-                operator: filterRule.operator,
-                values: filterRule.values,
-            });
+            const parsedBooleanFilterRule = booleanFilterSchema.safeParse(
+                getFilterSchemaInput(filterRule, field, FilterType.BOOLEAN),
+            );
 
             if (!parsedBooleanFilterRule.success) {
                 throw new AiAgentValidatorError(
-                    `Expected boolean filter rule for field ${filterRule.target.fieldId}. Error: ${parsedBooleanFilterRule.error.message}`,
+                    formatFilterRuleValidationError(
+                        filterRule,
+                        field,
+                        FilterType.BOOLEAN,
+                    ),
                 );
             }
 
             break;
         case FilterType.DATE:
-            const parsedDateFilterRule = dateFilterSchema.safeParse({
-                fieldId: filterRule.target.fieldId,
-                fieldType: field.type,
-                fieldFilterType: 'date',
-                operator: filterRule.operator,
-                values: filterRule.values,
-                settings: filterRule.settings,
-            });
+            const parsedDateFilterRule = dateFilterSchema.safeParse(
+                getFilterSchemaInput(filterRule, field, FilterType.DATE),
+            );
 
             if (!parsedDateFilterRule.success) {
                 throw new AiAgentValidatorError(
-                    `Expected date filter rule for field ${filterRule.target.fieldId}. Error: ${parsedDateFilterRule.error.message}`,
+                    formatFilterRuleValidationError(
+                        filterRule,
+                        field,
+                        FilterType.DATE,
+                    ),
                 );
             }
 
             break;
         case FilterType.NUMBER:
-            const parsedNumberFilterRule = numberFilterSchema.safeParse({
-                fieldId: filterRule.target.fieldId,
-                fieldType: field.type,
-                fieldFilterType: 'number',
-                operator: filterRule.operator,
-                values: filterRule.values,
-            });
+            const parsedNumberFilterRule = numberFilterSchema.safeParse(
+                getFilterSchemaInput(filterRule, field, FilterType.NUMBER),
+            );
 
             if (!parsedNumberFilterRule.success) {
                 throw new AiAgentValidatorError(
-                    `Expected number filter rule for field ${filterRule.target.fieldId}. Error: ${parsedNumberFilterRule.error.message}`,
+                    formatFilterRuleValidationError(
+                        filterRule,
+                        field,
+                        FilterType.NUMBER,
+                    ),
                 );
             }
 
             break;
         case FilterType.STRING:
-            const parsedStringFilterRule = stringFilterSchema.safeParse({
-                fieldId: filterRule.target.fieldId,
-                fieldType: field.type,
-                fieldFilterType: 'string',
-                operator: filterRule.operator,
-                values: filterRule.values,
-            });
+            const parsedStringFilterRule = stringFilterSchema.safeParse(
+                getFilterSchemaInput(filterRule, field, FilterType.STRING),
+            );
 
             if (!parsedStringFilterRule.success) {
                 throw new AiAgentValidatorError(
-                    `Expected string filter rule for field ${filterRule.target.fieldId}. Error: ${parsedStringFilterRule.error.message}`,
+                    formatFilterRuleValidationError(
+                        filterRule,
+                        field,
+                        FilterType.STRING,
+                    ),
                 );
             }
 
@@ -275,7 +623,7 @@ function validateFilterRule(
                 WeekDay.SUNDAY,
                 SupportedDbtAdapter.BIGQUERY,
                 'UTC',
-                true, // Default to case sensitive for validation
+                DEFAULT_FILTER_CASE_SENSITIVE,
             );
         }
     } catch (e) {
@@ -369,16 +717,28 @@ export function validateFilterRules(
     ];
     const allFieldIds = allFields.map(getItemId);
     const filterRuleErrors: string[] = [];
+    const unknownFieldIds: string[] = [];
 
     filterRules.forEach((rule) => {
         const fieldIndex = allFieldIds.indexOf(rule.target.fieldId);
         const field = allFields[fieldIndex];
 
         if (!field) {
+            unknownFieldIds.push(rule.target.fieldId);
+            const suggestions = suggestClosestFieldIds(
+                rule.target.fieldId,
+                allFieldIds,
+            );
+            const suggestionText =
+                suggestions.length > 0
+                    ? `\nDid you mean one of these existing fields? ${suggestions.join(
+                          ', ',
+                      )}`
+                    : '';
             filterRuleErrors.push(
                 `Error: the field with id "${
                     rule.target.fieldId
-                }" does not exist.
+                }" does not exist.${suggestionText}
 FilterRule:
 ${serializeData(rule, 'json')}`,
             );
@@ -404,6 +764,13 @@ ${filterRuleErrorStrings}`;
 
         Logger.error(`[AiAgent][Validate Filter Rules] ${errorMessage}`);
 
+        if (unknownFieldIds.length) {
+            throw new AiAgentUnknownFieldsError(
+                errorMessage,
+                explore,
+                unknownFieldIds,
+            );
+        }
         throw new AiAgentValidatorError(errorMessage);
     }
 }
@@ -662,11 +1029,13 @@ export function validateFieldEntityType(
     const customMetricFields = (customMetrics as AdditionalMetric[]) ?? [];
     const allFields = [...exploreFields, ...customMetricFields];
     const errors: string[] = [];
+    const unknownFields: string[] = [];
 
     fieldIds.forEach((fieldId) => {
         const field = allFields.find((f) => getItemId(f) === fieldId);
 
         if (!field) {
+            unknownFields.push(fieldId);
             errors.push(
                 `Error: Field with id "${fieldId}" does not exist in the explore or custom metrics.`,
             );
@@ -714,60 +1083,16 @@ ${customMetricFields
 
         Logger.error(`[AiAgent][Validate Field Entity Type] ${errorMessage}`);
 
-        throw new AiAgentValidatorError(errorMessage);
-    }
-}
-
-/**
- * Validate that table names exist in the explore
- * @param explore - The explore containing table definitions
- * @param tableNames - Array of table names to validate
- */
-export function validateTableNames(explore: Explore, tableNames: string[]) {
-    const availableTableNames = Object.keys(explore.tables);
-    const errors: string[] = [];
-
-    tableNames.forEach((tableName) => {
-        if (!availableTableNames.includes(tableName)) {
-            errors.push(
-                `Error: Table "${tableName}" does not exist in the explore.`,
+        if (unknownFields.length) {
+            throw new AiAgentUnknownFieldsError(
+                errorMessage,
+                explore,
+                unknownFields,
+                expectedEntityType,
             );
         }
-    });
-
-    if (errors.length > 0) {
-        const errorMessage = `Invalid table names:
-
-${errors.join('\n\n')}
-
-Available tables:
-${availableTableNames.map((t) => `- ${t}`).join('\n')}`;
-
-        Logger.error(`[AiAgent][Validate Table Names] ${errorMessage}`);
-
         throw new AiAgentValidatorError(errorMessage);
     }
-}
-
-/**
- * Validate that an explore name exists in the list of available explores
- * @param availableExploreNames - Array of available explore names
- * @param exploreName - The explore name to validate
- */
-export function validateExploreNameExists(
-    availableExplores: Explore[],
-    exploreName: string,
-) {
-    if (availableExplores.some((e) => e.name === exploreName)) return;
-
-    const errorMessage = `Invalid explore name: "${exploreName}"
-
-Available explores:
-${availableExplores.map((e) => `- ${e.name}`).join('\n')}`;
-
-    Logger.error(`[AiAgent][Validate Explore Name Exists] ${errorMessage}`);
-
-    throw new AiAgentValidatorError(errorMessage);
 }
 
 // Numeric metric types that support most table calculations
@@ -792,6 +1117,18 @@ const NUMERIC_CALCULATION_TYPES: TableCalcSchema['type'][] = [
     'running_total',
 ];
 
+function parseFormulaRefs(
+    formula: string,
+): { refs: string[] } | { error: string } {
+    try {
+        return {
+            refs: extractColumnRefs(parseFormula(withLeadingEquals(formula))),
+        };
+    } catch (e) {
+        return { error: getErrorMessage(e) };
+    }
+}
+
 function buildTableCalcSchemaDependencyGraph(
     tableCalcs: TableCalcsSchema,
 ): DependencyNode[] {
@@ -799,6 +1136,14 @@ function buildTableCalcSchemaDependencyGraph(
 
     return tableCalcs.map((tc) => {
         const deps: string[] = [];
+
+        if (tc.type === 'formula') {
+            // Parse errors are reported by validateTableCalculations
+            const parsed = parseFormulaRefs(tc.formula);
+            if ('refs' in parsed) {
+                deps.push(...parsed.refs);
+            }
+        }
 
         // Add fieldId dependency if it exists
         if ('fieldId' in tc && tc.fieldId !== null) {
@@ -941,6 +1286,29 @@ export function validateTableCalculations(
 
     tableCalcs.forEach((tableCalc) => {
         const { type, name } = tableCalc;
+
+        if (type === 'formula') {
+            const parsed = parseFormulaRefs(tableCalc.formula);
+            if ('error' in parsed) {
+                errors.push(
+                    `Table calculation "${name}" has an invalid formula: ${parsed.error}`,
+                );
+                return;
+            }
+
+            parsed.refs.forEach((ref) => {
+                if (!allSelectedFieldIds.includes(ref)) {
+                    errors.push(
+                        `Table calculation "${name}" references "${ref}" which is not selected in the query. ` +
+                            'Formulas can only reference selected dimensions, metrics, custom metrics, or other table calculations. ' +
+                            `Selected fields: ${allSelectedFieldIds.join(
+                                ', ',
+                            )}.`,
+                    );
+                }
+            });
+            return;
+        }
 
         if (type === 'window_function') {
             const needsFieldId = !nullaryWindowFunctions.includes(
@@ -1175,15 +1543,30 @@ export function validateYAxisMetrics(
  * @param tableCalculations - Table calculations that can be used as metrics
  */
 export function validateAxisFields(
-    chartConfig: ToolRunQueryArgsTransformed['chartConfig'] | null | undefined,
+    chartConfig: ToolRunQueryBuiltinChartConfig | null | undefined,
     selectedDimensions: string[],
     selectedMetrics: string[],
     tableCalculations?: TableCalcsSchema | TableCalculation[],
+    customMetrics?: CustomMetricBaseTransformed[] | null,
 ) {
     if (!chartConfig) {
         return;
     }
 
+    // Aggregation custom metrics are selected metrics too — they compile to
+    // "<table>_<name>" field ids and are valid on the axes. Fold them in like
+    // the sort / table-calculation / field-existence validators already do,
+    // otherwise a custom metric referenced in yAxisMetrics fails validation
+    // even though it is part of the query.
+    const customMetricIds = customMetrics?.map(getItemId) ?? [];
+    const selectableMetrics = [...selectedMetrics, ...customMetricIds];
+
+    const shapeErrors: string[] = [];
+    if (chartConfig.defaultVizType !== 'table' && !chartConfig.xAxisDimension) {
+        shapeErrors.push(
+            `Error: ${chartConfig.defaultVizType} chart requires an x-axis dimension. Add a dimension to queryConfig.dimensions and use its field id as xAxisDimension.`,
+        );
+    }
     // Validate both axis fields
     const xAxisErrors = validateXAxisField(
         chartConfig.xAxisDimension,
@@ -1191,20 +1574,20 @@ export function validateAxisFields(
     );
     const yAxisErrors = validateYAxisMetrics(
         chartConfig.yAxisMetrics,
-        selectedMetrics,
+        selectableMetrics,
         tableCalculations,
     );
     if (chartConfig.secondaryYAxisMetric) {
         yAxisErrors.push(
             ...validateYAxisMetrics(
                 [chartConfig.secondaryYAxisMetric],
-                selectedMetrics,
+                selectableMetrics,
                 tableCalculations,
             ),
         );
     }
 
-    const errors = [...xAxisErrors, ...yAxisErrors];
+    const errors = [...shapeErrors, ...xAxisErrors, ...yAxisErrors];
 
     if (errors.length > 0) {
         const errorMessage = `Invalid axis field configuration:
@@ -1212,10 +1595,47 @@ export function validateAxisFields(
 ${errors.join('\n\n')}
 
 Remember:
+- non-table charts require an x-axis dimension
 - xAxisDimension must be included in queryConfig.dimensions
 - yAxisMetrics must be included in queryConfig.metrics or tableCalculations`;
 
         Logger.error(`[AiAgent][Validate Axis Fields] ${errorMessage}`);
+
+        throw new AiAgentValidatorError(errorMessage);
+    }
+}
+
+/** The query's selected field ids, split by kind for slot pool matching. */
+export type CustomChartTypeSelectedFields = DataAppVizSelectedFields;
+
+/**
+ * Pre-query validation for a custom chart type chartConfig; see
+ * getDataAppVizChartConfigErrors for the rules.
+ */
+export function validateCustomChartTypeChartConfig(
+    chartConfig: ToolRunQueryCustomChartTypeConfig,
+    vizSchema: DataAppVizSchema,
+    selectedFields: CustomChartTypeSelectedFields,
+) {
+    const errors = getDataAppVizChartConfigErrors(
+        {
+            fieldMapping: chartConfig.fieldMapping,
+            optionValues: chartConfig.options ?? undefined,
+        },
+        vizSchema,
+        selectedFields,
+    );
+
+    if (errors.length > 0) {
+        const errorMessage = `Invalid configuration for custom chart type "${
+            chartConfig.customChartTypeSlug
+        }":
+
+${errors.join('\n\n')}
+
+Use findCustomChartTypes with this slug to see the type's field slots and config options, then bind each slot to a field id selected in queryConfig.`;
+
+        Logger.error(`[AiAgent][Validate Custom Chart Type] ${errorMessage}`);
 
         throw new AiAgentValidatorError(errorMessage);
     }
@@ -1292,6 +1712,83 @@ export function validatePeriodComparisons(
 ${errors.join('\n')}
 \`\`\``;
         Logger.error(`[AiAgent][Validate Period Comparisons] ${errorMessage}`);
+        throw new AiAgentValidatorError(errorMessage);
+    }
+}
+
+/**
+ * Reject parameter values the query engine would silently ignore or misapply:
+ * names that aren't defined, names the explore never references (setting them
+ * is a no-op, almost always a wrong-explore mistake), values outside a
+ * parameter's declared options, and lists for single-value parameters.
+ */
+export function validateQueryParameters(
+    parameters: ParametersValuesMap | null | undefined,
+    explore: Explore,
+    projectParameterDefinitions: ParameterDefinitions,
+): void {
+    if (!parameters || Object.keys(parameters).length === 0) return;
+
+    const definitions: ParameterDefinitions = {
+        ...projectParameterDefinitions,
+        ...getExploreParameterDefinitions(explore),
+    };
+    const referenced = new Set(getExploreParameterReferences(explore));
+    const referencedNames = [...referenced].filter((name) => definitions[name]);
+    const referencedNamesText =
+        referencedNames.length > 0
+            ? referencedNames.join(', ')
+            : '(none — no field in this explore is parameter-driven)';
+
+    const errors = Object.entries(parameters).flatMap(([name, value]) => {
+        const definition = definitions[name];
+        if (!definition) {
+            return [
+                `Error: unknown parameter "${name}". Parameters referenced by explore "${explore.name}": ${referencedNamesText}.`,
+            ];
+        }
+        if (!referenced.has(name)) {
+            return [
+                `Error: parameter "${name}" exists but nothing in explore "${explore.name}" references it — setting it would have no effect. Parameters referenced by this explore: ${referencedNamesText}.`,
+            ];
+        }
+        const valueErrors: string[] = [];
+        if (Array.isArray(value) && !definition.multiple) {
+            valueErrors.push(
+                `Error: parameter "${name}" takes a single value, not a list.`,
+            );
+        }
+        const optionValues = getParameterOptionValues(definition);
+        if (optionValues && !definition.allow_custom_values) {
+            const values = Array.isArray(value) ? value : [value];
+            const invalidValues = values.filter(
+                (candidate) =>
+                    !optionValues.some(
+                        (option) => String(option) === String(candidate),
+                    ),
+            );
+            if (invalidValues.length > 0) {
+                valueErrors.push(
+                    `Error: invalid value(s) ${invalidValues
+                        .map((invalid) => `"${invalid}"`)
+                        .join(
+                            ', ',
+                        )} for parameter "${name}". Allowed options: ${optionValues.join(
+                        ', ',
+                    )}.`,
+                );
+            }
+        }
+        return valueErrors;
+    });
+
+    if (errors.length > 0) {
+        const errorMessage = `The following query parameters are invalid:
+
+\`\`\`json
+${errors.join('\n')}
+\`\`\``;
+        Logger.error(`[AiAgent][Validate Query Parameters] ${errorMessage}`);
         throw new AiAgentValidatorError(errorMessage);
     }
 }

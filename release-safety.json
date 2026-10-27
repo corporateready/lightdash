@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "2",
+  "version": "3.68.2",
+  "previousVersion": "3.68.1",
+  "releaseDate": "2026-10-27T13:26:41.340Z",
+  "migrations": {
+    "present": false,
+    "count": 0,
+    "coreCount": 0,
+    "eeCount": 0,
+    "files": []
+  },
+  "compatibility": {
+    "rollingUpdateSafe": true,
+    "recommendedStrategy": "RollingUpdate"
+  },
+  "api": {
+    "rest": {
+      "checked": true,
+      "breaking": false,
+      "changes": [],
+      "breakingCount": 0,
+      "advisories": [],
+      "advisoryCount": 0
+    },
+    "mcp": {
+      "checked": true,
+      "breaking": false,
+      "changes": [],
+      "breakingCount": 0,
+      "advisories": [],
+      "advisoryCount": 0
+    }
+  },
+  "config": {
+    "checked": true,
+    "breaking": false,
+    "changes": []
+  },
+  "upgrade": {
+    "minPreviousVersion": "2.497.1",
+    "requiredStops": []
+  },
+  "declaredBreaks": [],
+  "declaredAdvisories": []
+}

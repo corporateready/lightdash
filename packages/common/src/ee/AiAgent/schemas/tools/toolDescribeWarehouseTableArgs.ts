@@ -1,47 +1,67 @@
 import { z } from 'zod';
+import { structuredToolOutputSchema } from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
 
-const TOOL_DESCRIBE_WAREHOUSE_TABLE_DESCRIPTION = `Tool: describe_warehouse_table
+export const TOOL_DESCRIBE_WAREHOUSE_TABLE_DESCRIPTION = `Return the column names and types of one raw, staging or seed table that no explore exposes. It reads cached metadata, so it is fast and needs no approval, and returns schema only, not data.
 
-Purpose:
-Return the column names + types of a single raw warehouse table. Use this to learn the exact schema of a raw / staging / seed table that is NOT exposed via an explore, so you can write correct runSql on the first attempt.
+For explore-backed tables use grepFields and getMetadata; to find a table's name use listWarehouseTables.`;
 
-Returns: { columns: [{ name, type }, ...] }. Pulled from cached metadata, fast, NO user approval required.
-
-When to use:
-- You're about to write runSql against a raw table and need its columns (e.g. to confirm a join key exists).
-- A previous runSql failed with "column does not exist" or similar. Use this to recover, then retry the SQL ONCE.
-- The user asked about a raw table that isn't part of any explore.
-
-Do NOT use:
-- For columns of explore-backed tables — use findFields instead.
-- As a substitute for runSql — this returns schema only, not data.
-- For schema-wide listings — use listWarehouseTables to find table names first.
-
-Parameters:
-- table: Required. The unqualified table name (e.g. "raw_parts", not "jaffle.raw_parts").
-- schema: Optional. The schema name (e.g. "jaffle"). If omitted, the project's default schema is used.
-`;
-
-export const toolDescribeWarehouseTableArgsSchema = createToolSchema({
-    description: TOOL_DESCRIBE_WAREHOUSE_TABLE_DESCRIPTION,
-})
+export const toolDescribeWarehouseTableArgsSchema = createToolSchema()
     .extend({
         table: z
             .string()
             .min(1)
             .describe(
-                'The unqualified table name (e.g. "raw_parts"). Do not include schema/database here — use the schema parameter instead.',
+                'Unqualified table name, e.g. "raw_parts", not "jaffle.raw_parts"; pass the schema and database in their own parameters.',
             ),
         schema: z
             .string()
             .optional()
             .describe(
-                "Optional schema name. Defaults to the project's default schema if omitted.",
+                'Schema name, e.g. "jaffle". Omit for the project\'s default schema.',
+            ),
+        database: z
+            .string()
+            .optional()
+            .describe(
+                "Database or catalog from listWarehouseTables, for a table outside the default database. Omit for the project's default database.",
             ),
     })
     .build();
 
 export type ToolDescribeWarehouseTableArgs = z.infer<
     typeof toolDescribeWarehouseTableArgsSchema
+>;
+
+export const toolDescribeWarehouseTableStructuredContentSchema = z.object({
+    qualifiedName: z
+        .string()
+        .describe(
+            'Table name as resolved in the warehouse, e.g. "database.schema.table"; the schema part is "(default schema)" when none was given or resolved.',
+        ),
+    columnCount: z.number().int().describe('Number of columns returned.'),
+    columns: z
+        .array(z.object({ name: z.string(), type: z.string() }))
+        .describe(
+            'Column names and warehouse types; empty when the table was not found or has no cached metadata.',
+        ),
+});
+
+export type ToolDescribeWarehouseTableStructuredContent = z.infer<
+    typeof toolDescribeWarehouseTableStructuredContentSchema
+>;
+
+export const toolDescribeWarehouseTableOutputSchema =
+    structuredToolOutputSchema({
+        metadata: z.object({
+            status: z.enum(['success', 'not_found', 'error']),
+        }),
+        structuredContent: toolDescribeWarehouseTableStructuredContentSchema,
+        // A missing table is a real answer, not a failure: the tool returns an
+        // empty column list, so not_found carries content rather than an error.
+        contentStatuses: z.enum(['success', 'not_found']),
+    });
+
+export type ToolDescribeWarehouseTableOutput = z.infer<
+    typeof toolDescribeWarehouseTableOutputSchema
 >;

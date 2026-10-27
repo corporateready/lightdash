@@ -1,0 +1,106 @@
+import { type DataAppVizContext } from '@lightdash/common';
+import { Box } from '@mantine/core';
+import { useId, type FC, type ReactNode } from 'react';
+import { type SdkUpgradeOffer } from '../../../features/apps/hooks/useSdkUpgradeStatus';
+import { type ChartTypeAppMeta } from '../../../features/chartTypes/builder/appMeta';
+import ChartTypeBuilderWorkspace from '../../../features/chartTypes/builder/ChartTypeBuilderWorkspace';
+import { type ChartTypeBuilderWorkspaceState } from '../../../features/chartTypes/builder/useChartTypeBuilderWorkspace';
+import { type VizBuildRequest } from '../../../features/chartTypes/hooks/useDataAppVizBuild';
+import { type VizSubtotalSource } from '../../../features/chartTypes/hooks/useVizSubtotalSource';
+import { ChartGalleryContext } from '../../common/ChartGallery/ChartGalleryContext';
+import { ConfigTabs as DataAppVizConfigTabs } from '../../VisualizationConfigs/DataAppVizConfig/DataAppVizConfigTabs';
+import { deriveAuthoringStatus } from './authoringStatus';
+import ExplorerChartTypeAuthoringHeader from './ExplorerChartTypeAuthoringHeader';
+import classes from './ExplorerChartTypeAuthoringView.module.css';
+
+type Props = {
+    projectUuid: string;
+    app: ChartTypeAppMeta | null;
+    upgrade: (SdkUpgradeOffer & { disabled: boolean }) | null;
+    workspace: ChartTypeBuilderWorkspaceState;
+    previewContext: DataAppVizContext | null;
+    /** Answers the preview's subtotal requests; null when it has none. */
+    onVizSubtotalsIntent: VizSubtotalSource['get'] | null;
+    sampleRows: Record<string, string>[];
+    buildContext?: VizBuildRequest['context'];
+    /** The host's results-staleness warning; renders nothing while clean. */
+    warning: ReactNode;
+    onDetailsSaved: () => void;
+    onDone: () => void;
+};
+
+/** The Author step as it looks; the container decides what it does. */
+const ExplorerChartTypeAuthoringView: FC<Props> = ({
+    projectUuid,
+    app,
+    upgrade,
+    workspace,
+    previewContext,
+    onVizSubtotalsIntent,
+    sampleRows,
+    buildContext,
+    warning,
+    onDetailsSaved,
+    onDone,
+}) => {
+    const titleId = useId();
+    const schema = workspace.dataAppViz?.schema;
+    // A schema is useful once it has something the chart can configure. The
+    // first build can claim an app before its preview/schema is ready, so do
+    // not reserve an empty rail while the workspace is still the only task.
+    const hasGeneratedConfig =
+        workspace.previewVersion !== null &&
+        schema !== null &&
+        schema !== undefined &&
+        (schema.fields.length > 0 ||
+            schema.configOptions.length > 0 ||
+            schema.colorPalette != null);
+    return (
+        <Box
+            component="section"
+            className={classes.root}
+            aria-labelledby={titleId}
+            data-testid="chart-type-authoring"
+        >
+            <ExplorerChartTypeAuthoringHeader
+                projectUuid={projectUuid}
+                titleId={titleId}
+                app={app}
+                status={deriveAuthoringStatus(workspace)}
+                upgrade={upgrade}
+                hasHistory={workspace.hasHistory}
+                isHistoryOpen={workspace.isHistoryOpen}
+                warning={warning}
+                onToggleHistory={workspace.toggleHistory}
+                onUpgradeStarted={workspace.openHistory}
+                onDetailsSaved={onDetailsSaved}
+                onDone={onDone}
+            />
+            <ChartTypeBuilderWorkspace
+                projectUuid={projectUuid}
+                workspace={workspace}
+                previewContext={previewContext}
+                onVizSubtotalsIntent={onVizSubtotalsIntent}
+                sampleRows={sampleRows}
+                currentBuildContext={buildContext}
+                syncPreviewUrlState={false}
+                configurePanel={null}
+                configurationSidebar={
+                    hasGeneratedConfig ? (
+                        <Box
+                            component="aside"
+                            className={classes.configColumn}
+                            aria-label="Chart type configuration"
+                        >
+                            <ChartGalleryContext.Provider value={true}>
+                                <DataAppVizConfigTabs />
+                            </ChartGalleryContext.Provider>
+                        </Box>
+                    ) : null
+                }
+            />
+        </Box>
+    );
+};
+
+export default ExplorerChartTypeAuthoringView;

@@ -1,44 +1,71 @@
-import { Group } from '@mantine-8/core';
-import { useMemo, type FC } from 'react';
+import { type ParameterDefinitions } from '@lightdash/common';
+import { Box, Group, Text } from '@mantine/core';
+import { IconAdjustmentsHorizontal } from '@tabler/icons-react';
+import { type FC, type ReactNode } from 'react';
+import {
+    selectMissingRequiredParameters,
+    selectParameterValues,
+    useAreAllChartsLoaded,
+    useDashboardSelector,
+} from '../../../../../features/dashboard/store';
+import FilterGroupSeparator from '../../../../../features/dashboardFilters/FilterGroupSeparator';
 import { Parameters } from '../../../../../features/parameters';
 import useDashboardContext from '../../../../../providers/Dashboard/useDashboardContext';
-import useDashboardTileStatusContext from '../../../../../providers/Dashboard/useDashboardTileStatusContext';
+import { useUiStrings } from '../../../../providers/Embed/useUiStrings';
+import { embedContractClass } from '../../styles/embedClassContract';
 
-const EmbedDashboardParameters: FC = () => {
-    const parameterValues = useDashboardContext((c) => c.parameterValues);
+const parametersSeparator: ReactNode = (
+    <FilterGroupSeparator
+        icon={IconAdjustmentsHorizontal}
+        tooltipLabel={
+            <Box>
+                <Text fw={500} fz="xs">
+                    Parameters
+                </Text>
+                <Text fz="xs">
+                    Adjust preset inputs that change how the dashboard's numbers
+                    are calculated.
+                </Text>
+            </Box>
+        }
+    />
+);
+
+type Props = {
+    /** Parameters referenced by the charts on the active tab */
+    parameters: ParameterDefinitions;
+};
+
+const EmbedDashboardParameters: FC<Props> = ({ parameters }) => {
+    const getUiString = useUiStrings();
+    const parameterValues = useDashboardSelector(selectParameterValues);
     const handleParameterChange = useDashboardContext((c) => c.setParameter);
     const clearAllParameters = useDashboardContext((c) => c.clearAllParameters);
-    const parameterDefinitions = useDashboardContext(
-        (c) => c.parameterDefinitions,
+    const areAllChartsLoaded = useAreAllChartsLoaded();
+    const missingRequiredParameters = useDashboardSelector(
+        selectMissingRequiredParameters,
     );
-    const parameterReferences = useDashboardContext(
-        (c) => c.dashboardParameterReferences,
-    );
-    const areAllChartsLoaded = useDashboardTileStatusContext(
-        (c) => c.areAllChartsLoaded,
-    );
-    const missingRequiredParameters = useDashboardContext(
-        (c) => c.missingRequiredParameters,
-    );
-
-    const referencedParameters = useMemo(() => {
-        return Object.fromEntries(
-            Object.entries(parameterDefinitions).filter(([key]) =>
-                parameterReferences.has(key),
-            ),
-        );
-    }, [parameterDefinitions, parameterReferences]);
 
     return (
-        <Group gap="xs" wrap="wrap" style={{ flexShrink: 0 }}>
+        <Group
+            className={embedContractClass('ld-dashboard-parameters')}
+            gap="xs"
+            wrap="wrap"
+        >
             <Parameters
                 isEditMode={false}
                 parameterValues={parameterValues}
                 onParameterChange={handleParameterChange}
                 onClearAll={clearAllParameters}
-                parameters={referencedParameters}
+                parameters={parameters}
                 isLoading={!areAllChartsLoaded}
                 missingRequiredParameters={missingRequiredParameters}
+                triggerClassName={embedContractClass('ld-dashboard-parameter')}
+                dropdownClassName={embedContractClass(
+                    'ld-dashboard-parameter-dropdown',
+                )}
+                separator={parametersSeparator}
+                getUiString={getUiString}
             />
         </Group>
     );

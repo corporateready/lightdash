@@ -41,6 +41,7 @@ ScreenshotReadyIndicator                    page.waitForSelector(
 | Single Charts            | `MinimalSavedExplorer.tsx` | `/minimal/projects/:projectUuid/saved/:savedQueryUuid`     | Uses minimal page                                  |
 | Explore (unsaved charts) | `Explorer/index.tsx`       | `/projects/:projectUuid/tables/:tableName`                 | Uses full page, screenshots only the visualization |
 | Data Apps                | `MinimalApp.tsx`           | `/minimal/projects/:projectUuid/apps/:appUuid`             | Indicator lives on parent, not in sandboxed iframe |
+| Documents                | `MinimalDocument.tsx`      | `/minimal/projects/:projectUuid/documents/:documentUuid`   | Requires `?versionUuid=`; unfurls resolve the latest |
 
 For EXPLORE pages, the indicator is rendered in the regular `Explorer` component (not a minimal page). The UnfurlService screenshots only the `[data-testid="visualization"]` element, so the sidebar and other UI elements are excluded from the screenshot.
 
@@ -61,6 +62,10 @@ Data apps render inside a sandboxed cross-origin iframe with no `allow-same-orig
 2. When the iframe `onload` has fired AND the in-flight set is empty for `APP_QUIET_DEBOUNCE_MS` (1.5s), the parent mounts `ScreenshotReadyIndicator`.
 3. The backend (`UnfurlService`) waits for the indicator (60s timeout), then sleeps an additional `APP_ANIMATION_BUFFER_MS` (5s) to let CSS / chart entrance animations finish before screenshotting.
 4. If the indicator never appears (older app bundle, broken render), we still take the screenshot after the animation buffer — preserves forward progress at the cost of capturing a half-loaded UI.
+
+`MinimalApp` renders the latest ready version. `?version=N` (set by `exportDataApp({ version })`) renders that version instead; if it doesn't exist or isn't ready the page shows its "No ready version" empty state and never falls back to another version.
+
+`captureDataAppVersion` is the strict variant behind automatic data app thumbnails: it returns the PNG buffer without hosting it, makes a single attempt, and throws when the ready indicator never appears (step 4 does not apply), so an empty state or a half-loaded app is never stored as a thumbnail.
 
 ### Error Handling
 
@@ -94,6 +99,8 @@ The indicator shows `data-status="completed-with-errors"` when any tile has erro
 
 ### Known Issues / Race Conditions
 
+**Custom chart tiles below the fold:** custom chart types (`DATA_APP_VIZ`) render in cross-origin iframes and report ready from inside the iframe after two animation frames (`viz-rendered`). Chromium does not run animation frames in cross-origin iframes outside the viewport, so dashboards expand the viewport to the full grid height (`expandViewportToDashboardGrid`) *before* waiting for the ready indicator. The expansion is capped at `MAX_PRE_READY_VIEWPORT_HEIGHT` (16,384px): loading a ~110,000px dashboard fully on screen crashed the shared browserless pod. Custom chart tiles below the cap rely on the renderer's 20s render-acknowledgement fallback.
+
 **Fixed:** There was a race condition in `MinimalDashboard` where tiles could render and call `markTileScreenshotErrored` before `dashboardTiles` was set in context, then the reset effect would clear that status. Fixed by adding an early return to wait for `dashboardTiles` before rendering tiles.
 
 ### Adding New Tile Types
@@ -123,6 +130,7 @@ When a user shares a Lightdash URL in Slack, Slack requests a preview image.
 
 - Triggered by `SlackController.getUnfurl()` → `UnfurlService.unfurlImage()`
 - Slack needs a publicly accessible URL to fetch the image
+- Unfurls render as the Slack installer, not the person who shared the link. Document links unfurl only when the installer can view the Document (`canSlackInstallerViewDocument`); the preview is the top viewport of the latest version
 
 **Image Storage:**
 

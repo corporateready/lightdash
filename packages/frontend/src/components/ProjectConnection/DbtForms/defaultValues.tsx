@@ -69,6 +69,7 @@ const dbtCloudIdeDefaultValues: DbtCloudIDEProjectConfig = {
     environment_id: '',
     discovery_api_endpoint: '',
     tags: [],
+    webhook_hmac_secret: '',
 } as const;
 
 // Local
@@ -80,7 +81,7 @@ const dbtDefaultValues: DbtLocalProjectConfig = {
 } as const;
 
 // CLI
-const noneDefaultValues: DbtNoneProjectConfig = {
+export const noneDefaultValues: DbtNoneProjectConfig = {
     type: DbtProjectType.NONE,
     hideRefreshButton: false,
 } as const;

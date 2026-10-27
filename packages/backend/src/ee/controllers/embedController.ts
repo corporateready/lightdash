@@ -4,9 +4,13 @@ import {
     AnyType,
     ApiCalculateSubtotalsResponse,
     ApiCalculateTotalResponse,
+    ApiDataAppVizPreviewTokenResponse,
+    ApiDataAppVizRenderMetadataResponse,
     ApiErrorPayload,
     ApiExecuteAsyncDashboardChartQueryResults,
     ApiExecuteAsyncDashboardSqlChartQueryResults,
+    ApiGetDataAppVizResponse,
+    ApiListDataAppVizsResponse,
     ApiSqlChart,
     ApiSuccessEmpty,
     assertEmbeddedAuth,
@@ -23,6 +27,7 @@ import {
     DateGranularity,
     DateZoom,
     DecodedEmbed,
+    DEFAULT_DATA_APP_VIZ_LIST_SORT,
     EmbedUrl,
     ExecuteAsyncDashboardChartRequestParams,
     ExecuteAsyncDashboardSqlChartRequestParams,
@@ -38,6 +43,9 @@ import {
     SavedChartsInfoForDashboardAvailableFilters,
     SortField,
     UpdateEmbed,
+    type DataAppVizListSortBy,
+    type DataAppVizListSortDirection,
+    type UUID,
 } from '@lightdash/common';
 import {
     Body,
@@ -49,6 +57,7 @@ import {
     Patch,
     Path,
     Post,
+    Query,
     Request,
     Response,
     Route,
@@ -57,6 +66,7 @@ import {
 import express from 'express';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
 } from '../../controllers/authentication';
 import { BaseController } from '../../controllers/baseController';
@@ -70,6 +80,7 @@ export type ApiEmbedDashboardResponse = {
         dashboardFiltersInteractivity?: CommonEmbedJwtContent['dashboardFiltersInteractivity'];
         parameterInteractivity?: CommonEmbedJwtContent['parameterInteractivity'];
         canExportCsv?: boolean;
+        canExportDashboardCsv?: boolean;
         canExportImages?: boolean;
         canExportPagePdf?: boolean;
         canDateZoom?: boolean;
@@ -154,11 +165,24 @@ export class EmbedController extends BaseController {
         };
     }
 
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    /**
+     * Update the dashboards allowed in the project embed config
+     * @summary Update embedded dashboards
+     *
+     * @deprecated Use PATCH /api/v1/embed/{projectUuid}/config instead
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use PATCH /api/v1/embed/{projectUuid}/config instead.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Patch('/config/dashboards')
     @OperationId('updateEmbeddedDashboards')
-    @Deprecated() // Use /config endpoint below instead
+    @Deprecated()
     async updateEmbeddedDashboards(
         @Request() req: express.Request,
         @Path() projectUuid: string,
@@ -178,11 +202,11 @@ export class EmbedController extends BaseController {
     }
 
     /**
-     * This endpoint is used for updating the embed config for dashboards and charts.
+     * This endpoint is used for updating the embed config for dashboards, charts, and data apps.
      * @summary Update embed config
      * @param req
      * @param projectUuid
-     * @param body Contains dashboardUuids, allowAllDashboards, chartUuids, allowAllCharts
+     * @param body Contains dashboardUuids, allowAllDashboards, chartUuids, allowAllCharts, appUuids, allowAllApps
      * @returns Empty response with status 'ok'
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
@@ -316,6 +340,7 @@ export class EmbedController extends BaseController {
         @Body()
         body: {
             tileUuid: string;
+            timezone?: string;
         } & Pick<
             ExecuteAsyncDashboardChartRequestParams,
             | 'dashboardFilters'
@@ -346,6 +371,7 @@ export class EmbedController extends BaseController {
                 parameters: body.parameters,
                 pivotResults: body.pivotResults,
                 limit: body.limit,
+                timezone: body.timezone,
             });
 
         return {
@@ -423,6 +449,17 @@ export class EmbedController extends BaseController {
         };
     }
 
+    /**
+     * Calculate totals from an embedded saved chart.
+     * @summary Calculate totals for embed saved chart
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total instead.
+     */
+    @Middlewares([
+        getDeprecatedRouteMiddleware(new Date('2026-05-29'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total instead.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/chart/:savedChartUuid/calculate-total')
     @OperationId('embedCalculateTotalFromSavedChart')
@@ -454,6 +491,16 @@ export class EmbedController extends BaseController {
         };
     }
 
+    /**
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total with kind 'columnSubtotal' instead.
+     * @summary Calculate subtotals for embed chart
+     */
+    @Middlewares([
+        getDeprecatedRouteMiddleware(new Date('2026-06-04'), {
+            suffixMessage:
+                "Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total with kind 'columnSubtotal' instead.",
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/chart/:savedChartUuid/calculate-subtotals')
     @OperationId('embedCalculateSubtotalsFromSavedChart')
@@ -496,7 +543,14 @@ export class EmbedController extends BaseController {
      * Calculate totals from a raw metric query in embed context.
      * This is used when exploring data directly (not from a saved chart).
      * @summary Calculate totals for embed query
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total instead.
      */
+    @Middlewares([
+        getDeprecatedRouteMiddleware(new Date('2026-05-29'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total instead.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/calculate-total')
     @OperationId('embedCalculateTotalFromQuery')
@@ -522,8 +576,15 @@ export class EmbedController extends BaseController {
     /**
      * Calculate subtotals from a raw metric query in embed context.
      * This is used when exploring data directly (not from a saved chart).
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total with kind 'columnSubtotal' instead.
      * @summary Calculate subtotals for embed query
      */
+    @Middlewares([
+        getDeprecatedRouteMiddleware(new Date('2026-06-04'), {
+            suffixMessage:
+                "Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total with kind 'columnSubtotal' instead.",
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/calculate-subtotals')
     @OperationId('embedCalculateSubtotalsFromQuery')
@@ -561,14 +622,24 @@ export class EmbedController extends BaseController {
             forceRefresh: boolean;
             tableName?: string;
             fieldId?: string;
+            timezone?: string;
+            parameters?: ParametersValuesMap;
         },
     ): Promise<{
         status: 'ok';
         results: FieldValueSearchResult;
     }> {
         this.setStatus(200);
-        const { search, limit, filters, forceRefresh, tableName, fieldId } =
-            body;
+        const {
+            search,
+            limit,
+            filters,
+            forceRefresh,
+            tableName,
+            fieldId,
+            timezone,
+            parameters,
+        } = body;
 
         assertEmbeddedAuth(req.account);
 
@@ -582,6 +653,8 @@ export class EmbedController extends BaseController {
             forceRefresh,
             tableName,
             fieldId,
+            timezone,
+            parameters,
         });
         return {
             status: 'ok',
@@ -636,13 +709,18 @@ export class EmbedController extends BaseController {
             ),
         );
 
+        // Embeds have no real name; an empty firstName crashes naive
+        // `firstName[0].toUpperCase()` avatar helpers, so derive a non-empty one.
+        const email = account.user.email ?? '';
+        const firstName = email.split('@')[0] || 'Guest';
+
         return {
             status: 'ok',
             results: {
                 userUuid: account.user.id,
-                firstName: '',
+                firstName,
                 lastName: '',
-                email: account.user.email ?? '',
+                email,
                 role: 'embed',
                 organizationUuid:
                     account.embed.organization.organizationUuid ?? '',
@@ -686,6 +764,178 @@ export class EmbedController extends BaseController {
         return {
             status: 'ok',
             results,
+        };
+    }
+
+    /**
+     * List project-scoped chart types available to an Explore-authorized embed.
+     * @summary List chart types
+     */
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations')
+    @OperationId('listEmbedProjectDataAppVisualizations')
+    async listEmbedProjectDataAppVisualizations(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Query() page: number = 1,
+        @Query() pageSize: number = 25,
+        @Query() search?: string,
+        @Query() sortBy?: DataAppVizListSortBy,
+        @Query() sortDirection?: DataAppVizListSortDirection,
+    ): Promise<ApiListDataAppVizsResponse> {
+        assertEmbeddedAuth(req.account);
+        return {
+            status: 'ok',
+            results:
+                await this.getEmbedService().listEmbedProjectDataAppVisualizations(
+                    req.account,
+                    projectUuid,
+                    { page, pageSize },
+                    search,
+                    {
+                        sortBy: sortBy ?? DEFAULT_DATA_APP_VIZ_LIST_SORT.sortBy,
+                        sortDirection:
+                            sortDirection ??
+                            DEFAULT_DATA_APP_VIZ_LIST_SORT.sortDirection,
+                    },
+                ),
+        };
+    }
+
+    /**
+     * Get a project-scoped chart type for an Explore-authorized embed.
+     * @summary Get chart type
+     */
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}')
+    @OperationId('getEmbedProjectDataAppVisualization')
+    async getEmbedProjectDataAppVisualization(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: UUID,
+        @Query() version?: number,
+    ): Promise<ApiGetDataAppVizResponse> {
+        assertEmbeddedAuth(req.account);
+        return {
+            status: 'ok',
+            results:
+                await this.getEmbedService().getEmbedProjectDataAppVisualization(
+                    req.account,
+                    projectUuid,
+                    dataAppVizUuid,
+                    version,
+                ),
+        };
+    }
+
+    /**
+     * Get render metadata for a project-scoped embedded chart type.
+     * @summary Get render metadata
+     */
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}/render-metadata')
+    @OperationId('getEmbedProjectDataAppVizRenderMetadata')
+    async getEmbedProjectDataAppVizRenderMetadata(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: UUID,
+        @Query() version?: number,
+    ): Promise<ApiDataAppVizRenderMetadataResponse> {
+        assertEmbeddedAuth(req.account);
+        return {
+            status: 'ok',
+            results:
+                await this.getEmbedService().getEmbedProjectDataAppVizRenderMetadata(
+                    req.account,
+                    projectUuid,
+                    dataAppVizUuid,
+                    version,
+                ),
+        };
+    }
+
+    /**
+     * Get a preview token for a project-scoped embedded chart type.
+     * @summary Get preview token
+     */
+    @SuccessResponse('200', 'Success')
+    @Get('/visualizations/{dataAppVizUuid}/versions/{version}/preview-token')
+    @OperationId('getEmbedProjectDataAppVizPreviewToken')
+    async getEmbedProjectDataAppVizPreviewToken(
+        @Request() req: express.Request,
+        @Path() projectUuid: UUID,
+        @Path() dataAppVizUuid: UUID,
+        @Path() version: number,
+    ): Promise<ApiDataAppVizPreviewTokenResponse> {
+        assertEmbeddedAuth(req.account);
+        return {
+            status: 'ok',
+            results: {
+                token: await this.getEmbedService().getEmbedProjectDataAppVizPreviewToken(
+                    req.account,
+                    projectUuid,
+                    dataAppVizUuid,
+                    version,
+                ),
+            },
+        };
+    }
+
+    /**
+     * @summary Get embedded data app visualization render metadata
+     */
+    @SuccessResponse('200', 'Success')
+    @Get(
+        '/chart/{savedChartUuid}/visualizations/{dataAppVizUuid}/render-metadata',
+    )
+    @OperationId('getEmbedDataAppVizRenderMetadata')
+    async getEmbedDataAppVizRenderMetadata(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() savedChartUuid: string,
+        @Path() dataAppVizUuid: string,
+    ): Promise<ApiDataAppVizRenderMetadataResponse> {
+        assertEmbeddedAuth(req.account);
+        const results =
+            await this.getEmbedService().getEmbedDataAppVizRenderMetadata(
+                req.account,
+                projectUuid,
+                savedChartUuid,
+                dataAppVizUuid,
+            );
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * @summary Get an embedded data app visualization preview token
+     */
+    @SuccessResponse('200', 'Success')
+    @Get(
+        '/chart/{savedChartUuid}/visualizations/{dataAppVizUuid}/versions/{version}/preview-token',
+    )
+    @OperationId('getEmbedDataAppVizPreviewToken')
+    async getEmbedDataAppVizPreviewToken(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() savedChartUuid: string,
+        @Path() dataAppVizUuid: string,
+        @Path() version: number,
+    ): Promise<ApiDataAppVizPreviewTokenResponse> {
+        assertEmbeddedAuth(req.account);
+        const token =
+            await this.getEmbedService().getEmbedDataAppVizPreviewToken(
+                req.account,
+                projectUuid,
+                savedChartUuid,
+                dataAppVizUuid,
+                version,
+            );
+        return {
+            status: 'ok',
+            results: { token },
         };
     }
 

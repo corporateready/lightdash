@@ -1,34 +1,28 @@
-import { FeatureFlags, WarehouseTypes } from '@lightdash/common';
-import {
-    Anchor,
-    NumberInput,
-    PasswordInput,
-    Select,
-    Stack,
-    TextInput,
-} from '@mantine/core';
-import React, { type FC } from 'react';
+import { WarehouseTypes } from '@lightdash/common';
+import { TextInput, Stack, Anchor, Select, PasswordInput } from '@mantine/core';
+import React, { type FC, type ReactNode } from 'react';
 import { useToggle } from 'react-use';
-import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
-import TimeZonePicker from '../../common/TimeZonePicker';
+import { NumberInput } from '../../common/NumberInput';
 import FormCollapseButton from '../FormCollapseButton';
 import { useFormContext } from '../formContext';
 import BooleanSwitch from '../Inputs/BooleanSwitch';
 import FormSection from '../Inputs/FormSection';
 import StartOfWeekSelect from '../Inputs/StartOfWeekSelect';
 import { useProjectFormContext } from '../useProjectFormContext';
+import DataTimezoneField from './DataTimezoneField';
 import { TrinoDefaultValues } from './defaultValues';
 
 export const TrinoSchemaInput: FC<{
     disabled: boolean;
-}> = ({ disabled }) => {
+    description?: ReactNode;
+}> = ({ disabled, description }) => {
     const form = useFormContext();
 
     return (
         <TextInput
             name="warehouse.schema"
             label="Schema"
-            description="This is the schema name."
+            description={description ?? 'This is the schema name.'}
             required
             {...form.getInputProps('warehouse.schema')}
             disabled={disabled}
@@ -44,13 +38,9 @@ const TrinoForm: FC<{
     const requireSecrets: boolean =
         savedProject?.warehouseConnection?.type !== WarehouseTypes.TRINO;
     const form = useFormContext();
-    const { data: timezoneSupportFlag } = useServerFeatureFlag(
-        FeatureFlags.EnableTimezoneSupport,
-    );
-    const isTimezoneSupportEnabled = timezoneSupportFlag?.enabled ?? false;
     return (
         <>
-            <Stack style={{ marginTop: '8px' }}>
+            <Stack mt="xs">
                 <TextInput
                     name="warehouse.host"
                     label="Host"
@@ -96,7 +86,7 @@ const TrinoForm: FC<{
                 />
 
                 <FormSection isOpen={isOpen} name="advanced">
-                    <Stack style={{ marginTop: '8px' }}>
+                    <Stack mt="xs">
                         <BooleanSwitch
                             name="warehouse.requireUserCredentials"
                             label="Require users to provide their own credentials"
@@ -121,6 +111,7 @@ const TrinoForm: FC<{
                         />
 
                         <Select
+                            allowDeselect={false}
                             name="warehouse.http_scheme"
                             {...form.getInputProps('warehouse.http_scheme')}
                             defaultValue={TrinoDefaultValues.http_scheme}
@@ -131,6 +122,7 @@ const TrinoForm: FC<{
                                     database using SSL. You can see more details
                                     in
                                     <Anchor
+                                        inherit
                                         target="_blank"
                                         href="https://docs.getdbt.com/reference/warehouse-setups/trino-setup#configuration"
                                         rel="noreferrer"
@@ -156,21 +148,7 @@ const TrinoForm: FC<{
                             disabled={disabled}
                         />
 
-                        {isTimezoneSupportEnabled && (
-                            <TimeZonePicker
-                                size="sm"
-                                maw="100%"
-                                label="Data timezone"
-                                description="The timezone your warehouse stores ambiguous timestamps in. Defaults to UTC if not set."
-                                searchable
-                                clearable
-                                placeholder="Not set (uses warehouse default)"
-                                disabled={disabled}
-                                {...form.getInputProps(
-                                    'warehouse.dataTimezone',
-                                )}
-                            />
-                        )}
+                        <DataTimezoneField disabled={disabled} />
                         <StartOfWeekSelect disabled={disabled} />
                     </Stack>
                 </FormSection>

@@ -1,4 +1,5 @@
 import {
+    Compact,
     CompactConfigMap,
     convertCustomFormatToFormatExpression,
     currencies,
@@ -24,8 +25,7 @@ import {
     Stack,
     Text,
     TextInput,
-} from '@mantine-8/core';
-import { NumberInput } from '@mantine/core';
+} from '@mantine/core';
 import { type UseFormReturnType } from '@mantine/form';
 import {
     IconCalendar,
@@ -34,8 +34,11 @@ import {
 } from '@tabler/icons-react';
 import { useMemo, type FC } from 'react';
 import { type ValueOf } from 'type-fest';
+import { optionalNumber } from '../../../utils/numberInputUtils';
 import MantineIcon from '../../common/MantineIcon';
+import { NumberInput } from '../../common/NumberInput';
 import { PolymorphicPaperButton } from '../../common/PolymorphicPaperButton';
+import { formatTextInputProps } from './formatTextInputProps';
 import { getFormatTypeLabel } from './getFormatSummary';
 
 type Props = {
@@ -88,6 +91,10 @@ const formatSeparatorOptions = [
         value: NumberSeparator.NO_SEPARATOR_PERIOD,
         label: '100000.00',
     },
+    {
+        value: NumberSeparator.APOSTROPHE_PERIOD,
+        label: "100'000.00",
+    },
 ];
 
 const formatCurrencyOptions = currencies.map((c) => {
@@ -132,6 +139,11 @@ export const FormatForm: FC<Props> = ({
     compact = false,
 }) => {
     const formatType = format.type;
+    const formatExpression = convertCustomFormatToFormatExpression(format);
+    const usesRuntimeOnlyFormatExpression =
+        format.compact === Compact.AUTO &&
+        (format.type === CustomFormatType.NUMBER ||
+            format.type === CustomFormatType.CURRENCY);
 
     const isDateField = useMemo(() => {
         return (
@@ -195,7 +207,7 @@ export const FormatForm: FC<Props> = ({
     }, [isDateType, format.custom, sampleDate]);
 
     return (
-        <Grid gutter="md" columns={12}>
+        <Grid gap="md" columns={12}>
             {/* Format Type Selection */}
             {isDateField ? (
                 <Grid.Col span={12}>
@@ -206,7 +218,6 @@ export const FormatForm: FC<Props> = ({
                         <SegmentedControl
                             w="fit-content"
                             size="sm"
-                            radius="md"
                             data={[
                                 {
                                     label: 'Default',
@@ -289,25 +300,21 @@ export const FormatForm: FC<Props> = ({
                                                 ? IconClockHour4
                                                 : IconCalendar
                                         }
-                                        color="ldGray.6"
+                                        color="dimmed"
                                     />
                                 }
                                 label="Custom format"
                                 placeholder="e.g. dd/mm/yyyy or mmmm d, yyyy"
-                                {...formatInputProps('custom')}
+                                {...formatTextInputProps(
+                                    formatInputProps('custom'),
+                                )}
                             />
                             {format.custom && (
                                 <Box pb={2}>
-                                    <Text
-                                        size="xs"
-                                        c="ldGray.6"
-                                        fw={500}
-                                        mb={4}
-                                    >
+                                    <Text size="xs" c="dimmed" fw={500} mb={4}>
                                         Result
                                     </Text>
                                     <Paper
-                                        withBorder
                                         px="md"
                                         h={36}
                                         display="flex"
@@ -332,7 +339,7 @@ export const FormatForm: FC<Props> = ({
 
                         <Stack gap="xs">
                             <Group gap="xs">
-                                <Text size="xs" c="ldGray.6" fw={500}>
+                                <Text size="xs" c="dimmed" fw={500}>
                                     Common formats
                                 </Text>
                                 <Anchor
@@ -404,7 +411,7 @@ export const FormatForm: FC<Props> = ({
                                 </Anchor>
                             </Group>
                         }
-                        {...formatInputProps('custom')}
+                        {...formatTextInputProps(formatInputProps('custom'))}
                     />
                 </Grid.Col>
             )}
@@ -430,17 +437,15 @@ export const FormatForm: FC<Props> = ({
                     )}
                     <Grid.Col span={compact ? 12 : 4}>
                         <NumberInput
-                            type="number"
                             min={0}
                             label="Decimal places"
                             placeholder="Auto"
-                            radius="md"
                             {...{
                                 ...formatInputProps('round'),
                                 onChange: (value) => {
                                     setFormatFieldValue(
                                         'round',
-                                        value === '' ? undefined : value,
+                                        optionalNumber(value),
                                     );
                                 },
                             }}
@@ -502,14 +507,18 @@ export const FormatForm: FC<Props> = ({
                                 <TextInput
                                     label="Prefix"
                                     placeholder="e.g. $"
-                                    {...formatInputProps('prefix')}
+                                    {...formatTextInputProps(
+                                        formatInputProps('prefix'),
+                                    )}
                                 />
                             </Grid.Col>
                             <Grid.Col span={compact ? 12 : 4}>
                                 <TextInput
                                     label="Suffix"
                                     placeholder="e.g. km/h"
-                                    {...formatInputProps('suffix')}
+                                    {...formatTextInputProps(
+                                        formatInputProps('suffix'),
+                                    )}
                                 />
                             </Grid.Col>
                         </>
@@ -529,8 +538,9 @@ export const FormatForm: FC<Props> = ({
                     <Text size="xs" c="ldGray.5">
                         Format expression:{' '}
                         <Text span fw={500} c="ldGray.7">
-                            {convertCustomFormatToFormatExpression(format) ||
-                                'default'}
+                            {usesRuntimeOnlyFormatExpression
+                                ? 'runtime only'
+                                : formatExpression || 'default'}
                         </Text>
                     </Text>
                 </Grid.Col>

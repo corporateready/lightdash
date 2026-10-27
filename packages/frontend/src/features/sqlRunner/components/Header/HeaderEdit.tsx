@@ -1,15 +1,15 @@
 import { type SqlChart } from '@lightdash/common';
 import {
-    ActionIcon,
-    Button,
     Group,
-    HoverCard,
-    Menu,
-    Paper,
     Stack,
     Title,
+    Button,
+    ActionIcon,
+    HoverCard,
+    Menu,
     Tooltip,
 } from '@mantine/core';
+import { useHotkeys } from '@mantine/hooks';
 import {
     IconArrowBack,
     IconDots,
@@ -21,6 +21,7 @@ import isEqual from 'lodash/isEqual';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import { useNavigate } from 'react-router';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import PageHeader from '../../../../components/common/Page/PageHeader';
 import { UpdatedInfo } from '../../../../components/common/PageHeader/UpdatedInfo';
 import { ResourceInfoPopup } from '../../../../components/common/ResourceInfoPopup/ResourceInfoPopup';
 import {
@@ -29,6 +30,7 @@ import {
 } from '../../../../components/DataViz/store/selectors';
 import { TitleBreadCrumbs } from '../../../../components/Explorer/SavedChartsHeader/TitleBreadcrumbs';
 import { DEFAULT_SQL_LIMIT } from '../../constants';
+import { useSavedChartConnection } from '../../hooks/useSavedChartConnection';
 import { useUpdateSqlChartMutation } from '../../hooks/useSavedSqlCharts';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import {
@@ -74,28 +76,43 @@ export const HeaderEdit: FC = () => {
     >(savedSqlChart);
     const [initialChartConfig, setInitialChartConfig] = useState(config);
 
+    const { connectionRequest, hasConnectionChange, markSaved } =
+        useSavedChartConnection(savedSqlChart);
+
     const hasChanges = useMemo(() => {
         if (!initialSavedSqlChart) return false;
         const changedSql = sql !== initialSavedSqlChart.sql;
         const changedLimit = limit !== initialSavedSqlChart.limit;
         const changedConfig = !isEqual(config, initialChartConfig);
 
-        return changedSql || changedLimit || changedConfig;
-    }, [initialSavedSqlChart, initialChartConfig, sql, limit, config]);
+        return (
+            changedSql || changedLimit || changedConfig || hasConnectionChange
+        );
+    }, [
+        initialSavedSqlChart,
+        initialChartConfig,
+        sql,
+        limit,
+        config,
+        hasConnectionChange,
+    ]);
 
     const onSave = useCallback(() => {
+        if (!connectionRequest.ready) return;
         if (config && sql) {
             mutate({
                 versionedData: {
                     config,
                     sql,
                     limit: limit ?? DEFAULT_SQL_LIMIT,
+                    ...connectionRequest.field,
                 },
             });
             setInitialChartConfig(config);
             setInitialSavedSqlChart({ sql, limit: limit ?? DEFAULT_SQL_LIMIT });
+            markSaved();
         }
-    }, [config, sql, mutate, limit]);
+    }, [config, sql, mutate, limit, connectionRequest, markSaved]);
 
     const isSaveModalOpen = useAppSelector(
         (state) => state.sqlRunner.modals.saveChartModal.isOpen,
@@ -138,6 +155,33 @@ export const HeaderEdit: FC = () => {
         }
     }, [hasErrors, config, sql, dispatch, onSave]);
 
+    const isAnyModalOpen =
+        isSaveModalOpen ||
+        isUpdateModalOpen ||
+        isDeleteModalOpen ||
+        isChartErrorsAlertOpen;
+
+    // Save on cmd/ctrl + s, including while the SQL editor is focused
+    useHotkeys(
+        [
+            [
+                'mod+s',
+                () => {
+                    if (
+                        config &&
+                        sql &&
+                        hasChanges &&
+                        !isLoading &&
+                        !isAnyModalOpen
+                    ) {
+                        onSaveClick();
+                    }
+                },
+            ],
+        ],
+        [],
+    );
+
     const handleGoBackToViewPage = useCallback(async () => {
         await queryClient.resetQueries({
             queryKey: [
@@ -158,29 +202,16 @@ export const HeaderEdit: FC = () => {
 
     return (
         <>
-            <Paper
-                shadow="none"
-                radius={0}
-                withBorder={false}
-                px="md"
-                py="xs"
-                sx={(theme) => ({
-                    borderBottom: `1px solid ${
-                        theme.colorScheme === 'dark'
-                            ? theme.colors.ldDark[8]
-                            : theme.colors.ldGray[3]
-                    }`,
-                })}
-            >
-                <Group position="apart">
-                    <Stack spacing="none">
-                        <Group spacing="two">
+            <PageHeader variant="query">
+                <Group justify="space-between" flex={1} wrap="nowrap">
+                    <Stack gap={0} miw={0}>
+                        <Group gap={4} wrap="nowrap">
                             <TitleBreadCrumbs
                                 projectUuid={savedSqlChart.project.projectUuid}
                                 spaceUuid={savedSqlChart.space.uuid}
                                 spaceName={savedSqlChart.space.name}
                             />
-                            <Title c="ldDark.6" order={5} fw={600}>
+                            <Title order={5} maw={500} lineClamp={1}>
                                 {savedSqlChart.name}
                             </Title>
                             <ActionIcon
@@ -192,7 +223,7 @@ export const HeaderEdit: FC = () => {
                                 <MantineIcon icon={IconPencil} />
                             </ActionIcon>
                         </Group>
-                        <Group spacing="xs">
+                        <Group gap="xs">
                             <UpdatedInfo
                                 updatedAt={savedSqlChart.lastUpdatedAt}
                                 user={savedSqlChart.lastUpdatedBy}
@@ -211,7 +242,7 @@ export const HeaderEdit: FC = () => {
                         </Group>
                     </Stack>
 
-                    <Group spacing="xs">
+                    <Group gap="xs">
                         <HoverCard disabled={!hasUnrunChanges} withArrow>
                             <HoverCard.Target>
                                 <Button
@@ -239,7 +270,6 @@ export const HeaderEdit: FC = () => {
                             </Button>
                         ) : (
                             <Tooltip
-                                variant="xs"
                                 label="Back to view page"
                                 position="bottom"
                             >
@@ -253,15 +283,9 @@ export const HeaderEdit: FC = () => {
                                 </ActionIcon>
                             </Tooltip>
                         )}
-                        <Menu
-                            position="bottom"
-                            withArrow
-                            withinPortal
-                            shadow="md"
-                            width={200}
-                        >
+                        <Menu position="bottom" withArrow width={200}>
                             <Menu.Target>
-                                <ActionIcon variant="subtle">
+                                <ActionIcon>
                                     <MantineIcon icon={IconDots} />
                                 </ActionIcon>
                             </Menu.Target>
@@ -269,7 +293,9 @@ export const HeaderEdit: FC = () => {
                                 <Menu.Label>Manage</Menu.Label>
                                 <Menu.Item
                                     disabled={!config || !sql}
-                                    icon={<MantineIcon icon={IconTrash} />}
+                                    leftSection={
+                                        <MantineIcon icon={IconTrash} />
+                                    }
                                     color="red"
                                     onClick={() =>
                                         dispatch(
@@ -283,7 +309,7 @@ export const HeaderEdit: FC = () => {
                         </Menu>
                     </Group>
                 </Group>
-            </Paper>
+            </PageHeader>
             <SaveSqlChartModal
                 key={`${isSaveModalOpen}-saveChartModal`}
                 opened={isSaveModalOpen}

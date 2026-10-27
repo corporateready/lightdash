@@ -17,7 +17,7 @@ import {
  *
  * Fields that appear in metricQuery.dimensions are treated as dimensions; all
  * others (metrics, table calculations, pivot dims, etc.) are treated as metrics
- * for the purpose of the hidden-field filter in pivotQueryResults.
+ * for the purpose of the hidden-field filter in convertSqlPivotedRowsToPivotData.
  */
 function splitHiddenTableFieldsByKind(
     tableChartConfig: TableChartConfig,
@@ -41,37 +41,28 @@ const getTablePivotConfig = (
     tableChartConfig: TableChartConfig,
     pivotConfig: CreateSavedChartVersion['pivotConfig'],
     tableConfig: CreateSavedChartVersion['tableConfig'],
-    metricQuery?: Pick<MetricQuery, 'dimensions'>,
+    metricQuery: Pick<MetricQuery, 'dimensions'>,
 ): PivotConfig | undefined => {
     if (!pivotConfig || pivotConfig.columns.length === 0) {
         return undefined;
     }
 
-    if (metricQuery) {
-        const { hiddenDimensions, hiddenMetrics } =
-            splitHiddenTableFieldsByKind(tableChartConfig, metricQuery);
-        return {
-            pivotDimensions: pivotConfig.columns,
-            metricsAsRows: tableChartConfig.config?.metricsAsRows ?? false,
-            ...(hiddenMetrics.length > 0 && {
-                hiddenMetricFieldIds: hiddenMetrics,
-            }),
-            ...(hiddenDimensions.length > 0 && {
-                hiddenDimensionFieldIds: hiddenDimensions,
-            }),
-            columnOrder: tableConfig.columnOrder,
-            rowTotals: tableChartConfig.config?.showRowCalculation ?? false,
-            columnTotals:
-                tableChartConfig.config?.showColumnCalculation ?? false,
-        };
-    }
-
-    // Fallback: no metricQuery available — put all hidden fields in hiddenMetricFieldIds
-    // for backward compatibility (previous behaviour).
+    const { hiddenDimensions, hiddenMetrics } = splitHiddenTableFieldsByKind(
+        tableChartConfig,
+        metricQuery,
+    );
     return {
         pivotDimensions: pivotConfig.columns,
         metricsAsRows: tableChartConfig.config?.metricsAsRows ?? false,
-        hiddenMetricFieldIds: getHiddenTableFields(tableChartConfig),
+        ...(pivotConfig.rows && {
+            rowFieldIds: pivotConfig.rows,
+        }),
+        ...(hiddenMetrics.length > 0 && {
+            hiddenMetricFieldIds: hiddenMetrics,
+        }),
+        ...(hiddenDimensions.length > 0 && {
+            hiddenDimensionFieldIds: hiddenDimensions,
+        }),
         columnOrder: tableConfig.columnOrder,
         rowTotals: tableChartConfig.config?.showRowCalculation ?? false,
         columnTotals: tableChartConfig.config?.showColumnCalculation ?? false,
@@ -95,7 +86,7 @@ export const getPivotConfig = (
     savedChart: Pick<
         CreateSavedChartVersion,
         'chartConfig' | 'pivotConfig' | 'tableConfig'
-    > & { metricQuery?: Pick<MetricQuery, 'dimensions'> },
+    > & { metricQuery: Pick<MetricQuery, 'dimensions'> },
 ): PivotConfig | undefined => {
     switch (savedChart.chartConfig.type) {
         case ChartType.TABLE:
@@ -116,7 +107,7 @@ export const getDownloadPivotConfig = (
     savedChart: Pick<
         CreateSavedChartVersion,
         'chartConfig' | 'pivotConfig' | 'tableConfig'
-    > & { metricQuery?: Pick<MetricQuery, 'dimensions'> },
+    > & { metricQuery: Pick<MetricQuery, 'dimensions'> },
     exportPivotedData: boolean = true,
 ): PivotConfig | undefined => {
     switch (savedChart.chartConfig.type) {
@@ -133,7 +124,7 @@ export const getDownloadPivotOptions = (
     savedChart: Pick<
         CreateSavedChartVersion,
         'chartConfig' | 'pivotConfig' | 'tableConfig'
-    > & { metricQuery?: Pick<MetricQuery, 'dimensions'> },
+    > & { metricQuery: Pick<MetricQuery, 'dimensions'> },
     exportPivotedData: boolean = true,
 ): { pivotConfig: PivotConfig | undefined; exportPivotedData: boolean } => ({
     pivotConfig: getDownloadPivotConfig(savedChart, exportPivotedData),

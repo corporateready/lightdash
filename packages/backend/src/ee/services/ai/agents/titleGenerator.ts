@@ -1,6 +1,11 @@
-import { generateObject, ModelMessage } from 'ai';
+import { generateText, ModelMessage, Output } from 'ai';
 import { z } from 'zod';
+import {
+    emitAiUsage,
+    languageModelUsageToTokens,
+} from '../../../../analytics/aiUsage';
 import { GeneratorModelOptions } from '../models/types';
+import { getGeneratorTelemetry } from '../utils/aiCallTelemetry';
 
 const TITLE_MAX_LENGTH_CHARS = 60;
 const TitleSchema = z.object({
@@ -20,11 +25,18 @@ export async function generateThreadTitle(
     modelOptions: GeneratorModelOptions,
     messages: ModelMessage[],
 ): Promise<string> {
-    const result = await generateObject({
+    const telemetry = getGeneratorTelemetry(
+        modelOptions,
+        'generateThreadTitle',
+        'thread-title',
+    );
+    const result = await generateText({
         model: modelOptions.model,
         ...modelOptions.callOptions,
         providerOptions: modelOptions.providerOptions,
-        schema: TitleSchema,
+        ...telemetry,
+        output: Output.object({ schema: TitleSchema }),
+        allowSystemInMessages: true,
         messages: [
             {
                 role: 'system',
@@ -40,14 +52,19 @@ Good examples:
 
 The title should be clear, specific, and helpful for someone browsing a list of conversations.`,
             },
+            ...messages,
+            // Last, not first: a thread ends on the assistant turn, and a
+            // structured-output request may not end on one — Anthropic rejects
+            // it as an attempt to pre-fill the assistant response.
             {
                 role: 'user',
                 content:
                     'Please create a title for this conversation based on the messages.',
             },
-            ...messages,
         ],
     });
 
-    return result.object.title;
+    emitAiUsage(telemetry, languageModelUsageToTokens(result.usage));
+
+    return result.output.title;
 }

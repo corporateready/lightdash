@@ -6,11 +6,12 @@ import {
     type CreateWarehouseCredentials,
     type Project,
 } from '@lightdash/common';
-import { Alert, Anchor, Box, Button, Card, Flex } from '@mantine/core';
+import { Alert, Anchor, Box, Button, Flex, Card } from '@mantine/core';
 import { IconExclamationCircle, IconExternalLink } from '@tabler/icons-react';
 import { type FC } from 'react';
 import {
     useProject,
+    useTestWarehouseConnectionMutation,
     useUpdateMutation,
     useUpdateWarehouseCredentialsMutation,
 } from '../../hooks/useProject';
@@ -20,6 +21,7 @@ import useApp from '../../providers/App/useApp';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
 import MantineIcon from '../common/MantineIcon';
+import ConnectionTestResults from './ConnectionTestResults';
 import { dbtDefaults } from './DbtForms/defaultValues';
 import { dbtFormValidators } from './DbtForms/validators';
 import { FormContainer } from './FormContainer';
@@ -28,6 +30,7 @@ import { ProjectForm } from './ProjectForm';
 import { ProjectFormProvider } from './ProjectFormProvider';
 import ProjectStatusCallout from './ProjectStatusCallout';
 import { type ProjectConnectionForm } from './types';
+import classes from './UpdateProjectConnection.module.css';
 import { useOnProjectError } from './useOnProjectError';
 import { warehouseDefaultValues } from './WarehouseForms/defaultValues';
 import { warehouseValueValidators } from './WarehouseForms/validators';
@@ -96,8 +99,20 @@ const UpdateProjectConnection: FC<{
 
     const { track } = useTracking();
 
+    const {
+        mutate: runConnectionTest,
+        isLoading: isTestingConnection,
+        data: connectionTestResults,
+        reset: resetConnectionTest,
+    } = useTestWarehouseConnectionMutation(projectUuid);
+
     const handleSaveCredentials = () => {
         updateWarehouseCredentials(form.values.warehouse);
+    };
+
+    const handleTestConnection = () => {
+        resetConnectionTest();
+        runConnectionTest(form.values.warehouse);
     };
 
     const handleSubmit = async ({
@@ -128,13 +143,12 @@ const UpdateProjectConnection: FC<{
             {project?.type === ProjectType.PREVIEW && (
                 <Alert
                     color="orange"
-                    icon={
-                        <MantineIcon icon={IconExclamationCircle} size="lg" />
-                    }
+                    icon={<MantineIcon icon={IconExclamationCircle} />}
                     title="Developer previews are temporary Lightdash projects where settings cannot be changed."
                 >
                     Read docs{' '}
                     <Anchor
+                        inherit
                         href="https://docs.lightdash.com/guides/cli/how-to-use-lightdash-preview"
                         target="_blank"
                         rel="noreferrer"
@@ -155,6 +169,12 @@ const UpdateProjectConnection: FC<{
                         />
                     </ProjectFormProvider>
 
+                    {connectionTestResults && (
+                        <ConnectionTestResults
+                            results={connectionTestResults}
+                        />
+                    )}
+
                     {!isIdle && (
                         <ProjectStatusCallout
                             isSuccess={isSuccess}
@@ -165,16 +185,9 @@ const UpdateProjectConnection: FC<{
                     )}
 
                     <Card
-                        component={Flex}
-                        justify="space-between"
-                        align="center"
-                        pos="sticky"
-                        withBorder
+                        className={classes.stickyFooter}
                         shadow="sm"
-                        sx={(theme) => ({
-                            zIndex: 1,
-                            bottom: `-${theme.spacing.xl}`,
-                        })}
+                        radius="sm"
                     >
                         <Box>
                             {latestCompilationLog && (
@@ -182,7 +195,7 @@ const UpdateProjectConnection: FC<{
                                     variant="subtle"
                                     color="gray"
                                     size="xs"
-                                    rightIcon={
+                                    rightSection={
                                         <MantineIcon icon={IconExternalLink} />
                                     }
                                     component="a"
@@ -196,7 +209,15 @@ const UpdateProjectConnection: FC<{
                                 </Button>
                             )}
                         </Box>
-                        <Flex gap="sm">
+                        <Flex gap="sm" className={classes.actions}>
+                            <Button
+                                variant="default"
+                                loading={isTestingConnection}
+                                disabled={isDisabled || isTestingConnection}
+                                onClick={handleTestConnection}
+                            >
+                                Test connection
+                            </Button>
                             {showSaveCredentials && (
                                 <Button
                                     variant="default"
@@ -234,7 +255,13 @@ const UpdateProjectConnectionWrapper: FC<{
         return null;
     }
 
-    return <UpdateProjectConnection projectUuid={projectUuid} project={data} />;
+    return (
+        <UpdateProjectConnection
+            key={projectUuid}
+            projectUuid={projectUuid}
+            project={data}
+        />
+    );
 };
 
 export default UpdateProjectConnectionWrapper;

@@ -1,7 +1,33 @@
-import type { ValidationResponse } from '@lightdash/common';
+import {
+    isChartValidationError,
+    isDashboardValidationError,
+    isDataAppValidationError,
+    type UnusedContentItem,
+    type ValidationResponse,
+} from '@lightdash/common';
 
 export const MANAGED_AGENT_TOOL_RESULT_ITEM_LIMIT = 100;
 export const MANAGED_AGENT_BROKEN_CONTENT_ERROR_LIMIT = 10;
+export const MANAGED_AGENT_BROKEN_CONTENT_GROUP_ITEM_LIMIT = 10;
+export const MANAGED_AGENT_BULK_DELETE_RUN_LIMIT = 25;
+export const MANAGED_AGENT_SOFT_DELETE_RUN_LIMIT = 25;
+
+// Root-cause model of a validation row. Guard order matters: table responses
+// are structurally assignable from the others, so they are the fallback.
+export const getValidationRootCauseTableName = (
+    validation: ValidationResponse,
+): string | null => {
+    if (isChartValidationError(validation)) {
+        return validation.tableName ?? null;
+    }
+    if (isDashboardValidationError(validation)) {
+        return validation.tableName ?? null;
+    }
+    if (isDataAppValidationError(validation)) {
+        return validation.modelName ?? null;
+    }
+    return validation.name ?? null;
+};
 
 export const getManagedAgentToolResultLimit = (
     requestedLimit: unknown,
@@ -28,19 +54,24 @@ type ManagedAgentToolListResult<T> = {
     omitted_count: number;
 };
 
-export const formatManagedAgentToolListResult = <T>(
+export const buildManagedAgentToolListResult = <T>(
     items: T[],
     limit = MANAGED_AGENT_TOOL_RESULT_ITEM_LIMIT,
-): string => {
+): ManagedAgentToolListResult<T> => {
     const limitedItems = items.slice(0, limit);
-    return JSON.stringify({
+    return {
         items: limitedItems,
         total_count: items.length,
         returned_count: limitedItems.length,
         truncated: items.length > limitedItems.length,
         omitted_count: Math.max(items.length - limitedItems.length, 0),
-    } satisfies ManagedAgentToolListResult<T>);
+    };
 };
+
+export const formatManagedAgentToolListResult = <T>(
+    items: T[],
+    limit = MANAGED_AGENT_TOOL_RESULT_ITEM_LIMIT,
+): string => JSON.stringify(buildManagedAgentToolListResult(items, limit));
 
 type ManagedAgentBrokenContentItem = {
     uuid: string;
@@ -53,6 +84,27 @@ type ManagedAgentBrokenContentItem = {
         error_type: ValidationResponse['errorType'];
     }[];
     errors_truncated: boolean;
+};
+
+export const formatManagedAgentBrokenContentPage = (
+    items: ManagedAgentBrokenContentItem[],
+    limit: number,
+    cursor: string | null,
+): string => {
+    const remaining = items
+        .filter((item) => cursor === null || item.uuid > cursor)
+        .sort((left, right) => {
+            if (left.uuid === right.uuid) return 0;
+            return left.uuid < right.uuid ? -1 : 1;
+        });
+    const page = buildManagedAgentToolListResult(remaining, limit);
+    return JSON.stringify({
+        ...page,
+        total_count: items.length,
+        next_cursor: page.truncated
+            ? page.items[page.items.length - 1].uuid
+            : null,
+    });
 };
 
 export const summarizeManagedAgentBrokenContent = (
@@ -99,4 +151,18 @@ export const summarizeManagedAgentBrokenContent = (
     });
 
     return [...byContentUuid.values()];
+};
+
+const toIsoDate = (date: Date) => date.toISOString().split('T')[0];
+
+// Written server-side so bulk stale flags never depend on model output.
+export const describeManagedAgentStaleFlag = (
+    item: UnusedContentItem,
+    stalenessDays: number,
+): string => {
+    const policy = `${stalenessDays}+ day staleness policy`;
+    if (item.lastViewedAt === null) {
+        return `Never viewed since it was created on ${toIsoDate(item.createdAt)} (${policy}).`;
+    }
+    return `Not viewed since ${toIsoDate(item.lastViewedAt)}, ${item.viewsCount} views in total, created on ${toIsoDate(item.createdAt)} (${policy}).`;
 };

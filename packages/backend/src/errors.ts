@@ -1,5 +1,6 @@
 import {
     getErrorMessage,
+    getSlackErrorMessages,
     isUnrecoverableSlackError,
     LightdashError,
     PayloadTooLargeError,
@@ -43,6 +44,14 @@ export const errorHandler = (error: Error): LightdashError => {
     ) {
         return new PayloadTooLargeError();
     }
+    if (error instanceof URIError || error.name === 'URIError') {
+        return new LightdashError({
+            statusCode: 400,
+            name: 'URIError',
+            message: 'Invalid URI encoding',
+            data: {},
+        });
+    }
     if (error instanceof LightdashError) {
         return error;
     }
@@ -65,7 +74,12 @@ export const scimErrorHandler = (
     }
 };
 export const slackErrorHandler = (e: unknown, context: string) => {
-    Logger.error(`${context}: ${getErrorMessage(e)}`);
+    const slackMessages = getSlackErrorMessages(e);
+    Logger.error(
+        `${context}: ${getErrorMessage(e)}${
+            slackMessages.length > 0 ? ` (${slackMessages.join('; ')})` : ''
+        }`,
+    );
 
     // Don't report unrecoverable errors to Sentry (expected for broken installations)
     if (isUnrecoverableSlackError(e)) {

@@ -1,0 +1,25 @@
+.submitButton {
+    flex-shrink: 0;
+    border-radius: var(--mantine-radius-xl);
+    transition:
+        transform 150ms ease,
+        background-color 150ms ease;
+
+    &:active:not(:disabled) {
+        transform: scale(0.95);
+    }
+}
+
+.submitButton[data-composer-size='lg'] {
+    width: rem(40px);
+    height: rem(40px);
+    min-width: rem(40px);
+    min-height: rem(40px);
+}
+
+.submitButton[data-composer-size='sm'] {
+    width: rem(32px);
+    height: rem(32px);
+    min-width: rem(32px);
+    min-height: rem(32px);
+}

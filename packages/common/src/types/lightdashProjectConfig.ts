@@ -2,6 +2,7 @@ import { type DimensionType } from './field';
 import type { ParameterValue } from './parameters';
 import type { WarehouseTypes } from './projects';
 import type { GroupType } from './table';
+import { type TimeFrames } from './timeFrames';
 
 type SpotlightCategory = {
     label: string;
@@ -15,14 +16,24 @@ type SpotlightConfig = {
     };
 };
 
+export type LightdashParameterOption = {
+    label: string;
+    value: string | number;
+};
+
+export const isLightdashParameterOption = (
+    opt: unknown,
+): opt is LightdashParameterOption =>
+    typeof opt === 'object' && opt !== null && 'label' in opt && 'value' in opt;
+
 export type LightdashProjectParameter = {
     label: string;
     description?: string;
     type?: 'string' | 'number' | 'date'; // defaults to 'string' for backwards compatibility
-    default?: ParameterValue;
+    default?: ParameterValue; // for `type: date`, the sentinel `today` resolves to the current date at query time
     multiple?: boolean; // the parameter input will be a multi select
     allow_custom_values?: boolean; // allows users to input custom values beyond predefined options
-    options?: string[] | number[]; // hardcoded options - kept separate as they're always homogeneous arrays
+    options?: string[] | number[] | LightdashParameterOption[]; // hardcoded options - string/number arrays or label+value pairs
     options_from_dimension?: {
         // options will be populated from dimension values
         model: string;
@@ -49,6 +60,36 @@ export type ProjectDefaults = {
      * Defaults to true if not specified.
      */
     case_sensitive?: boolean;
+    /**
+     * Default behavior for column totals in results tables.
+     * When false, the extra warehouse query that calculates column totals
+     * is not run by default for new queries. Charts that explicitly enable
+     * "Show column totals" still calculate them.
+     * Defaults to true if not specified.
+     */
+    column_totals?: boolean;
+    /**
+     * Extra time intervals appended to the built-in defaults for date/timestamp
+     * dimensions that do not declare their own `time_intervals`. Values may be
+     * standard granularities (e.g. `hour`) or `custom_granularities` keys.
+     */
+    additional_time_intervals?: {
+        date?: (TimeFrames | string)[];
+        timestamp?: (TimeFrames | string)[];
+    };
+    /**
+     * Override the display label of standard granularities (e.g. `week`:
+     * "Week starting Monday"). Keyed by standard granularity name; applies to
+     * Explorer dimension labels, the Explorer sidebar tree, and the date zoom.
+     */
+    granularity_labels?: Record<string, string>;
+    /**
+     * Whether a matched query whose pre-aggregate execution fails is served
+     * from the source warehouse (execution fallback). When false, the query
+     * errors instead of transparently running on the warehouse.
+     * Defaults to true if not specified.
+     */
+    pre_aggregate_execution_fallback?: boolean;
     // Room for future project-wide defaults like:
     // date_format?: string;
     // number_format?: string;
@@ -60,8 +101,16 @@ export type CustomGranularity = {
     type?: DimensionType.DATE | DimensionType.TIMESTAMP | DimensionType.STRING;
 };
 
+export type ContentAsCodeConfig = {
+    /** Track uploaded content as Git-backed for review/write-back workflows. */
+    sync?: boolean;
+    /** Directory holding charts/ and dashboards/, relative to the project dir. Defaults to `lightdash`. */
+    path?: string;
+};
+
 export type LightdashProjectConfig = {
     spotlight: SpotlightConfig;
+    content_as_code?: ContentAsCodeConfig;
     parameters?: Record<string, LightdashProjectParameter>; // keys must be ^[a-zA-Z0-9_-]+$
     warehouse?: WarehouseConfig; // Required for Lightdash-only projects (no dbt)
     defaults?: ProjectDefaults; // Project-wide defaults for various settings

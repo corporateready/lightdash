@@ -2,9 +2,11 @@ import {
     buildPopAdditionalMetric,
     CartesianSeriesType,
     ChartType,
+    derivePivotConfigurationFromChart,
     FilterOperator,
     getDefaultDateRangeFromInterval,
     getFieldIdForDateDimension,
+    getFieldsFromMetricQuery,
     getItemId,
     getPopPeriodLabel,
     isCompleteLayout,
@@ -20,6 +22,7 @@ import {
     type MetricExplorerDateRange,
     type MetricQuery,
     type MetricWithAssociatedTimeDimension,
+    type PivotConfiguration,
     type Series,
     type TimeDimensionConfig,
 } from '@lightdash/common';
@@ -39,6 +42,18 @@ import { useMetric } from './useMetricsCatalog';
 
 const METRICS_EXPLORER_PREVIOUS_PERIOD_OFFSET_DEFAULT = 1;
 const METRICS_EXPLORER_PREVIOUS_PERIOD_GRANULARITY_DEFAULT = TimeFrames.YEAR;
+const METRICS_EXPLORER_PREVIOUS_YEAR_WEEK_OFFSET = 52;
+
+const getPreviousPeriodComparison = (timeFrame: TimeFrames) =>
+    timeFrame === TimeFrames.WEEK
+        ? {
+              granularity: TimeFrames.WEEK,
+              periodOffset: METRICS_EXPLORER_PREVIOUS_YEAR_WEEK_OFFSET,
+          }
+        : {
+              granularity: METRICS_EXPLORER_PREVIOUS_PERIOD_GRANULARITY_DEFAULT,
+              periodOffset: METRICS_EXPLORER_PREVIOUS_PERIOD_OFFSET_DEFAULT,
+          };
 
 const buildMetricQueryFromField = (
     field: MetricWithAssociatedTimeDimension,
@@ -117,16 +132,34 @@ const buildMetricQueryFromField = (
                   name: compareMetric.name,
               })
             : undefined;
-    const popResult =
-        shouldCompareToPreviousYear && timeDimensionFieldId
-            ? buildPopAdditionalMetric({
-                  metric: field,
-                  timeDimensionId: timeDimensionFieldId,
-                  granularity:
-                      METRICS_EXPLORER_PREVIOUS_PERIOD_GRANULARITY_DEFAULT,
-                  periodOffset: METRICS_EXPLORER_PREVIOUS_PERIOD_OFFSET_DEFAULT,
-              })
-            : null;
+    const getPreviousYearMetric = () => {
+        if (
+            !shouldCompareToPreviousYear ||
+            !timeDimensionConfig ||
+            !timeDimensionFieldId
+        ) {
+            return null;
+        }
+
+        const result = buildPopAdditionalMetric({
+            metric: field,
+            timeDimensionId: timeDimensionFieldId,
+            ...getPreviousPeriodComparison(timeDimensionConfig.interval),
+        });
+
+        return {
+            ...result,
+            additionalMetric: {
+                ...result.additionalMetric,
+                label: `${field.label} (${getPopPeriodLabel(
+                    METRICS_EXPLORER_PREVIOUS_PERIOD_GRANULARITY_DEFAULT,
+                    METRICS_EXPLORER_PREVIOUS_PERIOD_OFFSET_DEFAULT,
+                )})`,
+            },
+        };
+    };
+
+    const popResult = getPreviousYearMetric();
 
     const popMetricId = popResult?.metricId;
 
@@ -343,6 +376,51 @@ export function useMetricVisualization({
         compareMetric,
     ]);
 
+    /**
+     * When segmenting, request a SQL pivot so the backend emits pivotDetails.
+     * The series logic (getExpectedSeriesMap) requires pivotDetails to expand
+     * pivoted series — without it a segmented chart renders no series.
+     *
+     * Derived from the pre-execution metricQuery (not executedMetricQuery): it
+     * feeds queryArgs, so a per-response reference would loop the query.
+     */
+    const pivotConfiguration = useMemo<PivotConfiguration | undefined>(() => {
+        if (
+            !segmentDimensionId ||
+            !metricQuery ||
+            !exploreQuery.data ||
+            !metricFieldQuery.data
+        ) {
+            return undefined;
+        }
+
+        // Reuse buildLineChartConfig so the pivot's layout (xField/yField) stays
+        // the single source of truth and can't drift from the rendered chart.
+        const chartConfigForPivot = buildLineChartConfig(
+            metricQuery,
+            metricFieldQuery.data.label,
+            comparison,
+            compareMetric?.label ?? undefined,
+        );
+        const fields = getFieldsFromMetricQuery(metricQuery, exploreQuery.data);
+
+        return derivePivotConfigurationFromChart(
+            {
+                chartConfig: chartConfigForPivot,
+                pivotConfig: { columns: [segmentDimensionId] },
+            },
+            metricQuery,
+            fields,
+        );
+    }, [
+        segmentDimensionId,
+        metricQuery,
+        exploreQuery.data,
+        metricFieldQuery.data,
+        comparison,
+        compareMetric,
+    ]);
+
     const queryArgs = useMemo<QueryResultsProps | null>(() => {
         if (!projectUuid || !tableName || !metricQuery) return null;
         return {
@@ -350,8 +428,9 @@ export function useMetricVisualization({
             tableId: tableName,
             query: metricQuery,
             context: QueryExecutionContext.METRICS_EXPLORER,
+            pivotConfiguration,
         };
-    }, [projectUuid, tableName, metricQuery]);
+    }, [projectUuid, tableName, metricQuery, pivotConfiguration]);
 
     const [{ query: createQuery, queryResults }] = useQueryExecutor(
         queryArgs,
@@ -427,7 +506,6 @@ export function useMetricVisualization({
             defaultShowSymbol: firstSerie?.showSymbol,
             defaultAreaStyle: firstSerie?.areaStyle,
             defaultCartesianType: CartesianSeriesType.LINE,
-            availableDimensions: executedMetricQuery?.dimensions ?? [],
             isStacked: false,
             pivotKeys: segmentDimensionId ? [segmentDimensionId] : undefined,
             resultsData: queryResults,
@@ -435,6 +513,7 @@ export function useMetricVisualization({
             yFields: chartConfig.config.layout.yField,
             defaultLabel: firstSerie?.label,
             itemsMap: createQuery.data?.fields ?? {},
+            existingSeries: chartConfig.config.eChartsConfig.series,
         });
 
         const pivotKeys = segmentDimensionId ? [segmentDimensionId] : undefined;
@@ -452,7 +531,6 @@ export function useMetricVisualization({
     }, [
         chartConfig,
         queryResults,
-        executedMetricQuery?.dimensions,
         executedMetricQuery?.sorts,
         segmentDimensionId,
         createQuery.data?.fields,

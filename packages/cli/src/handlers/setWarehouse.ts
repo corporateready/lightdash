@@ -1,15 +1,14 @@
-import {
-    AuthorizationError,
-    type ApiJobStartedResults,
-    type UpdateProject,
-} from '@lightdash/common';
+import { AuthorizationError } from '@lightdash/common';
 import inquirer from 'inquirer';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
 import { getConfig } from '../config';
 import GlobalState from '../globalState';
 import * as styles from '../styles';
 import { loadWarehouseCredentialsFromProfiles } from './createProject';
-import { checkLightdashVersion, lightdashApi } from './dbt/apiClient';
-import { getFinalJobState, getProject } from './dbt/refresh';
+import { checkLightdashVersion } from './dbt/apiClient';
+import { getProject } from './dbt/refresh';
+import { resolveProjectFlag } from './resolveProjectFlag';
+import { updateProjectWarehouseConnection } from './warehouseConnection';
 
 type SetWarehouseHandlerOptions = {
     projectDir: string;
@@ -25,12 +24,12 @@ type SetWarehouseHandlerOptions = {
 
 const resolveProjectUuid = async (projectOption?: string): Promise<string> => {
     if (projectOption) {
-        return projectOption;
+        return resolveProjectFlag(projectOption);
     }
     const config = await getConfig();
     if (!config.context?.project) {
         throw new AuthorizationError(
-            `No project selected. Run 'lightdash config set-project' first or pass '--project <uuid>'.`,
+            `No project selected. Run 'lightdash config set-project' first or pass '--project <uuid or slug>'.`,
         );
     }
     return config.context.project;
@@ -39,6 +38,7 @@ const resolveProjectUuid = async (projectOption?: string): Promise<string> => {
 export const setWarehouseHandler = async (
     options: SetWarehouseHandlerOptions,
 ) => {
+    assertAgentCommandAllowed('set-warehouse');
     GlobalState.setVerbose(options.verbose);
     await checkLightdashVersion();
 
@@ -91,26 +91,11 @@ export const setWarehouseHandler = async (
     );
 
     try {
-        // Build UpdateProject body — preserve existing fields, override warehouseConnection.
-        // Note: dbtConnection from GET response may have stripped secrets, but the backend's
-        // mergeMissingProjectConfigSecrets fills them back in from the saved project before persisting.
-        const updateBody: UpdateProject = {
-            name: existingProject.name,
-            dbtConnection: existingProject.dbtConnection,
-            dbtVersion: existingProject.dbtVersion,
-            warehouseConnection: credentials,
-        };
-
-        // PATCH project — triggers adaptor test + recompile
-        const result = await lightdashApi<ApiJobStartedResults>({
-            method: 'PATCH',
-            url: `/api/v1/projects/${projectUuid}`,
-            body: JSON.stringify(updateBody),
-        });
-
-        // Poll until job completes (custom spinner prefix)
-        await getFinalJobState(result.jobUuid, 'Updating warehouse connection');
-
+        await updateProjectWarehouseConnection(
+            existingProject,
+            credentials,
+            'Updating warehouse connection',
+        );
         spinner.stop();
     } catch (e) {
         spinner.fail();

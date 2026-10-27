@@ -1,0 +1,135 @@
+/**
+ * Developer lessons: one per semantic-layer docs page, practised in the
+ * workspace of a training copy. The generator (scripts/scope-tours/lessons.ts,
+ * buildLessonTours) turns each entry into a tour under its id; the catalogue
+ * lists each as a `docs` module in the Developer group. Only the snippet is
+ * authored here; every sentence the learner reads is a cited docs sentence.
+ *
+ * The snippet is appended to the END of `file` by the editor's tour hook, so
+ * it must be indented to extend the mapping the file ends in. The lesson
+ * compile test (scripts/playground-bundle/learnLessons.test.ts) proves it.
+ */
+/** One docs citation, or several read in order and joined into one body. */
+export type DocsCitation = string | string[];
+
+export type SandboxLesson = {
+    /** `docs:<page path without .mdx>`; doubles as the module and tour key. */
+    id: `docs:${string}`;
+    /** The page the card and the intro cite. */
+    docs: string;
+    /** Citation for the intro step. */
+    intro: DocsCitation;
+    /** Workspace file the tour opens: a model yml in the bundle. */
+    file: string;
+    /**
+     * dbt column of `file` whose key the snippet extends (a metric under its
+     * `metrics:`); absent when the snippet extends the model itself (a new
+     * entry under `columns:`). Named on the cards.
+     */
+    column?: string;
+    /** Citation shown when the file is opened: where metrics live in the YAML. */
+    fileDocs: DocsCitation;
+    /** Appended by "Use it"; must extend the file's last mapping. */
+    /** Starts with the key it extends (`metrics:`), then the entry to add under it. */
+    snippet: string;
+    /** Citation shown with the editor step. */
+    snippetDocs: DocsCitation;
+    /** What the tour types into the terminal. */
+    command: string;
+    /** Citation shown with the command step. */
+    commandDocs: DocsCitation;
+    /** Citation shown while the command runs. */
+    outputDocs: DocsCitation;
+    /** The explore name and field name the learner ends on, not their ids. */
+    result: {
+        explore: string;
+        field: string;
+        /** Which field list the learner finds it in at the end. */
+        kind: 'metric' | 'dimension';
+    };
+    /** Citation on the look at the new field. */
+    resultDocs: DocsCitation;
+    /**
+     * Citation for a closing step on how the change ships in a team (a pull
+     * request whose CI builds the preview); titled from its docs heading.
+     */
+    shipDocs?: DocsCitation;
+};
+
+/*
+ * Both lessons end in a preview, not a deploy: a team's changes reach
+ * production through a pull request and CI, so the learner previews the
+ * change (the training copy is itself a preview project) and the last step
+ * says how a pull request does that for them.
+ */
+// The CLI requires a name for the preview; in the sandbox the learner's
+// copy is that preview, whatever it is called.
+const PREVIEW_COMMAND = 'lightdash start-preview --name my-preview';
+const PREVIEW_COMMAND_DOCS: DocsCitation =
+    'workflow/preview-projects.mdx#lightdash-cli-tool-local:1';
+const PREVIEW_OUTPUT_DOCS: DocsCitation = [
+    'workflow/preview-projects.mdx#intro:p2:1',
+    'workflow/preview-projects.mdx#intro:li1',
+];
+const PREVIEW_SHIP_DOCS: DocsCitation =
+    'workflow/set-up-ci-cd.mdx#add-previews-to-pull-requests:1';
+
+export const SANDBOX_LESSONS: SandboxLesson[] = [
+    {
+        id: 'docs:semantic-layer/metrics',
+        docs: 'semantic-layer/metrics.mdx',
+        intro: [
+            'semantic-layer/metrics.mdx#intro:1-2',
+            'semantic-layer/metrics.mdx#intro:p2:1',
+        ],
+        file: 'models/payments.yml',
+        column: 'amount',
+        fileDocs: 'semantic-layer/metrics.mdx#1-using-the-column-meta-tag:1',
+        snippet: [
+            '            metrics:',
+            '              average_payment_amount:',
+            '                type: average',
+        ].join('\n'),
+        // The section's second paragraph: the first is a glossary entry with
+        // no subject once it leaves the page ("Takes the average...").
+        snippetDocs: 'semantic-layer/metrics.mdx#average:p2:1',
+        command: PREVIEW_COMMAND,
+        commandDocs: PREVIEW_COMMAND_DOCS,
+        outputDocs: PREVIEW_OUTPUT_DOCS,
+        result: {
+            explore: 'payments',
+            field: 'average_payment_amount',
+            kind: 'metric',
+        },
+        resultDocs: 'explore/explore-view.mdx#the-explore-page:li1',
+        shipDocs: PREVIEW_SHIP_DOCS,
+    },
+    {
+        id: 'docs:semantic-layer/dimensions',
+        docs: 'semantic-layer/dimensions.mdx',
+        intro: 'semantic-layer/dimensions.mdx#intro:1',
+        file: 'models/fm_buildings.yml',
+        fileDocs: 'semantic-layer/dimensions.mdx#dimension-configuration:1',
+        // fm_buildings has many table columns its YAML never declares;
+        // declaring one is exactly how a dimension is added.
+        snippet: [
+            '    columns:',
+            '      - name: number_of_floors',
+            '        description: Storeys above ground',
+        ].join('\n'),
+        // Not the page's next sentence: that one proposes `lightdash generate`,
+        // which the sandbox terminal does not offer yet.
+        snippetDocs:
+            'semantic-layer/dimensions.mdx#adding-dimensions-to-your-project:1',
+        command: PREVIEW_COMMAND,
+        commandDocs: PREVIEW_COMMAND_DOCS,
+        outputDocs: PREVIEW_OUTPUT_DOCS,
+        result: {
+            explore: 'fm_buildings',
+            field: 'number_of_floors',
+            kind: 'dimension',
+        },
+        resultDocs: 'explore/explore-view.mdx#the-explore-page:li1',
+        shipDocs: PREVIEW_SHIP_DOCS,
+    },
+];

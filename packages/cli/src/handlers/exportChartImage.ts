@@ -1,11 +1,16 @@
 import { promises as fs } from 'fs';
 import fetch from 'node-fetch';
+import { validate as isValidUuid } from 'uuid';
+import { getConfig } from '../config';
+import { refuseAgentConnection } from '../credentials';
 import GlobalState from '../globalState';
 import * as styles from '../styles';
 import { lightdashApi } from './dbt/apiClient';
+import { resolveProjectFlag } from './resolveProjectFlag';
 
 type ExportChartImageOptions = {
     output: string;
+    project?: string;
     verbose?: boolean;
 };
 
@@ -13,15 +18,31 @@ export const exportChartImageHandler = async (
     chartUuidOrSlug: string,
     options: ExportChartImageOptions,
 ): Promise<void> => {
+    refuseAgentConnection();
     GlobalState.setVerbose(options.verbose ?? false);
 
     const spinner = GlobalState.startSpinner(
         `Exporting chart image for '${chartUuidOrSlug}'...`,
     );
 
+    const isChartUuid = isValidUuid(chartUuidOrSlug);
+    const resolveDefaultProject = async () =>
+        !isChartUuid ? (await getConfig()).context?.project : undefined;
+    const projectUuid = options.project
+        ? await resolveProjectFlag(options.project)
+        : await resolveDefaultProject();
+    if (!projectUuid && !isChartUuid) {
+        throw new Error(
+            'A project is required when exporting by slug. Pass --project <uuid or slug> or select a project first.',
+        );
+    }
+    const projectQuery = projectUuid
+        ? `?projectUuid=${encodeURIComponent(projectUuid)}`
+        : '';
+
     const imageUrl = await lightdashApi<string>({
         method: 'POST',
-        url: `/api/v1/saved/${chartUuidOrSlug}/export`,
+        url: `/api/v1/saved/${chartUuidOrSlug}/export${projectQuery}`,
         body: undefined,
     });
 

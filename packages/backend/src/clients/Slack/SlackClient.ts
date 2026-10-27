@@ -3,6 +3,10 @@ import {
     friendlyName,
     getErrorMessage,
     getSlackErrorCode,
+    getSlackErrorMessages,
+    getSlackFeatureAvailability,
+    getSlackInstallScopes,
+    getSlackInvalidBlockIndices,
     isSlackRateLimitedError,
     isUnrecoverableSlackError,
     MissingConfigError,
@@ -10,6 +14,8 @@ import {
     SlackAppCustomSettings,
     SlackChannel,
     SlackError,
+    SlackFeature,
+    SlackFeatureAvailabilityMap,
     SlackFileUploadError,
     SlackInstallationNotFoundError,
     SlackSettings,
@@ -18,16 +24,17 @@ import {
 } from '@lightdash/common';
 import {
     App,
-    Block,
     ExpressReceiver,
     LogLevel as SlackLogLevel,
     type InstallationStore,
 } from '@slack/bolt';
 import { InstallProvider } from '@slack/oauth';
 import {
+    Block,
     ChatPostMessageArguments,
     ChatUpdateArguments,
     FilesCompleteUploadExternalResponse,
+    KnownBlock,
     WebAPICallResult,
     WebClient,
     type FilesUploadV2Arguments,
@@ -42,6 +49,40 @@ import Logger from '../../logging/logger';
 import { SlackAuthenticationModel } from '../../models/SlackAuthenticationModel';
 import { SlackChannelCacheModel } from '../../models/SlackChannelCacheModel';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
+import {
+    replaceImageBlocksWithNotice,
+    type SlackChartImage,
+} from './SlackMessageBlocks';
+
+export type SlackStreamChunk =
+    | {
+          type: 'markdown_text';
+          text: string;
+      }
+    | {
+          type: 'task_update';
+          id: string;
+          title: string;
+          status: 'pending' | 'in_progress' | 'complete' | 'error';
+          details?: string;
+          output?: string;
+          sources?: Array<{ type: 'url'; text: string; url: string }>;
+      }
+    | {
+          type: 'plan_update';
+          title: string;
+      }
+    | {
+          type: 'blocks';
+          blocks: SlackBlock[];
+      };
+
+export type SlackStreamResponse = WebAPICallResult & {
+    ts?: string;
+    channel?: string;
+};
+
+export type SlackBlock = Block | KnownBlock;
 
 const DEFAULT_CACHE_TIME = 1000 * 60 * 10; // 10 minutes
 const CHANNELS_LIMIT = 200;
@@ -51,16 +92,17 @@ const INITIAL_SYNC_TIMEOUT_MS = 60000; // 60 seconds
 const SYNC_POLL_INTERVAL_MS = 1000; // 1 second
 
 // Slack Tier 2 rate limit throttling configuration
-// Tier 2 allows 20+ requests/minute - we use only 20% to be a good API citizen
+// Tier 2 allows at least 20 requests/minute. Use 60% of that documented minimum
+// to balance sync throughput with headroom for workspace-specific rate limits.
 const TIER_2_REQUESTS_PER_MIN = 20;
-const RATE_LIMIT_USAGE_PERCENT = 0.2; // Use only 20% of the rate limit
+const RATE_LIMIT_USAGE_PERCENT = 0.6;
 const THROTTLE_MIN_DELAY_MS = Math.ceil(
     60000 / (TIER_2_REQUESTS_PER_MIN * RATE_LIMIT_USAGE_PERCENT),
-); // 15000ms = 15 seconds between requests
+); // 5000ms = 5 seconds between requests
 
 /**
  * Creates a throttled executor for Slack API calls.
- * Uses lodash throttle pattern to proactively stay within 20% of Tier 2 rate limits.
+ * Uses lodash throttle pattern to proactively stay within 60% of Tier 2 rate limits.
  * This prevents rate limit errors instead of reacting to them.
  * Includes a simple retry as safety net for unexpected rate limits (e.g., from other integrations).
  */
@@ -87,7 +129,7 @@ const createThrottledSlackExecutor = () => {
         if (lastCallTime > 0 && timeSinceLastCall < THROTTLE_MIN_DELAY_MS) {
             const waitTime = THROTTLE_MIN_DELAY_MS - timeSinceLastCall;
             Logger.debug(
-                `Throttling ${context}: waiting ${waitTime}ms to stay within 20% of Tier 2 rate limit`,
+                `Throttling ${context}: waiting ${waitTime}ms to stay within the Tier 2 rate limit`,
             );
             // eslint-disable-next-line no-await-in-loop
             await sleep(waitTime);
@@ -215,20 +257,42 @@ export class SlackClient {
     }
 
     // eslint-disable-next-line class-methods-use-this
+    protected isCommercial(): boolean {
+        return false;
+    }
+
     public getRequiredScopes() {
-        return [
-            'links:read',
-            'links:write',
-            'chat:write',
-            'chat:write.customize',
-            'channels:read',
-            'groups:read',
-            'users:read',
-            'app_mentions:read',
-            'files:write',
-            'files:read',
-            // 'channels:join', - Made optional since users can manually add the app to channels
-        ];
+        return getSlackInstallScopes(this.isCommercial());
+    }
+
+    public getFeatureAvailability(
+        installationScopes: string[] | undefined,
+    ): SlackFeatureAvailabilityMap {
+        return getSlackFeatureAvailability(
+            installationScopes,
+            this.isCommercial(),
+        );
+    }
+
+    public isFeatureAvailable(
+        installationScopes: string[] | undefined,
+        feature: SlackFeature,
+    ): boolean {
+        return this.getFeatureAvailability(installationScopes)[feature]
+            .available;
+    }
+
+    private getCustomIconArgs(
+        installationScopes: string[] | undefined,
+        appProfilePhotoUrl: string | null | undefined,
+    ): { icon_url: string } | Record<string, never> {
+        if (!appProfilePhotoUrl) return {};
+        return this.isFeatureAvailable(
+            installationScopes,
+            SlackFeature.CUSTOM_APP_PROFILE,
+        )
+            ? { icon_url: appProfilePhotoUrl }
+            : {};
     }
 
     public getSlackOptions() {
@@ -252,6 +316,42 @@ export class SlackClient {
     public hasRequiredScopes(installationScopes: string[]) {
         const requiredScopes = this.getRequiredScopes();
         return without(requiredScopes, ...installationScopes).length === 0;
+    }
+
+    /**
+     * Add an emoji reaction to a Slack message. Requires the bot to have the
+     * `reactions:write` scope in the destination workspace; callers should
+     * treat failures (notably `missing_scope` on workspaces that haven't
+     * re-authorized after this scope was added) as non-fatal.
+     */
+    public async addReaction({
+        organizationUuid,
+        channel,
+        timestamp,
+        name,
+    }: {
+        organizationUuid: string;
+        channel: string;
+        timestamp: string;
+        name: string;
+    }): Promise<void> {
+        const webClient = await this.getWebClient(organizationUuid);
+        await webClient.reactions.add({ channel, timestamp, name });
+    }
+
+    public async removeReaction({
+        organizationUuid,
+        channel,
+        timestamp,
+        name,
+    }: {
+        organizationUuid: string;
+        channel: string;
+        timestamp: string;
+        name: string;
+    }): Promise<void> {
+        const webClient = await this.getWebClient(organizationUuid);
+        await webClient.reactions.remove({ channel, timestamp, name });
     }
 
     async getWebClient(organizationUuid: string): Promise<WebClient> {
@@ -536,15 +636,17 @@ export class SlackClient {
             };
         }
 
-        if (!this.hasRequiredScopes(installation.scopes)) {
-            const currentScopes = installation.scopes.join(', ');
-            const requiredScopes = this.getRequiredScopes().join(', ');
+        const deliveries = this.getFeatureAvailability(
+            installation.scopes,
+        ).scheduledDeliveries;
+        if (!deliveries.available) {
+            const missing = deliveries.missingScopes.join(', ');
             Logger.debug(
-                `Skipping Slack channel sync for organization ${organizationUuid}: missing required scopes. Has: [${currentScopes}], needs: [${requiredScopes}]`,
+                `Skipping Slack channel sync for organization ${organizationUuid}: missing scopes [${missing}]`,
             );
             return {
                 status: 'skipped',
-                reason: 'Missing required Slack scopes - user needs to re-install',
+                reason: `Missing Slack scopes for scheduled deliveries: ${missing}. Reinstall the Slack app to grant them.`,
                 totalChannels: 0,
             };
         }
@@ -899,7 +1001,10 @@ export class SlackClient {
             throw new SlackInstallationNotFoundError();
         }
 
-        const { appProfilePhotoUrl } = installation;
+        const customIconArgs = this.getCustomIconArgs(
+            installation.scopes,
+            installation.appProfilePhotoUrl,
+        );
 
         // Resolve channel name to ID for reliable API calls (critical for private channels)
         const resolvedChannel = await this.resolveChannelToId(
@@ -909,18 +1014,81 @@ export class SlackClient {
 
         return webClient.chat
             .postMessage({
-                ...(appProfilePhotoUrl ? { icon_url: appProfilePhotoUrl } : {}),
+                ...customIconArgs,
                 channel: resolvedChannel,
                 ...slackMessageArgs,
             })
-            .catch((e) => {
-                if (getSlackErrorCode(e) === 'invalid_blocks') {
+            .catch(async (e) => {
+                const errorCode = getSlackErrorCode(e);
+                // Slack rejects the whole message when it dislikes the custom
+                // icon URL (e.g. a signed or expired CDN link). The icon is
+                // cosmetic, so deliver with the default icon rather than fail.
+                if (
+                    errorCode === 'invalid_arguments' &&
+                    'icon_url' in customIconArgs
+                ) {
+                    Logger.warn(
+                        `Slack rejected the custom app icon for organization ${organizationUuid}, retrying with the default icon: ${getSlackErrorMessages(
+                            e,
+                        ).join('; ')}`,
+                    );
+                    return webClient.chat
+                        .postMessage({
+                            channel: resolvedChannel,
+                            ...slackMessageArgs,
+                        })
+                        .catch((retryError) => {
+                            slackErrorHandler(
+                                retryError,
+                                'Unable to post message on Slack without custom icon',
+                            );
+                            throw retryError;
+                        });
+                }
+                if (errorCode === 'invalid_blocks') {
+                    const { blocks } = slackMessageArgs;
+                    const rejectedIndices = getSlackInvalidBlockIndices(e);
                     Logger.error(
                         `Slack invalid_blocks error for channel ${channel}`,
                         {
-                            blocks: JSON.stringify(slackMessageArgs.blocks),
+                            blockTypes: blocks?.map((block) => block.type),
+                            rejectedIndices,
                         },
                     );
+                    // Slack points at the rejected blocks in the error
+                    // metadata. When every rejected block is an image (e.g.
+                    // Slack can't fetch the image URL), retry once with
+                    // those blocks swapped for a notice so the message still
+                    // delivers. Any other rejected block means the message
+                    // itself is malformed — retrying wouldn't help.
+                    const onlyImagesRejected =
+                        blocks !== undefined &&
+                        rejectedIndices.length > 0 &&
+                        rejectedIndices.every(
+                            (index) => blocks[index]?.type === 'image',
+                        );
+                    if (onlyImagesRejected) {
+                        Logger.info(
+                            `Retrying Slack message without rejected image blocks for channel ${channel}`,
+                        );
+                        return webClient.chat
+                            .postMessage({
+                                ...customIconArgs,
+                                channel: resolvedChannel,
+                                ...slackMessageArgs,
+                                blocks: replaceImageBlocksWithNotice(
+                                    blocks,
+                                    rejectedIndices,
+                                ),
+                            })
+                            .catch((retryError) => {
+                                slackErrorHandler(
+                                    retryError,
+                                    'Unable to post message on Slack without image blocks',
+                                );
+                                throw retryError;
+                            });
+                    }
                 }
                 slackErrorHandler(e, 'Unable to post message on Slack');
                 throw e;
@@ -943,6 +1111,14 @@ export class SlackClient {
         );
 
         if (channelId && channelId !== currentChannelId) {
+            const installation =
+                await this.slackAuthenticationModel.getInstallationFromOrganizationUuid(
+                    organizationUuid,
+                );
+            const customIconArgs = this.getCustomIconArgs(
+                installation?.scopes,
+                appProfilePhotoUrl,
+            );
             await this.joinChannels(organizationUuid, [channelId]);
             await webClient.chat
                 .postMessage({
@@ -950,9 +1126,7 @@ export class SlackClient {
                     text: `This channel will now receive notifications for failed scheduled delivery jobs in Lightdash. Configuration completed${
                         userFullName.trim().length ? ` by ${userFullName}` : ''
                     }. Stay informed on your job status here.`,
-                    ...(appProfilePhotoUrl
-                        ? { icon_url: appProfilePhotoUrl }
-                        : {}),
+                    ...customIconArgs,
                 })
                 .catch((e) => {
                     slackErrorHandler(
@@ -982,7 +1156,7 @@ export class SlackClient {
     }: {
         organizationUuid: string;
         text: string;
-        blocks?: Block[];
+        blocks?: SlackBlock[];
     }): Promise<void> {
         try {
             const channelId =
@@ -1031,6 +1205,179 @@ export class SlackClient {
             text,
             blocks,
             ts: messageTs,
+        });
+    }
+
+    async setAssistantStatus({
+        organizationUuid,
+        channelId,
+        threadTs,
+        status,
+        loadingMessages,
+    }: {
+        organizationUuid: string;
+        channelId: string;
+        threadTs: string;
+        status: string;
+        loadingMessages?: string[];
+    }) {
+        const webClient = await this.getWebClient(organizationUuid);
+        const resolvedChannel = await this.resolveChannelToId(
+            organizationUuid,
+            channelId,
+        );
+        return webClient.apiCall('assistant.threads.setStatus', {
+            channel_id: resolvedChannel,
+            thread_ts: threadTs,
+            status,
+            ...(loadingMessages ? { loading_messages: loadingMessages } : {}),
+        });
+    }
+
+    async setAssistantTitle({
+        organizationUuid,
+        channelId,
+        threadTs,
+        title,
+    }: {
+        organizationUuid: string;
+        channelId: string;
+        threadTs: string;
+        title: string;
+    }) {
+        const webClient = await this.getWebClient(organizationUuid);
+        const resolvedChannel = await this.resolveChannelToId(
+            organizationUuid,
+            channelId,
+        );
+        return webClient.apiCall('assistant.threads.setTitle', {
+            channel_id: resolvedChannel,
+            thread_ts: threadTs,
+            title,
+        });
+    }
+
+    async setSuggestedPrompts({
+        organizationUuid,
+        channelId,
+        threadTs,
+        title,
+        prompts,
+    }: {
+        organizationUuid: string;
+        channelId: string;
+        threadTs: string;
+        title: string;
+        prompts: Array<{ title: string; message: string }>;
+    }) {
+        const webClient = await this.getWebClient(organizationUuid);
+        const resolvedChannel = await this.resolveChannelToId(
+            organizationUuid,
+            channelId,
+        );
+        return webClient.apiCall('assistant.threads.setSuggestedPrompts', {
+            channel_id: resolvedChannel,
+            thread_ts: threadTs,
+            title,
+            prompts,
+        });
+    }
+
+    async startAgentStream({
+        organizationUuid,
+        channelId,
+        threadTs,
+        username,
+        recipientUserId,
+        chunks,
+    }: {
+        organizationUuid: string;
+        channelId: string;
+        threadTs: string;
+        username?: string;
+        recipientUserId?: string;
+        chunks?: SlackStreamChunk[];
+    }): Promise<SlackStreamResponse> {
+        const webClient = await this.getWebClient(organizationUuid);
+        const resolvedChannel = await this.resolveChannelToId(
+            organizationUuid,
+            channelId,
+        );
+        const recipientArgs =
+            recipientUserId && !resolvedChannel.startsWith('D')
+                ? {
+                      recipient_user_id: recipientUserId,
+                      recipient_team_id:
+                          await this.slackAuthenticationModel.getSlackTeamIdFromOrganizationUuid(
+                              organizationUuid,
+                          ),
+                  }
+                : {};
+        return webClient.apiCall('chat.startStream', {
+            channel: resolvedChannel,
+            thread_ts: threadTs,
+            task_display_mode: 'plan',
+            ...recipientArgs,
+            ...(username ? { username } : {}),
+            ...(chunks ? { chunks } : {}),
+        });
+    }
+
+    async appendAgentStream({
+        organizationUuid,
+        channelId,
+        threadTs,
+        messageTs,
+        chunks,
+    }: {
+        organizationUuid: string;
+        channelId: string;
+        threadTs: string;
+        messageTs: string;
+        chunks: SlackStreamChunk[];
+    }): Promise<SlackStreamResponse> {
+        const webClient = await this.getWebClient(organizationUuid);
+        const resolvedChannel = await this.resolveChannelToId(
+            organizationUuid,
+            channelId,
+        );
+        return webClient.apiCall('chat.appendStream', {
+            channel: resolvedChannel,
+            thread_ts: threadTs,
+            ts: messageTs,
+            chunks,
+        });
+    }
+
+    async stopAgentStream({
+        organizationUuid,
+        channelId,
+        threadTs,
+        messageTs,
+        text,
+        blocks,
+        chunks,
+    }: {
+        organizationUuid: string;
+        channelId: string;
+        threadTs: string;
+        messageTs: string;
+        text?: string;
+        blocks?: SlackBlock[];
+        chunks?: SlackStreamChunk[];
+    }): Promise<SlackStreamResponse> {
+        const webClient = await this.getWebClient(organizationUuid);
+        const resolvedChannel = await this.resolveChannelToId(
+            organizationUuid,
+            channelId,
+        );
+        return webClient.apiCall('chat.stopStream', {
+            channel: resolvedChannel,
+            thread_ts: threadTs,
+            ts: messageTs,
+            ...(text && !chunks ? { markdown_text: text } : {}),
+            ...(blocks && !chunks ? { blocks } : {}),
+            ...(chunks ? { chunks } : {}),
         });
     }
 
@@ -1105,14 +1452,13 @@ export class SlackClient {
     /*
     This method will try to upload an image to slack, so it can be used in blocks,
     instead of sharing the file directly on a channel or a thread
-    It returns a promise that resolves to the file url, but it takes a while for the file to be uploaded
     Note: method sharedPublicURL will not work here because it requires a user token, and we only use bot tokens
     */
     async uploadFile(args: {
         organizationUuid: string;
         file: Buffer;
         title: string;
-    }) {
+    }): Promise<{ id: string; url: string }> {
         const webClient = await this.getWebClient(args.organizationUuid);
         const filename = friendlyName(args.title);
         const result = (await webClient.files.uploadV2({
@@ -1160,9 +1506,9 @@ export class SlackClient {
             return checkFile(0);
         }
 
-        const fileUrl = await waitForFileReady(uploadedFile?.id);
+        const fileUrl = await waitForFileReady(uploadedFile.id);
 
-        return fileUrl;
+        return { id: uploadedFile.id, url: fileUrl };
     }
 
     async getUserInfo(
@@ -1230,33 +1576,46 @@ export class SlackClient {
     }
 
     /**
-     * Helper method to try to upload an image to slack, so it can be used in blocks without expiration
-     * If it fails, we will keep using the same URL (s3)
+     * Helper method to try to upload an image to slack, so blocks can reference
+     * it by file id — no public URL and no expiration. If the upload fails we
+     * fall back to the external URL, which requires the instance to be
+     * reachable by Slack's servers.
      */
-    async tryUploadingImageToSlack(
-        organizationUuid: string,
-        imageUrl: string | undefined,
-        name: string,
-    ) {
+    async tryUploadingImageToSlack(args: {
+        organizationUuid: string;
+        imageUrl: string | undefined;
+        imageBuffer: Buffer | undefined;
+        title: string;
+    }): Promise<SlackChartImage | undefined> {
+        const { organizationUuid, imageUrl, imageBuffer, title } = args;
+        const fallback: SlackChartImage | undefined = imageUrl
+            ? { source: 'url', url: imageUrl }
+            : undefined;
         try {
-            if (!imageUrl) {
-                return { url: imageUrl, expiring: true };
+            let buffer = imageBuffer;
+            if (buffer === undefined) {
+                if (!imageUrl) return undefined;
+                const response = await fetch(imageUrl);
+                if (!response.ok) {
+                    throw new SlackFileUploadError(
+                        `Failed to fetch image for Slack upload (status ${response.status})`,
+                    );
+                }
+                buffer = Buffer.from(await response.arrayBuffer());
             }
-            const response = await fetch(imageUrl);
-            const buffer = Buffer.from(await response.arrayBuffer());
-            const slackFileUrl = await this.uploadFile({
+            const { id } = await this.uploadFile({
                 organizationUuid,
                 file: buffer,
-                title: name,
+                title,
             });
-            return { url: slackFileUrl, expiring: false };
+            return { source: 'slackFile', fileId: id };
         } catch (e) {
             if (e instanceof SlackFileUploadError) {
                 Logger.warn(e.message);
             } else {
                 slackErrorHandler(e, 'Failed to upload image to slack');
             }
-            return { url: imageUrl, expiring: true };
+            return fallback;
         }
     }
 

@@ -1,202 +1,646 @@
 import {
-    AllChartsSearchResult,
+    assertUnreachable,
     ContentVerificationInfo,
-    DashboardSearchResult,
-    isDashboardSearchResult,
-    isSavedChartSearchResult,
-    isSqlChartSearchResult,
-    toolFindContentArgsSchema,
-    toolFindContentOutputSchema,
+    findContentToolDefinition,
+    getFindContentToolDescription,
+    type ToolFindContentCompactSearchResult,
+    type ToolFindContentSearchResult,
+    type ToolFindContentStructuredContent,
 } from '@lightdash/common';
 import { tool } from 'ai';
 import moment from 'moment';
-import type { FindContentFn } from '../types/aiAgentDependencies';
+import type { AiAgentFindContentCoverage } from '../../../../analytics/LightdashAnalytics';
+import type { AiDecisionClient } from '../decisions/AiDecisionClient';
+import { rankCandidates } from '../decisions/rankCandidates';
+import type {
+    FindContentChartResult,
+    FindContentDashboardResult,
+    FindContentDataAppResult,
+    FindContentFn,
+    FindContentResult,
+    FindContentSpaceMetadata,
+    FindContentSpaceResult,
+} from '../types/aiAgentDependencies';
+import type {
+    ExecuteStructuredToolResult,
+    ExecuteToolErrorResult,
+} from '../utils/structuredToolResult';
 import { toModelOutput } from '../utils/toModelOutput';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
-import {
-    CONTENT_DESCRIPTION_MAX_CHARS,
-    DASHBOARD_CHARTS_PREVIEW_COUNT,
-    truncate,
-} from '../utils/truncation';
-import { xmlBuilder } from '../xmlBuilder';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
+import { DASHBOARD_CHARTS_PREVIEW_COUNT, truncate } from '../utils/truncation';
+import { escapeXmlText, xmlBuilder } from '../xmlBuilder';
 
-const renderVerified = (verification: ContentVerificationInfo | null) =>
+type SearchResult = ToolFindContentSearchResult;
+type ContentItem = SearchResult['content'][number];
+type ContentItemOf<T extends ContentItem['contentType']> = Extract<
+    ContentItem,
+    { contentType: T }
+>;
+type SpaceMetadata = ContentItemOf<'space'>['space'];
+type Verification = ContentItemOf<'chart'>['verification'];
+
+const NO_VERIFIED_CONTENT_NOTE =
+    'No verified content matched this query. Verified content may still exist under other search terms; re-run with verifiedOnly=false only if unverified content is acceptable.';
+const COMPACT_NO_VERIFIED_CONTENT_NOTE =
+    'No verified content matched this query. Try other search terms; use verifiedOnly=false only if unverified content is acceptable.';
+const COMPACT_TRUNCATION_NOTE =
+    'More matches were omitted. Narrow the search query or spaceSlug if the intended item is missing; this is not an exhaustive inventory.';
+const COMPACT_SHOWN_COUNT = 8;
+const COMPACT_DESCRIPTION_MAX_CHARS = 200;
+
+type Dependencies = {
+    decisions?: Pick<AiDecisionClient, 'evaluate'>;
+    findContent: FindContentFn;
+    siteUrl: string;
+    toolDescriptionMaxChars: number;
+    trackCoverage: (coverage: AiAgentFindContentCoverage) => void;
+    dashboardDetailsToolName: 'getDashboardCharts' | 'readContent';
+};
+
+const toolDefinition = findContentToolDefinition.for('agent');
+
+const fullName = (user: { firstName: string; lastName: string }) =>
+    `${user.firstName} ${user.lastName}`;
+
+const verifiedFirst = <T extends { verification: unknown }>(items: T[]) =>
+    [...items].sort(
+        (a, b) =>
+            Number(b.verification !== null) - Number(a.verification !== null),
+    );
+
+const toDescription = (
+    description: string | null | undefined,
+    toolDescriptionMaxChars: number,
+) => (description ? truncate(description, toolDescriptionMaxChars) : null);
+
+const toVerification = (
+    verification: ContentVerificationInfo | null,
+): Verification =>
+    verification
+        ? {
+              verifiedBy: fullName(verification.verifiedBy),
+              verifiedAt: new Date(verification.verifiedAt).toISOString(),
+              verifiedAgo: moment(verification.verifiedAt).fromNow(),
+          }
+        : null;
+
+// Search rows carry timestamps as Date objects despite their string type.
+const toTimestamp = (timestamp: string | null): string | null =>
+    timestamp ? new Date(timestamp).toISOString() : null;
+
+const toSpaceMetadata = (space: FindContentSpaceMetadata): SpaceMetadata => ({
+    uuid: space.uuid,
+    name: space.name,
+    slug: space.slug,
+    breadcrumb: space.breadcrumbs.map((item) => item.name).join(' / '),
+});
+
+const toSpaceItem = (
+    space: FindContentSpaceResult,
+): ContentItemOf<'space'> => ({
+    contentType: 'space',
+    uuid: space.uuid,
+    name: space.name,
+    slug: space.slug,
+    searchRank: space.search_rank,
+    chartCount: space.chartCount,
+    dashboardCount: space.dashboardCount,
+    childSpaceCount: space.childSpaceCount,
+    appCount: space.appCount,
+    directAccess: space.directAccess,
+    canEdit: space.canEdit,
+    space: toSpaceMetadata(space.space),
+});
+
+const chartHref = (chart: FindContentChartResult, siteUrl: string) => {
+    switch (chart.chartSource) {
+        case 'saved':
+            return `${siteUrl}/projects/${chart.projectUuid}/saved/${chart.uuid}/view#chart-link#chart-type-${chart.chartType}`;
+        case 'sql':
+            return `${siteUrl}/projects/${chart.projectUuid}/sql-runner/${chart.slug}#chart-link#chart-type-${chart.chartType}`;
+        default:
+            return assertUnreachable(chart.chartSource, 'Unknown chart source');
+    }
+};
+
+const toChartItem = (
+    chart: FindContentChartResult,
+    siteUrl: string,
+    toolDescriptionMaxChars: number,
+): ContentItemOf<'chart'> => ({
+    contentType: 'chart',
+    uuid: chart.uuid,
+    name: chart.name,
+    slug: chart.slug,
+    searchRank: chart.search_rank,
+    chartType: chart.chartType,
+    chartSource: chart.chartSource,
+    spaceUuid: chart.spaceUuid,
+    viewsCount: chart.viewsCount,
+    href: chartHref(chart, siteUrl),
+    space: toSpaceMetadata(chart.space),
+    description: toDescription(chart.description, toolDescriptionMaxChars),
+    verification: toVerification(chart.verification),
+    firstViewedAt: toTimestamp(chart.firstViewedAt),
+    firstViewedAgo: chart.firstViewedAt
+        ? moment(toTimestamp(chart.firstViewedAt)).fromNow()
+        : null,
+    lastModified: toTimestamp(chart.lastModified),
+    lastModifiedAgo: chart.lastModified
+        ? moment(toTimestamp(chart.lastModified)).fromNow()
+        : null,
+    createdBy: chart.createdBy ? fullName(chart.createdBy) : null,
+    lastUpdatedBy: chart.lastUpdatedBy ? fullName(chart.lastUpdatedBy) : null,
+});
+
+const toDashboardItem = (
+    dashboard: FindContentDashboardResult,
+    siteUrl: string,
+    toolDescriptionMaxChars: number,
+): ContentItemOf<'dashboard'> => ({
+    contentType: 'dashboard',
+    uuid: dashboard.uuid,
+    name: dashboard.name,
+    slug: dashboard.slug,
+    searchRank: dashboard.search_rank,
+    spaceUuid: dashboard.spaceUuid,
+    viewsCount: dashboard.viewsCount,
+    href: `${siteUrl}/projects/${dashboard.projectUuid}/dashboards/${dashboard.uuid}/view#dashboard-link`,
+    space: toSpaceMetadata(dashboard.space),
+    description: toDescription(dashboard.description, toolDescriptionMaxChars),
+    verification: toVerification(dashboard.verification),
+    firstViewedAt: toTimestamp(dashboard.firstViewedAt),
+    firstViewedAgo: dashboard.firstViewedAt
+        ? moment(toTimestamp(dashboard.firstViewedAt)).fromNow()
+        : null,
+    lastModified: toTimestamp(dashboard.lastModified),
+    lastModifiedAgo: dashboard.lastModified
+        ? moment(toTimestamp(dashboard.lastModified)).fromNow()
+        : null,
+    createdBy: dashboard.createdBy ? fullName(dashboard.createdBy) : null,
+    lastUpdatedBy: dashboard.lastUpdatedBy
+        ? fullName(dashboard.lastUpdatedBy)
+        : null,
+    charts: {
+        count: dashboard.charts.length,
+        preview: verifiedFirst(dashboard.charts)
+            .slice(0, DASHBOARD_CHARTS_PREVIEW_COUNT)
+            .map((chart) => ({
+                uuid: chart.uuid,
+                name: chart.name,
+                chartType: chart.chartType,
+                description: toDescription(
+                    chart.description,
+                    toolDescriptionMaxChars,
+                ),
+                verification: toVerification(chart.verification),
+            })),
+    },
+    validationErrorCount: dashboard.validationErrors.length,
+});
+
+const toDataAppItem = (
+    dataApp: FindContentDataAppResult,
+    siteUrl: string,
+    toolDescriptionMaxChars: number,
+): ContentItemOf<'data_app'> => ({
+    contentType: 'data_app',
+    uuid: dataApp.uuid,
+    name: dataApp.name,
+    slug: dataApp.slug,
+    searchRank: dataApp.search_rank,
+    spaceUuid: dataApp.spaceUuid,
+    viewsCount: dataApp.viewsCount,
+    href: `${siteUrl}/projects/${dataApp.projectUuid}/apps/${dataApp.uuid}/view`,
+    space: dataApp.space ? toSpaceMetadata(dataApp.space) : null,
+    description: toDescription(dataApp.description, toolDescriptionMaxChars),
+    createdBy: dataApp.createdBy ? fullName(dataApp.createdBy) : null,
+});
+
+const toContentItem = (
+    content: FindContentResult,
+    siteUrl: string,
+    toolDescriptionMaxChars: number,
+    compact: boolean,
+): ContentItem => {
+    switch (content.contentType) {
+        case 'document':
+            return {
+                contentType: 'document',
+                uuid: content.uuid,
+                name: content.name,
+                slug: content.slug,
+                href: content.href,
+                description: toDescription(
+                    content.description,
+                    toolDescriptionMaxChars,
+                ),
+                space:
+                    compact && content.space
+                        ? toSpaceMetadata(content.space)
+                        : null,
+            };
+        case 'space':
+            return toSpaceItem(content);
+        case 'data_app':
+            return toDataAppItem(content, siteUrl, toolDescriptionMaxChars);
+        case 'dashboard':
+            return toDashboardItem(content, siteUrl, toolDescriptionMaxChars);
+        case 'chart':
+            return toChartItem(content, siteUrl, toolDescriptionMaxChars);
+        default:
+            return assertUnreachable(content, 'Unknown content type');
+    }
+};
+
+const toCompactContentItem = (
+    content: ContentItem,
+): ToolFindContentCompactSearchResult['content'][number] => {
+    switch (content.contentType) {
+        case 'space':
+            return content;
+        case 'document':
+            return {
+                ...content,
+                description: content.description || null,
+            };
+        case 'data_app':
+            return {
+                contentType: content.contentType,
+                uuid: content.uuid,
+                name: content.name,
+                slug: content.slug,
+                spaceUuid: content.spaceUuid,
+                href: content.href,
+                space: content.space,
+                description: content.description || null,
+            };
+        case 'dashboard':
+            return {
+                contentType: content.contentType,
+                uuid: content.uuid,
+                name: content.name,
+                slug: content.slug,
+                spaceUuid: content.spaceUuid,
+                href: content.href,
+                space: content.space,
+                description: content.description || null,
+                verification: content.verification,
+                charts: { count: content.charts.count },
+                validationErrorCount: content.validationErrorCount,
+            };
+        case 'chart':
+            return {
+                contentType: content.contentType,
+                uuid: content.uuid,
+                name: content.name,
+                slug: content.slug,
+                chartType: content.chartType,
+                chartSource: content.chartSource,
+                spaceUuid: content.spaceUuid,
+                href: content.href,
+                space: content.space,
+                description: content.description || null,
+                verification: content.verification,
+            };
+        default:
+            return assertUnreachable(content, 'Unknown content type');
+    }
+};
+
+const toSearchResult = (
+    args: Awaited<ReturnType<FindContentFn>> & {
+        searchQuery: string;
+        verifiedOnly: boolean;
+    },
+    siteUrl: string,
+    toolDescriptionMaxChars: number,
+    compact: boolean,
+): SearchResult => {
+    // Order is decided by the caller (verified-first, then optional ranking).
+    const matches = compact
+        ? args.content.slice(0, COMPACT_SHOWN_COUNT)
+        : args.content;
+    const noVerifiedContentNote = compact
+        ? COMPACT_NO_VERIFIED_CONTENT_NOTE
+        : NO_VERIFIED_CONTENT_NOTE;
+    const content = matches.map((item) =>
+        toContentItem(
+            item,
+            siteUrl,
+            compact
+                ? Math.min(
+                      toolDescriptionMaxChars,
+                      COMPACT_DESCRIPTION_MAX_CHARS,
+                  )
+                : toolDescriptionMaxChars,
+            compact,
+        ),
+    );
+    return {
+        searchQuery: args.searchQuery,
+        count: args.content.length,
+        note:
+            args.verifiedOnly && content.length === 0
+                ? noVerifiedContentNote
+                : null,
+        truncationNote:
+            compact && args.content.length > COMPACT_SHOWN_COUNT
+                ? COMPACT_TRUNCATION_NOTE
+                : null,
+        content,
+    };
+};
+
+const renderVerified = (verification: Verification) =>
     verification ? (
         <verified
-            by={`${verification.verifiedBy.firstName} ${verification.verifiedBy.lastName}`}
-            at={moment(verification.verifiedAt).fromNow()}
+            by={verification.verifiedBy}
+            at={verification.verifiedAgo}
+            iso={new Date(verification.verifiedAt).toISOString()}
         />
     ) : null;
 
-type Dependencies = {
-    findContent: FindContentFn;
-    siteUrl: string;
-    trackCoverage: (coverage: {
-        searchQuery: string;
-        totalResultCount: number;
-        verifiedResultCount: number;
-        topResultVerified: boolean;
-    }) => void;
-};
+const renderSpaceMetadata = (space: SpaceMetadata) => (
+    <space
+        uuid={space.uuid}
+        name={space.name}
+        slug={space.slug}
+        breadcrumb={space.breadcrumb}
+    />
+);
 
-const renderChart = (chart: AllChartsSearchResult, siteUrl: string) => {
-    const isSavedChart = isSavedChartSearchResult(chart);
-    const isSqlChart = isSqlChartSearchResult(chart);
+const renderSpace = (space: ContentItemOf<'space'>) => (
+    <spaceResult
+        spaceUuid={space.uuid}
+        slug={space.slug}
+        searchRank={space.searchRank}
+        chartCount={space.chartCount}
+        dashboardCount={space.dashboardCount}
+        childSpaceCount={space.childSpaceCount}
+        appCount={space.appCount}
+        directAccess={space.directAccess}
+        canEdit={space.canEdit}
+    >
+        <name>{space.name}</name>
+        {renderSpaceMetadata(space.space)}
+    </spaceResult>
+);
 
-    let chartUrl: string | undefined;
-    if (isSavedChart) {
-        chartUrl = `${siteUrl}/projects/${chart.projectUuid}/saved/${chart.uuid}/view#chart-link#chart-type-${chart.chartType}`;
-    } else if (isSqlChart) {
-        chartUrl = `${siteUrl}/projects/${chart.projectUuid}/sql-runner/${chart.slug}#chart-link#chart-type-${chart.chartType}`;
-    }
+const renderChart = (chart: ContentItemOf<'chart'>) => (
+    <chart
+        chartUuid={chart.uuid}
+        slug={chart.slug}
+        searchRank={chart.searchRank}
+        chartType={chart.chartType}
+        chartSource={chart.chartSource}
+        spaceUuid={chart.spaceUuid}
+        viewsCount={chart.viewsCount}
+        href={chart.href}
+    >
+        <name>{chart.name}</name>
+        {renderSpaceMetadata(chart.space)}
+        {chart.description !== null && (
+            <description>{chart.description}</description>
+        )}
+        {renderVerified(chart.verification)}
+        {chart.firstViewedAt && (
+            <firstviewedat iso={new Date(chart.firstViewedAt).toISOString()}>
+                {chart.firstViewedAgo}
+            </firstviewedat>
+        )}
+        {chart.lastModified && (
+            <lastmodified iso={new Date(chart.lastModified).toISOString()}>
+                {chart.lastModifiedAgo}
+            </lastmodified>
+        )}
+        {chart.createdBy && <createdby>{chart.createdBy}</createdby>}
+        {chart.lastUpdatedBy && (
+            <lastupdatedby>{chart.lastUpdatedBy}</lastupdatedby>
+        )}
+    </chart>
+);
 
-    return (
-        <chart
-            chartUuid={chart.uuid}
-            slug={chart.slug}
-            searchRank={chart.search_rank}
-            chartType={chart.chartType}
-            chartSource={chart.chartSource}
-            spaceUuid={chart.spaceUuid}
-            viewsCount={chart.viewsCount}
-            href={chartUrl}
-        >
-            <name>{chart.name}</name>
-            {chart.description && (
-                <description>
-                    {truncate(chart.description, CONTENT_DESCRIPTION_MAX_CHARS)}
-                </description>
-            )}
-            {renderVerified(chart.verification)}
-            {chart.firstViewedAt && (
-                <firstviewedat>
-                    {moment(chart.firstViewedAt).fromNow()}
-                </firstviewedat>
-            )}
-            {chart.lastModified && (
-                <lastmodified>
-                    {moment(chart.lastModified).fromNow()}
-                </lastmodified>
-            )}
-            {chart.createdBy && (
-                <createdby>
-                    {`${chart.createdBy.firstName} ${chart.createdBy.lastName}`}
-                </createdby>
-            )}
-            {chart.lastUpdatedBy && (
-                <lastupdatedby>
-                    {`${chart.lastUpdatedBy.firstName} ${chart.lastUpdatedBy.lastName}`}
-                </lastupdatedby>
-            )}
-        </chart>
-    );
-};
-
-const renderDashboard = (dashboard: DashboardSearchResult, siteUrl: string) => (
+const renderDashboard = (dashboard: ContentItemOf<'dashboard'>) => (
     <dashboard
         dashboardUuid={dashboard.uuid}
         slug={dashboard.slug}
         spaceUuid={dashboard.spaceUuid}
         viewCount={dashboard.viewsCount}
-        href={`${siteUrl}/projects/${dashboard.projectUuid}/dashboards/${dashboard.uuid}/view#dashboard-link`}
+        href={dashboard.href}
     >
         <name>{dashboard.name}</name>
-        <searchrank>{dashboard.search_rank}</searchrank>
+        <searchrank>{dashboard.searchRank}</searchrank>
+        {renderSpaceMetadata(dashboard.space)}
 
-        {dashboard.description && (
-            <description>
-                {truncate(dashboard.description, CONTENT_DESCRIPTION_MAX_CHARS)}
-            </description>
+        {dashboard.description !== null && (
+            <description>{dashboard.description}</description>
         )}
         {renderVerified(dashboard.verification)}
 
         {dashboard.firstViewedAt && (
-            <firstviewedat>
-                {moment(dashboard.firstViewedAt).fromNow()}
+            <firstviewedat
+                iso={new Date(dashboard.firstViewedAt).toISOString()}
+            >
+                {dashboard.firstViewedAgo}
             </firstviewedat>
         )}
 
         {dashboard.lastModified && (
-            <lastmodified>
-                {moment(dashboard.lastModified).fromNow()}
+            <lastmodified iso={new Date(dashboard.lastModified).toISOString()}>
+                {dashboard.lastModifiedAgo}
             </lastmodified>
         )}
-        {dashboard.createdBy && (
-            <createdby>
-                {`${dashboard.createdBy.firstName} ${dashboard.createdBy.lastName}`}
-            </createdby>
-        )}
+        {dashboard.createdBy && <createdby>{dashboard.createdBy}</createdby>}
         {dashboard.lastUpdatedBy && (
-            <lastupdatedby>
-                {`${dashboard.lastUpdatedBy.firstName} ${dashboard.lastUpdatedBy.lastName}`}
-            </lastupdatedby>
+            <lastupdatedby>{dashboard.lastUpdatedBy}</lastupdatedby>
         )}
-        <charts count={dashboard.charts.length}>
-            {[...dashboard.charts]
-                .sort(
-                    (a, b) =>
-                        Number(b.verification !== null) -
-                        Number(a.verification !== null),
-                )
-                .slice(0, DASHBOARD_CHARTS_PREVIEW_COUNT)
-                .map((chart) => (
-                    <chart chartUuid={chart.uuid} chartType={chart.chartType}>
-                        <name>{chart.name}</name>
-                        {chart.description && (
-                            <description>
-                                {truncate(
-                                    chart.description,
-                                    CONTENT_DESCRIPTION_MAX_CHARS,
-                                )}
-                            </description>
-                        )}
-                        {renderVerified(chart.verification)}
-                    </chart>
-                ))}
+        <charts count={dashboard.charts.count}>
+            {dashboard.charts.preview.map((chart) => (
+                <chart chartUuid={chart.uuid} chartType={chart.chartType}>
+                    <name>{chart.name}</name>
+                    {chart.description !== null && (
+                        <description>{chart.description}</description>
+                    )}
+                    {renderVerified(chart.verification)}
+                </chart>
+            ))}
         </charts>
-        {dashboard.validationErrors && dashboard.validationErrors.length > 0 ? (
-            <validationerrors count={dashboard.validationErrors.length} />
+        {dashboard.validationErrorCount > 0 ? (
+            <validationerrors count={dashboard.validationErrorCount} />
         ) : null}
     </dashboard>
 );
 
-const renderContent = (
-    args: Awaited<ReturnType<FindContentFn>> & { searchQuery: string },
-    siteUrl: string,
+const renderDataApp = (dataApp: ContentItemOf<'data_app'>) => (
+    <dataApp
+        dataAppUuid={dataApp.uuid}
+        slug={dataApp.slug}
+        searchRank={dataApp.searchRank}
+        spaceUuid={dataApp.spaceUuid}
+        viewsCount={dataApp.viewsCount}
+        href={dataApp.href}
+    >
+        <name>{dataApp.name}</name>
+        {dataApp.space && renderSpaceMetadata(dataApp.space)}
+        {dataApp.description !== null && (
+            <description>{dataApp.description}</description>
+        )}
+        {dataApp.createdBy && <createdby>{dataApp.createdBy}</createdby>}
+    </dataApp>
+);
+
+const renderContentItem = (content: ContentItem) => {
+    switch (content.contentType) {
+        case 'document':
+            return (
+                <document
+                    uuid={content.uuid}
+                    name={content.name}
+                    slug={content.slug}
+                    href={content.href}
+                >
+                    {content.description}
+                </document>
+            );
+        case 'space':
+            return renderSpace(content);
+        case 'data_app':
+            return renderDataApp(content);
+        case 'dashboard':
+            return renderDashboard(content);
+        case 'chart':
+            return renderChart(content);
+        default:
+            return assertUnreachable(content, 'Unknown content type');
+    }
+};
+
+const renderSearchResult = (searchResult: SearchResult) => (
+    <searchresult searchQuery={searchResult.searchQuery}>
+        {searchResult.note}
+        {searchResult.content.map(renderContentItem)}
+    </searchresult>
+);
+
+const renderCompactSearchResult = (
+    searchResult: ToolFindContentCompactSearchResult,
+    descriptionMaxChars: number,
+    detailsToolName: Dependencies['dashboardDetailsToolName'],
 ) => {
-    const sortedContent = [...args.content].sort(
-        (a, b) =>
-            Number(b.verification !== null) - Number(a.verification !== null),
-    );
+    const shown = searchResult.content.slice(0, COMPACT_SHOWN_COUNT);
     return (
-        <searchresult searchQuery={args.searchQuery}>
-            {sortedContent.map((content) =>
-                isDashboardSearchResult(content)
-                    ? renderDashboard(content, siteUrl)
-                    : renderChart(content, siteUrl),
+        <searchresult
+            searchQuery={searchResult.searchQuery}
+            totalMatches={searchResult.count}
+            shown={shown.length}
+        >
+            {searchResult.note}
+            {searchResult.truncationNote}
+            {shown.length > 0
+                ? `Search summaries only. Use ${detailsToolName} to inspect a selected dashboard's charts before making claims about their contents.`
+                : null}
+            {shown.map((content) =>
+                content.contentType === 'space' ? (
+                    renderSpace(content)
+                ) : (
+                    <match
+                        type={content.contentType}
+                        uuid={content.uuid}
+                        slug={'slug' in content ? content.slug : undefined}
+                        name={content.name}
+                        href={content.href}
+                        chartCount={
+                            content.contentType === 'dashboard'
+                                ? content.charts.count
+                                : undefined
+                        }
+                        validationErrorCount={
+                            content.contentType === 'dashboard'
+                                ? content.validationErrorCount
+                                : undefined
+                        }
+                    >
+                        {'space' in content && content.space
+                            ? renderSpaceMetadata(content.space)
+                            : null}
+                        {'verification' in content
+                            ? renderVerified(content.verification)
+                            : null}
+                        {content.description ? (
+                            <description>
+                                {escapeXmlText(
+                                    truncate(
+                                        content.description,
+                                        Math.min(
+                                            descriptionMaxChars,
+                                            COMPACT_DESCRIPTION_MAX_CHARS,
+                                        ),
+                                    ),
+                                )}
+                            </description>
+                        ) : null}
+                    </match>
+                ),
             )}
         </searchresult>
     );
 };
 
 export const getFindContent = ({
+    decisions,
     findContent,
     siteUrl,
+    toolDescriptionMaxChars,
     trackCoverage,
+    dashboardDetailsToolName,
 }: Dependencies) =>
     tool({
-        description: toolFindContentArgsSchema.description,
-        inputSchema: toolFindContentArgsSchema,
-        outputSchema: toolFindContentOutputSchema,
-        execute: async (args) => {
+        ...toolDefinition,
+        description: getFindContentToolDescription({
+            runtime: 'agent',
+            toolName: toolDefinition.name,
+            dashboardDetailsToolName,
+        }),
+        execute: async (
+            args,
+        ): Promise<
+            | ExecuteStructuredToolResult<ToolFindContentStructuredContent>
+            | ExecuteToolErrorResult
+        > => {
             try {
+                const verifiedOnly = args.verifiedOnly ?? false;
                 const searchQueryResults = await Promise.all(
-                    args.searchQueries.map(async (searchQuery) => ({
-                        searchQuery: searchQuery.label,
-                        ...(await findContent({
+                    args.searchQueries.map(async (searchQuery) => {
+                        const result = await findContent({
                             searchQuery,
-                        })),
-                    })),
+                            spaceSlug: args.spaceSlug ?? null,
+                            verifiedOnly,
+                        });
+                        const candidates = verifiedFirst(result.content);
+                        const ranked = decisions
+                            ? await rankCandidates({
+                                  decisions,
+                                  query: searchQuery.label,
+                                  candidates,
+                                  operation: 'content-relevance',
+                                  describe: (content) => ({
+                                      name: content.name,
+                                      description:
+                                          content.contentType === 'space'
+                                              ? null
+                                              : content.description,
+                                      type: content.contentType,
+                                  }),
+                              })
+                            : null;
+                        return {
+                            ...result,
+                            searchQuery: searchQuery.label,
+                            verifiedOnly,
+                            content: ranked?.candidates ?? candidates,
+                        };
+                    }),
                 );
 
                 for (const searchQueryResult of searchQueryResults) {
@@ -206,39 +650,63 @@ export const getFindContent = ({
                             (c) => c.verification !== null,
                         ).length;
                     const topResultVerified =
-                        verifiedResultCount > 0 && totalResultCount > 0;
+                        totalResultCount > 0 &&
+                        searchQueryResult.content[0].verification !== null;
                     trackCoverage({
                         searchQuery: searchQueryResult.searchQuery,
                         totalResultCount,
                         verifiedResultCount,
                         topResultVerified,
+                        verifiedOnly,
                     });
                 }
+
+                const searchResults = searchQueryResults.map(
+                    (searchQueryResult) =>
+                        toSearchResult(
+                            searchQueryResult,
+                            siteUrl,
+                            toolDescriptionMaxChars,
+                            Boolean(decisions),
+                        ),
+                );
+                const compactSearchResults = decisions
+                    ? searchResults.map((searchResult) => ({
+                          ...searchResult,
+                          content:
+                              searchResult.content.map(toCompactContentItem),
+                      }))
+                    : null;
+                const structuredContent: ToolFindContentStructuredContent = {
+                    searchResults: compactSearchResults ?? searchResults,
+                };
 
                 return {
                     result: (
                         <searchresults>
-                            {searchQueryResults.map((searchQueryResult) =>
-                                renderContent(searchQueryResult, siteUrl),
-                            )}
+                            {compactSearchResults
+                                ? compactSearchResults.map((searchResult) =>
+                                      renderCompactSearchResult(
+                                          searchResult,
+                                          toolDescriptionMaxChars,
+                                          dashboardDetailsToolName,
+                                      ),
+                                  )
+                                : searchResults.map(renderSearchResult)}
                         </searchresults>
                     ).toString(),
                     metadata: {
                         status: 'success',
                     },
+                    structuredContent,
                 };
             } catch (error) {
-                return {
-                    result: toolErrorHandler(
-                        error,
-                        `Error finding content for search queries: ${args.searchQueries
-                            .map((q) => q.label)
-                            .join(', ')}`,
-                    ),
-                    metadata: {
-                        status: 'error',
-                    },
-                };
+                return toolErrorOutput(
+                    error,
+                    `Error finding content for search queries: ${args.searchQueries
+                        .map((q) => q.label)
+                        .join(', ')}`,
+                );
             }
         },
         toModelOutput: ({ output }) => toModelOutput(output),

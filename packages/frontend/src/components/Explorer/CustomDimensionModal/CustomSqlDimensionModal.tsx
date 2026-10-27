@@ -10,30 +10,51 @@ import {
 } from '@lightdash/common';
 import {
     ActionIcon,
+    Box,
     Button,
     Group,
     Select,
     Stack,
+    Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
-import { useMantineColorScheme } from '@mantine/core';
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { IconMaximize, IconMinimize, IconSql } from '@tabler/icons-react';
+import {
+    IconMaximize,
+    IconMinimize,
+    IconSparkles,
+    IconSql,
+} from '@tabler/icons-react';
 import { useMemo, useRef, type FC } from 'react';
 import { useToggle } from 'react-use';
+import {
+    AiCustomDimensionInputBody,
+    AiSlot,
+} from '../../../ee/features/ambientAi/components/tableCalculation';
+import { useAmbientAiEnabled } from '../../../ee/features/ambientAi/hooks/useAmbientAiEnabled';
 import {
     explorerActions,
     selectCustomDimensions,
     selectTableCalculations,
+    selectTableName,
     useExplorerDispatch,
     useExplorerSelector,
 } from '../../../features/explorer/store';
 import { SqlEditor } from '../../../features/tableCalculation/components/SqlForm';
 import useToaster from '../../../hooks/toaster/useToaster';
+import { useEditorTheme } from '../../../hooks/useEditorTheme';
+import { useExplore } from '../../../hooks/useExplore';
 import { useCustomDimensionsAceEditorCompleter } from '../../../hooks/useExplorerAceEditorCompleter';
+import {
+    useExploreWarehouseConnection,
+    useMixedWarehouseConnectionsEnabled,
+} from '../../../hooks/useExploreWarehouseConnection';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { getWarehouseSqlCaption } from '../../../utils/mixedWarehouseConnections';
 import MantineIcon from '../../common/MantineIcon';
 import MantineModal from '../../common/MantineModal';
+import classes from './CustomSqlDimensionModal.module.css';
 
 type FormValues = {
     customDimensionLabel: string;
@@ -42,19 +63,48 @@ type FormValues = {
 };
 const generateCustomSqlDimensionId = (label: string) => snakeCaseName(label);
 
+/**
+ * Walkthrough action for manage:CustomFields: creating a custom SQL
+ * dimension on a saved chart being edited.
+ */
+const createTourAction = {
+    'data-tour-scope': 'manage:CustomFields',
+    'data-tour-step': '2',
+    'data-tour-route': '/projects/:projectUuid/saved/:savedQueryUuid/edit',
+    'data-tour-label': 'Create the dimension',
+    'data-tour-title': 'Add a custom SQL dimension',
+    'data-tour-interactive': 'true',
+    'data-tour-via':
+        '[data-tour-nav="browse"] >> [data-tour-nav="all-charts"] >> [data-tour-anchor="chart-row"][data-tour-value="Orders over time"] >> [data-tour-anchor="edit-chart"] >> [data-tour-anchor="add-custom-dimension"] >> [data-tour-anchor="custom-dimension-label"] >> [data-tour-anchor="custom-dimension-sql"]',
+    'data-tour-then': '[data-tour-anchor="run-query"]',
+    'data-tour-docs': 'explore/create-custom-fields.mdx#custom-sql:2',
+};
+
 export const CustomSqlDimensionModal: FC<{
     isEditing: boolean;
     table: string;
     item?: CustomSqlDimension;
 }> = ({ isEditing, table, item }) => {
-    const { colorScheme } = useMantineColorScheme();
+    const { ace: aceTheme } = useEditorTheme();
 
     const { showToastSuccess, showToastError } = useToaster();
     const { setAceEditor } = useCustomDimensionsAceEditorCompleter();
+    const projectUuid = useProjectUuid();
+    const isAmbientAiEnabled = useAmbientAiEnabled(projectUuid);
 
     const dispatch = useExplorerDispatch();
     const customDimensions = useExplorerSelector(selectCustomDimensions);
     const tableCalculations = useExplorerSelector(selectTableCalculations);
+    const tableName = useExplorerSelector(selectTableName);
+    const { data: explore } = useExplore(tableName);
+    const { warehouseType } = useExploreWarehouseConnection(
+        tableName,
+        projectUuid,
+    );
+    const sqlCaption = getWarehouseSqlCaption(
+        warehouseType,
+        useMixedWarehouseConnectionsEnabled(),
+    );
 
     const toggleModal = () =>
         dispatch(explorerActions.toggleCustomDimensionModal());
@@ -87,6 +137,13 @@ export const CustomSqlDimensionModal: FC<{
 
                 if (isEditing && item && customDimensionId === item.id) {
                     return null;
+                }
+
+                if (
+                    !isEditing &&
+                    explore?.tables[table]?.dimensions[customDimensionId]
+                ) {
+                    return 'A model dimension with this ID already exists';
                 }
 
                 const isInvalid = [
@@ -213,26 +270,39 @@ export const CustomSqlDimensionModal: FC<{
                     type="submit"
                     form="custom-sql-dimension-form"
                     ref={submitButtonRef}
+                    {...(isEditing ? {} : createTourAction)}
                 >
                     {isEditing ? 'Save changes' : 'Create'}
                 </Button>
             }
         >
-            <form id="custom-sql-dimension-form" onSubmit={handleOnSubmit}>
+            <form
+                id="custom-sql-dimension-form"
+                onSubmit={handleOnSubmit}
+                // Walkthrough look at the form once it opens.
+                data-tour-scope="manage:CustomFields"
+                data-tour-look="1"
+                data-tour-after='[data-tour-anchor="add-custom-dimension"]'
+                data-tour-label="A custom SQL dimension reads straight from the warehouse"
+                data-tour-docs="explore/create-custom-fields.mdx#custom-sql:1"
+            >
                 <Stack gap="xs">
                     <Group justify="space-between">
                         <TextInput
                             label="Label"
                             required
                             placeholder="Enter custom dimension label"
-                            style={{ flex: 1 }}
+                            flex={1}
                             {...form.getInputProps('customDimensionLabel')}
                             data-testid="CustomSqlDimensionModal/LabelInput"
+                            // Typed anchor for scope walkthroughs (data-tour-via)
+                            data-tour-anchor="custom-dimension-label"
+                            data-tour-hint="Name the dimension"
+                            data-tour-input="true"
+                            data-tour-suggest="Order size"
                         />
                         <Select
-                            style={{
-                                alignSelf: 'flex-start',
-                            }}
+                            className={classes.dimensionTypeSelect}
                             label="Dimension Type"
                             data={Object.values(DimensionType).map((type) => ({
                                 value: type,
@@ -242,27 +312,63 @@ export const CustomSqlDimensionModal: FC<{
                         />
                     </Group>
 
-                    <SqlEditor
-                        mode="sql"
-                        placeholder="Enter SQL"
-                        theme={
-                            colorScheme === 'dark' ? 'tomorrow_night' : 'github'
-                        }
-                        width="100%"
-                        maxLines={Infinity}
-                        minLines={isExpanded ? 25 : 8}
-                        setOptions={{
-                            autoScrollEditorIntoView: true,
-                        }}
-                        onLoad={setAceEditor}
-                        isFullScreen={isExpanded}
-                        enableLiveAutocompletion
-                        enableBasicAutocompletion
-                        showPrintMargin={false}
-                        wrapEnabled={true}
-                        gutterBackgroundColor={'var(--mantine-color-ldGray-1)'}
-                        {...form.getInputProps('sql')}
-                    />
+                    <Box
+                        // Typed anchor for scope walkthroughs: the SQL editor.
+                        data-tour-anchor="custom-dimension-sql"
+                        data-tour-hint="Write the SQL"
+                        data-tour-input="true"
+                        data-tour-suggest="CASE WHEN ${orders.amount} < 100 THEN 'small' ELSE 'large' END"
+                    >
+                        {sqlCaption !== null && (
+                            <Text size="xs" c="dimmed">
+                                {sqlCaption}
+                            </Text>
+                        )}
+                        <SqlEditor
+                            mode="sql"
+                            placeholder="Enter SQL"
+                            theme={aceTheme}
+                            width="100%"
+                            maxLines={Infinity}
+                            minLines={isExpanded ? 25 : 8}
+                            setOptions={{
+                                autoScrollEditorIntoView: true,
+                            }}
+                            onLoad={setAceEditor}
+                            isFullScreen={isExpanded}
+                            enableLiveAutocompletion
+                            enableBasicAutocompletion
+                            showPrintMargin={false}
+                            wrapEnabled={true}
+                            gutterBackgroundColor={
+                                'var(--mantine-color-ldGray-1)'
+                            }
+                            {...form.getInputProps('sql')}
+                        />
+                    </Box>
+
+                    {isAmbientAiEnabled && (
+                        <AiSlot
+                            icon={IconSparkles}
+                            iconColor="indigo.4"
+                            title="Generate and improve your custom dimension with AI"
+                        >
+                            <AiCustomDimensionInputBody
+                                currentSql={form.values.sql || undefined}
+                                onApply={(result) => {
+                                    form.setFieldValue('sql', result.sql);
+                                    form.setFieldValue(
+                                        'customDimensionLabel',
+                                        result.displayName,
+                                    );
+                                    form.setFieldValue(
+                                        'dimensionType',
+                                        result.dimensionType,
+                                    );
+                                }}
+                            />
+                        </AiSlot>
+                    )}
                 </Stack>
             </form>
         </MantineModal>

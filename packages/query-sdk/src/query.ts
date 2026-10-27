@@ -6,12 +6,14 @@
  *     .dimensions(['customer_segment', 'order_date'])
  *     .metrics(['total_revenue', 'order_count'])
  *     .filters([{ field: 'order_date', operator: 'inThePast', value: 90, unit: 'days' }])
+ *     .metricFilters([{ field: 'total_revenue', operator: 'greaterThan', value: 1000 }])
  *     .sorts([{ field: 'total_revenue', direction: 'desc' }])
  *     .limit(100)
  *
  * The builder is immutable -- each method returns a new instance.
  */
 
+import { toInternalFilters } from './filterConversion';
 import type {
     AdditionalMetric,
     CustomDimension,
@@ -28,6 +30,7 @@ type BuilderState = {
     dimensions: string[];
     metrics: string[];
     filters: InternalFilterDefinition[];
+    metricFilters: InternalFilterDefinition[];
     sorts: { fieldId: string; descending: boolean }[];
     tableCalculations: TableCalculation[];
     additionalMetrics: AdditionalMetric[];
@@ -62,6 +65,7 @@ export class QueryBuilder {
                 dimensions: [],
                 metrics: [],
                 filters: [],
+                metricFilters: [],
                 sorts: [],
                 tableCalculations: [],
                 additionalMetrics: [],
@@ -70,8 +74,22 @@ export class QueryBuilder {
                 parameters: {},
                 label: undefined,
             };
-        } else {
+        } else if (
+            exploreOrState !== null &&
+            typeof exploreOrState === 'object' &&
+            Array.isArray(exploreOrState.dimensions)
+        ) {
             this._state = exploreOrState;
+        } else {
+            // Fail here, at the call site, instead of on a later chained call.
+            // The most common cause is a circular import: a model-name
+            // constant read before its module initialized is undefined.
+            throw new Error(
+                `query() expects a model name string, got ${
+                    exploreOrState === null ? 'null' : typeof exploreOrState
+                }. If the model name is a shared constant, make sure it is not ` +
+                    'exported from a file that imports this one (circular import).',
+            );
         }
     }
 
@@ -98,35 +116,20 @@ export class QueryBuilder {
         });
     }
 
-    /** Add filters */
+    /** Add dimension (WHERE) filters */
     filters(filters: Filter[]): QueryBuilder {
-        const converted: InternalFilterDefinition[] = filters.map((f) => {
-            const values: (string | number | boolean)[] = [];
-            if (f.value !== undefined) {
-                if (Array.isArray(f.value)) {
-                    values.push(...f.value);
-                } else {
-                    values.push(f.value);
-                }
-            }
-
-            return {
-                fieldId: f.field,
-                operator: f.operator,
-                values,
-                settings: f.unit
-                    ? {
-                          unitOfTime: f.unit,
-                          ...(f.completed !== undefined && {
-                              completed: f.completed,
-                          }),
-                      }
-                    : null,
-            };
-        });
-
         return this._clone({
-            filters: [...this._state.filters, ...converted],
+            filters: [...this._state.filters, ...toInternalFilters(filters)],
+        });
+    }
+
+    /** Add metric (HAVING) filters. The metrics do not need to be selected. */
+    metricFilters(filters: Filter[]): QueryBuilder {
+        return this._clone({
+            metricFilters: [
+                ...this._state.metricFilters,
+                ...toInternalFilters(filters),
+            ],
         });
     }
 
@@ -193,6 +196,7 @@ export class QueryBuilder {
             dimensions: this._state.dimensions,
             metrics: this._state.metrics,
             filters: this._state.filters,
+            metricFilters: this._state.metricFilters,
             sorts: this._state.sorts,
             tableCalculations: this._state.tableCalculations,
             additionalMetrics: this._state.additionalMetrics,

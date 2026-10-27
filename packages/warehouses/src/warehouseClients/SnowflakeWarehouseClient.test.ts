@@ -1,8 +1,28 @@
-import { CreateSnowflakeCredentials, DimensionType } from '@lightdash/common';
-import { createConnection } from 'snowflake-sdk';
-import { Readable } from 'stream';
 import {
+    AnyType,
+    CreateSnowflakeCredentials,
+    DimensionType,
+    ForbiddenError,
+    SnowflakeAuthenticationType,
+} from '@lightdash/common';
+import { generateKeyPairSync } from 'node:crypto';
+import {
+    configure,
+    Connection,
+    createConnection,
+    type ConnectionCallback,
+    type SnowflakeError,
+} from 'snowflake-sdk';
+import { Readable } from 'stream';
+import type { Mock } from 'vitest';
+import {
+    checkSnowflakeAgentSession,
+    checkSnowflakeAgentSessionWithToken,
+    isSnowflakeAgentActivatedValue,
     mapFieldType,
+    mapSnowflakeDiagnosticError,
+    SNOWFLAKE_AGENT_SESSION_REQUIRED_MESSAGE,
+    SnowflakeDiagnosticError,
     SnowflakeWarehouseClient,
 } from './SnowflakeWarehouseClient';
 import {
@@ -24,7 +44,13 @@ const mockStreamRows = () =>
         },
     });
 
-const executeMock = jest.fn(({ sqlText, complete }) => {
+const defaultExecute = ({
+    sqlText,
+    complete,
+}: {
+    sqlText: string;
+    complete: (error?: Error, statement?: unknown, rows?: unknown[]) => void;
+}) => {
     complete(
         undefined,
         {
@@ -35,51 +61,1221 @@ const executeMock = jest.fn(({ sqlText, complete }) => {
         },
         [],
     );
-});
+};
 
-const getResultsFromQueryIdMock = jest.fn(({ sqlText, queryId }) => ({
+const executeMock = vi.fn(defaultExecute);
+
+const getResultsFromQueryIdMock = vi.fn(({ sqlText, queryId }) => ({
     streamRows: mockStreamRows,
     getColumns: () => queryColumnsMock,
     getQueryId: () => queryId,
     getNumRows: () => 1,
 }));
 
-jest.mock('snowflake-sdk', () => ({
-    ...jest.requireActual('snowflake-sdk'),
-    createConnection: jest.fn(() => ({
-        connect: jest.fn((callback) => callback(null, {})),
+const oauthAccessToken = (expiresAtSeconds: number): string =>
+    `header.${Buffer.from(JSON.stringify({ exp: expiresAtSeconds })).toString(
+        'base64url',
+    )}.signature`;
+
+const interactiveConnectionMock = (
+    execute: ReturnType<typeof vi.fn>,
+): Connection =>
+    ({
+        connect: vi.fn((callback: ConnectionCallback) =>
+            callback(undefined, {} as Connection),
+        ),
+        connectAsync: vi.fn((callback: ConnectionCallback) => {
+            callback(undefined, {} as Connection);
+            return Promise.resolve();
+        }),
+        execute,
+        destroy: vi.fn((callback: ConnectionCallback) =>
+            callback(undefined, {} as Connection),
+        ),
+    }) as unknown as Connection;
+
+type OAuthCredentialWriter = {
+    write(key: string, token: string): Promise<void>;
+};
+
+const getConfiguredCredentialManager = (): OAuthCredentialWriter => {
+    const manager =
+        vi.mocked(configure).mock.lastCall?.[0]?.customCredentialManager;
+    if (
+        !manager ||
+        typeof manager !== 'object' ||
+        !('write' in manager) ||
+        typeof manager.write !== 'function'
+    ) {
+        throw new Error('OAuth credential manager was not configured');
+    }
+    return manager as OAuthCredentialWriter;
+};
+
+vi.mock('snowflake-sdk', async () => ({
+    ...(
+        await vi.importActual<{ default: typeof import('snowflake-sdk') }>(
+            'snowflake-sdk',
+        )
+    ).default,
+    configure: vi.fn(),
+    createConnection: vi.fn(() => ({
+        connect: vi.fn((callback) => callback(null, {})),
         execute: executeMock,
-        destroy: jest.fn((callback) => callback(null, {})),
+        destroy: vi.fn((callback) => callback(null, {})),
         getResultsFromQueryId: getResultsFromQueryIdMock,
-        getQueryStatus: jest.fn(() => 'SUCCESS'),
-        isStillRunning: jest.fn(() => false),
+        getQueryStatus: vi.fn(() => 'SUCCESS'),
+        isStillRunning: vi.fn(() => false),
     })),
 }));
 
+describe('isSnowflakeAgentActivatedValue', () => {
+    it.each([
+        ['TRUE', true],
+        ['true', true],
+        [true, true],
+        ['FALSE', false],
+        [false, false],
+        [null, false],
+        [undefined, false],
+        [1, false],
+        ['', false],
+    ])('maps %s to %s', (value, expected) => {
+        expect(isSnowflakeAgentActivatedValue(value)).toBe(expected);
+    });
+});
+
 describe('SnowflakeWarehouseClient', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        executeMock.mockReset();
+        executeMock.mockImplementation(defaultExecute);
+    });
+
+    it.each([true, false, undefined])(
+        'sets result caching without requiring activation for agent job controls %s',
+        async (agentJobControls) => {
+            const warehouse = new SnowflakeWarehouseClient(
+                { ...credentials, requireAgentSession: false },
+                { agentJobControls },
+            );
+            await warehouse.streamQuery('SELECT 1', () => {}, {});
+            const statements = executeMock.mock.calls.map(
+                ([options]) => options.sqlText,
+            );
+            expect(
+                statements.some((sql) => sql.includes('IS_AGENT_ACTIVATED')),
+            ).toBe(false);
+            if (agentJobControls) {
+                expect(statements[0]).toBe(
+                    'ALTER SESSION SET USE_CACHED_RESULT = FALSE',
+                );
+            } else {
+                expect(statements).not.toContain(
+                    'ALTER SESSION SET USE_CACHED_RESULT = FALSE',
+                );
+            }
+            expect(statements).toContain('SELECT 1');
+        },
+    );
+
+    it('destroys the connection when disabling the result cache fails without activation', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(new Error('cannot disable cache'));
+        });
+        const warehouse = new SnowflakeWarehouseClient(
+            { ...credentials, requireAgentSession: false },
+            { agentJobControls: true },
+        );
+        await expect(
+            warehouse.streamQuery('SELECT 1', () => {}, {}),
+        ).rejects.toBeInstanceOf(ForbiddenError);
+        expect(
+            vi.mocked(createConnection).mock.results[0].value.destroy,
+        ).toHaveBeenCalledOnce();
+        expect(executeMock).toHaveBeenCalledOnce();
+    });
+
+    it('checks an AI session before the first statement', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(undefined, {}, [
+                {
+                    IS_AGENT_ACTIVATED: 'TRUE',
+                    CURRENT_ROLE: 'ANALYST',
+                    ACTIVE_RESTRICTED_SESSION_SCOPES: 'READ',
+                },
+            ]);
+        });
+        const logger = { info: vi.fn() };
+        const warehouse = new SnowflakeWarehouseClient(
+            {
+                ...credentials,
+                requireAgentSession: true,
+            },
+            { logger },
+        );
+        await warehouse.streamQuery('SELECT 1', () => {}, {});
+        expect(executeMock.mock.calls[0]?.[0].sqlText).toBe(
+            "SELECT SYS_CONTEXT('SNOWFLAKE$CURRENT', 'IS_AGENT_ACTIVATED')::BOOLEAN AS IS_AGENT_ACTIVATED, CURRENT_ROLE() AS CURRENT_ROLE, SYS_CONTEXT('SNOWFLAKE$SESSION', 'ACTIVE_RESTRICTED_SESSION_SCOPES') AS ACTIVE_RESTRICTED_SESSION_SCOPES",
+        );
+        expect(
+            executeMock.mock.calls.map(([options]) => options.sqlText),
+        ).toEqual(
+            expect.arrayContaining([
+                'ALTER SESSION SET USE_CACHED_RESULT = FALSE',
+                'SELECT 1',
+            ]),
+        );
+        expect(executeMock.mock.calls[1]?.[0].sqlText).toBe(
+            'ALTER SESSION SET USE_CACHED_RESULT = FALSE',
+        );
+        expect(logger.info).toHaveBeenCalledWith(
+            'Snowflake agent session activated',
+            {
+                currentRole: 'ANALYST',
+                activeRestrictedSessionScopes: 'READ',
+            },
+        );
+    });
+
+    it('checks every new AI connection', async () => {
+        executeMock.mockImplementation(({ sqlText, complete }) => {
+            complete(
+                undefined,
+                {
+                    streamRows: mockStreamRows,
+                    getColumns: () => queryColumnsMock,
+                    getQueryId: () => 'queryId',
+                    getSqlText: () => sqlText,
+                },
+                sqlText.includes('IS_AGENT_ACTIVATED')
+                    ? [{ IS_AGENT_ACTIVATED: true }]
+                    : [],
+            );
+        });
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            requireAgentSession: true,
+        });
+        await warehouse.streamQuery('SELECT 1', () => {}, {});
+        await warehouse.streamQuery('SELECT 2', () => {}, {});
+        const statements = executeMock.mock.calls.map(
+            ([options]) => options.sqlText,
+        );
+        expect(
+            statements.filter((sql) => sql.includes('IS_AGENT_ACTIVATED')),
+        ).toHaveLength(2);
+        expect(
+            statements.filter(
+                (sql) => sql === 'ALTER SESSION SET USE_CACHED_RESULT = FALSE',
+            ),
+        ).toHaveLength(2);
+        expect(createConnection).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses the next session after agent activation is disabled', async () => {
+        let activated = true;
+        executeMock.mockImplementation((options) => {
+            if (options.sqlText.includes('IS_AGENT_ACTIVATED')) {
+                options.complete(undefined, {}, [
+                    { IS_AGENT_ACTIVATED: activated },
+                ]);
+            } else {
+                defaultExecute(options);
+            }
+        });
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            requireAgentSession: true,
+        });
+        await warehouse.streamQuery('SELECT 1', () => {}, {});
+        activated = false;
+        await expect(
+            warehouse.streamQuery('SELECT 2', () => {}, {}),
+        ).rejects.toBeInstanceOf(ForbiddenError);
+        expect(createConnection).toHaveBeenCalledTimes(2);
+        expect(
+            vi.mocked(createConnection).mock.results[1]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+            executeMock.mock.calls.map(([options]) => options.sqlText),
+        ).not.toContain('SELECT 2');
+    });
+
+    it('returns the agent session role and scopes', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(undefined, {}, [
+                {
+                    IS_AGENT_ACTIVATED: true,
+                    CURRENT_ROLE: 'ANALYST',
+                    ACTIVE_RESTRICTED_SESSION_SCOPES: 'READ',
+                },
+            ]);
+        });
+        const connection = createConnection({ account: 'test' });
+        await expect(checkSnowflakeAgentSession(connection)).resolves.toEqual({
+            agentActivated: true,
+            currentRole: 'ANALYST',
+            activeRestrictedSessionScopes: 'READ',
+        });
+    });
+
+    it('refuses an AI session without activation', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(undefined, {}, [{ IS_AGENT_ACTIVATED: 'FALSE' }]);
+        });
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            requireAgentSession: true,
+        });
+        await expect(
+            warehouse.streamQuery('SELECT 1', () => {}, {}),
+        ).rejects.toThrow('IS_AGENTIC = TRUE');
+        expect(executeMock).toHaveBeenCalledTimes(1);
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([null, undefined])(
+        'refuses an AI session when activation is %s',
+        async (activation) => {
+            executeMock.mockImplementationOnce(({ complete }) => {
+                complete(undefined, {}, [{ IS_AGENT_ACTIVATED: activation }]);
+            });
+            const warehouse = new SnowflakeWarehouseClient({
+                ...credentials,
+                requireAgentSession: true,
+            });
+            await expect(
+                warehouse.streamQuery('SELECT 1', () => {}, {}),
+            ).rejects.toThrow('IS_AGENTIC = TRUE');
+            expect(executeMock).toHaveBeenCalledTimes(1);
+            expect(
+                vi.mocked(createConnection).mock.results[0]?.value.destroy,
+            ).toHaveBeenCalledTimes(1);
+        },
+    );
+
+    it('refuses an AI session when the activation query fails', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(new Error('session check failed'));
+        });
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            requireAgentSession: true,
+        });
+        await expect(
+            warehouse.streamQuery('SELECT 1', () => {}, {}),
+        ).rejects.toThrow('IS_AGENTIC = TRUE');
+        expect(executeMock).toHaveBeenCalledTimes(1);
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it('checks a diagnostic AI connection before returning it', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(undefined, {}, [{ IS_AGENT_ACTIVATED: false }]);
+        });
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            requireAgentSession: true,
+        });
+        await expect(warehouse.openDiagnosticConnection()).rejects.toThrow(
+            'IS_AGENTIC = TRUE',
+        );
+        expect(executeMock).toHaveBeenCalledTimes(1);
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses and destroys an AI connection when disabling cached results fails', async () => {
+        executeMock
+            .mockImplementationOnce(({ complete }) => {
+                complete(undefined, {}, [{ IS_AGENT_ACTIVATED: true }]);
+            })
+            .mockImplementationOnce(({ complete }) => {
+                complete(new Error('session update failed'));
+            });
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            requireAgentSession: true,
+        });
+        await expect(
+            warehouse.streamQuery('SELECT 1', () => {}, {}),
+        ).rejects.toThrow('IS_AGENTIC = TRUE');
+        expect(executeMock).toHaveBeenCalledTimes(2);
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it('checks and disables cached results on the token sign-in connection', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(undefined, {}, [{ IS_AGENT_ACTIVATED: true }]);
+        });
+        await expect(
+            checkSnowflakeAgentSessionWithToken('test', 'token'),
+        ).resolves.toEqual({
+            agentActivated: true,
+            currentRole: null,
+            activeRestrictedSessionScopes: null,
+        });
+        expect(executeMock.mock.calls[1]?.[0].sqlText).toBe(
+            'ALTER SESSION SET USE_CACHED_RESULT = FALSE',
+        );
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates probe errors only when requested and still destroys the connection', async () => {
+        executeMock.mockImplementationOnce(({ complete }) => {
+            complete(new Error('connection interrupted'));
+        });
+        await expect(
+            checkSnowflakeAgentSessionWithToken('test', 'token', {
+                throwOnError: true,
+            }),
+        ).rejects.toThrow('connection interrupted');
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses token sign-in when disabling cached results fails', async () => {
+        executeMock
+            .mockImplementationOnce(({ complete }) => {
+                complete(undefined, {}, [{ IS_AGENT_ACTIVATED: true }]);
+            })
+            .mockImplementationOnce(({ complete }) => {
+                complete(new Error('session update failed'));
+            });
+        await expect(
+            checkSnowflakeAgentSessionWithToken('test', 'token'),
+        ).resolves.toEqual({
+            agentActivated: false,
+            currentRole: null,
+            activeRestrictedSessionScopes: null,
+        });
+        expect(
+            vi.mocked(createConnection).mock.results[0]?.value.destroy,
+        ).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not check a regular session', async () => {
+        const warehouse = new SnowflakeWarehouseClient(credentials);
+        await warehouse.streamQuery('SELECT 1', () => {}, {});
+        expect(
+            executeMock.mock.calls.some(
+                ([options]) =>
+                    options.sqlText.includes('IS_AGENT_ACTIVATED') ||
+                    options.sqlText.includes('USE_CACHED_RESULT = FALSE'),
+            ),
+        ).toBe(false);
+    });
+
+    it('caps result chunk size via CLIENT_RESULT_CHUNK_SIZE session parameter', async () => {
+        const warehouse = new SnowflakeWarehouseClient(credentials);
+        await warehouse.streamQuery('SELECT 1', () => {}, {});
+        const alterSessionSql = executeMock.mock.calls
+            .map((call) => call[0].sqlText as string)
+            .find((sql) => sql.startsWith('ALTER SESSION SET'));
+        expect(alterSessionSql).toContain('CLIENT_RESULT_CHUNK_SIZE = 16');
+    });
+
+    it.each(['', null, undefined, NaN])(
+        'falls back to the default STATEMENT_TIMEOUT_IN_SECONDS when timeoutSeconds is %p',
+        async (timeoutSeconds) => {
+            const warehouse = new SnowflakeWarehouseClient({
+                ...credentials,
+                timeoutSeconds: timeoutSeconds as unknown as number,
+            });
+            await warehouse.streamQuery('SELECT 1', () => {}, {});
+            const alterSessionSql = executeMock.mock.calls
+                .map((call) => call[0].sqlText as string)
+                .find((sql) => sql.startsWith('ALTER SESSION SET'));
+            expect(alterSessionSql).toContain(
+                'STATEMENT_TIMEOUT_IN_SECONDS = 300',
+            );
+        },
+    );
+
+    it('keeps an explicit STATEMENT_TIMEOUT_IN_SECONDS of 0 (no timeout)', async () => {
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            timeoutSeconds: 0,
+        });
+        await warehouse.streamQuery('SELECT 1', () => {}, {});
+        const alterSessionSql = executeMock.mock.calls
+            .map((call) => call[0].sqlText as string)
+            .find((sql) => sql.startsWith('ALTER SESSION SET'));
+        expect(alterSessionSql).toContain('STATEMENT_TIMEOUT_IN_SECONDS = 0,');
+    });
+
+    it.each(['ANALYST', undefined])(
+        'passes the configured external-browser role %s to the SDK',
+        async (role) => {
+            const connection = interactiveConnectionMock(executeMock);
+            vi.mocked(createConnection).mockReturnValueOnce(connection);
+            const warehouse = new SnowflakeWarehouseClient({
+                ...credentials,
+                user: 'profile-user',
+                authenticationType:
+                    SnowflakeAuthenticationType.EXTERNAL_BROWSER,
+                role,
+            });
+
+            await warehouse.streamQuery('SELECT CURRENT_ROLE()', () => {}, {});
+
+            expect(createConnection).toHaveBeenCalledExactlyOnceWith(
+                expect.objectContaining({
+                    authenticator: 'EXTERNALBROWSER',
+                    role,
+                }),
+            );
+            expect(
+                vi.mocked(createConnection).mock.calls[0][0],
+            ).not.toHaveProperty('username');
+            expect(connection.connectAsync).toHaveBeenCalledOnce();
+            expect(connection.connect).not.toHaveBeenCalled();
+        },
+    );
+
+    it('configures the local application authorization-code flow with SDK defaults', () => {
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            authenticationType:
+                SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+        });
+
+        expect(warehouse.connectionOptions).toEqual(
+            expect.objectContaining({
+                account: credentials.account,
+                authenticator: 'OAUTH_AUTHORIZATION_CODE',
+                clientStoreTemporaryCredential: true,
+                browserActionTimeout: 300_000,
+            }),
+        );
+        expect(warehouse.connectionOptions).not.toHaveProperty('username');
+        expect(warehouse.connectionOptions).not.toHaveProperty('oauthClientId');
+        expect(warehouse.connectionOptions).not.toHaveProperty(
+            'oauthAuthorizationUrl',
+        );
+        expect(warehouse.connectionOptions).not.toHaveProperty(
+            'oauthTokenRequestUrl',
+        );
+        expect(warehouse.connectionOptions).not.toHaveProperty(
+            'oauthRedirectUri',
+        );
+        expect(warehouse.connectionOptions).not.toHaveProperty(
+            'oauthEnableSingleUseRefreshTokens',
+        );
+        expect(warehouse.connectionOptions).not.toHaveProperty(
+            'oauthClientSecret',
+        );
+        expect(vi.mocked(configure)).toHaveBeenCalledWith({
+            customCredentialManager: expect.any(Object),
+        });
+    });
+
+    it('exposes authorization-code tokens captured by the SDK credential manager', async () => {
+        const expiresAtSeconds = 2_000_000_000;
+        const accessToken = oauthAccessToken(expiresAtSeconds);
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            authenticationType:
+                SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+        });
+        const customCredentialManager = getConfiguredCredentialManager();
+
+        await customCredentialManager.write(
+            '{HOST}:{USER}:{OAUTH_AUTHORIZATION_CODE_ACCESS_TOKEN}',
+            accessToken,
+        );
+        await customCredentialManager.write(
+            '{HOST}:{USER}:{OAUTH_AUTHORIZATION_CODE_REFRESH_TOKEN}',
+            'refresh-token',
+        );
+
+        expect(warehouse.getOAuthTokens()).toEqual({
+            accessToken,
+            refreshToken: 'refresh-token',
+            expiresAt: new Date(expiresAtSeconds * 1000),
+        });
+    });
+
+    it('inspects key fingerprints and changes only the selected user key slot', async () => {
+        const execute = vi.fn(
+            ({
+                sqlText,
+                complete,
+            }: {
+                sqlText: string;
+                complete: (
+                    error: undefined,
+                    statement: { getColumns: () => typeof queryColumnsMock },
+                    rows: Record<string, string>[],
+                ) => void;
+            }) => {
+                const rows = sqlText.startsWith('DESCRIBE USER')
+                    ? [
+                          {
+                              property: 'RSA_PUBLIC_KEY_FP',
+                              value: 'SHA256:occupied',
+                          },
+                          {
+                              property: 'RSA_PUBLIC_KEY_2_FP',
+                              value: 'null',
+                          },
+                      ]
+                    : [];
+                complete(
+                    undefined,
+                    { getColumns: () => queryColumnsMock },
+                    rows,
+                );
+            },
+        );
+        vi.mocked(createConnection).mockImplementationOnce(() =>
+            interactiveConnectionMock(execute),
+        );
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            user: 'Mixed User',
+            authenticationType:
+                SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+        });
+
+        await expect(
+            warehouse.getUserPublicKeySlots('Mixed User'),
+        ).resolves.toEqual({
+            RSA_PUBLIC_KEY: 'SHA256:occupied',
+            RSA_PUBLIC_KEY_2: null,
+        });
+        await warehouse.setUserPublicKey(
+            'Mixed User',
+            'RSA_PUBLIC_KEY_2',
+            'dGVzdA==',
+        );
+        await warehouse.unsetUserPublicKey('Mixed User', 'RSA_PUBLIC_KEY_2');
+
+        expect(createConnection).toHaveBeenCalledTimes(1);
+        expect(execute).toHaveBeenNthCalledWith(
+            1,
+            expect.objectContaining({
+                sqlText: 'DESCRIBE USER "Mixed User"',
+            }),
+        );
+        expect(execute).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({
+                sqlText:
+                    'ALTER USER "Mixed User" SET RSA_PUBLIC_KEY_2 = \'dGVzdA==\'',
+            }),
+        );
+        expect(execute).toHaveBeenNthCalledWith(
+            3,
+            expect.objectContaining({
+                sqlText: 'ALTER USER "Mixed User" UNSET RSA_PUBLIC_KEY_2',
+            }),
+        );
+    });
+
+    it.each([
+        SnowflakeAuthenticationType.EXTERNAL_BROWSER,
+        SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+    ])(
+        'replaces an existing named PAT for a %s session and scopes the new token to a role',
+        async (authenticationType) => {
+            const execute = vi.fn(
+                ({
+                    sqlText,
+                    complete,
+                }: {
+                    sqlText: string;
+                    complete: (
+                        error: undefined,
+                        statement: {
+                            getColumns: () => typeof queryColumnsMock;
+                        },
+                        rows: Record<string, string>[],
+                    ) => void;
+                }) => {
+                    let rows: Record<string, string>[] = [];
+                    if (sqlText.startsWith('SHOW USER')) {
+                        rows = [
+                            {
+                                name: 'LIGHTDASH_ONBOARDING_11111111',
+                                status: 'ACTIVE',
+                            },
+                        ];
+                    } else if (sqlText.startsWith('ALTER USER ADD')) {
+                        rows = [{ TOKEN_SECRET: 'pat-secret' }];
+                    }
+                    complete(
+                        undefined,
+                        { getColumns: () => queryColumnsMock },
+                        rows,
+                    );
+                },
+            );
+            vi.mocked(createConnection).mockImplementationOnce(() =>
+                interactiveConnectionMock(execute),
+            );
+            const warehouse = new SnowflakeWarehouseClient({
+                ...credentials,
+                authenticationType,
+            });
+
+            await expect(
+                warehouse.createProgrammaticAccessToken(
+                    'LIGHTDASH_ONBOARDING_11111111',
+                    365,
+                    1440,
+                    "ANALYTICS'ROLE",
+                ),
+            ).resolves.toEqual({
+                tokenName: 'LIGHTDASH_ONBOARDING_11111111',
+                tokenSecret: 'pat-secret',
+            });
+            expect(execute).toHaveBeenNthCalledWith(
+                2,
+                expect.objectContaining({
+                    sqlText:
+                        'ALTER USER REMOVE PROGRAMMATIC ACCESS TOKEN LIGHTDASH_ONBOARDING_11111111',
+                }),
+            );
+            expect(execute).toHaveBeenNthCalledWith(
+                3,
+                expect.objectContaining({
+                    sqlText: expect.stringContaining(
+                        "ROLE_RESTRICTION = 'ANALYTICS''ROLE'",
+                    ),
+                }),
+            );
+        },
+    );
+
+    it('prunes only non-active Lightdash onboarding PATs', async () => {
+        const execute = vi.fn(
+            ({
+                sqlText,
+                complete,
+            }: {
+                sqlText: string;
+                complete: (
+                    error: undefined,
+                    statement: { getColumns: () => typeof queryColumnsMock },
+                    rows: Record<string, string>[],
+                ) => void;
+            }) => {
+                let rows: Record<string, string>[] = [];
+                if (sqlText.startsWith('SHOW USER')) {
+                    rows = [
+                        {
+                            name: 'LIGHTDASH_ONBOARDING_EXPIRED',
+                            status: 'EXPIRED',
+                        },
+                        {
+                            name: 'LIGHTDASH_ONBOARDING_DISABLED',
+                            status: 'DISABLED',
+                        },
+                        {
+                            name: 'LIGHTDASH_ONBOARDING_ACTIVE',
+                            status: 'ACTIVE',
+                        },
+                        { name: 'OTHER_EXPIRED', status: 'EXPIRED' },
+                        { name: 'OTHER_ACTIVE', status: 'ACTIVE' },
+                    ];
+                } else if (sqlText.startsWith('ALTER USER ADD')) {
+                    rows = [{ TOKEN_SECRET: 'pat-secret' }];
+                }
+                complete(
+                    undefined,
+                    { getColumns: () => queryColumnsMock },
+                    rows,
+                );
+            },
+        );
+        vi.mocked(createConnection).mockImplementationOnce(() =>
+            interactiveConnectionMock(execute),
+        );
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            authenticationType:
+                SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+        });
+
+        await expect(
+            warehouse.createProgrammaticAccessToken('LIGHTDASH_ONBOARDING_NEW'),
+        ).resolves.toEqual({
+            tokenName: 'LIGHTDASH_ONBOARDING_NEW',
+            tokenSecret: 'pat-secret',
+        });
+
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText:
+                    'ALTER USER REMOVE PROGRAMMATIC ACCESS TOKEN LIGHTDASH_ONBOARDING_EXPIRED',
+            }),
+        );
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText:
+                    'ALTER USER REMOVE PROGRAMMATIC ACCESS TOKEN LIGHTDASH_ONBOARDING_DISABLED',
+            }),
+        );
+        expect(execute).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText:
+                    'ALTER USER REMOVE PROGRAMMATIC ACCESS TOKEN LIGHTDASH_ONBOARDING_ACTIVE',
+            }),
+        );
+        expect(execute).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText:
+                    'ALTER USER REMOVE PROGRAMMATIC ACCESS TOKEN OTHER_EXPIRED',
+            }),
+        );
+        expect(execute).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText:
+                    'ALTER USER REMOVE PROGRAMMATIC ACCESS TOKEN OTHER_ACTIVE',
+            }),
+        );
+    });
+
+    it('creates a PAT when pruning an inactive PAT fails', async () => {
+        const execute = vi.fn(
+            ({
+                sqlText,
+                complete,
+            }: {
+                sqlText: string;
+                complete: (
+                    error: Error | undefined,
+                    statement: { getColumns: () => typeof queryColumnsMock },
+                    rows: Record<string, string>[],
+                ) => void;
+            }) => {
+                const statement = { getColumns: () => queryColumnsMock };
+                if (sqlText.startsWith('SHOW USER')) {
+                    complete(undefined, statement, [
+                        {
+                            name: 'LIGHTDASH_ONBOARDING_EXPIRED',
+                            status: 'EXPIRED',
+                        },
+                    ]);
+                } else if (sqlText.startsWith('ALTER USER REMOVE')) {
+                    complete(new Error('Failed to remove PAT'), statement, []);
+                } else {
+                    complete(undefined, statement, [
+                        { TOKEN_SECRET: 'pat-secret' },
+                    ]);
+                }
+            },
+        );
+        vi.mocked(createConnection).mockImplementationOnce(() =>
+            interactiveConnectionMock(execute),
+        );
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            authenticationType:
+                SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+        });
+
+        await expect(
+            warehouse.createProgrammaticAccessToken('LIGHTDASH_ONBOARDING_NEW'),
+        ).resolves.toEqual({
+            tokenName: 'LIGHTDASH_ONBOARDING_NEW',
+            tokenSecret: 'pat-secret',
+        });
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText: expect.stringMatching(
+                    /^ALTER USER ADD PROGRAMMATIC ACCESS TOKEN LIGHTDASH_ONBOARDING_NEW/,
+                ),
+            }),
+        );
+    });
+
+    it('discovers session defaults and capped inventory for interactive sessions', async () => {
+        const execute = vi.fn(
+            ({
+                sqlText,
+                complete,
+            }: {
+                sqlText: string;
+                complete: (
+                    error: undefined,
+                    statement: { getColumns: () => typeof queryColumnsMock },
+                    rows: Record<string, AnyType>[],
+                ) => void;
+            }) => {
+                let rows: Record<string, AnyType>[] = [];
+                if (sqlText.startsWith('SELECT CURRENT_USER')) {
+                    rows = [
+                        {
+                            USER: 'user.name@example.com',
+                            ROLE: 'ANALYST',
+                            WAREHOUSE: 'TRANSFORMING',
+                            DATABASE: 'ANALYTICS',
+                            SCHEMA: 'PUBLIC',
+                        },
+                    ];
+                } else if (sqlText.startsWith('SHOW DATABASES')) {
+                    rows = Array.from({ length: 125 }, (_, index) => ({
+                        name: `DATABASE_${index}`,
+                        comment: index === 0 ? 'Primary analytics' : '',
+                        kind: index === 1 ? 'IMPORTED DATABASE' : 'STANDARD',
+                    }));
+                } else if (sqlText.startsWith('SHOW WAREHOUSES')) {
+                    rows = [
+                        {
+                            name: 'TRANSFORMING',
+                            size: 'X-Small',
+                            state: 'SUSPENDED',
+                            auto_suspend: '300',
+                        },
+                    ];
+                } else if (sqlText.startsWith('SHOW GRANTS')) {
+                    rows = [{ role: 'ANALYST' }, { role: 'REPORTER' }];
+                } else if (sqlText.startsWith('SHOW SCHEMAS')) {
+                    rows = [
+                        { name: 'PUBLIC', database_name: 'ANALYTICS' },
+                        { name: 'JAFFLE', database_name: 'ANALYTICS' },
+                        {
+                            name: 'INFORMATION_SCHEMA',
+                            database_name: 'ANALYTICS',
+                        },
+                    ];
+                } else if (sqlText.startsWith('SELECT SUM(bytes)')) {
+                    if (sqlText.includes('DATABASE_0.')) {
+                        rows = [{ total_bytes: 1250 }];
+                    } else if (sqlText.includes('DATABASE_1.')) {
+                        rows = [{ total_bytes: 500 }];
+                    } else {
+                        rows = [{ total_bytes: null }];
+                    }
+                }
+                complete(
+                    undefined,
+                    { getColumns: () => queryColumnsMock },
+                    rows,
+                );
+            },
+        );
+        vi.mocked(createConnection).mockImplementationOnce(() =>
+            interactiveConnectionMock(execute),
+        );
+        const warehouse = new SnowflakeWarehouseClient({
+            ...credentials,
+            authenticationType:
+                SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE,
+        });
+
+        await expect(
+            warehouse.getSessionDiscovery('user.name@example.com'),
+        ).resolves.toEqual({
+            user: 'user.name@example.com',
+            defaults: {
+                role: 'ANALYST',
+                warehouse: 'TRANSFORMING',
+                database: 'ANALYTICS',
+                schema: 'PUBLIC',
+            },
+            inventory: {
+                databases: Array.from({ length: 100 }, (_, index) => ({
+                    name: `DATABASE_${index}`,
+                    comment: index === 0 ? 'Primary analytics' : null,
+                    kind: index === 1 ? 'IMPORTED DATABASE' : 'STANDARD',
+                    sizeBytes: [1250, 500][index] ?? null,
+                })),
+                warehouses: [
+                    {
+                        name: 'TRANSFORMING',
+                        size: 'X-Small',
+                        state: 'SUSPENDED',
+                        autoSuspendSeconds: 300,
+                    },
+                ],
+                roles: [
+                    { name: 'ANALYST', isDefault: true },
+                    { name: 'REPORTER', isDefault: false },
+                    { name: 'PUBLIC', isDefault: false },
+                ],
+                schemas: [
+                    { databaseName: 'ANALYTICS', name: 'PUBLIC' },
+                    { databaseName: 'ANALYTICS', name: 'JAFFLE' },
+                ],
+            },
+        });
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText: 'SHOW SCHEMAS IN ACCOUNT LIMIT 1000',
+            }),
+        );
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText: `SELECT SUM(bytes) AS "total_bytes" FROM DATABASE_0.INFORMATION_SCHEMA.TABLES WHERE table_type = 'BASE TABLE'`,
+            }),
+        );
+        expect(
+            execute.mock.calls.filter(([statement]) =>
+                statement.sqlText.startsWith('SELECT SUM(bytes)'),
+            ),
+        ).toHaveLength(25);
+        expect(
+            execute.mock.calls.some(([statement]) =>
+                statement.sqlText.startsWith('USE WAREHOUSE'),
+            ),
+        ).toBe(false);
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText:
+                    'SHOW GRANTS TO USER "user.name@example.com" LIMIT 100',
+            }),
+        );
+    });
+
+    it('returns null database sizes when size discovery fails', async () => {
+        const execute = vi.fn(
+            ({
+                sqlText,
+                complete,
+            }: {
+                sqlText: string;
+                complete: (
+                    error: Error | undefined,
+                    statement: { getColumns: () => typeof queryColumnsMock },
+                    rows: Record<string, AnyType>[],
+                ) => void;
+            }) => {
+                if (sqlText.startsWith('SELECT SUM(bytes)')) {
+                    complete(
+                        new Error('Insufficient privileges'),
+                        { getColumns: () => queryColumnsMock },
+                        [],
+                    );
+                    return;
+                }
+                let rows: Record<string, AnyType>[] = [];
+                if (sqlText.startsWith('SELECT CURRENT_USER')) {
+                    rows = [{ USER: 'test-user' }];
+                } else if (sqlText.startsWith('SHOW DATABASES')) {
+                    rows = [{ name: 'ANALYTICS' }, { name: 'RAW' }];
+                } else if (sqlText.startsWith('SHOW WAREHOUSES')) {
+                    rows = [
+                        { name: 'WH_BIG', size: 'Large', state: 'SUSPENDED' },
+                        {
+                            name: 'WH_SMALL',
+                            size: 'X-Small',
+                            state: 'STARTED',
+                        },
+                    ];
+                }
+                complete(
+                    undefined,
+                    { getColumns: () => queryColumnsMock },
+                    rows,
+                );
+            },
+        );
+        vi.mocked(createConnection).mockImplementationOnce(() =>
+            interactiveConnectionMock(execute),
+        );
+        const warehouse = new SnowflakeWarehouseClient(credentials);
+
+        const discovery = await warehouse.getSessionDiscovery('test-user');
+
+        expect(discovery.inventory.databases).toEqual([
+            {
+                name: 'ANALYTICS',
+                comment: null,
+                kind: null,
+                sizeBytes: null,
+            },
+            { name: 'RAW', comment: null, kind: null, sizeBytes: null },
+        ]);
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqlText: 'USE WAREHOUSE WH_SMALL',
+            }),
+        );
+    });
+
+    it('opens, checks, and closes a diagnostic connection', async () => {
+        const execute = vi.fn(
+            ({
+                sqlText,
+                complete,
+            }: {
+                sqlText: string;
+                complete: (
+                    error: undefined,
+                    statement: { getColumns: () => typeof queryColumnsMock },
+                    rows: Record<string, AnyType>[],
+                ) => void;
+            }) =>
+                complete(undefined, { getColumns: () => queryColumnsMock }, []),
+        );
+        const connection = interactiveConnectionMock(execute);
+        vi.mocked(createConnection).mockImplementationOnce(() => connection);
+        const warehouse = new SnowflakeWarehouseClient(credentials);
+
+        const session = await warehouse.openDiagnosticConnection();
+        await warehouse.selectOneDiagnosticConnection(session);
+        await warehouse.closeDiagnosticConnection(session);
+
+        expect(execute).toHaveBeenCalledWith(
+            expect.objectContaining({ sqlText: 'SELECT 1' }),
+        );
+        expect(connection.destroy).toHaveBeenCalledOnce();
+    });
+
     it('expect query rows', async () => {
         const warehouse = new SnowflakeWarehouseClient(credentials);
         const results = await warehouse.runQuery('fake sql');
 
-        expect(results.fields).toEqual(expectedFields);
+        expect(results.fields).toEqual({
+            ...expectedFields,
+            // NUMBER with scale 0 at the source is an integer
+            MYNUMBERCOLUMN: {
+                ...expectedFields.MYNUMBERCOLUMN,
+                numericKind: { kind: 'integer' },
+            },
+        });
         expect(results.rows[0]).toEqual(expectedRow);
     });
+
+    it('keeps agent identity in valid JSON with oversized tags', () => {
+        const result = SnowflakeWarehouseClient.formatQueryTag({
+            huge: 'x'.repeat(3000),
+            ...Object.fromEntries(
+                Array.from({ length: 100 }, (_, i) => [
+                    `tag_${i}`,
+                    'value'.repeat(10),
+                ]),
+            ),
+            agent: 'true',
+            agent_surface: 'slack_agent',
+            agent_client: 'h-1234',
+        });
+        expect(result.length).toBeLessThanOrEqual(2000);
+        expect(JSON.parse(result)).toMatchObject({
+            agent: 'true',
+            agent_surface: 'slack_agent',
+            agent_client: 'h-1234',
+        });
+    });
+
+    it('escapes single quotes in query tags for session SQL', () => {
+        expect(
+            SnowflakeWarehouseClient.formatQueryTag({
+                user_attribute_company: "O'Reilly Media",
+            }),
+        ).toBe('{"user_attribute_company":"O\'\'Reilly Media"}');
+    });
+
+    it('limits query tag value to Snowflake maximum length', () => {
+        expect(
+            SnowflakeWarehouseClient.formatQueryTag({
+                user_attribute_company: 'x'.repeat(3000),
+            }).length,
+        ).toBe(2000);
+    });
+
+    it('keeps long escaped query tags safe for Snowflake session SQL', () => {
+        const result = SnowflakeWarehouseClient.formatQueryTag({
+            user_attribute_company: "'".repeat(3000),
+        });
+        const singleQuoteRuns = result.match(/'+/g) ?? [];
+
+        expect(result.length).toBeGreaterThan(2000);
+        expect(result.replace(/''/g, "'")).toHaveLength(2000);
+        expect(singleQuoteRuns.every((run) => run.length % 2 === 0)).toBe(true);
+    });
+
     it('expect schema with snowflake types mapped to dimension types', async () => {
-        (createConnection as jest.Mock).mockImplementationOnce(() => ({
-            connect: jest.fn((callback) => callback(null, {})),
-            execute: jest.fn(({ sqlText, complete }) => {
+        (createConnection as Mock).mockImplementationOnce(() => ({
+            connect: vi.fn((callback) => callback(null, {})),
+            execute: vi.fn(({ sqlText, complete }) => {
                 complete(
                     undefined,
                     { getColumns: () => queryColumnsMock },
                     columns,
                 );
             }),
-            destroy: jest.fn((callback) => callback(null, {})),
+            destroy: vi.fn((callback) => callback(null, {})),
         }));
         const warehouse = new SnowflakeWarehouseClient(credentials);
         expect(await warehouse.getCatalog(config)).toEqual(
             expectedWarehouseSchema,
         );
+    });
+});
+
+describe('mapSnowflakeDiagnosticError', () => {
+    it.each([
+        [
+            { code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND host' },
+            'account_identifier',
+        ],
+        [
+            {
+                code: 250001,
+                message: 'Incorrect username or password was specified',
+            },
+            'authentication',
+        ],
+        [
+            {
+                code: 'ERR_OSSL_PEM_BAD_BASE64_DECODE',
+                message: 'PEM routines failed',
+            },
+            'private_key',
+        ],
+        [
+            { code: 390144, message: 'Authentication token rejected' },
+            'private_key',
+        ],
+        [
+            { code: 390422, message: 'Incoming request rejected' },
+            'network_policy',
+        ],
+        [
+            {
+                code: '002003',
+                message:
+                    "Database 'ANALYTICS' does not exist or not authorized",
+            },
+            'database_access',
+        ],
+        [
+            {
+                code: '002043',
+                message: "Warehouse 'COMPUTE' does not exist or not authorized",
+            },
+            'warehouse_access',
+        ],
+        [{ code: 'UNKNOWN', message: 'socket closed unexpectedly' }, 'unknown'],
+    ])('maps %o to %s without exposing its raw message', (error, category) => {
+        const result = mapSnowflakeDiagnosticError(error);
+
+        expect(result.category).toBe(category);
+        expect(result.code).toBe(String(error.code));
+        expect(result.sanitizedMessage).not.toContain(error.message);
+    });
+
+    it('keeps the raw error non-enumerable for internal inspection', () => {
+        const rawError = new Error('sensitive socket detail');
+        const error = new SnowflakeDiagnosticError(rawError);
+
+        expect(error.getRawError()).toBe(rawError);
+        expect(JSON.stringify(error)).not.toContain('sensitive socket detail');
     });
 });
 
@@ -236,6 +1432,26 @@ describe('SnowflakeErrorParsing', () => {
             "You don't have access to the {snowflakeTable} table. Please go to 'analytics_{snowflakeSchema}' in sailpoint and request access",
         );
     });
+
+    it('should convert literal \\n escape sequences into real newlines', () => {
+        process.env.SNOWFLAKE_UNAUTHORIZED_ERROR_MESSAGE =
+            'No access to {snowflakeTable}.\\n1) Step one\\n2) Step two';
+
+        const error = {
+            message:
+                "Object 'DB.MY_SCHEMA.MY_TABLE' does not exist or not authorized.",
+            code: 'COMPILATION',
+            data: { type: 'COMPILATION' },
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = warehouse.parseError(error as any);
+
+        expect(result.message).toBe(
+            'No access to MY_TABLE.\n1) Step one\n2) Step two',
+        );
+        expect(result.message).not.toContain('\\n');
+    });
 });
 
 describe('SnowflakeWarehouseClient.parseError - warehouse access errors', () => {
@@ -284,7 +1500,7 @@ describe('SnowflakeWarehouseClient.parseError - warehouse access errors', () => 
         );
     });
 
-    it('should return original warehouse error message when SNOWFLAKE_WAREHOUSE_ERROR_MESSAGE is not set', () => {
+    it('should append the configured warehouse to the original error when SNOWFLAKE_WAREHOUSE_ERROR_MESSAGE is not set', () => {
         // Ensure environment variable is not set
         delete process.env.SNOWFLAKE_WAREHOUSE_ERROR_MESSAGE;
 
@@ -299,7 +1515,32 @@ describe('SnowflakeWarehouseClient.parseError - warehouse access errors', () => 
         const result = warehouse.parseError(error as any);
 
         expect(result.message).toBe(
-            "No active warehouse selected in the current session. Select an active warehouse with the 'use warehouse' command",
+            `No active warehouse selected in the current session. Select an active warehouse with the 'use warehouse' command (configured warehouse: "TEST_WAREHOUSE")`,
+        );
+    });
+
+    it('should flag missing warehouse credentials when no warehouse is configured on the connection', () => {
+        delete process.env.SNOWFLAKE_WAREHOUSE_ERROR_MESSAGE;
+
+        const warehouseWithoutWarehouse = new SnowflakeWarehouseClient({
+            account: 'test-account',
+            user: 'test-user',
+            password: 'test-password',
+            database: 'test-database',
+        } as CreateSnowflakeCredentials);
+
+        const error = {
+            message:
+                "No active warehouse selected in the current session. Select an active warehouse with the 'use warehouse' command",
+            code: 'SESSION_ERROR',
+            data: { type: 'SESSION_ERROR' },
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = warehouseWithoutWarehouse.parseError(error as any);
+
+        expect(result.message).toBe(
+            "No active warehouse selected in the current session. Select an active warehouse with the 'use warehouse' command (no warehouse was configured on the connection — credentials may be missing this field)",
         );
     });
 
@@ -337,5 +1578,191 @@ describe('SnowflakeWarehouseClient.parseError - warehouse access errors', () => 
         const result = warehouse.parseError(error as any);
 
         expect(result.message).toBe('Some other SQL error');
+    });
+
+    it('should convert literal \\n escape sequences into real newlines', () => {
+        process.env.SNOWFLAKE_WAREHOUSE_ERROR_MESSAGE =
+            'No access to warehouse {warehouseName}.\\n1) Step one\\n2) Step two';
+
+        const error = {
+            message:
+                "No active warehouse selected in the current session. Select an active warehouse with the 'use warehouse' command",
+            code: 'SESSION_ERROR',
+            data: { type: 'SESSION_ERROR' },
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = warehouse.parseError(error as any);
+
+        expect(result.message).toBe(
+            'No access to warehouse TEST_WAREHOUSE.\n1) Step one\n2) Step two',
+        );
+        expect(result.message).not.toContain('\\n');
+    });
+});
+
+describe('AI service account sessions', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        executeMock.mockReset().mockImplementation(defaultExecute);
+    });
+    it('disables cached results before application SQL on each key-pair session without activation queries', async () => {
+        const client = new SnowflakeWarehouseClient(
+            {
+                ...credentials,
+                authenticationType: SnowflakeAuthenticationType.PRIVATE_KEY,
+                user: 'SLOT_USER',
+                privateKey: 'slot-key',
+                role: 'SLOT_ROLE',
+            },
+            { agentJobControls: true, agentSession: true },
+        );
+        await client.runQuery('SELECT 1', {});
+        await client.runQuery('SELECT 2', {});
+        const sql = executeMock.mock.calls.map(([call]) => call.sqlText);
+        expect(
+            sql.filter((value) => value.includes('USE_CACHED_RESULT')),
+        ).toHaveLength(2);
+        expect(
+            sql.findIndex((value) => value.includes('USE_CACHED_RESULT')),
+        ).toBeLessThan(sql.indexOf('SELECT 1'));
+        expect(
+            sql
+                .slice(sql.indexOf('SELECT 1') + 1)
+                .findIndex((value) => value.includes('USE_CACHED_RESULT')),
+        ).toBeLessThan(
+            sql.slice(sql.indexOf('SELECT 1') + 1).indexOf('SELECT 2'),
+        );
+        expect(sql.join(' ')).not.toContain('IS_AGENT_ACTIVATED');
+        expect(vi.mocked(createConnection).mock.calls[0][0]).toMatchObject({
+            authenticator: 'SNOWFLAKE_JWT',
+            username: 'SLOT_USER',
+            role: 'SLOT_ROLE',
+            privateKey: 'slot-key',
+        });
+    });
+    it.each([false, true])(
+        'does not change ordinary sessions with agentSession=%s',
+        async (agentSession) => {
+            const client = new SnowflakeWarehouseClient(credentials, {
+                agentSession,
+            });
+            await client.runQuery('SELECT 1', {});
+            expect(
+                executeMock.mock.calls.map(([call]) => call.sqlText).join(' '),
+            ).not.toContain('USE_CACHED_RESULT');
+        },
+    );
+    it('destroys a session if disabling cached results fails and does not run application SQL', async () => {
+        const connection = interactiveConnectionMock(executeMock);
+        vi.mocked(createConnection).mockReturnValueOnce(connection);
+        executeMock.mockImplementationOnce(({ complete }) =>
+            complete(new Error('ALTER failed')),
+        );
+        const client = new SnowflakeWarehouseClient(credentials, {
+            agentJobControls: true,
+        });
+        await expect(client.runQuery('SELECT 1', {})).rejects.toThrow(
+            SNOWFLAKE_AGENT_SESSION_REQUIRED_MESSAGE,
+        );
+        expect(connection.destroy).toHaveBeenCalledOnce();
+        expect(executeMock).toHaveBeenCalledOnce();
+        expect(executeMock.mock.calls[0][0].sqlText).toContain(
+            'USE_CACHED_RESULT',
+        );
+    });
+    it('preserves structured sign-in causes only for agent-controlled sessions', async () => {
+        const cause = Object.assign(new Error('JWT token is invalid'), {
+            code: '390144',
+        });
+        const connection = interactiveConnectionMock(executeMock);
+        vi.mocked(connection.connect).mockImplementation((callback) => {
+            callback!(cause as unknown as SnowflakeError, connection);
+            return connection;
+        });
+        vi.mocked(createConnection).mockReturnValueOnce(connection);
+        const client = new SnowflakeWarehouseClient(credentials, {
+            agentJobControls: true,
+        });
+        await expect(client.runQuery('SELECT 1', {})).rejects.toMatchObject({
+            name: 'WarehouseConnectionError',
+            cause,
+        });
+        expect(executeMock).not.toHaveBeenCalled();
+    });
+    it('decrypts an encrypted RSA key without changing its user or role', async () => {
+        const { privateKey } = generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+        });
+        const passphrase = ' passphrase ';
+        const encrypted = privateKey
+            .export({
+                format: 'pem',
+                type: 'pkcs8',
+                cipher: 'aes-256-cbc',
+                passphrase,
+            })
+            .toString();
+        const client = new SnowflakeWarehouseClient(
+            {
+                ...credentials,
+                authenticationType: SnowflakeAuthenticationType.PRIVATE_KEY,
+                user: 'SlotUser',
+                role: 'SlotRole',
+                privateKey: encrypted,
+                privateKeyPass: passphrase,
+            },
+            { agentJobControls: true },
+        );
+        await client.runQuery('SELECT 1', {});
+        expect(vi.mocked(createConnection).mock.calls[0][0]).toMatchObject({
+            username: 'SlotUser',
+            role: 'SlotRole',
+            authenticator: 'SNOWFLAKE_JWT',
+            privateKey: privateKey
+                .export({ format: 'pem', type: 'pkcs8' })
+                .toString(),
+        });
+        expect(client.credentials.privateKey).toBe(encrypted);
+    });
+    it('does not let a custom connection tag replace authoritative actor tags', async () => {
+        const client = new SnowflakeWarehouseClient(
+            {
+                ...credentials,
+                queryTag:
+                    '{"agent":"false","ai_principal":"spoof","agent_surface":"spoof"}',
+            },
+            { agentJobControls: true },
+        );
+        await client.runQuery('SELECT 1', {
+            agent: 'true',
+            ai_principal: 'actual-person',
+            agent_surface: 'mcp',
+            agent_client: 'client',
+        });
+        const sql = executeMock.mock.calls
+            .map(([call]) => call.sqlText)
+            .join(' ');
+        expect(sql).toContain('"ai_principal":"actual-person"');
+        expect(sql).toContain('"agent_surface":"mcp"');
+        expect(sql).not.toContain('spoof');
+    });
+    it('keeps person and actor fields in valid bounded JSON tags', () => {
+        const tag = SnowflakeWarehouseClient.formatQueryTag({
+            custom: 'x'.repeat(3000),
+            ai_principal: 'person-uuid',
+            user_uuid: 'person-uuid',
+            agent: 'true',
+            agent_surface: 'slack_agent',
+            agent_client: "client's",
+        });
+        expect(tag.length).toBeLessThan(2000);
+        expect(JSON.parse(tag.replace(/''/g, "'"))).toEqual({
+            ai_principal: 'person-uuid',
+            user_uuid: 'person-uuid',
+            agent: 'true',
+            agent_surface: 'slack_agent',
+            agent_client: "client's",
+        });
     });
 });

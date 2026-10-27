@@ -1,8 +1,67 @@
 import { type AbilityBuilder } from '@casl/ability';
 import { type MemberAbility } from '../authorization/types';
 import { type AnyType } from './any';
-import { type OpenIdIdentityIssuerType } from './openIdIdentity';
+import { type ManagedSignIn } from './managedSignIn';
+import { OpenIdIdentityIssuerType } from './openIdIdentity';
 import { type OrganizationMemberRole } from './organizationMemberProfile';
+import { type PromotionAction } from './promotion';
+import { type UserAvatarColorValue } from './userAvatars';
+
+export type UserAsCodeRole =
+    | {
+          type: 'system';
+          name: OrganizationMemberRole;
+      }
+    | {
+          type: 'custom';
+          name: string;
+      };
+
+export type UserAsCode = {
+    version: 1;
+    email: string;
+    disabled: boolean;
+    /** Primary organization role (system or custom). */
+    role: UserAsCodeRole;
+    /**
+     * Extra organization custom roles held on top of `role` (role sets).
+     * Omitted when the user holds a single role; older servers reject the
+     * field instead of silently dropping it.
+     */
+    additionalRoles?: Extract<UserAsCodeRole, { type: 'custom' }>[];
+};
+
+export enum UserAsCodeLifecycleStatus {
+    READY = 'ready',
+    AWAITING_AUTHENTICATION = 'awaiting authentication',
+}
+
+export enum UserAsCodeInvitationStatus {
+    NOT_REQUESTED = 'not requested',
+    SENT = 'sent',
+    SKIPPED_AUTHENTICATED = 'skipped authenticated',
+    SKIPPED_DISABLED = 'skipped disabled',
+    SKIPPED_VALID_INVITE = 'skipped valid invite',
+}
+
+export type ApiUserAsCodeListResponse = {
+    status: 'ok';
+    results: {
+        users: UserAsCode[];
+    };
+};
+
+export type ApiUserAsCodeUpsertResponse = {
+    status: 'ok';
+    results: {
+        action:
+            | PromotionAction.CREATE
+            | PromotionAction.UPDATE
+            | PromotionAction.NO_CHANGES;
+        lifecycle: UserAsCodeLifecycleStatus;
+        invitation: UserAsCodeInvitationStatus;
+    };
+};
 
 export type AccountUser = {
     /**
@@ -39,12 +98,17 @@ export interface LightdashUser {
     updatedAt: Date;
     /* IANA timezone the user prefers query results rendered in. */
     timezone: string | null;
+    /* Content-addressed path to the uploaded avatar image; null when none uploaded. */
+    avatarUrl: string | null;
+    /* Explicit gradient placeholder override; null falls back to the deterministic gradient. */
+    avatarGradient: UserAvatarColorValue | null;
     /* Whether the user doesn't have an authentication method (password or openId) */
     isPending?: boolean;
 }
 
 export interface LightdashSessionUser extends AccountUser {
     type: 'registered';
+    isEmailVerified?: boolean;
     // The current effective primary key for users. It duplicates user.id.
     userUuid: string;
     // The old sequential primary key for users
@@ -58,6 +122,8 @@ export interface LightdashSessionUser extends AccountUser {
     createdAt: Date;
     updatedAt: Date;
     timezone: string | null;
+    avatarUrl: string | null;
+    avatarGradient: UserAvatarColorValue | null;
     /* Whether the user doesn't have an authentication method (password or openId) */
     isPending?: boolean;
     /* Set only when an admin is impersonating this user via session auth */
@@ -84,6 +150,7 @@ export interface LightdashUserWithAbilityRules extends LightdashUser {
 
 export interface SessionUser extends LightdashUserWithAbilityRules {
     ability: MemberAbility;
+    isEmailVerified?: boolean;
     /**
      * Per-request metadata (IP, user agent, request id) populated by the auth
      * middleware. Used by the audit log; intentionally not persisted in the
@@ -172,18 +239,79 @@ export type ApiRegisterUserResponse = {
     results: LightdashUser;
 };
 
+export type ApiLoginEmailOtpRequest = {
+    email: string;
+};
+
+export type ApiLoginEmailOtpResponse = {
+    status: 'ok';
+};
+
+export type ApiVerifyLoginEmailOtpRequest = {
+    email: string;
+    passcode: string;
+};
+
+export type ApiVerifyLoginEmailOtpResponse = {
+    status: 'ok';
+    results: LightdashUser;
+};
+
 export enum LocalIssuerTypes {
     EMAIL = 'email',
+    EMAIL_OTP = 'emailOtp',
     API_TOKEN = 'apiToken',
 }
 
 export type LoginOptionTypes = OpenIdIdentityIssuerType | LocalIssuerTypes;
 
+export type MobileLoginIntent = 'sso' | 'local';
+
+export const isMobileLoginIntent = (
+    value: unknown,
+): value is MobileLoginIntent => value === 'sso' || value === 'local';
+
+export type MobileLoginSsoProvider =
+    | OpenIdIdentityIssuerType.GOOGLE
+    | OpenIdIdentityIssuerType.OKTA
+    | OpenIdIdentityIssuerType.ONELOGIN
+    | OpenIdIdentityIssuerType.AZUREAD
+    | OpenIdIdentityIssuerType.GENERIC_OIDC;
+
+export const isMobileLoginSsoProvider = (
+    value: unknown,
+): value is MobileLoginSsoProvider =>
+    value === OpenIdIdentityIssuerType.GOOGLE ||
+    value === OpenIdIdentityIssuerType.OKTA ||
+    value === OpenIdIdentityIssuerType.ONELOGIN ||
+    value === OpenIdIdentityIssuerType.AZUREAD ||
+    value === OpenIdIdentityIssuerType.GENERIC_OIDC;
+
+export type MobileLoginSsoPresentation =
+    | { kind: 'none' }
+    | { kind: 'neutral' }
+    | {
+          kind: 'branded';
+          provider: MobileLoginSsoProvider;
+      };
+
 export type LoginOptions = {
     showOptions: LoginOptionTypes[];
     forceRedirect?: boolean;
     redirectUri?: string;
+    ssoPresentation?: MobileLoginSsoPresentation;
+    localEmailAvailable?: boolean;
+    managedSignIn?: ManagedSignIn;
 };
+
+export type UserLoginOptions = Pick<
+    LoginOptions,
+    'showOptions' | 'forceRedirect' | 'redirectUri'
+>;
+
+export type MobileLoginOptions = UserLoginOptions &
+    Required<Pick<LoginOptions, 'ssoPresentation' | 'localEmailAvailable'>> &
+    Pick<LoginOptions, 'managedSignIn'>;
 
 export type ApiGetLoginOptionsResponse = {
     status: 'ok';

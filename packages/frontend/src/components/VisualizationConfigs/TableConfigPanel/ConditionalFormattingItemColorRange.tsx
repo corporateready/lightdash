@@ -5,14 +5,13 @@ import {
     type ConditionalFormattingMinMax,
     type FilterableItem,
 } from '@lightdash/common';
-import { Group, Select, Stack } from '@mantine/core';
+import { Group, Stack } from '@mantine/core';
 import { IconPercentage } from '@tabler/icons-react';
 import capitalize from 'lodash/capitalize';
 import { startTransition, useCallback, type FC } from 'react';
-import FilterNumberInput from '../../common/Filters/FilterInputs/FilterNumberInput';
 import MantineIcon from '../../common/MantineIcon';
 import ColorSelector from '../ColorSelector';
-import { Config } from '../common/Config';
+import { RangeBoundInput } from '../common/RangeBoundInput';
 
 type Props = {
     config: ConditionalFormattingConfigWithColorRange;
@@ -25,11 +24,6 @@ type Props = {
         newMinMax: Partial<ConditionalFormattingMinMax<number | 'auto'>>,
     ) => void;
 };
-
-enum RangeValue {
-    CUSTOM = 'custom',
-    AUTO = 'auto',
-}
 
 const groups = [
     ['start', 'min'],
@@ -55,68 +49,26 @@ const ConditionalFormattingItemColorRange: FC<Props> = ({
     );
 
     return (
-        <Stack spacing="xs">
+        <Stack gap="xs">
             {groups.map(([rangeName, minMaxName]) => (
-                <Group key={rangeName} spacing="xs" noWrap align="end">
-                    <Select
-                        sx={{ flexBasis: '100%' }}
-                        label={`${capitalize(minMaxName)} value type`}
-                        data={Object.values(RangeValue).map((value) => ({
-                            value,
-                            label:
-                                value === RangeValue.AUTO
-                                    ? `${capitalize(minMaxName)} value in table`
-                                    : `Custom`,
-                        }))}
-                        value={
-                            config.rule[minMaxName] === 'auto'
-                                ? RangeValue.AUTO
-                                : RangeValue.CUSTOM
-                        }
-                        onChange={(value) => {
-                            if (value === RangeValue.AUTO) {
-                                onChangeMinMax({ [minMaxName]: 'auto' });
-                            } else {
-                                onChangeMinMax({ [minMaxName]: 0 });
-                            }
-                        }}
-                    />
-
-                    {/* FIXME: remove this and use NumberInput from @mantine/core once we upgrade to mantine v7 */}
-                    {/* INFO: mantine v6 NumberInput does not handle decimal values properly */}
-                    <FilterNumberInput
-                        flex="0 1 auto"
-                        disabled={config.rule[minMaxName] === 'auto'}
-                        placeholder={
-                            config.rule[minMaxName] === 'auto'
-                                ? 'Auto'
-                                : undefined
-                        }
-                        label={
-                            <Config.Label>
-                                {capitalize(minMaxName)} value
-                            </Config.Label>
+                <Group key={rangeName} gap="xs" wrap="nowrap" align="end">
+                    <RangeBoundInput
+                        label={`${capitalize(minMaxName)} value`}
+                        autoLabel={`${capitalize(minMaxName)} value in table`}
+                        value={config.rule[minMaxName]}
+                        onChange={(newValue) =>
+                            onChangeMinMax({ [minMaxName]: newValue })
                         }
                         leftSection={
                             hasPercentageFormat(field) ? (
                                 <MantineIcon icon={IconPercentage} />
                             ) : null
                         }
-                        value={config.rule[minMaxName]}
-                        onChange={(newValue) => {
-                            if (newValue === null) return;
-
-                            onChangeMinMax({
-                                [minMaxName]: newValue,
-                            });
-                        }}
                     />
 
                     <ColorSelector
                         colorSwatchProps={{
-                            style: {
-                                flexShrink: '0',
-                            },
+                            flex: '0 0 auto',
                             size: '24px',
                             my: 3,
                         }}

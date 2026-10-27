@@ -1,38 +1,43 @@
-import { FeatureFlags } from '@lightdash/common';
 import {
     selectChartConfig,
     selectPivotConfig,
     useExplorerSelector,
 } from '../../../features/explorer/store';
+import { useMergeSafe } from '../../../features/mergeQuery/context/useMerge';
 import { useExplorerQuery } from '../../../hooks/useExplorerQuery';
-import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../providers/App/useApp';
 
 /**
  * Hook to determine if grouped results view is available and enabled.
  * Centralizes the logic for checking:
- * - Backend SQL pivot feature flag
  * - Whether pivot columns are configured
  * - Whether the visualization type supports grouping (not table viz)
  * - Whether the pivot column limit has been exceeded
  */
 export function useGroupedResultsAvailability() {
     const { health } = useApp();
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
     const pivotConfig = useExplorerSelector(selectPivotConfig);
     const chartConfig = useExplorerSelector(selectChartConfig);
     const { queryResults } = useExplorerQuery();
+    const merge = useMergeSafe();
+    const mergeResults = merge?.mergeResults;
+    const activeResults = mergeResults?.results ?? queryResults;
 
-    const isSqlPivotEnabled = !!useSqlPivotResults?.enabled;
     const hasPivotColumns = !!pivotConfig?.columns?.length;
     const isTableViz = chartConfig.type === 'table';
-    const hasNoResults = queryResults.rows.length === 0;
+    const mergeIsPendingOrFailed =
+        !!merge?.isMerging &&
+        !mergeResults &&
+        (merge.wasRestored ||
+            merge.isRunning ||
+            !!merge.runError ||
+            merge.runErrors.length > 0);
+    const hasNoResults =
+        mergeIsPendingOrFailed || activeResults.rows.length === 0;
 
     // Check if pivot column limit is exceeded
     const maxColumnLimit = health.data?.pivotTable?.maxColumnLimit;
-    const totalColumnCount = queryResults.pivotDetails?.totalColumnCount;
+    const totalColumnCount = activeResults.pivotDetails?.totalColumnCount;
     const exceedsColumnLimit =
         maxColumnLimit !== undefined &&
         totalColumnCount !== undefined &&
@@ -44,12 +49,10 @@ export function useGroupedResultsAvailability() {
     const isGroupedDisabled =
         !hasPivotColumns || isTableViz || exceedsColumnLimit || hasNoResults;
 
-    // Can show grouped results when SQL pivot is enabled AND we have pivot columns
-    const canShowGroupedResults = isSqlPivotEnabled && hasPivotColumns;
+    // Can show grouped results when we have pivot columns
+    const canShowGroupedResults = hasPivotColumns;
 
     return {
-        /** Whether the SQL pivot feature flag is enabled */
-        isSqlPivotEnabled,
         /** Whether there are pivot columns configured */
         hasPivotColumns,
         /** Whether the query returned no results */

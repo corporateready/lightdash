@@ -1,0 +1,189 @@
+# AI agent
+
+Lightdash's in-app conversational agent, surfaced as Ask AI. A user asks
+questions in a thread; the agent answers with tools that read and query the
+project. Users can attach project content to a prompt so the agent knows what
+they are looking at. Not the coding agent that writes data apps, and not an
+external agent reaching Lightdash through MCP.
+
+## Language
+
+**Ask AI**:
+The entry point that opens the AI agent from a piece of content — a chart,
+dashboard, dashboard tile, data app, or listing row — with that content
+already pinned to the new prompt.
+_Avoid_: ask agent, open copilot, AI button
+
+**Pinned context**:
+The set of content a user attaches to one AI agent prompt: charts,
+dashboards, data apps, Documents, previous conversations, dbt files,
+repositories, external sources, and a theme picked for a data app build. Stored with the
+prompt and shown to the agent as names and slugs; the agent reads the content
+itself with its tools. Outside this context, qualify as "AI agent pinned
+context"; it is not data-app **Context**, which is what the coding agent
+receives.
+_Avoid_: context (unqualified), attachments, references, mentions (for the
+set)
+
+**Theme pick**:
+The data app theme a user chooses from the composer's `+` menu for the
+prompt about to be sent. Offered only when the agent can start data app
+builds and the organization has themes; it surfaces on the main input once
+the draft reads as a data app request. Per prompt, not per thread: it rides
+the prompt as pinned context, shows as a chip on the sent message, and beats
+a theme named in the prompt's text. Leaving it unset keeps the organization
+default.
+_Avoid_: theme setting, thread theme, design pick
+
+**Theme listing**:
+The agent tool (`listDataAppThemes`) that returns the organization's data app
+themes — slug, name, default flag, description — so a theme named in prose
+("our brand", "the dark theme") resolves to a slug. Offered only where the
+agent can start data app builds, in threads and over MCP alike. A theme
+pick on the prompt makes the listing unnecessary; when nothing matches, the
+agent asks rather than guessing. Slack-started threads have no composer, so
+this is their only path to a theme.
+_Avoid_: theme picker (for the tool), design list
+
+**Bound dashboard**:
+The dashboard a thread is tied to for its whole life, set when the thread is
+created through the API. The agent may only change that dashboard and charts
+saved in it. Shown at the top of the thread as the linked dashboard; the
+launcher never pins a different dashboard into a bound thread. Per thread,
+unlike pinned context, which is per prompt.
+_Avoid_: pinned dashboard (for the binding), thread dashboard, scoped dashboard
+
+**Bound chart**:
+The saved chart a thread is tied to for its whole life, set when the thread is
+created through the API. The agent may only edit that chart and schedule its
+deliveries; it cannot create saved content. Shown at the top of the thread as
+the linked chart. Per thread, unlike pinned context, which is per prompt.
+_Avoid_: pinned chart (for the binding), thread chart, scoped chart
+
+**Thread context**:
+Free text given when a thread is created through the API, such as a summary of
+an earlier conversation. The agent reads it on every turn; it never appears as
+a chat message. It may hold internal notes, so the API returns it only to
+viewers with `view:AiAgentThreadContext` (organization and project admins by
+default; never embed viewers). Shown collapsed at the top of the thread.
+_Avoid_: context (unqualified), initial prompt, system prompt
+
+**Mention**:
+Attaching content to a prompt by typing `@` and picking it from search, the
+current page, or the tiles of a pinned dashboard. A mention is one way to
+add pinned context; Ask AI is the other.
+_Avoid_: tag, link, reference
+
+**Runtime overrides**:
+The live state a chart or dashboard had when it was pinned — dashboard
+filters, parameter values, date zoom, active tab — recorded so the agent
+queries what the user saw rather than the saved state.
+_Avoid_: filters (unqualified), page state, snapshot
+
+**Launcher**:
+The docked panel that hosts the AI agent on content pages. Ask AI opens it;
+a thread can expand from it to the full page and collapse back.
+_Avoid_: sidebar, widget, chat panel
+
+**Preview panel**:
+The in-thread panel that renders a data app the agent built or the user
+pinned, so it can be inspected without leaving the thread. Opens on its own
+when a build starts in the current session and shows a building or failed
+state while the app has no ready version to render; closing it keeps it
+closed for that build.
+_Avoid_: iframe, side panel, viewer
+
+**Build watch**:
+One data app build started from a thread that the app-wide build watcher
+follows until its outcome lands. Lives in the AI agent store for the session
+only; nothing is persisted.
+_Avoid_: subscription, poll registration, tracked build
+
+**Agent default**:
+The model picker entry that drops an explicit model pick so new threads
+follow the agent's current model again. Shown as selected whenever no pick is
+stored for that agent in this browser. See
+[ai-agent-model-resolution.md](../ai-agent-model-resolution.md) for the
+resolution order.
+_Avoid_: default model (ambiguous with the organization default), reset,
+auto
+
+**Skill**:
+A named unit of guidance the AI agent can follow: a description, a markdown
+body, and optional resource files. Built-in skills ship with Lightdash and
+are declared by the add-on whose tools they explain, so a loadout lists only
+the built-in skills of its add-ons; custom skills are authored by an
+organization and enabled on an agent one by one. A skill reaches the model
+two ways: the agent loads it when a request matches its description, or a
+user invokes it directly with a slash command and optional arguments.
+_Avoid_: command (for the unit), prompt template, action, macro
+
+**Skill proposal**:
+An Issues board card the review judge files when users keep steering an
+agent through the same procedure or presentation convention on otherwise
+correct answers. It carries a drafted skill (name, description, instructions)
+and lands in triage, where "Create skill" opens the skill editor prefilled
+and resolves the card on save.
+_Avoid_: skill suggestion, auto-skill, skill finding
+
+**Loadout**:
+The resolved bundle one AI agent run gets: a base, the add-ons that apply,
+and the tool names and prompt sections they declare. Resolved once per run
+from the agent's settings, feature flags and execution mode; it is the single
+answer to "what can this agent do", recorded per thread, and the unit the
+contract snapshots pin.
+_Avoid_: mode (already execution mode), profile, preset, toolset, capability
+(already agent permissions in agent identity)
+
+**Base**:
+The mutually exclusive core of a loadout. It owns the query path and the
+tools every run of that kind gets: classic, composer, no data access, deep
+research worker, deep research coordinator. Exactly one base per loadout;
+bases never combine, and each lists which add-ons it accepts.
+_Avoid_: core, default loadout, agent type
+
+**Add-on**:
+An additive, independent unit a base accepts into a loadout: a condition on
+the agent's arguments, the tools it contributes, and at most one prompt
+section. Add-ons compose by union; no two add-ons contribute the same tool,
+and no add-on removes anything.
+_Avoid_: capability, feature, extension, module
+
+**Intent gate**:
+With Jev on, the server picks a turn type at the start of each turn and
+withholds the tools and prompt sections that do not fit it; the agent gets
+them back with `loadAgentTools`. It never adds a tool.
+_Avoid_: overlay, filter
+
+**Tool allowlist**:
+A per-thread cap on the loadout, such as a data app investigation thread. It
+never adds a tool.
+_Avoid_: overlay, filter
+
+**SQL chart**:
+A chart saved from raw warehouse SQL rather than from an explore. Lives
+alongside semantic-layer charts in content as code (type `sql_chart`) and on
+dashboards as a SQL chart tile. The AI agent may run SQL in a thread, and
+may save a SQL chart only after the user approves that SQL for publication,
+unless the thread has approved SQL once and for all.
+_Avoid_: SQL Runner chart, saved SQL, raw SQL chart
+
+## MCP servers
+
+**MCP server**:
+A project-scoped record of an external tool server the AI agent can call:
+name, URL, auth type, credentials, and the tool list found on it. Shared by
+every agent in the project. Not the MCP server Lightdash itself exposes so
+external clients can reach Lightdash; that is inbound, this is outbound.
+_Avoid_: MCP, integration, connection, tool server
+
+**Attach**:
+Linking an MCP server to one agent so that agent can call its tools. Detach
+undoes the link and drops that agent's tool permissions, leaving the server
+in the project.
+_Avoid_: add (in prose), enable, connect (that is the credential step)
+
+**Delete**:
+Removing an MCP server from the project. Detaches it from every agent and
+drops its shared and personal credentials.
+_Avoid_: remove (ambiguous with detach), disable

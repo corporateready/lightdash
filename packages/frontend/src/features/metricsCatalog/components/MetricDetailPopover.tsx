@@ -1,5 +1,6 @@
 import {
     friendlyName,
+    interpolateUiString,
     type MetricExplorerDateRange,
     type MetricTotalComparisonType,
     type MetricWithAssociatedTimeDimension,
@@ -8,18 +9,26 @@ import {
 import {
     Badge,
     Box,
+    Button,
     Divider,
     Group,
     HoverCard,
+    Popover,
+    CloseButton,
+    UnstyledButton,
     Loader,
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
-import { Prism } from '@mantine/prism';
+} from '@mantine/core';
 import { IconCode, IconTable } from '@tabler/icons-react';
 import { useState, type FC, type ReactNode } from 'react';
+import CodeBlock from '../../../components/common/CodeBlock/CodeBlock';
 import MantineIcon from '../../../components/common/MantineIcon';
+import useCanViewEmbedCompiledSql from '../../../ee/providers/Embed/useCanViewEmbedCompiledSql';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
+import { useCanHover } from '../../../hooks/useCanHover';
+import { useExploreMetric } from '../hooks/useExploreMetric';
 import { useMetric } from '../hooks/useMetricsCatalog';
 import { useCompileMetricTotalQuery } from '../hooks/useRunMetricExplorerQuery';
 import classes from './MetricDetailPopover.module.css';
@@ -35,7 +44,9 @@ export type CompiledQueryConfig = {
 type Props = {
     tableName: string;
     metricName: string;
+    metricLabel: string;
     projectUuid: string;
+    showExploreButton: boolean;
     children: ReactNode;
     compiledQueryConfig?: CompiledQueryConfig;
 };
@@ -71,8 +82,9 @@ const CompiledQuerySection: FC<{
                     <Text size="xs" c="dimmed" fw={500}>
                         How's total calculated?
                     </Text>
-                    <Group
-                        gap={4}
+                    <UnstyledButton
+                        type="button"
+                        aria-pressed={showSql}
                         className={classes.compiledToggle}
                         onClick={() => setShowSql((prev) => !prev)}
                     >
@@ -88,7 +100,7 @@ const CompiledQuerySection: FC<{
                         >
                             {showSql ? 'Hide SQL' : 'Show SQL'}
                         </Text>
-                    </Group>
+                    </UnstyledButton>
                 </Group>
                 {showSql &&
                     (isLoading ? (
@@ -96,14 +108,13 @@ const CompiledQuerySection: FC<{
                             <Loader size="sm" />
                         </Group>
                     ) : data ? (
-                        <Prism
+                        <CodeBlock
+                            code={data.query}
                             language="sql"
                             className={classes.codeBlock}
                             copyLabel="Copy SQL"
                             copiedLabel="Copied!"
-                        >
-                            {data.query}
-                        </Prism>
+                        />
                     ) : (
                         <Text size="xs" c="dimmed">
                             Unable to load SQL
@@ -116,22 +127,32 @@ const CompiledQuerySection: FC<{
 
 type MetricDetailContentProps = {
     metric: MetricWithAssociatedTimeDimension;
+    tableName: string;
+    metricName: string;
+    showExploreButton: boolean;
     projectUuid: string;
     compiledQueryConfig?: CompiledQueryConfig;
     isOpen: boolean;
+    onExplore: () => void;
 };
 
 const MetricDetailContent: FC<MetricDetailContentProps> = ({
     metric,
+    tableName,
+    metricName,
+    showExploreButton,
     projectUuid,
     compiledQueryConfig,
     isOpen,
+    onExplore,
 }) => {
+    const exploreMetric = useExploreMetric();
     const [showCompiled, setShowCompiled] = useState(false);
     const sqlToShow = showCompiled ? metric.compiledSql : metric.sql;
+    const canViewSql = useCanViewEmbedCompiledSql();
 
     return (
-        <Stack gap="xs" w={compiledQueryConfig ? 400 : 300}>
+        <Stack gap="xs" w="100%">
             <Group gap="xs" wrap="nowrap" justify="space-between">
                 <Group gap="xs" wrap="nowrap">
                     <MantineIcon icon={IconTable} color="gray.6" size={14} />
@@ -139,43 +160,55 @@ const MetricDetailContent: FC<MetricDetailContentProps> = ({
                         {metric.tableLabel}
                     </Text>
                 </Group>
-                <Badge size="xs" variant="light" color="indigo" radius="sm">
+                <Badge size="xs" color="indigo">
                     {metric.type.toUpperCase()}
                 </Badge>
             </Group>
 
-            <Divider />
+            {canViewSql && (
+                <>
+                    <Divider />
 
-            <Box>
-                <Group gap="xs" mb={4} justify="space-between">
-                    <Text size="xs" c="dimmed" fw={500}>
-                        {compiledQueryConfig ? 'Metric SQL' : 'SQL'}
-                    </Text>
-                    <Tooltip label="Show compiled SQL" withinPortal>
-                        <Group
-                            gap={4}
-                            className={classes.compiledToggle}
-                            onClick={() => setShowCompiled((prev) => !prev)}
-                        >
-                            <MantineIcon
-                                icon={IconCode}
-                                size={12}
-                                color={showCompiled ? 'indigo.6' : 'gray.6'}
-                            />
-                            <Text
-                                size="xs"
-                                c={showCompiled ? 'indigo.6' : 'dimmed'}
-                                fw={500}
-                            >
-                                Compiled SQL
+                    <Box>
+                        <Group gap="xs" mb={4} justify="space-between">
+                            <Text size="xs" c="dimmed" fw={500}>
+                                {compiledQueryConfig ? 'Metric SQL' : 'SQL'}
                             </Text>
+                            <Tooltip label="Show compiled SQL">
+                                <UnstyledButton
+                                    type="button"
+                                    aria-pressed={showCompiled}
+                                    className={classes.compiledToggle}
+                                    onClick={() =>
+                                        setShowCompiled((prev) => !prev)
+                                    }
+                                >
+                                    <MantineIcon
+                                        icon={IconCode}
+                                        size={12}
+                                        color={
+                                            showCompiled ? 'indigo.6' : 'gray.6'
+                                        }
+                                    />
+                                    <Text
+                                        size="xs"
+                                        c={showCompiled ? 'indigo.6' : 'dimmed'}
+                                        fw={500}
+                                    >
+                                        Compiled SQL
+                                    </Text>
+                                </UnstyledButton>
+                            </Tooltip>
                         </Group>
-                    </Tooltip>
-                </Group>
-                <Prism language="sql" className={classes.codeBlock} noCopy>
-                    {sqlToShow}
-                </Prism>
-            </Box>
+                        <CodeBlock
+                            code={sqlToShow}
+                            language="sql"
+                            className={classes.codeBlock}
+                            withCopyButton={false}
+                        />
+                    </Box>
+                </>
+            )}
 
             {metric.timeDimension && (
                 <>
@@ -186,7 +219,6 @@ const MetricDetailContent: FC<MetricDetailContentProps> = ({
                         </Text>
                         <Tooltip
                             label={`${metric.timeDimension.table}.${metric.timeDimension.field}`}
-                            withinPortal
                         >
                             <Text size="xs">
                                 {metric.timeDimension.table !== metric.table &&
@@ -199,7 +231,7 @@ const MetricDetailContent: FC<MetricDetailContentProps> = ({
                 </>
             )}
 
-            {compiledQueryConfig && (
+            {compiledQueryConfig && canViewSql && (
                 <CompiledQuerySection
                     projectUuid={projectUuid}
                     exploreName={metric.table}
@@ -208,6 +240,21 @@ const MetricDetailContent: FC<MetricDetailContentProps> = ({
                     isOpen={isOpen}
                 />
             )}
+
+            {showExploreButton && (
+                <Button
+                    size="xs"
+                    fullWidth
+                    onClick={() => {
+                        // Close the popover before opening the modal,
+                        // otherwise its dropdown floats above the modal.
+                        onExplore();
+                        exploreMetric({ tableName, metricName });
+                    }}
+                >
+                    Explore
+                </Button>
+            )}
         </Stack>
     );
 };
@@ -215,11 +262,17 @@ const MetricDetailContent: FC<MetricDetailContentProps> = ({
 export const MetricDetailPopover: FC<Props> = ({
     tableName,
     metricName,
+    metricLabel,
     projectUuid,
+    showExploreButton,
     children,
     compiledQueryConfig,
 }) => {
     const [opened, setOpened] = useState(false);
+    // Mantine v8 HoverCard has no controlled mode, so remount it to close.
+    const [hoverCardKey, setHoverCardKey] = useState(0);
+    const canHover = useCanHover();
+    const getUiString = useUiStrings();
 
     const { data: metric, isLoading } = useMetric({
         projectUuid,
@@ -228,36 +281,89 @@ export const MetricDetailPopover: FC<Props> = ({
         enabled: opened,
     });
 
+    const renderContent = (onExplore: () => void) => (
+        <>
+            {isLoading && (
+                <Group justify="center" p="md">
+                    <Loader size="sm" />
+                </Group>
+            )}
+            {metric && (
+                <MetricDetailContent
+                    metric={metric}
+                    tableName={tableName}
+                    metricName={metricName}
+                    showExploreButton={showExploreButton}
+                    projectUuid={projectUuid}
+                    compiledQueryConfig={compiledQueryConfig}
+                    isOpen={opened}
+                    onExplore={onExplore}
+                />
+            )}
+        </>
+    );
+
+    if (canHover) {
+        return (
+            <HoverCard
+                key={hoverCardKey}
+                position="bottom-start"
+                width={compiledQueryConfig ? 432 : 332}
+                withArrow
+                offset={8}
+                openDelay={300}
+                closeDelay={200}
+                onOpen={() => setOpened(true)}
+                onClose={() => setOpened(false)}
+            >
+                <HoverCard.Target>
+                    <Box className={classes.target}>{children}</Box>
+                </HoverCard.Target>
+                <HoverCard.Dropdown>
+                    {renderContent(() => setHoverCardKey((key) => key + 1))}
+                </HoverCard.Dropdown>
+            </HoverCard>
+        );
+    }
+
     return (
-        <HoverCard
+        <Popover
+            opened={opened}
+            onChange={setOpened}
             position="bottom-start"
+            width={`min(${compiledQueryConfig ? 432 : 332}px, calc(100vw - 24px))`}
+            floatingStrategy="fixed"
+            middlewares={{ shift: { crossAxis: true, padding: 12 } }}
+            trapFocus
             withArrow
-            shadow="md"
-            radius="md"
             offset={8}
-            openDelay={300}
-            closeDelay={200}
-            onOpen={() => setOpened(true)}
-            onClose={() => setOpened(false)}
         >
-            <HoverCard.Target>
-                <Box className={classes.target}>{children}</Box>
-            </HoverCard.Target>
-            <HoverCard.Dropdown>
-                {isLoading && (
-                    <Group justify="center" p="md">
-                        <Loader size="sm" />
-                    </Group>
-                )}
-                {metric && (
-                    <MetricDetailContent
-                        metric={metric}
-                        projectUuid={projectUuid}
-                        compiledQueryConfig={compiledQueryConfig}
-                        isOpen={opened}
+            <Popover.Target>
+                <UnstyledButton
+                    className={classes.target}
+                    aria-label={interpolateUiString(
+                        getUiString('metrics.details'),
+                        { metric: metricLabel },
+                    )}
+                    aria-expanded={opened}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setOpened((value) => !value);
+                    }}
+                >
+                    {children}
+                </UnstyledButton>
+            </Popover.Target>
+            <Popover.Dropdown className={classes.dropdown}>
+                <Group justify="flex-end" className={classes.closeRow}>
+                    <CloseButton
+                        aria-label={getUiString('metrics.closeDetails')}
+                        mod="touch-dismiss"
+                        onClick={() => setOpened(false)}
                     />
-                )}
-            </HoverCard.Dropdown>
-        </HoverCard>
+                </Group>
+                {renderContent(() => setOpened(false))}
+            </Popover.Dropdown>
+        </Popover>
     );
 };

@@ -1,3 +1,4 @@
+import { subject } from '@casl/ability';
 import {
     getHumanReadableCronExpression,
     type Scheduler,
@@ -14,7 +15,7 @@ import {
     Switch,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconPencil, IconSend, IconTrash } from '@tabler/icons-react';
 import { useState, type FC } from 'react';
 import { GSheetsIcon } from '../../../components/common/GSheetsIcon';
@@ -24,6 +25,7 @@ import MantineModal, {
 } from '../../../components/common/MantineModal';
 import { useActiveProjectUuid } from '../../../hooks/useActiveProject';
 import { useProject } from '../../../hooks/useProject';
+import useApp from '../../../providers/App/useApp';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
 import ConfirmPauseSchedulerModal from '../../scheduler/components/ConfirmPauseSchedulerModal';
@@ -32,6 +34,7 @@ import { useSchedulersEnabledUpdateMutation } from '../../scheduler/hooks/useSch
 import { SyncModalAction } from '../providers/types';
 import { useSyncModal } from '../providers/useSyncModal';
 import { GoogleSheetsInfoPopover } from './GoogleSheetsInfoPopover';
+import classes from './SyncModalView.module.css';
 
 const ToggleSyncEnabled: FC<{ scheduler: Scheduler }> = ({ scheduler }) => {
     const { mutate: mutateSchedulerEnabled } =
@@ -45,8 +48,6 @@ const ToggleSyncEnabled: FC<{ scheduler: Scheduler }> = ({ scheduler }) => {
     return (
         <>
             <Tooltip
-                withinPortal
-                variant="xs"
                 maw={130}
                 label={
                     scheduler.enabled
@@ -89,18 +90,17 @@ const SendNowButton: FC<{ schedulerUuid: string }> = ({ schedulerUuid }) => {
     const { track } = useTracking();
 
     return (
-        <Tooltip withinPortal label="Sync now">
+        <Tooltip label="Sync now">
             <ActionIcon
                 variant="light"
-                radius="md"
-                color="ldDark.9"
+                color="gray"
                 disabled={isLoading}
                 onClick={() => {
                     track({ name: EventName.SCHEDULER_SEND_NOW_BUTTON });
                     sendNow();
                 }}
             >
-                <MantineIcon color="ldDark.9" icon={IconSend} />
+                <MantineIcon icon={IconSend} />
             </ActionIcon>
         </Tooltip>
     );
@@ -108,12 +108,15 @@ const SendNowButton: FC<{ schedulerUuid: string }> = ({ schedulerUuid }) => {
 
 type Props = {
     schedulers: SchedulerAndTargets[];
+    /** Drives the empty-state copy ("This {resourceLabel} has no Syncs..."). */
+    resourceLabel: 'chart' | 'app';
     isFetchingNextPage?: boolean;
     onScrollBottom?: () => void;
 } & Pick<MantineModalProps, 'onClose'>;
 
 export const SyncModalView: FC<Props> = ({
     schedulers,
+    resourceLabel,
     isFetchingNextPage,
     onScrollBottom,
     onClose,
@@ -122,6 +125,7 @@ export const SyncModalView: FC<Props> = ({
 
     const { activeProjectUuid } = useActiveProjectUuid();
     const { data: project } = useProject(activeProjectUuid);
+    const { user } = useApp();
 
     if (!project) return null;
 
@@ -146,7 +150,7 @@ export const SyncModalView: FC<Props> = ({
             {schedulers.length > 0 ? (
                 <Box
                     mah={400}
-                    style={{ overflowY: 'auto' }}
+                    className={classes.syncList}
                     onScroll={
                         onScrollBottom
                             ? (e) => {
@@ -164,79 +168,105 @@ export const SyncModalView: FC<Props> = ({
                     }
                 >
                     <Stack>
-                        {schedulers.map((sync) => (
-                            <Paper
-                                key={sync.schedulerUuid}
-                                p="sm"
-                                withBorder
-                                style={{
-                                    overflow: 'hidden',
-                                }}
-                            >
-                                <Group wrap="nowrap" justify="space-between">
-                                    <Stack gap="xs">
-                                        <Text fz="sm" fw={600} truncate>
-                                            {sync.name}
-                                        </Text>
+                        {schedulers.map((sync) => {
+                            const canManageSync =
+                                user.data?.ability?.can(
+                                    'manage',
+                                    subject('GoogleSheets', {
+                                        organizationUuid:
+                                            user.data?.organizationUuid,
+                                        projectUuid: activeProjectUuid,
+                                    }),
+                                ) &&
+                                user.data?.ability?.can(
+                                    'manage',
+                                    subject('ScheduledDeliveries', {
+                                        organizationUuid:
+                                            user.data?.organizationUuid,
+                                        projectUuid: activeProjectUuid,
+                                        userUuid: sync.createdBy,
+                                    }),
+                                );
 
-                                        <Text size="xs" c="ldGray.6">
-                                            {getHumanReadableCronExpression(
-                                                sync.cron,
-                                                sync.timezone ||
-                                                    project.schedulerTimezone,
-                                            )}
-                                        </Text>
-                                    </Stack>
+                            return (
+                                <Paper
+                                    key={sync.schedulerUuid}
+                                    p="sm"
+                                    className={classes.syncCard}
+                                >
+                                    <Group
+                                        wrap="nowrap"
+                                        justify="space-between"
+                                    >
+                                        <Stack gap="xs">
+                                            <Text fz="sm" fw={600} truncate>
+                                                {sync.name}
+                                            </Text>
 
-                                    <Group wrap="nowrap" gap="xs">
-                                        <ToggleSyncEnabled scheduler={sync} />
+                                            <Text size="xs" c="dimmed">
+                                                {getHumanReadableCronExpression(
+                                                    sync.cron,
+                                                    sync.timezone ||
+                                                        project.schedulerTimezone,
+                                                )}
+                                            </Text>
+                                        </Stack>
 
-                                        <SendNowButton
-                                            schedulerUuid={sync.schedulerUuid}
-                                        />
-
-                                        <Tooltip withinPortal label="Edit">
-                                            <ActionIcon
-                                                variant="light"
-                                                radius="md"
-                                                color="ldDark.9"
-                                                onClick={() => {
-                                                    setAction(
-                                                        SyncModalAction.EDIT,
-                                                    );
-                                                    setCurrentSchedulerUuid(
-                                                        sync.schedulerUuid,
-                                                    );
-                                                }}
-                                            >
-                                                <MantineIcon
-                                                    color="ldDark.9"
-                                                    icon={IconPencil}
+                                        {canManageSync && (
+                                            <Group wrap="nowrap" gap="xs">
+                                                <ToggleSyncEnabled
+                                                    scheduler={sync}
                                                 />
-                                            </ActionIcon>
-                                        </Tooltip>
 
-                                        <Tooltip withinPortal label="Delete">
-                                            <ActionIcon
-                                                variant="light"
-                                                color="red"
-                                                radius="md"
-                                                onClick={() => {
-                                                    setAction(
-                                                        SyncModalAction.DELETE,
-                                                    );
-                                                    setCurrentSchedulerUuid(
-                                                        sync.schedulerUuid,
-                                                    );
-                                                }}
-                                            >
-                                                <MantineIcon icon={IconTrash} />
-                                            </ActionIcon>
-                                        </Tooltip>
+                                                <SendNowButton
+                                                    schedulerUuid={
+                                                        sync.schedulerUuid
+                                                    }
+                                                />
+
+                                                <Tooltip label="Edit">
+                                                    <ActionIcon
+                                                        variant="light"
+                                                        color="gray"
+                                                        onClick={() => {
+                                                            setAction(
+                                                                SyncModalAction.EDIT,
+                                                            );
+                                                            setCurrentSchedulerUuid(
+                                                                sync.schedulerUuid,
+                                                            );
+                                                        }}
+                                                    >
+                                                        <MantineIcon
+                                                            icon={IconPencil}
+                                                        />
+                                                    </ActionIcon>
+                                                </Tooltip>
+
+                                                <Tooltip label="Delete">
+                                                    <ActionIcon
+                                                        variant="light"
+                                                        color="red"
+                                                        onClick={() => {
+                                                            setAction(
+                                                                SyncModalAction.DELETE,
+                                                            );
+                                                            setCurrentSchedulerUuid(
+                                                                sync.schedulerUuid,
+                                                            );
+                                                        }}
+                                                    >
+                                                        <MantineIcon
+                                                            icon={IconTrash}
+                                                        />
+                                                    </ActionIcon>
+                                                </Tooltip>
+                                            </Group>
+                                        )}
                                     </Group>
-                                </Group>
-                            </Paper>
-                        ))}
+                                </Paper>
+                            );
+                        })}
 
                         {isFetchingNextPage && (
                             <Stack align="center" mt="md">
@@ -247,12 +277,12 @@ export const SyncModalView: FC<Props> = ({
                 </Box>
             ) : (
                 <Group justify="center" ta="center" gap="xs" my="sm" pt="md">
-                    <Text fz="sm" fw={450} c="ldGray.7">
-                        This chart has no Syncs set up yet
+                    <Text fz="sm" fw={500} c="ldGray.7">
+                        This {resourceLabel} has no Syncs set up yet
                     </Text>
-                    <Text fz="xs" fw={400} c="ldGray.6">
+                    <Text fz="xs" fw={400} c="dimmed">
                         Get started by clicking 'Create new Sync' to seamlessly
-                        integrate your chart data with Google Sheets
+                        integrate your {resourceLabel} data with Google Sheets
                     </Text>
                 </Group>
             )}

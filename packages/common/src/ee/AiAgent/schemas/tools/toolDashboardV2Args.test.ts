@@ -1,0 +1,181 @@
+import { describe, expect, it } from 'vitest';
+import {
+    toolDashboardV2ArgsSchema,
+    toolDashboardV2ArgsSchemaPersisted,
+    toolDashboardV2ArgsSchemaTransformed,
+} from './toolDashboardV2Args';
+
+const visualization = (tableCalculations: unknown) => ({
+    title: 'Revenue',
+    description: 'Revenue',
+    queryConfig: {
+        exploreName: 'orders',
+        dimensions: ['orders_created_month'],
+        metrics: ['orders_revenue'],
+        sorts: [],
+        limit: 500,
+        customMetrics: null,
+        tableCalculations,
+        filters: null,
+    },
+    chartConfig: null,
+});
+
+const templateCalc = {
+    type: 'running_total',
+    name: 'running_revenue',
+    displayName: 'Running Revenue',
+    fieldId: 'orders_revenue',
+};
+
+// Persisted dashboard artifacts predate the formula-only V4 contract; the V3
+// parse path must keep accepting template table calcs.
+describe('toolDashboardV2Args persisted parsing', () => {
+    const persistedDashboard = {
+        title: 'Revenue dashboard',
+        description: 'Revenue dashboard',
+        visualizations: [visualization([templateCalc]), visualization(null)],
+    };
+
+    it('V3 schema parses persisted dashboards with template table calcs', () => {
+        expect(
+            toolDashboardV2ArgsSchemaPersisted.safeParse(persistedDashboard)
+                .success,
+        ).toBe(true);
+        expect(
+            toolDashboardV2ArgsSchemaTransformed.safeParse(persistedDashboard)
+                .success,
+        ).toBe(true);
+    });
+
+    it('advertised schema only accepts formula table calcs', () => {
+        expect(
+            toolDashboardV2ArgsSchema.safeParse(persistedDashboard).success,
+        ).toBe(false);
+        expect(
+            toolDashboardV2ArgsSchema.safeParse({
+                ...persistedDashboard,
+                visualizations: [
+                    visualization([
+                        {
+                            type: 'formula',
+                            name: 'aov',
+                            displayName: 'AOV',
+                            formula: 'orders_revenue / 2',
+                            format: null,
+                            resultType: null,
+                        },
+                    ]),
+                    visualization(null),
+                ],
+            }).success,
+        ).toBe(true);
+    });
+});
+
+describe('dashboard visualization merges', () => {
+    const mergeConfig = {
+        primarySourceId: 'primary',
+        additionalSources: [
+            {
+                id: 'comparison',
+                queryConfig: {
+                    exploreName: 'orders',
+                    dimensions: ['orders_created_month'],
+                    metrics: ['orders_revenue'],
+                    sorts: [],
+                    customMetrics: null,
+                    filters: null,
+                },
+            },
+        ],
+        joinKey: [
+            {
+                name: 'month',
+                fields: [
+                    { sourceId: 'primary', fieldId: 'orders_created_month' },
+                    { sourceId: 'comparison', fieldId: 'orders_created_month' },
+                ],
+            },
+        ],
+        joinType: 'full',
+    };
+    const dashboard = {
+        title: 'Revenue dashboard',
+        description: 'Revenue dashboard',
+        visualizations: [
+            { ...visualization(null), mergeConfig },
+            visualization(null),
+        ],
+    };
+
+    it('the advertised schema refuses a merge the agent authors', () => {
+        const result = toolDashboardV2ArgsSchema.safeParse(dashboard);
+        expect(result.success).toBe(false);
+        expect(result.error?.issues[0]).toMatchObject({
+            path: ['visualizations', 0, 'mergeConfig'],
+            message: 'Merge queries are not supported by the agent.',
+        });
+    });
+
+    it('persisted dashboards with merges still parse', () => {
+        expect(
+            toolDashboardV2ArgsSchemaPersisted.safeParse(dashboard).success,
+        ).toBe(true);
+    });
+});
+
+describe('server-owned dashboard layout', () => {
+    const dashboard = {
+        title: 'Overview',
+        description: '',
+        visualizations: [visualization(null), visualization(null)],
+    };
+    const layout = {
+        template: 'analysis',
+        positions: [
+            { x: 0, y: 10, w: 36, h: 8 },
+            { x: 0, y: 0, w: 36, h: 10 },
+        ],
+    };
+
+    it('round-trips layout only in the persisted schema', () => {
+        const input = { ...dashboard, layout };
+        expect(toolDashboardV2ArgsSchemaPersisted.parse(input).layout).toEqual(
+            layout,
+        );
+        expect(
+            toolDashboardV2ArgsSchemaTransformed.parse(input).layout,
+        ).toEqual(layout);
+        expect(toolDashboardV2ArgsSchema.parse(input)).not.toHaveProperty(
+            'layout',
+        );
+    });
+
+    it.each([
+        { ...layout, positions: layout.positions.slice(0, 1) },
+        { ...layout, positions: [layout.positions[0], layout.positions[0]] },
+        {
+            ...layout,
+            positions: [{ x: 0, y: 0, w: 40, h: 8 }, layout.positions[1]],
+        },
+    ])('refuses incomplete or invalid placement %j', (invalidLayout) => {
+        expect(
+            toolDashboardV2ArgsSchemaPersisted.safeParse({
+                ...dashboard,
+                layout: invalidLayout,
+            }).success,
+        ).toBe(false);
+    });
+
+    it('can read a partially validated one-chart artifact while advertising a two-chart minimum', () => {
+        const input = {
+            ...dashboard,
+            visualizations: dashboard.visualizations.slice(0, 1),
+        };
+        expect(
+            toolDashboardV2ArgsSchemaPersisted.safeParse(input).success,
+        ).toBe(true);
+        expect(toolDashboardV2ArgsSchema.safeParse(input).success).toBe(false);
+    });
+});

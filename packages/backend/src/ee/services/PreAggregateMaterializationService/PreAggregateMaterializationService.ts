@@ -1,8 +1,12 @@
+import { subject } from '@casl/ability';
 import {
+    assertIsAccountWithOrg,
+    ForbiddenError,
     getErrorMessage,
     getIntrinsicUserAttributes,
     NotFoundError,
     PRE_AGGREGATE_ROW_COUNT_WARNING_THRESHOLD,
+    preAggregateMaterialization,
     QueryExecutionContext,
     QueryHistoryStatus,
     type Account,
@@ -16,11 +20,16 @@ import * as Sentry from '@sentry/node';
 import { LightdashAnalytics } from '../../../analytics/LightdashAnalytics';
 import { type S3ResultsFileStorageClient } from '../../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient';
 import { type LightdashConfig } from '../../../config/parseConfig';
+import { type ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { type QueryHistoryModel } from '../../../models/QueryHistoryModel/QueryHistoryModel';
 import type PrometheusMetrics from '../../../prometheus/PrometheusMetrics';
 import { type AsyncQueryService } from '../../../services/AsyncQueryService/AsyncQueryService';
 import { BaseService } from '../../../services/BaseService';
+import { traceSpan } from '../../../tracing/tracing';
 import { PreAggregateModel } from '../../models/PreAggregateModel';
+import { writeMaterializationProducer } from '../AsyncQueryService/materializationProducer';
+
+const { getDefaultMaterializationSorts } = preAggregateMaterialization;
 
 const QUERY_POLL_INTERVAL_MS = 1000;
 const QUERY_POLL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -29,6 +38,8 @@ export class PreAggregateMaterializationService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
 
     private readonly preAggregateModel: PreAggregateModel;
+
+    private readonly projectModel: ProjectModel;
 
     private readonly queryHistoryModel: QueryHistoryModel;
 
@@ -43,6 +54,7 @@ export class PreAggregateMaterializationService extends BaseService {
     constructor(args: {
         lightdashConfig: LightdashConfig;
         preAggregateModel: PreAggregateModel;
+        projectModel: ProjectModel;
         queryHistoryModel: QueryHistoryModel;
         asyncQueryService: AsyncQueryService;
         analytics: LightdashAnalytics;
@@ -52,6 +64,7 @@ export class PreAggregateMaterializationService extends BaseService {
         super({ serviceName: 'PreAggregateMaterializationService' });
         this.lightdashConfig = args.lightdashConfig;
         this.preAggregateModel = args.preAggregateModel;
+        this.projectModel = args.projectModel;
         this.queryHistoryModel = args.queryHistoryModel;
         this.asyncQueryService = args.asyncQueryService;
         this.analytics = args.analytics;
@@ -149,6 +162,7 @@ export class PreAggregateMaterializationService extends BaseService {
     }
 
     async materializePreAggregate(args: {
+        beforeEffect?: () => Promise<void>;
         account: Account;
         projectUuid: string;
         preAggregateDefinitionUuid: string;
@@ -161,6 +175,17 @@ export class PreAggregateMaterializationService extends BaseService {
         let materializationUuid: string | undefined;
         let preAggregateName: string | undefined;
         const startTime = Date.now();
+        let connectionCheckFailed = false;
+        const beforeEffect = args.beforeEffect
+            ? async () => {
+                  try {
+                      await args.beforeEffect!();
+                  } catch (error) {
+                      connectionCheckFailed = true;
+                      throw error;
+                  }
+              }
+            : undefined;
 
         try {
             const definition =
@@ -185,12 +210,14 @@ export class PreAggregateMaterializationService extends BaseService {
                 },
             );
 
+            if (beforeEffect) await beforeEffect();
             const materializationRow =
                 await this.preAggregateModel.insertInProgress({
                     projectUuid: args.projectUuid,
                     preAggregateDefinitionUuid:
                         definition.preAggregateDefinitionUuid,
                     trigger: args.trigger,
+                    definitionFingerprint: definition.definitionFingerprint,
                 });
             materializationUuid = materializationRow.materializationUuid;
 
@@ -224,7 +251,8 @@ export class PreAggregateMaterializationService extends BaseService {
                 `Starting executeAsyncMetricQuery for pre-aggregate materialization for definition ${args.preAggregateDefinitionUuid}`,
             );
 
-            const { queryUuid } = await Sentry.startSpan(
+            if (beforeEffect) await beforeEffect();
+            const { queryUuid } = await traceSpan(
                 {
                     op: 'preaggregate',
                     name: 'executeAsyncMetricQuery',
@@ -239,24 +267,18 @@ export class PreAggregateMaterializationService extends BaseService {
                         projectUuid: args.projectUuid,
                         context:
                             QueryExecutionContext.PRE_AGGREGATE_MATERIALIZATION,
-                        metricQuery: {
-                            ...materializationMetricQuery.metricQuery,
-                            sorts: materializationMetricQuery.metricQuery.dimensions
-                                .slice()
-                                .sort((a, b) => {
-                                    const timeDim =
-                                        materializationMetricQuery.timeDimensionFieldId;
-                                    if (a === timeDim) return -1;
-                                    if (b === timeDim) return 1;
-                                    return 0;
-                                })
-                                .map((fieldId) => ({
-                                    fieldId,
-                                    descending:
-                                        fieldId ===
-                                        materializationMetricQuery.timeDimensionFieldId,
-                                })),
-                        },
+                        metricQuery:
+                            definition.preAggregateDefinition.sorts ===
+                            undefined
+                                ? {
+                                      ...materializationMetricQuery.metricQuery,
+                                      sorts: getDefaultMaterializationSorts(
+                                          materializationMetricQuery.metricQuery
+                                              .dimensions,
+                                          materializationMetricQuery.timeDimensionFieldId,
+                                      ),
+                                  }
+                                : materializationMetricQuery.metricQuery,
                         ...(definition.preAggregateDefinition
                             .materializationRole
                             ? {
@@ -299,7 +321,7 @@ export class PreAggregateMaterializationService extends BaseService {
             );
 
             const pollStart = Date.now();
-            const queryHistory = await Sentry.startSpan(
+            const queryHistory = await traceSpan(
                 {
                     op: 'preaggregate',
                     name: 'pollForQueryCompletion',
@@ -424,7 +446,8 @@ export class PreAggregateMaterializationService extends BaseService {
 
             // Get file size from S3 and promote to active — timed together
             const promoteStart = Date.now();
-            const totalBytes = await Sentry.startSpan(
+            if (beforeEffect) await beforeEffect();
+            const totalBytes = await traceSpan(
                 {
                     op: 'preaggregate',
                     name: 'getFileSize',
@@ -454,7 +477,25 @@ export class PreAggregateMaterializationService extends BaseService {
                 warehouseExecutionTimeMs: queryHistory.warehouseExecutionTimeMs,
             });
 
-            const { status } = await Sentry.startSpan(
+            if (beforeEffect) await beforeEffect();
+            await writeMaterializationProducer(
+                this.preAggregateResultsStorageClient,
+                {
+                    projectUuid: args.projectUuid,
+                    queryUuid,
+                    resultsFileName: queryHistory.resultsFileName,
+                    producer:
+                        queryHistory.requestParameters?.resultProducer ?? null,
+                },
+            ).catch((error: unknown) =>
+                this.logger.warn(
+                    'Failed to store materialization producer provenance',
+                    { error },
+                ),
+            );
+
+            if (beforeEffect) await beforeEffect();
+            const { status } = await traceSpan(
                 {
                     op: 'db',
                     name: 'promoteToActive',
@@ -616,6 +657,7 @@ export class PreAggregateMaterializationService extends BaseService {
                     errorMessage,
                 });
 
+                if (connectionCheckFailed) throw error;
                 return {
                     materializationUuid,
                     status: 'failed',
@@ -627,9 +669,25 @@ export class PreAggregateMaterializationService extends BaseService {
     }
 
     async getMaterializations(
+        account: Account,
         projectUuid: string,
         paginateArgs?: KnexPaginateArgs,
     ): Promise<KnexPaginatedData<ApiPreAggregateMaterializationsResults>> {
+        assertIsAccountWithOrg(account);
+
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
         return this.preAggregateModel.getDefinitionsWithLatestMaterialization(
             projectUuid,
             paginateArgs,

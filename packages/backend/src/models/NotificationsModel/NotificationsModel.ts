@@ -5,10 +5,14 @@ import {
     DashboardDAO,
     DashboardTile,
     LightdashUser,
+    NotificationAiCreditAllowance,
+    NotificationAiReview,
+    NotificationContentReview,
     NotificationDashboardComment,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import {
+    DbNotificationDashboardTileCommentMetadata,
     DbNotificationResourceType,
     NotificationsTableName,
 } from '../../database/entities/notifications';
@@ -36,23 +40,127 @@ export class NotificationsModel {
             )
             .orderBy(`${NotificationsTableName}.created_at`, 'desc');
 
+        return notifications.map((notif) => {
+            const metadata =
+                notif.metadata as DbNotificationDashboardTileCommentMetadata | null;
+
+            return {
+                notificationId: notif.notification_id,
+                resourceType: ApiNotificationResourceType.DashboardComments,
+                message: notif.message ?? undefined,
+                url: notif.url ?? undefined,
+                viewed: notif.viewed,
+                createdAt: notif.created_at,
+                resourceUuid: notif.resource_uuid ?? undefined,
+                metadata: metadata
+                    ? {
+                          dashboardUuid: metadata.dashboard_uuid,
+                          dashboardName: metadata.dashboard_name,
+                          dashboardTileUuid: metadata.dashboard_tile_uuid,
+                          dashboardTileName: metadata.dashboard_tile_name,
+                      }
+                    : undefined,
+            };
+        });
+    }
+
+    async getAiReviewNotifications(
+        userUuid: string,
+    ): Promise<NotificationAiReview[]> {
+        const notifications = await this.database(NotificationsTableName)
+            .select()
+            .where(`${NotificationsTableName}.user_uuid`, userUuid)
+            .andWhere(
+                `${NotificationsTableName}.resource_type`,
+                DbNotificationResourceType.AiReviewItem,
+            )
+            .orderBy(`${NotificationsTableName}.created_at`, 'desc');
+
         return notifications.map((notif) => ({
             notificationId: notif.notification_id,
-            resourceType: ApiNotificationResourceType.DashboardComments,
+            resourceType: ApiNotificationResourceType.AiReview,
             message: notif.message ?? undefined,
             url: notif.url ?? undefined,
             viewed: notif.viewed,
             createdAt: notif.created_at,
             resourceUuid: notif.resource_uuid ?? undefined,
-            metadata: notif.metadata
-                ? {
-                      dashboardUuid: notif.metadata.dashboard_uuid,
-                      dashboardName: notif.metadata.dashboard_name,
-                      dashboardTileUuid: notif.metadata.dashboard_tile_uuid,
-                      dashboardTileName: notif.metadata.dashboard_tile_name,
-                  }
-                : undefined,
+            metadata: notif.metadata as NotificationAiReview['metadata'],
         }));
+    }
+
+    async getContentReviewNotifications(
+        userUuid: string,
+    ): Promise<NotificationContentReview[]> {
+        const notifications = await this.database(NotificationsTableName)
+            .select()
+            .where(`${NotificationsTableName}.user_uuid`, userUuid)
+            .andWhere(
+                `${NotificationsTableName}.resource_type`,
+                DbNotificationResourceType.ContentReviewRequest,
+            )
+            .orderBy(`${NotificationsTableName}.created_at`, 'desc');
+
+        return notifications.map((notif) => ({
+            notificationId: notif.notification_id,
+            resourceType: ApiNotificationResourceType.ContentReview,
+            message: notif.message ?? undefined,
+            url: notif.url ?? undefined,
+            viewed: notif.viewed,
+            createdAt: notif.created_at,
+            resourceUuid: notif.resource_uuid ?? undefined,
+            metadata: notif.metadata as NotificationContentReview['metadata'],
+        }));
+    }
+
+    async getAiCreditAllowanceNotifications(
+        userUuid: string,
+    ): Promise<NotificationAiCreditAllowance[]> {
+        const notifications = await this.database(NotificationsTableName)
+            .select()
+            .where(`${NotificationsTableName}.user_uuid`, userUuid)
+            .andWhere(
+                `${NotificationsTableName}.resource_type`,
+                DbNotificationResourceType.AiCreditAllowance,
+            )
+            .orderBy(`${NotificationsTableName}.created_at`, 'desc');
+
+        return notifications.map((notif) => ({
+            notificationId: notif.notification_id,
+            resourceType: ApiNotificationResourceType.AiCreditAllowance,
+            message: notif.message ?? undefined,
+            url: notif.url ?? undefined,
+            viewed: notif.viewed,
+            createdAt: notif.created_at,
+            resourceUuid: notif.resource_uuid ?? undefined,
+            metadata:
+                notif.metadata as NotificationAiCreditAllowance['metadata'],
+        }));
+    }
+
+    async createAiCreditAllowanceNotifications({
+        userUuids,
+        alertUuid,
+        metadata,
+        message,
+        url,
+    }: {
+        userUuids: string[];
+        alertUuid: string;
+        metadata: NotificationAiCreditAllowance['metadata'];
+        message: string;
+        url: string;
+    }): Promise<void> {
+        if (userUuids.length === 0) return;
+        await this.database(NotificationsTableName).insert(
+            userUuids.map((userUuid) => ({
+                user_uuid: userUuid,
+                resource_uuid: alertUuid,
+                resource_type: DbNotificationResourceType.AiCreditAllowance,
+                message,
+                url,
+                metadata: JSON.stringify(metadata),
+            })),
+        );
     }
 
     async updateNotification(
@@ -61,7 +169,7 @@ export class NotificationsModel {
     ) {
         return this.database(NotificationsTableName)
             .where({ notification_id: notificationUuid })
-            .update(updateData);
+            .update({ viewed: updateData.viewed });
     }
 
     private static generateDashboardCommentNotificationMessage({
@@ -125,6 +233,57 @@ export class NotificationsModel {
                         }),
                     });
                 }
+            }),
+        );
+    }
+
+    async createAiReviewNotifications({
+        recipients,
+        metadata,
+        message,
+        url,
+    }: {
+        recipients: { userUuid: string }[];
+        metadata: NotificationAiReview['metadata'];
+        message: string;
+        url: string;
+    }): Promise<void> {
+        await Promise.all(
+            recipients.map(async ({ userUuid }) => {
+                await this.database(NotificationsTableName).insert({
+                    user_uuid: userUuid,
+                    resource_uuid: metadata.fingerprint,
+                    resource_type: DbNotificationResourceType.AiReviewItem,
+                    message,
+                    url,
+                    metadata: JSON.stringify(metadata),
+                });
+            }),
+        );
+    }
+
+    async createContentReviewNotifications({
+        recipients,
+        metadata,
+        message,
+        url,
+    }: {
+        recipients: { userUuid: string }[];
+        metadata: NotificationContentReview['metadata'];
+        message: string;
+        url: string;
+    }): Promise<void> {
+        await Promise.all(
+            recipients.map(async ({ userUuid }) => {
+                await this.database(NotificationsTableName).insert({
+                    user_uuid: userUuid,
+                    resource_uuid: metadata.requestUuid,
+                    resource_type:
+                        DbNotificationResourceType.ContentReviewRequest,
+                    message,
+                    url,
+                    metadata: JSON.stringify(metadata),
+                });
             }),
         );
     }

@@ -1,6 +1,7 @@
 import { type CatalogField } from '@lightdash/common';
-import { Button, Text, Tooltip } from '@mantine-8/core';
-import { type MRT_Row } from '../../../components/common/ContentTable';
+import { Button, Text, Tooltip } from '@mantine/core';
+import { type ContentTableRow } from '../../../components/common/ContentTable';
+import useEmbed from '../../../ee/providers/Embed/useEmbed';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { BarChart } from '../../../svgs/metricsCatalog';
 import { EventName } from '../../../types/Events';
@@ -11,9 +12,11 @@ import styles from './MetricChartUsageButton.module.css';
 export const MetricChartUsageButton = ({
     row,
 }: {
-    row: MRT_Row<CatalogField>;
+    row: ContentTableRow<CatalogField>;
 }) => {
-    const hasChartsUsage = row.original.chartUsage ?? 0 > 0;
+    const hasChartsUsage = (row.original.chartUsage ?? 0) > 0;
+    const { embedToken } = useEmbed();
+    const canViewChartUsage = hasChartsUsage && !embedToken;
     const organizationUuid = useAppSelector(
         (state) => state.metricsCatalog.organizationUuid,
     );
@@ -27,7 +30,7 @@ export const MetricChartUsageButton = ({
     const { track } = useTracking();
 
     const handleChartUsageClick = () => {
-        if (hasChartsUsage) {
+        if (canViewChartUsage) {
             track({
                 name: EventName.METRICS_CATALOG_CHART_USAGE_CLICKED,
                 properties: {
@@ -45,9 +48,7 @@ export const MetricChartUsageButton = ({
 
     return (
         <Tooltip
-            withinPortal
-            variant="xs"
-            disabled={!hasChartsUsage}
+            disabled={!canViewChartUsage}
             openDelay={200}
             maw={250}
             fz="xs"
@@ -62,13 +63,12 @@ export const MetricChartUsageButton = ({
             <Button
                 size="compact-xs"
                 variant="subtle"
-                disabled={!hasChartsUsage}
+                disabled={!canViewChartUsage}
                 onClick={handleChartUsageClick}
                 leftSection={<BarChart />}
                 opacity={hasChartsUsage ? 1 : 0.8}
                 fz="sm"
                 c="ldGray.7"
-                fw={500}
                 className={styles.button}
             >
                 {row.original.chartUsage}

@@ -1,11 +1,11 @@
-import { Button } from '@mantine-8/core';
+import { Button } from '@mantine/core';
 import { IconBrandSlack } from '@tabler/icons-react';
 import { useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import { EmptyState } from '../../components/common/EmptyState';
 import MantineIcon from '../../components/common/MantineIcon';
 
-export const SlackAuthSuccess = () => {
+const SlackAuthSuccess = () => {
     const [searchParams] = useSearchParams();
 
     const slackUrl = useMemo(() => {
@@ -48,3 +48,5 @@ export const SlackAuthSuccess = () => {
         </EmptyState>
     );
 };
+
+export default SlackAuthSuccess;

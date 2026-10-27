@@ -28,12 +28,13 @@ import {
     SupportedDbtVersions,
     WarehouseTypes,
 } from '@lightdash/common';
+import { warehouseClientFromCredentials } from '@lightdash/warehouses';
 import bcrypt from 'bcrypt';
 import { Knex } from 'knex';
 import path from 'path';
 import { lightdashConfig } from '../../../config/lightdashConfig';
+import { toDbtTarget } from '../../../dbt/targets';
 import { CatalogModel } from '../../../models/CatalogModel/CatalogModel';
-import { ChangesetModel } from '../../../models/ChangesetModel';
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { ProjectParametersModel } from '../../../models/ProjectParametersModel';
 import { TagsModel } from '../../../models/TagsModel';
@@ -111,17 +112,26 @@ export async function seed(knex: Knex): Promise<void> {
             role: seedUserRole,
         });
 
-        await knex(OnboardingTableName).insert({
-            organization_id: organizationId,
-            ranQuery_at: new Date(),
-            shownSuccess_at: new Date(),
-        });
+        await knex(OnboardingTableName)
+            .insert({
+                organization_id: organizationId,
+                ranQuery_at: new Date(),
+                shownSuccess_at: new Date(),
+            })
+            .onConflict('organization_id')
+            .ignore();
 
         return { organizationId, user, organizationUuid };
     };
 
     const { organizationId, organizationUuid } =
         await addOrganization(SEED_ORG_1);
+
+    await knex('organization_homepage_settings').insert({
+        organization_uuid: organizationUuid,
+        enabled: true,
+        opening: null,
+    });
 
     // Add user attribute
     await new UserAttributesModel({ database: knex }).create(
@@ -133,6 +143,20 @@ export async function seed(knex: Knex): Promise<void> {
             users: [],
             groups: [],
         },
+    );
+
+    await Promise.all(
+        ['customer_id', 'is_admin'].map((name) =>
+            new UserAttributesModel({ database: knex }).create(
+                SEED_ORG_1.organization_uuid,
+                {
+                    name,
+                    attributeDefaults: null,
+                    users: [],
+                    groups: [],
+                },
+            ),
+        ),
     );
 
     const { user } = await addUser(
@@ -189,9 +213,10 @@ export async function seed(knex: Knex): Promise<void> {
     )
         .insert({
             ...SEED_PROJECT,
+            slug: generateSlug(SEED_PROJECT.name),
             organization_id: organizationId,
             dbt_connection: encryptedProjectSettings,
-            dbt_version: SupportedDbtVersions.V1_7,
+            dbt_version: SupportedDbtVersions.V1_12,
             created_by_user_uuid: user.user_uuid,
         })
         .returning(['project_id', 'project_uuid']);
@@ -259,12 +284,21 @@ export async function seed(knex: Knex): Promise<void> {
     try {
         const adapter = await projectAdapterFromConfig(
             projectSettings,
-            warehouseCredentials,
+            warehouseClientFromCredentials(warehouseCredentials),
             {
                 warehouseCatalog: undefined,
                 onWarehouseCatalogChange: () => {},
             },
-            SupportedDbtVersions.V1_7,
+            SupportedDbtVersions.V1_12,
+            lightdashConfig.dbt.environmentVariableAllowlist,
+            null,
+            {
+                resolve: () =>
+                    toDbtTarget(warehouseCredentials, {
+                        explicitCredentials: false,
+                    }),
+                policy: { explicitCredentials: false },
+            },
         );
         const explores = await adapter.compileAllExplores({
             userUuid: user.user_uuid,
@@ -272,17 +306,16 @@ export async function seed(knex: Knex): Promise<void> {
             projectUuid,
         });
 
-        const changesetModel = new ChangesetModel({ database: knex });
         const projectModel = new ProjectModel({
             database: knex,
             lightdashConfig,
             encryptionUtil: enc,
-            changesetModel,
         });
 
         await projectModel.saveExploresToCache(
             SEED_PROJECT.project_uuid,
             explores,
+            true,
         );
 
         // Index catalog after saving explores to cache
@@ -292,6 +325,30 @@ export async function seed(knex: Knex): Promise<void> {
             lightdashConfig,
         });
         const tagsModel = new TagsModel({ database: knex });
+
+        const lightdashProjectConfig = await adapter.getLightdashProjectConfig({
+            projectUuid,
+            organizationUuid,
+            userUuid: user.user_uuid,
+        });
+
+        // Persist spotlight categories as yaml tags before indexing so the
+        // catalog index attaches them (mirrors ProjectService compile). Without
+        // this the seed project has no categories and category filtering
+        // returns nothing.
+        await tagsModel.replaceYamlTags(
+            projectUuid,
+            Object.entries(
+                lightdashProjectConfig.spotlight?.categories ?? {},
+            ).map(([yamlReference, category]) => ({
+                project_uuid: projectUuid,
+                name: category.label,
+                color: category.color ?? 'gray',
+                created_by_user_uuid: user.user_uuid,
+                yaml_reference: yamlReference,
+            })),
+        );
+
         const projectYamlTags = await tagsModel.getYamlTags(projectUuid);
         const cachedExploresMap = await projectModel.findExploresFromCache(
             projectUuid,
@@ -306,14 +363,15 @@ export async function seed(knex: Knex): Promise<void> {
         );
 
         // Seed parameters
-        const lightdashProjectConfig = await adapter.getLightdashProjectConfig({
-            projectUuid,
-            organizationUuid,
-            userUuid: user.user_uuid,
-        });
         await new ProjectParametersModel({
             database: knex,
         }).replace(projectUuid, lightdashProjectConfig.parameters ?? {});
+
+        // Seed table group labels & descriptions for the explore sidebar
+        await projectModel.setTableGroups(
+            projectUuid,
+            lightdashProjectConfig.table_groups,
+        );
     } catch (e) {
         console.error(e);
         throw e;

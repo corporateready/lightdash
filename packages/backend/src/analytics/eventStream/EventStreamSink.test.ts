@@ -1,0 +1,215 @@
+import { QueryExecutionContext, WarehouseTypes } from '@lightdash/common';
+import { QueryCompletedEvent } from '../LightdashAnalytics';
+import { EventStreamSink } from './EventStreamSink';
+import { EVENT_STREAM_SCHEMA_VERSION } from './projection';
+import { eventStreamRegistry } from './registry';
+import { EventStreamRow } from './types';
+
+vi.mock('../../logging/logger', () => ({
+    __esModule: true,
+    default: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+    },
+}));
+
+const createWriterMock = () => ({
+    push: vi.fn<(stream: string, row: EventStreamRow) => void>(),
+    flush: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+});
+
+const queryCompletedEvent: QueryCompletedEvent = {
+    event: 'query.completed',
+    userId: 'user-1',
+    properties: {
+        inheritedFromProjectUuid: null,
+        queryId: 'query-1',
+        organizationId: 'org-1',
+        projectId: 'project-1',
+        isPreviewProject: false,
+        status: 'success',
+        context: QueryExecutionContext.EXPLORE,
+        onboardingFlow: 'legacy',
+        exploreName: 'orders',
+        chartId: 'chart-1',
+        dashboardId: 'dashboard-1',
+        cacheHit: false,
+        executionSource: 'warehouse',
+        warehouseType: WarehouseTypes.POSTGRES,
+        connectionWarehouseType: WarehouseTypes.POSTGRES,
+        warehouseConnectionId: 'connection-1',
+        connectionKind: 'extra',
+        connectionCount: 2,
+        warehouseExecutionTimeMs: 123,
+        warehousePhaseTimings: { connect: 20, query: 90, fetch: 13 },
+        totalRowCount: 42,
+        columnsCount: 5,
+    },
+};
+
+describe('EventStreamSink', () => {
+    it('projects query timing and workload metadata without copying arbitrary properties', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            ...queryCompletedEvent,
+            properties: {
+                ...queryCompletedEvent.properties,
+                responseTimeMs: 350,
+                responseTimingBasis: 'request',
+                workloadOrigin: 'app',
+                appId: 'app',
+                appVersion: 2,
+                dashboardTileId: 'tile',
+                requestId: 'request',
+                parentOperationId: 'job',
+                initiatingActorType: 'service_account',
+                schedulerId: 'schedule',
+            },
+        });
+        expect(writer.push.mock.calls[0][1]).toMatchObject({
+            response_time_ms: 350,
+            response_timing_basis: 'request',
+            workload_origin: 'app',
+            app_id: 'app',
+            app_version: 2,
+            dashboard_tile_id: 'tile',
+            request_id: 'request',
+            parent_operation_id: 'job',
+            initiating_actor_type: 'service_account',
+            scheduler_id: 'schedule',
+            warehouse_execution_time_ms: 123,
+        });
+    });
+
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it.each([
+        QueryExecutionContext.EXPLORE,
+        QueryExecutionContext.GSHEETS_ADDON,
+    ])('projects a successful query.completed event from %s', (context) => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            ...queryCompletedEvent,
+            properties: { ...queryCompletedEvent.properties, context },
+        });
+        expect(writer.push).toHaveBeenCalledTimes(1);
+        const [stream, row] = writer.push.mock.calls[0];
+        expect(stream).toBe('query_events');
+        expect(row).toMatchObject({
+            event_name: 'query.completed',
+            org_id: 'org-1',
+            user_id: 'user-1',
+            schema_version: EVENT_STREAM_SCHEMA_VERSION,
+            project_id: 'project-1',
+            query_id: 'query-1',
+            status: 'success',
+            context,
+            explore_name: 'orders',
+            chart_id: 'chart-1',
+            dashboard_id: 'dashboard-1',
+            cache_hit: false,
+            execution_source: 'warehouse',
+            warehouse_type: WarehouseTypes.POSTGRES,
+            connection_warehouse_type: WarehouseTypes.POSTGRES,
+            warehouse_connection_id: 'connection-1',
+            connection_kind: 'extra',
+            connection_count: 2,
+            warehouse_execution_time_ms: 123,
+            warehouse_connect_ms: 20,
+            warehouse_query_ms: 90,
+            warehouse_fetch_ms: 13,
+            warehouse_session_ms: null,
+            warehouse_ssh_tunnel_ms: null,
+            total_row_count: 42,
+            columns_count: 5,
+        });
+        expect(new Date(row.event_ts).toISOString()).toBe(row.event_ts);
+    });
+
+    it('projects an errored query.completed event with null outcome columns', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        const event: QueryCompletedEvent = {
+            ...queryCompletedEvent,
+            properties: {
+                ...queryCompletedEvent.properties,
+                status: 'error',
+                warehouseType: null,
+                connectionWarehouseType: WarehouseTypes.POSTGRES,
+                warehouseConnectionId: null,
+                connectionKind: null,
+                connectionCount: 1,
+                executionSource: null,
+                warehouseExecutionTimeMs: null,
+                warehousePhaseTimings: null,
+                totalRowCount: null,
+                columnsCount: null,
+            },
+        };
+        sink.handle(event);
+        expect(writer.push).toHaveBeenCalledTimes(1);
+        const [, row] = writer.push.mock.calls[0];
+        expect(row).toMatchObject({
+            event_name: 'query.completed',
+            status: 'error',
+            warehouse_type: null,
+            connection_warehouse_type: WarehouseTypes.POSTGRES,
+            warehouse_connection_id: null,
+            connection_kind: null,
+            connection_count: 1,
+            execution_source: null,
+            warehouse_execution_time_ms: null,
+            total_row_count: null,
+            columns_count: null,
+        });
+    });
+
+    it('drops events from preview projects', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            ...queryCompletedEvent,
+            properties: {
+                ...queryCompletedEvent.properties,
+                isPreviewProject: true,
+            },
+        });
+        expect(writer.push).not.toHaveBeenCalled();
+    });
+
+    it('drops events without an organization id', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            ...queryCompletedEvent,
+            properties: {
+                ...queryCompletedEvent.properties,
+                organizationId: '',
+            },
+        });
+        expect(writer.push).not.toHaveBeenCalled();
+    });
+
+    it('ignores events not in the registry', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            event: 'query.executed',
+            userId: 'user-1',
+            properties: { organizationId: 'org-1', projectId: 'project-1' },
+        });
+        sink.handle({
+            event: 'space.created',
+            userId: 'user-1',
+            properties: { name: 'My space' },
+        });
+        expect(writer.push).not.toHaveBeenCalled();
+    });
+});

@@ -1,5 +1,12 @@
+import { ExploreType, type Explore } from '../types/explore';
+import { type LightdashProjectParameter } from '../types/lightdashProjectConfig';
 import {
+    getExploreParameterDefinitions,
+    getExploreParameterReferences,
+    getMissingRequiredParameters,
     getParameterReferences,
+    getReferencedParameterDefinitions,
+    hasReservedParameterReference,
     validateParameterConfiguration,
     validateParameterNames,
 } from './parameters';
@@ -97,6 +104,63 @@ describe('getParameterReferences', () => {
             expect(result).toContain('active_status');
             expect(result.length).toBe(2);
         });
+    });
+
+    describe('Conditional format references', () => {
+        it.each([
+            ['${ld.parameters.currency=="USD"?"$":"€"}0.00', 'currency'],
+            ['${lightdash.parameters.currency!="USD"?"€":"$"}0.00', 'currency'],
+            [
+                '${ld.parameters.orders.currency=="USD"?"$":"€"}0.00',
+                'orders.currency',
+            ],
+            [
+                '${lightdash.parameters.orders.currency?"$":"€"}0.00',
+                'orders.currency',
+            ],
+        ])('extracts parameters from %s', (format, parameter) => {
+            expect(getParameterReferences('SUM(amount)', format)).toEqual([
+                parameter,
+            ]);
+        });
+
+        it('deduplicates references across SQL and conditional formats', () => {
+            expect(
+                getParameterReferences(
+                    '${ld.parameters.currency}',
+                    '${ld.parameters.currency==lightdash.parameters.preferred?"$":"€"}0.00',
+                ),
+            ).toEqual(['currency', 'preferred']);
+        });
+
+        it('does not scan bare references outside a conditional placeholder', () => {
+            expect(
+                getParameterReferences(
+                    '${ld.parameters.currency=="USD"?"$":"€"} ld.parameters.fake',
+                ),
+            ).toEqual(['currency']);
+        });
+
+        it.each([
+            '${ld.parameters.currency=="USD"?"ld.parameters.caption":"lightdash.parameters.fallback"}',
+            "${ld.parameters.currency=='ld.parameters.caption'?'$':'€'}",
+            '${"lightdash.parameters.caption"==ld.parameters.currency?"$":"€"}',
+            '${ld.parameters.currency=="Why? ld.parameters.caption: \\"USD\\""?"$":"€"}',
+            '${ld.parameters.currency?ld.parameters.caption:lightdash.parameters.fallback}',
+        ])('ignores literal text and output branches in %s', (format) => {
+            expect(getParameterReferences(format)).toEqual(['currency']);
+        });
+
+        it.each([
+            '${ld.parameters.currency=="USD?: ld.parameters.caption"}',
+            '${ld.parameters.orders.currency.extra=="USD"?"$":"€"}',
+            '${ld.parameters.currency-invalid=="USD"?"$":"€"}',
+        ])(
+            'does not extract references from unsupported expressions: %s',
+            (format) => {
+                expect(getParameterReferences(format)).toEqual([]);
+            },
+        );
     });
 
     describe('Liquid template references', () => {
@@ -392,6 +456,113 @@ describe('validateParameterNames', () => {
         expect(result.invalidParameters).toContain('invalid.param');
         expect(result.invalidParameters).toContain('another invalid');
     });
+
+    it('should not fail on reserved parameter names (user param wins, surfaced separately)', () => {
+        const result = validateParameterNames({
+            date_zoom: { label: 'Date zoom', default: 'week' },
+        });
+        expect(result.isInvalid).toBe(false);
+        expect(result.reservedParameters).toContain('date_zoom');
+        expect(result.invalidParameters).toEqual([]);
+    });
+
+    it('should report invalid and reserved names separately (only invalid fails)', () => {
+        const result = validateParameterNames({
+            'bad.name': { label: 'Bad', default: 'x' },
+            date_zoom: { label: 'Date zoom', default: 'week' },
+            good_name: { label: 'Good', default: 'y' },
+        });
+        expect(result.isInvalid).toBe(true);
+        expect(result.invalidParameters).toEqual(['bad.name']);
+        expect(result.reservedParameters).toEqual(['date_zoom']);
+    });
+});
+
+describe('hasReservedParameterReference', () => {
+    it('returns true when a reserved parameter is referenced', () => {
+        expect(hasReservedParameterReference(['region', 'date_zoom'])).toBe(
+            true,
+        );
+    });
+
+    it('returns false when only user parameters are referenced', () => {
+        expect(hasReservedParameterReference(['region', 'status'])).toBe(false);
+    });
+
+    it('returns false for an empty list', () => {
+        expect(hasReservedParameterReference([])).toBe(false);
+    });
+});
+
+describe('getMissingRequiredParameters', () => {
+    it('flags a referenced parameter with no value and no default', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            {},
+            { region: { label: 'Region' } },
+        );
+        expect(result).toEqual(['region']);
+    });
+
+    it('does not flag a parameter that has a value', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            { region: 'EU' },
+            { region: { label: 'Region' } },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('does not flag a parameter explicitly set to a falsy value', () => {
+        // Key presence, not truthiness: a user can deliberately pick 0, '' or [].
+        const result = getMissingRequiredParameters(
+            ['amount', 'label', 'tags'],
+            { amount: 0, label: '', tags: [] },
+            {
+                amount: { label: 'Amount' },
+                label: { label: 'Label' },
+                tags: { label: 'Tags' },
+            },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('does not flag a parameter that has a default', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            {},
+            { region: { label: 'Region', default: 'EU' } },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('does not flag a parameter whose default is a falsy value (0 / empty string)', () => {
+        // A declared default counts as supplied (backend uses `default !== undefined`).
+        const result = getMissingRequiredParameters(
+            ['count', 'note'],
+            {},
+            {
+                count: { label: 'Count', type: 'number', default: 0 },
+                note: { label: 'Note', default: '' },
+            },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('still flags a parameter declared with no default key', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            {},
+            { region: { label: 'Region' } },
+        );
+        expect(result).toEqual(['region']);
+    });
+
+    it('never flags a reserved parameter as missing', () => {
+        // Reserved parameters are resolved server-side, so never user-required.
+        const result = getMissingRequiredParameters(['date_zoom'], {}, {});
+        expect(result).toEqual([]);
+    });
 });
 
 describe('validateParameterConfiguration', () => {
@@ -493,5 +664,140 @@ describe('validateParameterConfiguration', () => {
         });
         expect(result.isValid).toBe(true);
         expect(result.error).toBeNull();
+    });
+});
+
+describe('getExploreParameterDefinitions', () => {
+    it('includes active explore parameter aliases so shadowed reserved names can be matched by reference', () => {
+        const definitions = getExploreParameterDefinitions({
+            name: 'orders',
+            label: 'Orders',
+            baseTable: 'orders',
+            joinedTables: [],
+            type: ExploreType.DEFAULT,
+            tables: {
+                orders: {
+                    name: 'orders',
+                    label: 'Orders',
+                    parameters: {
+                        date_zoom: {
+                            label: 'Table-scoped date zoom',
+                            options: ['week'],
+                        },
+                    },
+                    dimensions: {},
+                    metrics: {},
+                    lineageGraph: {},
+                },
+            },
+            parameters: {
+                date_zoom: {
+                    label: 'Shadowed date zoom',
+                    options: ['week'],
+                },
+            },
+        } as unknown as Explore);
+
+        expect(definitions['orders.date_zoom']?.label).toBe(
+            'Table-scoped date zoom',
+        );
+        expect(definitions.date_zoom?.label).toBe('Shadowed date zoom');
+    });
+});
+
+describe('getReferencedParameterDefinitions', () => {
+    const region: LightdashProjectParameter = { label: 'Region' };
+    const shadowedDateZoom: LightdashProjectParameter = {
+        label: 'Shadowed date zoom',
+    };
+
+    it('returns only definitions that are referenced', () => {
+        expect(
+            getReferencedParameterDefinitions({ region }, ['region']),
+        ).toEqual({ region });
+    });
+
+    it('excludes references that have no user definition (e.g. a reserved-only reference)', () => {
+        // date_zoom is referenced but not user-defined: it is reserved-only and must not show.
+        expect(
+            getReferencedParameterDefinitions({ region }, ['date_zoom']),
+        ).toEqual({});
+    });
+
+    it('includes a user-defined parameter that shadows a reserved name', () => {
+        expect(
+            getReferencedParameterDefinitions({ date_zoom: shadowedDateZoom }, [
+                'date_zoom',
+            ]),
+        ).toEqual({ date_zoom: shadowedDateZoom });
+    });
+
+    it('returns nothing when there are no references', () => {
+        expect(
+            getReferencedParameterDefinitions({ region }, undefined),
+        ).toEqual({});
+        expect(getReferencedParameterDefinitions({ region }, [])).toEqual({});
+    });
+});
+
+describe('getExploreParameterReferences', () => {
+    it('collects deduplicated references from joins, tables, and fields', () => {
+        const references = getExploreParameterReferences({
+            name: 'orders',
+            label: 'Orders',
+            baseTable: 'orders',
+            joinedTables: [
+                { table: 'customers', parameterReferences: ['region'] },
+            ],
+            tables: {
+                orders: {
+                    name: 'orders',
+                    label: 'Orders',
+                    parameterReferences: ['env'],
+                    dimensions: {
+                        selected_metric: {
+                            name: 'selected_metric',
+                            parameterReferences: ['orders.metric', 'region'],
+                        },
+                    },
+                    metrics: {
+                        total: {
+                            name: 'total',
+                            parameterReferences: ['orders.metric'],
+                        },
+                    },
+                    lineageGraph: {},
+                },
+                customers: {
+                    name: 'customers',
+                    label: 'Customers',
+                    dimensions: {},
+                    metrics: {},
+                    lineageGraph: {},
+                },
+            },
+        } as unknown as Explore);
+
+        expect(references.sort()).toEqual(['env', 'orders.metric', 'region']);
+    });
+
+    it('returns empty for an explore with no references', () => {
+        const references = getExploreParameterReferences({
+            name: 'orders',
+            label: 'Orders',
+            baseTable: 'orders',
+            joinedTables: [],
+            tables: {
+                orders: {
+                    name: 'orders',
+                    label: 'Orders',
+                    dimensions: {},
+                    metrics: {},
+                    lineageGraph: {},
+                },
+            },
+        } as unknown as Explore);
+
+        expect(references).toEqual([]);
     });
 });

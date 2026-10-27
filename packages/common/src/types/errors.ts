@@ -1,6 +1,15 @@
-// eslint-disable-next-line max-classes-per-file
+import {
+    AI_ACCESS_REFUSED_CODE,
+    getAiAccessRefusalAction,
+    getAiAccessRefusalMessage,
+    getAiAccessRefusalSettingsUrl,
+    type AiAccessRefusal,
+    type AiAccessRefusalReason,
+} from './aiPrincipal';
+/* eslint-disable max-classes-per-file */
 import { type AnyType } from './any';
 import { type DbtLog } from './job';
+import type { SharedSignInExpiry } from './sharedSignIn';
 
 type LightdashErrorData = {
     /**
@@ -17,6 +26,18 @@ type LightdashErrorParams = {
     statusCode: number;
     data: LightdashErrorData;
 };
+
+/** Routine domain outcomes that should not produce error-level API reporting. */
+export type ExpectedError = {
+    readonly isExpected: true;
+};
+
+export const isExpectedError = (
+    error: unknown,
+): error is Error & ExpectedError =>
+    error instanceof Error &&
+    'isExpected' in error &&
+    error.isExpected === true;
 
 export class LightdashError extends Error {
     statusCode: number;
@@ -45,6 +66,100 @@ export class ForbiddenError extends LightdashError {
     }
 }
 
+export class FeatureNotEnabledError extends ForbiddenError {
+    constructor(featureFlagId: string) {
+        super('This feature is not enabled for your organisation.', {
+            code: 'feature_not_enabled',
+            featureFlagId,
+        });
+        this.name = 'FeatureNotEnabledError';
+    }
+}
+
+export class AiAccessRefusedError extends ForbiddenError {
+    readonly refusal: AiAccessRefusal;
+
+    readonly inheritedFromProjectUuid: string | null;
+
+    constructor(
+        reason: AiAccessRefusalReason,
+        options: {
+            message?: string;
+            settingsUrl?: string | null;
+            connectUrl?: string | null;
+            inheritedFromProjectUuid?: string | null;
+            requiredCapabilities?: AiAccessRefusal['requiredCapabilities'];
+            blockers?: AiAccessRefusal['blockers'];
+            blockersComplete?: boolean;
+            explanationUrl?: string;
+            capability?: AiAccessRefusal['capability'];
+            policyLayer?: AiAccessRefusal['policyLayer'];
+            operation?: string;
+            policyVersion?: number;
+            projectUuid?: string | null;
+        } = {},
+    ) {
+        const refusal: AiAccessRefusal = {
+            code: AI_ACCESS_REFUSED_CODE,
+            reason,
+            message:
+                options.message ??
+                getAiAccessRefusalMessage(reason, { projectName: null }),
+            action: getAiAccessRefusalAction(reason),
+            settingsUrl:
+                options.settingsUrl === undefined
+                    ? getAiAccessRefusalSettingsUrl(
+                          reason,
+                          options.projectUuid ?? null,
+                      )
+                    : options.settingsUrl,
+            connectUrl: options.connectUrl ?? null,
+            ...(options.requiredCapabilities === undefined
+                ? {}
+                : { requiredCapabilities: options.requiredCapabilities }),
+            ...(options.blockers === undefined
+                ? {}
+                : { blockers: options.blockers }),
+            ...(options.blockersComplete === undefined
+                ? {}
+                : { blockersComplete: options.blockersComplete }),
+            ...(options.explanationUrl === undefined
+                ? {}
+                : { explanationUrl: options.explanationUrl }),
+            ...(options.capability === undefined
+                ? {}
+                : { capability: options.capability }),
+            ...(options.policyLayer === undefined
+                ? {}
+                : { policyLayer: options.policyLayer }),
+            ...(options.operation === undefined
+                ? {}
+                : { operation: options.operation }),
+            ...(options.policyVersion === undefined
+                ? {}
+                : { policyVersion: options.policyVersion }),
+            ...(options.projectUuid === undefined
+                ? {}
+                : { projectUuid: options.projectUuid }),
+        };
+        super(refusal.message, refusal);
+        this.refusal = refusal;
+        this.inheritedFromProjectUuid =
+            options.inheritedFromProjectUuid ?? null;
+    }
+}
+
+export class GoogleNotConnectedError extends LightdashError {
+    constructor(message = 'Google account not connected') {
+        super({
+            message,
+            name: 'GoogleNotConnectedError',
+            statusCode: 412,
+            data: {},
+        });
+    }
+}
+
 export class DeactivatedAccountError extends LightdashError {
     constructor(
         message = 'Your account has been deactivated. Please contact your organization administrator.',
@@ -53,6 +168,20 @@ export class DeactivatedAccountError extends LightdashError {
         super({
             message,
             name: 'DeactivatedAccountError',
+            statusCode: 403,
+            data,
+        });
+    }
+}
+
+export class TrialExpiredError extends LightdashError {
+    constructor(
+        message = "Your organization's trial has expired. Please contact your organization administrator.",
+        data: { [key: string]: AnyType } = {},
+    ) {
+        super({
+            message,
+            name: 'TrialExpiredError',
             statusCode: 403,
             data,
         });
@@ -185,9 +314,31 @@ export class UnexpectedGitError extends LightdashError {
     }
 }
 
+/**
+ * Thrown when a Git write operation (create branch, commit, open/update PR) is
+ * rejected because the credentials backing the connection lack write access —
+ * e.g. GitHub returns 403 "Resource not accessible by integration". This is a
+ * terminal setup problem (a personal access token without write scope, or a
+ * GitHub App installation missing Contents/Pull-requests write), not a transient
+ * failure, so callers should surface a one-time fix rather than retry.
+ */
+export class InsufficientGitPermissionsError extends LightdashError {
+    constructor(
+        message = 'The Git connection does not have write access to this repository',
+        data: { [key: string]: AnyType } = {},
+    ) {
+        super({
+            message,
+            name: 'InsufficientGitPermissionsError',
+            statusCode: 403,
+            data,
+        });
+    }
+}
+
 export class UnexpectedDatabaseError extends LightdashError {
     constructor(
-        message = 'Unexpected error in Lightdash database.',
+        message = 'Unexpected error in the application database.',
         data: { [key: string]: AnyType } = {},
     ) {
         super({
@@ -215,7 +366,7 @@ export class ParseError extends LightdashError {
 
 export class CompileError extends LightdashError {
     constructor(
-        message = 'Error compiling sql from Lightdash configuration',
+        message = 'Error compiling sql from project configuration',
         data: Record<string, AnyType> = {},
     ) {
         super({
@@ -256,13 +407,37 @@ export class DbtError extends LightdashError {
 }
 
 export class NotFoundError extends LightdashError {
-    constructor(message: string) {
+    constructor(message: string, data: Record<string, AnyType> = {}) {
         super({
             message,
             name: 'NotFoundError',
             statusCode: 404,
-            data: {},
+            data,
         });
+    }
+}
+
+export class ExploreSplitError extends NotFoundError {
+    constructor(exploreName: string, candidateExploreNames: string[]) {
+        const quotedCandidates = candidateExploreNames.map(
+            (candidate) => `"${candidate}"`,
+        );
+        const candidateList = `${quotedCandidates
+            .slice(0, -1)
+            .join(', ')} and ${quotedCandidates.at(-1)}`;
+        super(
+            `Explore "${exploreName}" was split into ${candidateList}. Pick one.`,
+            { exploreName, candidateExploreNames },
+        );
+    }
+}
+
+export class ExpectedNotFoundError
+    extends NotFoundError
+    implements ExpectedError
+{
+    get isExpected(): true {
+        return true;
     }
 }
 
@@ -310,6 +485,20 @@ export class WarehouseQueryError extends LightdashError {
     }
 }
 
+export class QueryCostEstimateExceededError extends LightdashError {
+    constructor(
+        message: string,
+        data: { estimatedBytes: number; limitBytes: number },
+    ) {
+        super({
+            message,
+            name: 'QueryCostEstimateExceededError',
+            statusCode: 422,
+            data,
+        });
+    }
+}
+
 export class SmptError extends LightdashError {
     constructor(message: string, data: { [key: string]: AnyType } = {}) {
         super({
@@ -336,6 +525,30 @@ export class AlreadyExistsError extends LightdashError {
         super({
             message,
             name: 'AlreadyExistsError',
+            statusCode: 409,
+            data: {},
+        });
+    }
+}
+
+export class ConflictError extends LightdashError {
+    constructor(message: string, data: { [key: string]: AnyType } = {}) {
+        super({
+            message,
+            name: 'ConflictError',
+            statusCode: 409,
+            data,
+        });
+    }
+}
+
+export class SingleConnectionProjectError extends LightdashError {
+    constructor(
+        message = 'This project uses a single warehouse connection. Enable multiple connections first.',
+    ) {
+        super({
+            message,
+            name: 'SingleConnectionProjectError',
             statusCode: 409,
             data: {},
         });
@@ -487,6 +700,31 @@ export class GoogleSheetsTransientError extends LightdashError {
     }
 }
 
+export class TooManyRequestsError extends LightdashError {
+    constructor(
+        message = 'Too many requests',
+        data: { [key: string]: AnyType } = {},
+    ) {
+        super({
+            message,
+            name: 'TooManyRequestsError',
+            statusCode: 429,
+            data,
+        });
+    }
+}
+
+export class PasswordLoginBlockedError extends LightdashError {
+    constructor(blockedUntil: Date) {
+        super({
+            message: 'Too many failed login attempts. Please try again later.',
+            name: 'PasswordLoginBlockedError',
+            statusCode: 429,
+            data: { blockedUntil: blockedUntil.toISOString() },
+        });
+    }
+}
+
 export class GoogleSheetsQuotaError extends LightdashError {
     constructor(
         message = 'Google Sheets API quota exceeded. The sync will be retried automatically.',
@@ -500,6 +738,16 @@ export class GoogleSheetsQuotaError extends LightdashError {
         });
     }
 }
+export class WarehouseDatabaseListingNotSupportedError extends LightdashError {
+    constructor(warehouseType: string) {
+        super({
+            message: `Additional databases are not supported for ${warehouseType} yet`,
+            name: 'WarehouseDatabaseListingNotSupportedError',
+            statusCode: 400,
+            data: { warehouseType },
+        });
+    }
+}
 export class NotImplementedError extends LightdashError {
     constructor(message = 'Not implemented') {
         super({
@@ -510,8 +758,23 @@ export class NotImplementedError extends LightdashError {
         });
     }
 }
+export class DeprecatedRouteError extends LightdashError {
+    constructor(
+        message = 'Deprecated route called past its removal deadline',
+        data: { [key: string]: AnyType } = {},
+    ) {
+        super({
+            message,
+            name: 'DeprecatedRouteError',
+            statusCode: 410,
+            data,
+        });
+    }
+}
+
 export const getErrorMessage = (e: unknown) => {
     if (e instanceof Error && e.message) return e.message;
+    if (typeof e === 'string' && e.trim().length > 0) return e;
     return `Unknown ${typeof e} error`;
 };
 
@@ -530,12 +793,12 @@ export class ScreenshotError extends LightdashError {
 }
 
 export class SshTunnelError extends LightdashError {
-    constructor(message: string) {
+    constructor(message: string, data: { [key: string]: AnyType } = {}) {
         super({
             message,
             name: 'SshTunnelError',
             statusCode: 400,
-            data: {},
+            data,
         });
     }
 }
@@ -647,16 +910,18 @@ export class AiAgentValidatorError extends LightdashError {
     }
 }
 
+export type WarehouseTokenErrorData = { sharedSignIn?: SharedSignInExpiry };
+
 /* This specific error will be used in the frontend
 to show a "reauthenticate" button in the UI
 */
 export class SnowflakeTokenError extends LightdashError {
-    constructor(message: string) {
+    constructor(message: string, data: WarehouseTokenErrorData = {}) {
         super({
             message,
             name: 'SnowflakeTokenError',
             statusCode: 401,
-            data: {},
+            data,
         });
     }
 }
@@ -665,10 +930,73 @@ export class SnowflakeTokenError extends LightdashError {
 to show a "reauthenticate" button in the UI
 */
 export class DatabricksTokenError extends LightdashError {
-    constructor(message: string) {
+    constructor(message: string, data: WarehouseTokenErrorData = {}) {
         super({
             message,
             name: 'DatabricksTokenError',
+            statusCode: 401,
+            data,
+        });
+    }
+}
+
+/* This specific error will be used in the frontend
+to show a "reauthenticate" button in the UI
+*/
+export class BigqueryTokenError extends LightdashError {
+    constructor(message: string, data: WarehouseTokenErrorData = {}) {
+        super({
+            message,
+            name: 'BigqueryTokenError',
+            statusCode: 401,
+            data,
+        });
+    }
+}
+
+export const BIGQUERY_TOKEN_ERROR_MESSAGE_MARKER =
+    'Google rejected the BigQuery refresh token';
+
+export const isBigqueryTokenErrorMessage = (message: string): boolean =>
+    message.includes(BIGQUERY_TOKEN_ERROR_MESSAGE_MARKER);
+
+export const PREVIEW_WAREHOUSE_SIGN_IN_EXPIRED_MESSAGE_MARKER =
+    "This preview's warehouse sign-in expired";
+
+export const getPreviewWarehouseSignInExpiredMessage = (
+    upstreamProjectName: string,
+): string =>
+    `${PREVIEW_WAREHOUSE_SIGN_IN_EXPIRED_MESSAGE_MARKER}. Reconnect the warehouse on ${upstreamProjectName}.`;
+
+export const isPreviewWarehouseSignInExpiredMessage = (
+    message: string,
+): boolean =>
+    message.includes(PREVIEW_WAREHOUSE_SIGN_IN_EXPIRED_MESSAGE_MARKER);
+
+export class PreviewWarehouseSignInExpiredError extends LightdashError {
+    constructor(upstream: {
+        upstreamProjectUuid: string;
+        upstreamProjectName: string;
+    }) {
+        super({
+            message: getPreviewWarehouseSignInExpiredMessage(
+                upstream.upstreamProjectName,
+            ),
+            name: 'PreviewWarehouseSignInExpiredError',
+            statusCode: 401,
+            data: upstream,
+        });
+    }
+}
+
+/* This specific error will be used in the frontend
+to show a "reauthenticate" button in the UI
+*/
+export class RedshiftIamTokenError extends LightdashError {
+    constructor(message: string) {
+        super({
+            message,
+            name: 'RedshiftIamTokenError',
             statusCode: 401,
             data: {},
         });
@@ -755,23 +1083,6 @@ export class CorruptedExploreError extends LightdashError {
             message,
             name: 'CorruptedExploreError',
             statusCode: 500,
-            data,
-        });
-    }
-}
-
-export class ChangesetConflictError extends LightdashError {
-    constructor(
-        message: string,
-        data: {
-            entityName: string;
-            entityTableName: string;
-        },
-    ) {
-        super({
-            message,
-            name: 'ChangesetConflictError',
-            statusCode: 409,
             data,
         });
     }

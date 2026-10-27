@@ -1,0 +1,1340 @@
+import {
+    ChartSourceType,
+    ContentType,
+    defineUserAbility,
+    DirectAccessResourceType,
+    ForbiddenError,
+    KnexPaginatedData,
+    OrganizationMemberRole,
+    ProjectMemberRole,
+    SpaceMemberRole,
+    SummaryContent,
+} from '@lightdash/common';
+import type { DeletedContentItem, SessionUser } from '@lightdash/common';
+import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
+import type { ContentModel } from '../../models/ContentModel/ContentModel';
+import type { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import type { SpaceModel } from '../../models/SpaceModel';
+import type { ValidationModel } from '../../models/ValidationModel/ValidationModel';
+import type { DashboardService } from '../DashboardService/DashboardService';
+import type { DocumentService } from '../DocumentService/DocumentService';
+import type { SavedChartService } from '../SavedChartsService/SavedChartService';
+import type { SavedSqlService } from '../SavedSqlService/SavedSqlService';
+import type { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import type { SpaceService } from '../SpaceService/SpaceService';
+import { ContentService } from './ContentService';
+
+const projectUuid = 'project-uuid';
+const organizationUuid = 'organization-uuid';
+const userUuid = 'user-uuid';
+
+const createUser = (): SessionUser =>
+    ({
+        userId: 1,
+        userUuid,
+        organizationUuid,
+        abilityRules: [],
+        ability: defineUserAbility(
+            {
+                userUuid,
+                role: OrganizationMemberRole.MEMBER,
+                organizationUuid,
+            },
+            [
+                {
+                    projectUuid,
+                    role: ProjectMemberRole.ADMIN,
+                    userUuid,
+                    roleUuid: undefined,
+                },
+            ],
+        ),
+    }) as unknown as SessionUser;
+
+const createOrganizationAdminUser = (): SessionUser => ({
+    ...createUser(),
+    role: OrganizationMemberRole.ADMIN,
+    ability: defineUserAbility(
+        {
+            userUuid,
+            role: OrganizationMemberRole.ADMIN,
+            organizationUuid,
+        },
+        [],
+    ),
+});
+
+const createService = ({
+    contentModel = {} as ContentModel,
+    spaceModel = {} as SpaceModel,
+    spacePermissionService = {} as SpacePermissionService,
+    sharedWithMeUuids = {
+        dashboard: [],
+        chart: [],
+        sqlChart: [],
+        app: [],
+        document: [],
+    },
+    sharedWithMeRoles = {
+        dashboard: { 'dashboard-1': [SpaceMemberRole.EDITOR] },
+        chart: {},
+        sqlChart: {},
+        app: {},
+        document: {},
+    },
+}: {
+    contentModel?: ContentModel;
+    spaceModel?: SpaceModel;
+    spacePermissionService?: SpacePermissionService;
+    sharedWithMeUuids?: Record<string, string[]>;
+    sharedWithMeRoles?: Record<
+        DirectAccessResourceType,
+        Record<string, SpaceMemberRole[]>
+    >;
+} = {}) => {
+    const projectModel = {
+        getAllByOrganizationUuid: vi.fn().mockResolvedValue([
+            {
+                projectUuid,
+                name: 'Test project',
+                organizationUuid,
+            },
+        ]),
+        getSummary: vi.fn().mockResolvedValue({
+            organizationUuid,
+            name: 'Test project',
+        }),
+    };
+    const savedChartService = {
+        restore: vi.fn().mockResolvedValue(undefined),
+        permanentDelete: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const savedSqlService = {
+        restore: vi.fn().mockResolvedValue(undefined),
+        permanentDelete: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const dashboardService = {
+        restore: vi.fn().mockResolvedValue(undefined),
+        permanentDelete: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const spaceService = {
+        restore: vi.fn().mockResolvedValue(undefined),
+        permanentDelete: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const validationModel = {
+        deleteChartValidations: vi.fn().mockResolvedValue(undefined),
+        deleteDashboardValidations: vi.fn().mockResolvedValue(undefined),
+    };
+    const directAccessService = {
+        findSharedWithMeAccess: vi.fn().mockResolvedValue({
+            uuidsByType: { document: [], ...sharedWithMeUuids },
+            rolesByType: sharedWithMeRoles,
+        }),
+        findGrantedRoles: vi
+            .fn<() => Promise<Record<string, SpaceMemberRole[]>>>()
+            .mockResolvedValue({
+                'dashboard-1': [SpaceMemberRole.EDITOR],
+            }),
+    };
+    const documentService = {
+        delete: vi.fn().mockResolvedValue(undefined),
+        restore: vi.fn().mockResolvedValue(undefined),
+        permanentDelete: vi.fn().mockResolvedValue(undefined),
+        moveToSpace: vi.fn().mockResolvedValue(undefined),
+        filterViewableUuids: vi
+            .fn()
+            .mockImplementation(
+                async (_account, _projects, uuids: string[]) => uuids,
+            ),
+    };
+
+    return {
+        service: new ContentService({
+            documentService: documentService as unknown as DocumentService,
+            analytics: analyticsMock,
+            projectModel: projectModel as unknown as ProjectModel,
+            contentModel,
+            spaceModel,
+            spaceService: spaceService as unknown as SpaceService,
+            dashboardService: dashboardService as unknown as DashboardService,
+            savedChartService:
+                savedChartService as unknown as SavedChartService,
+            savedSqlService: savedSqlService as unknown as SavedSqlService,
+            spacePermissionService: {
+                resolveAccessBatch: vi.fn().mockResolvedValue([]),
+                ...(spacePermissionService as Partial<SpacePermissionService>),
+            } as unknown as SpacePermissionService,
+            directAccessService: directAccessService as never,
+            validationModel: validationModel as unknown as ValidationModel,
+            appMoveService: undefined,
+            appGenerateService: undefined,
+        }),
+        projectModel,
+        savedChartService,
+        savedSqlService,
+        dashboardService,
+        spaceService,
+        validationModel,
+        directAccessService,
+        documentService,
+    };
+};
+
+describe('Document discovery', () => {
+    it('bulk deletion reports a denied Document without losing successful deletions', async () => {
+        const deps = createService();
+        deps.documentService.delete.mockRejectedValueOnce(new ForbiddenError());
+        const result = await deps.service.bulkDelete(
+            createUser(),
+            projectUuid,
+            [
+                { contentType: ContentType.DOCUMENT, uuid: 'denied' },
+                { contentType: ContentType.DOCUMENT, uuid: 'deleted' },
+            ],
+        );
+        expect(result).toEqual({
+            deletedCount: 1,
+            skipped: [
+                {
+                    uuid: 'denied',
+                    contentType: ContentType.DOCUMENT,
+                    reason: 'You do not have permission to delete this content',
+                },
+            ],
+        });
+    });
+    it.each(['restoreContent', 'permanentlyDeleteContent'] as const)(
+        'dispatches %s to Document lifecycle authorization',
+        async (method) => {
+            const deps = createService();
+            await deps.service[method](createUser(), projectUuid, {
+                contentType: ContentType.DOCUMENT,
+                uuid: 'document',
+            });
+            const lifecycle =
+                method === 'restoreContent'
+                    ? deps.documentService.restore
+                    : deps.documentService.permanentDelete;
+            expect(lifecycle).toHaveBeenCalledWith(
+                expect.any(Object),
+                projectUuid,
+                'document',
+            );
+        },
+    );
+
+    it('includes Recently deleted Documents and scopes nonadmins to their own deletions', async () => {
+        const findDeletedContents = vi.fn().mockResolvedValue({ data: [] });
+        const deps = createService({
+            contentModel: {
+                findDeletedContents,
+            } as unknown as ContentModel,
+        });
+        const user = createUser();
+        user.ability.update([{ action: 'view', subject: 'Project' }]);
+        await deps.service.findDeleted(user, {
+            projectUuids: [projectUuid],
+            deletedByUserUuids: ['other-user'],
+        });
+        expect(findDeletedContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                deletedByUserUuids: [userUuid],
+                documents: { allowedSpaceUuids: [] },
+            }),
+            undefined,
+        );
+        const { contentTypes } = findDeletedContents.mock.calls[0][0];
+        expect(contentTypes).toContain(ContentType.DOCUMENT);
+    });
+    const page = {
+        data: [],
+        pagination: {
+            page: 1,
+            pageSize: 10,
+            totalPageCount: 0,
+            totalResults: 0,
+        },
+    };
+    const createDocumentDiscovery = () => {
+        const findSummaryContents = vi.fn().mockResolvedValue(page);
+        const resolveAccessBatch = vi.fn().mockResolvedValue([
+            {
+                target: { type: 'space', spaceUuid: 'space' },
+                context: {
+                    organizationUuid,
+                    projectUuid,
+                    inheritsFromOrgOrProject: true,
+                    access: [],
+                },
+            },
+        ]);
+        const deps = createService({
+            contentModel: { findSummaryContents } as unknown as ContentModel,
+            spaceModel: {
+                find: vi.fn().mockResolvedValue([{ uuid: 'space' }]),
+                getChildSpaceUuidsForParents: vi.fn().mockResolvedValue([]),
+            } as unknown as SpaceModel,
+            spacePermissionService: {
+                getAccessibleSpaceUuids: vi.fn().mockResolvedValue(['space']),
+                resolveAccessBatch,
+            } as unknown as SpacePermissionService,
+        });
+        return { ...deps, findSummaryContents, resolveAccessBatch };
+    };
+
+    it('unions only authorized direct Documents into the top-level list before pagination', async () => {
+        const deps = createDocumentDiscovery();
+        deps.directAccessService.findSharedWithMeAccess.mockResolvedValue({
+            uuidsByType: { document: ['allowed', 'denied'] },
+            rolesByType: {
+                dashboard: {},
+                chart: {},
+                sqlChart: {},
+                app: {},
+                document: {},
+            },
+        });
+        deps.documentService.filterViewableUuids.mockResolvedValue(['allowed']);
+        await deps.service.find(
+            createUser(),
+            {
+                contentTypes: [ContentType.DOCUMENT],
+                search: 'weekly',
+                includePersonalDocuments: true,
+            },
+            {},
+            { page: 2, pageSize: 10 },
+        );
+        expect(deps.documentService.filterViewableUuids).toHaveBeenCalledWith(
+            expect.any(Object),
+            [projectUuid],
+            ['allowed', 'denied'],
+        );
+        expect(deps.findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                spaceUuids: undefined,
+                search: 'weekly',
+                documents: {
+                    allowedSpaceUuids: ['space'],
+                    grantedUuids: ['allowed'],
+                    personal: {
+                        forUserUuid: userUuid,
+                        adminProjectUuids: [projectUuid],
+                    },
+                },
+            }),
+            {},
+            { page: 2, pageSize: 10 },
+        );
+    });
+
+    it('leaves personal Documents out unless the caller opts in', async () => {
+        const deps = createDocumentDiscovery();
+        await deps.service.find(
+            createUser(),
+            { contentTypes: [ContentType.DOCUMENT] },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(deps.findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                documents: expect.not.objectContaining({
+                    personal: expect.anything(),
+                }),
+            }),
+            {},
+            { page: 1, pageSize: 10 },
+        );
+    });
+
+    it("lists only an editor's own personal Documents", async () => {
+        const deps = createDocumentDiscovery();
+        const editor = {
+            ...createUser(),
+            ability: defineUserAbility(
+                {
+                    userUuid,
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid,
+                },
+                [
+                    {
+                        projectUuid,
+                        role: ProjectMemberRole.EDITOR,
+                        userUuid,
+                        roleUuid: undefined,
+                    },
+                ],
+            ),
+        } as SessionUser;
+        await deps.service.find(
+            editor,
+            {
+                contentTypes: [ContentType.DOCUMENT],
+                includePersonalDocuments: true,
+            },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(deps.findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                documents: expect.objectContaining({
+                    personal: { forUserUuid: userUuid, adminProjectUuids: [] },
+                }),
+            }),
+            {},
+            { page: 1, pageSize: 10 },
+        );
+    });
+
+    it.each([
+        { contentTypes: [ContentType.DOCUMENT], spaceUuids: ['space'] },
+        { contentTypes: [ContentType.DOCUMENT, ContentType.CHART] },
+        { contentTypes: [ContentType.CHART] },
+        {},
+    ])(
+        'does not expand direct discovery outside All documents: %j',
+        async (filters) => {
+            const deps = createDocumentDiscovery();
+            await deps.service.find(
+                createUser(),
+                filters,
+                {},
+                { page: 1, pageSize: 10 },
+            );
+            expect(
+                deps.directAccessService.findSharedWithMeAccess,
+            ).not.toHaveBeenCalled();
+            expect(deps.findSummaryContents).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    spaceUuids: ['space'],
+                    documents: { allowedSpaceUuids: ['space'] },
+                }),
+                {},
+                { page: 1, pageSize: 10 },
+            );
+        },
+    );
+
+    it('enriches ordinary Document rows with direct access roles', async () => {
+        const deps = createDocumentDiscovery();
+        deps.findSummaryContents.mockResolvedValue({
+            ...page,
+            data: [{ uuid: 'document', contentType: ContentType.DOCUMENT }],
+        });
+        deps.directAccessService.findGrantedRoles.mockResolvedValue({
+            document: [SpaceMemberRole.EDITOR],
+        });
+        const result = await deps.service.find(
+            createUser(),
+            {},
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(result.data[0]).toHaveProperty('directAccessRoles', [
+            SpaceMemberRole.EDITOR,
+        ]);
+        expect(deps.directAccessService.findGrantedRoles).toHaveBeenCalledWith(
+            expect.any(Object),
+            expect.arrayContaining([
+                {
+                    resourceType: DirectAccessResourceType.DOCUMENT,
+                    uuids: ['document'],
+                },
+            ]),
+        );
+    });
+
+    it('dispatches Document moves through the independently authorized Document service', async () => {
+        const deps = createService();
+        await deps.service.move(
+            createOrganizationAdminUser(),
+            projectUuid,
+            { uuid: 'document', contentType: ContentType.DOCUMENT },
+            'destination',
+        );
+        expect(deps.documentService.moveToSpace).toHaveBeenCalledWith(
+            expect.objectContaining({
+                user: expect.objectContaining({ userUuid }),
+            }),
+            {
+                projectUuid,
+                itemUuid: 'document',
+                targetSpaceUuid: 'destination',
+            },
+            { checkForAccess: true, trackEvent: true },
+        );
+    });
+
+    it('dispatches Document deletion through the generic content API', async () => {
+        const deps = createService();
+        await expect(
+            deps.service.delete(createUser(), projectUuid, {
+                uuid: 'document',
+                contentType: ContentType.DOCUMENT,
+            }),
+        ).resolves.toBeUndefined();
+        expect(deps.documentService.delete).toHaveBeenCalledWith(
+            expect.any(Object),
+            projectUuid,
+            'document',
+        );
+    });
+
+    it('overwrites a caller-supplied Documents filter', async () => {
+        const deps = createDocumentDiscovery();
+        await deps.service.find(
+            createUser(),
+            { documents: { allowedSpaceUuids: ['injected'] } },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(deps.findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                documents: expect.objectContaining({
+                    allowedSpaceUuids: ['space'],
+                }),
+            }),
+            {},
+            { page: 1, pageSize: 10 },
+        );
+    });
+
+    it('does not discover Documents with a custom role that can view Spaces but not Documents', async () => {
+        const deps = createDocumentDiscovery();
+        const user = createUser();
+        user.ability.update([
+            { action: 'view', subject: 'Project' },
+            { action: 'view', subject: 'Space' },
+        ]);
+        await deps.service.find(user, {}, {}, { page: 1, pageSize: 10 });
+        expect(deps.findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({ documents: { allowedSpaceUuids: [] } }),
+            {},
+            { page: 1, pageSize: 10 },
+        );
+    });
+
+    it('passes Document-authorized Spaces to both discovery and count queries', async () => {
+        const deps = createDocumentDiscovery();
+        await deps.service.find(
+            createUser(),
+            {},
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(deps.findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                documents: { allowedSpaceUuids: ['space'] },
+            }),
+            {},
+            { page: 1, pageSize: 10 },
+        );
+    });
+
+    it('removes directly granted Documents denied by Document authorization before pagination', async () => {
+        const findSummaryContents = vi.fn();
+        const deps = createService({
+            contentModel: { findSummaryContents } as unknown as ContentModel,
+            sharedWithMeUuids: {
+                dashboard: [],
+                chart: [],
+                sqlChart: [],
+                app: [],
+                document: ['denied-document'],
+            },
+        });
+        deps.documentService.filterViewableUuids.mockResolvedValue([]);
+        const result = await deps.service.find(
+            createUser(),
+            { sharedWithMe: true, contentTypes: [ContentType.DOCUMENT] },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(deps.documentService.filterViewableUuids).toHaveBeenCalledWith(
+            expect.any(Object),
+            [projectUuid],
+            ['denied-document'],
+        );
+        expect(findSummaryContents).not.toHaveBeenCalled();
+        expect(result.pagination?.totalResults).toBe(0);
+        expect(result.data).toEqual([]);
+    });
+
+    it('Shared with me hydrates only granted Document UUIDs', async () => {
+        const findSummaryContents = vi.fn().mockResolvedValue({
+            ...page,
+            data: [{ uuid: 'document', contentType: ContentType.DOCUMENT }],
+        });
+        const deps = createService({
+            contentModel: {
+                findSummaryContents,
+            } as unknown as ContentModel,
+            sharedWithMeUuids: {
+                dashboard: [],
+                chart: [],
+                sqlChart: [],
+                app: [],
+                document: ['document'],
+            },
+            sharedWithMeRoles: {
+                dashboard: {},
+                chart: {},
+                sqlChart: {},
+                app: {},
+                document: { document: [SpaceMemberRole.VIEWER] },
+            },
+        });
+        const result = await deps.service.find(
+            createUser(),
+            { sharedWithMe: true, contentTypes: [ContentType.DOCUMENT] },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                uuids: ['document'],
+                spaceUuids: undefined,
+                documents: {
+                    allowedSpaceUuids: [],
+                    grantedUuids: ['document'],
+                },
+            }),
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(result.data).toEqual([
+            {
+                uuid: 'document',
+                contentType: ContentType.DOCUMENT,
+                directAccessRoles: [SpaceMemberRole.VIEWER],
+            },
+        ]);
+    });
+});
+
+describe('ContentService deleted content actions', () => {
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    describe('restoreContent', () => {
+        it.each<
+            [
+                string,
+                DeletedContentItem,
+                keyof Pick<
+                    ReturnType<typeof createService>,
+                    | 'savedChartService'
+                    | 'savedSqlService'
+                    | 'dashboardService'
+                    | 'spaceService'
+                >,
+            ]
+        >([
+            [
+                'DBT chart',
+                {
+                    uuid: 'chart-uuid',
+                    contentType: ContentType.CHART,
+                    source: ChartSourceType.DBT_EXPLORE,
+                },
+                'savedChartService',
+            ],
+            [
+                'SQL chart',
+                {
+                    uuid: 'sql-chart-uuid',
+                    contentType: ContentType.CHART,
+                    source: ChartSourceType.SQL,
+                },
+                'savedSqlService',
+            ],
+            [
+                'dashboard',
+                { uuid: 'dashboard-uuid', contentType: ContentType.DASHBOARD },
+                'dashboardService',
+            ],
+            [
+                'space',
+                { uuid: 'space-uuid', contentType: ContentType.SPACE },
+                'spaceService',
+            ],
+        ])(
+            'passes authorized projectUuid for %s restore',
+            async (_, item, key) => {
+                const deps = createService();
+                const user = createUser();
+
+                await deps.service.restoreContent(user, projectUuid, item);
+
+                expect(deps[key].restore).toHaveBeenCalledWith(
+                    user,
+                    item.uuid,
+                    { projectUuid },
+                );
+            },
+        );
+    });
+
+    describe('permanentlyDeleteContent', () => {
+        it.each<
+            [
+                string,
+                DeletedContentItem,
+                keyof Pick<
+                    ReturnType<typeof createService>,
+                    | 'savedChartService'
+                    | 'savedSqlService'
+                    | 'dashboardService'
+                    | 'spaceService'
+                >,
+            ]
+        >([
+            [
+                'DBT chart',
+                {
+                    uuid: 'chart-uuid',
+                    contentType: ContentType.CHART,
+                    source: ChartSourceType.DBT_EXPLORE,
+                },
+                'savedChartService',
+            ],
+            [
+                'SQL chart',
+                {
+                    uuid: 'sql-chart-uuid',
+                    contentType: ContentType.CHART,
+                    source: ChartSourceType.SQL,
+                },
+                'savedSqlService',
+            ],
+            [
+                'dashboard',
+                { uuid: 'dashboard-uuid', contentType: ContentType.DASHBOARD },
+                'dashboardService',
+            ],
+            [
+                'space',
+                { uuid: 'space-uuid', contentType: ContentType.SPACE },
+                'spaceService',
+            ],
+        ])(
+            'passes authorized projectUuid for %s permanent delete',
+            async (_, item, key) => {
+                const deps = createService();
+                const user = createUser();
+
+                await deps.service.permanentlyDeleteContent(
+                    user,
+                    projectUuid,
+                    item,
+                );
+
+                expect(deps[key].permanentDelete).toHaveBeenCalledWith(
+                    user,
+                    item.uuid,
+                    { projectUuid },
+                );
+            },
+        );
+    });
+});
+
+describe('ContentService.find', () => {
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('filters content to spaces the service account user can view', async () => {
+        const accessibleSpaceUuid = 'accessible-space-uuid';
+        const privateSpaceUuid = 'private-space-uuid';
+        const findSummaryContents = vi.fn(
+            async (): Promise<KnexPaginatedData<SummaryContent[]>> => ({
+                pagination: {
+                    page: 1,
+                    pageSize: 50,
+                    totalPageCount: 1,
+                    totalResults: 0,
+                },
+                data: [],
+            }),
+        );
+        const getAccessibleSpaceUuids = vi
+            .fn()
+            .mockResolvedValue([accessibleSpaceUuid]);
+        const user = {
+            ...createUser(),
+            serviceAccount: {
+                uuid: 'service-account-uuid',
+                description: 'Embedded customer actions',
+            },
+        };
+        const deps = createService({
+            contentModel: {
+                findSummaryContents,
+            } as unknown as ContentModel,
+            spaceModel: {
+                find: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { uuid: accessibleSpaceUuid },
+                        { uuid: privateSpaceUuid },
+                    ]),
+            } as unknown as SpaceModel,
+            spacePermissionService: {
+                getAccessibleSpaceUuids,
+                getDirectAccessUserUuids: vi.fn(),
+            } as unknown as SpacePermissionService,
+        });
+
+        await deps.service.find(
+            user,
+            {
+                projectUuids: [projectUuid],
+                contentTypes: [ContentType.SPACE],
+            },
+            {},
+            { page: 1, pageSize: 50 },
+        );
+
+        expect(getAccessibleSpaceUuids).toHaveBeenCalledWith('view', user, [
+            accessibleSpaceUuid,
+            privateSpaceUuid,
+        ]);
+        expect(findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                projectUuids: [projectUuid],
+                spaceUuids: [accessibleSpaceUuid],
+                contentTypes: [ContentType.SPACE],
+            }),
+            expect.any(Object),
+            expect.objectContaining({ page: 1, pageSize: 50 }),
+        );
+    });
+
+    // The vizs-only listing skips space scoping, so it must be gated on
+    // manage:Explore like the viz library endpoint.
+    describe('dataAppVizsFilter=only authorization', () => {
+        const emptyPage = (): Promise<KnexPaginatedData<SummaryContent[]>> =>
+            Promise.resolve({
+                pagination: {
+                    page: 1,
+                    pageSize: 50,
+                    totalPageCount: 1,
+                    totalResults: 0,
+                },
+                data: [],
+            });
+
+        const findWithUser = async (user: SessionUser) => {
+            const findSummaryContents = vi.fn(emptyPage);
+            const deps = createService({
+                contentModel: {
+                    findSummaryContents,
+                } as unknown as ContentModel,
+                spaceModel: {
+                    find: vi.fn().mockResolvedValue([]),
+                } as unknown as SpaceModel,
+                spacePermissionService: {
+                    getAccessibleSpaceUuids: vi.fn().mockResolvedValue([]),
+                    getDirectAccessUserUuids: vi.fn(),
+                } as unknown as SpacePermissionService,
+            });
+            await deps.service.find(
+                user,
+                {
+                    projectUuids: [projectUuid],
+                    contentTypes: [ContentType.DATA_APP],
+                    dataAppVizsFilter: 'only',
+                },
+                {},
+                { page: 1, pageSize: 50 },
+            );
+            return findSummaryContents;
+        };
+
+        it('drops projects where the user cannot manage explores', async () => {
+            const viewer: SessionUser = {
+                ...createUser(),
+                ability: defineUserAbility(
+                    {
+                        userUuid,
+                        role: OrganizationMemberRole.MEMBER,
+                        organizationUuid,
+                    },
+                    [
+                        {
+                            projectUuid,
+                            role: ProjectMemberRole.VIEWER,
+                            userUuid,
+                            roleUuid: undefined,
+                        },
+                    ],
+                ),
+            };
+
+            const findSummaryContents = await findWithUser(viewer);
+
+            expect(findSummaryContents).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    projectUuids: [],
+                    dataAppVizsFilter: 'only',
+                }),
+                expect.any(Object),
+                expect.any(Object),
+            );
+        });
+
+        it('keeps projects where the user can manage explores', async () => {
+            const findSummaryContents = await findWithUser(createUser());
+
+            expect(findSummaryContents).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    projectUuids: [projectUuid],
+                    dataAppVizsFilter: 'only',
+                }),
+                expect.any(Object),
+                expect.any(Object),
+            );
+        });
+    });
+});
+
+describe('ContentService.bulkDelete', () => {
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('dispatches deletes per content type and clears validation rows', async () => {
+        const deps = createService();
+        const user = createUser();
+
+        const results = await deps.service.bulkDelete(user, projectUuid, [
+            {
+                uuid: 'chart-uuid',
+                contentType: ContentType.CHART,
+                source: ChartSourceType.DBT_EXPLORE,
+            },
+            {
+                uuid: 'sql-chart-uuid',
+                contentType: ContentType.CHART,
+                source: ChartSourceType.SQL,
+            },
+            { uuid: 'dashboard-uuid', contentType: ContentType.DASHBOARD },
+            { uuid: 'space-uuid', contentType: ContentType.SPACE },
+        ]);
+
+        expect(results).toEqual({ deletedCount: 4, skipped: [] });
+        expect(deps.savedChartService.delete).toHaveBeenCalledWith(
+            user,
+            'chart-uuid',
+            { projectUuid },
+        );
+        expect(
+            deps.validationModel.deleteChartValidations,
+        ).toHaveBeenCalledWith('chart-uuid', projectUuid);
+        expect(deps.savedSqlService.delete).toHaveBeenCalledWith(
+            user,
+            'sql-chart-uuid',
+        );
+        expect(deps.dashboardService.delete).toHaveBeenCalledWith(
+            user,
+            'dashboard-uuid',
+            { projectUuid },
+        );
+        expect(
+            deps.validationModel.deleteDashboardValidations,
+        ).toHaveBeenCalledWith('dashboard-uuid', projectUuid);
+        expect(deps.spaceService.delete).toHaveBeenCalledWith(
+            user,
+            'space-uuid',
+        );
+    });
+
+    it('reports partial success when some items cannot be deleted', async () => {
+        const deps = createService();
+        deps.savedChartService.delete.mockRejectedValueOnce(
+            new ForbiddenError(),
+        );
+        const user = createUser();
+
+        const results = await deps.service.bulkDelete(user, projectUuid, [
+            {
+                uuid: 'forbidden-chart-uuid',
+                contentType: ContentType.CHART,
+                source: ChartSourceType.DBT_EXPLORE,
+            },
+            { uuid: 'dashboard-uuid', contentType: ContentType.DASHBOARD },
+            { uuid: 'app-uuid', contentType: ContentType.DATA_APP },
+        ]);
+
+        expect(results.deletedCount).toBe(1);
+        expect(results.skipped).toHaveLength(2);
+        expect(results.skipped[0]).toMatchObject({
+            uuid: 'forbidden-chart-uuid',
+            contentType: ContentType.CHART,
+        });
+        expect(results.skipped[1]).toMatchObject({
+            uuid: 'app-uuid',
+            contentType: ContentType.DATA_APP,
+        });
+        // Failed chart delete must not clear its validation rows
+        expect(
+            deps.validationModel.deleteChartValidations,
+        ).not.toHaveBeenCalled();
+    });
+
+    it('reports the Content as Code reason when bulk deletion is blocked', async () => {
+        const deps = createService();
+        deps.savedChartService.delete.mockRejectedValueOnce(
+            new ForbiddenError(
+                'This chart is managed by Content as Code and can only be deleted by a Content as Code manager.',
+                { contentAsCodeManaged: true },
+            ),
+        );
+
+        const results = await deps.service.bulkDelete(
+            createUser(),
+            projectUuid,
+            [
+                {
+                    uuid: 'managed-chart-uuid',
+                    contentType: ContentType.CHART,
+                    source: ChartSourceType.DBT_EXPLORE,
+                },
+            ],
+        );
+
+        expect(results).toEqual({
+            deletedCount: 0,
+            skipped: [
+                expect.objectContaining({
+                    uuid: 'managed-chart-uuid',
+                    reason: expect.stringContaining('Content as Code'),
+                }),
+            ],
+        });
+    });
+
+    it('rejects a project the user cannot view', async () => {
+        const deps = createService();
+        deps.projectModel.getSummary.mockResolvedValue({
+            organizationUuid: 'another-organization-uuid',
+            name: 'Another project',
+        });
+
+        await expect(
+            deps.service.bulkDelete(
+                createOrganizationAdminUser(),
+                projectUuid,
+                [
+                    {
+                        uuid: 'dashboard-uuid',
+                        contentType: ContentType.DASHBOARD,
+                    },
+                ],
+            ),
+        ).rejects.toThrow(ForbiddenError);
+        expect(deps.dashboardService.delete).not.toHaveBeenCalled();
+    });
+});
+
+describe('ContentService.findDeleted', () => {
+    it('rejects a project owned by another organization', async () => {
+        const findDeletedContents = vi.fn();
+        const deps = createService({
+            contentModel: {
+                findDeletedContents,
+            } as unknown as ContentModel,
+        });
+        deps.projectModel.getSummary.mockResolvedValue({
+            organizationUuid: 'another-organization-uuid',
+            name: 'Another project',
+        });
+
+        await expect(
+            deps.service.findDeleted(createOrganizationAdminUser(), {
+                projectUuids: [projectUuid],
+            }),
+        ).rejects.toThrow(ForbiddenError);
+        expect(findDeletedContents).not.toHaveBeenCalled();
+    });
+});
+
+describe('ContentService.find sharedWithMe', () => {
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    const emptyModelPage = async (): Promise<
+        KnexPaginatedData<SummaryContent[]>
+    > => ({
+        pagination: {
+            page: 1,
+            pageSize: 10,
+            totalPageCount: 1,
+            totalResults: 2,
+        },
+        data: [],
+    });
+
+    it('returns grant roles without fetching them again after pagination', async () => {
+        const dashboard = {
+            uuid: 'dashboard-1',
+            contentType: ContentType.DASHBOARD,
+        } as SummaryContent;
+        const findSummaryContents = vi.fn().mockResolvedValue({
+            ...(await emptyModelPage()),
+            data: [dashboard],
+        });
+        const deps = createService({
+            contentModel: { findSummaryContents } as unknown as ContentModel,
+            sharedWithMeUuids: {
+                dashboard: ['dashboard-1'],
+                chart: [],
+                sqlChart: [],
+                app: [],
+            },
+        });
+
+        const result = await deps.service.find(
+            createUser(),
+            { sharedWithMe: true },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+
+        expect(result.data).toEqual([
+            { ...dashboard, directAccessRoles: [SpaceMemberRole.EDITOR] },
+        ]);
+        expect(
+            deps.directAccessService.findGrantedRoles,
+        ).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        [ContentType.DASHBOARD, undefined, DirectAccessResourceType.DASHBOARD],
+        [ContentType.DATA_APP, undefined, DirectAccessResourceType.APP],
+        [
+            ContentType.CHART,
+            ChartSourceType.DBT_EXPLORE,
+            DirectAccessResourceType.CHART,
+        ],
+        [
+            ContentType.CHART,
+            ChartSourceType.SQL,
+            DirectAccessResourceType.SQL_CHART,
+        ],
+    ] as const)(
+        'keeps roles scoped to %s (%s) when another type has the same UUID',
+        async (contentType, source, resourceType) => {
+            const item = {
+                uuid: 'same-uuid',
+                contentType,
+                source,
+            } as SummaryContent;
+            const deps = createService({
+                contentModel: {
+                    findSummaryContents: vi.fn().mockResolvedValue({
+                        ...(await emptyModelPage()),
+                        data: [item],
+                    }),
+                } as unknown as ContentModel,
+                sharedWithMeUuids: {
+                    dashboard: ['same-uuid'],
+                    chart: ['same-uuid'],
+                    sqlChart: ['same-uuid'],
+                    app: ['same-uuid'],
+                },
+                sharedWithMeRoles: {
+                    document: {},
+                    dashboard: { 'same-uuid': [SpaceMemberRole.ADMIN] },
+                    chart: { 'same-uuid': [SpaceMemberRole.ADMIN] },
+                    sqlChart: { 'same-uuid': [SpaceMemberRole.ADMIN] },
+                    app: { 'same-uuid': [SpaceMemberRole.ADMIN] },
+                    [resourceType]: { 'same-uuid': [SpaceMemberRole.VIEWER] },
+                },
+            });
+
+            const result = await deps.service.find(
+                createUser(),
+                { sharedWithMe: true, contentTypes: [contentType] },
+                {},
+                { page: 1, pageSize: 1 },
+            );
+            expect(result.data).toEqual([
+                { ...item, directAccessRoles: [SpaceMemberRole.VIEWER] },
+            ]);
+            expect(
+                deps.directAccessService.findGrantedRoles,
+            ).not.toHaveBeenCalled();
+        },
+    );
+
+    it('keeps an empty role list when a hydrated resource has no matching grant', async () => {
+        const dashboard = {
+            uuid: 'dashboard-1',
+            contentType: ContentType.DASHBOARD,
+            directAccessRoles: [],
+        };
+        const deps = createService({
+            contentModel: {
+                findSummaryContents: vi.fn().mockResolvedValue({
+                    ...(await emptyModelPage()),
+                    data: [dashboard],
+                }),
+            } as unknown as ContentModel,
+            sharedWithMeUuids: {
+                dashboard: ['dashboard-1'],
+                chart: [],
+                sqlChart: [],
+                app: [],
+            },
+            sharedWithMeRoles: {
+                document: {},
+                dashboard: {},
+                chart: {},
+                sqlChart: {},
+                app: {},
+            },
+        });
+        const result = await deps.service.find(
+            createUser(),
+            { sharedWithMe: true },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+        expect(result.data).toEqual([dashboard]);
+    });
+
+    it('hydrates only granted uuids without space scoping', async () => {
+        const findSummaryContents = vi.fn(emptyModelPage);
+        const getAccessibleSpaceUuids = vi.fn();
+        const deps = createService({
+            contentModel: {
+                findSummaryContents,
+            } as unknown as ContentModel,
+            spacePermissionService: {
+                getAccessibleSpaceUuids,
+            } as unknown as SpacePermissionService,
+            sharedWithMeUuids: {
+                dashboard: ['dashboard-1'],
+                chart: ['chart-1'],
+                sqlChart: ['sql-chart-1'],
+                app: ['app-1'],
+            },
+        });
+
+        await deps.service.find(
+            createUser(),
+            { sharedWithMe: true },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+
+        expect(
+            deps.directAccessService.findSharedWithMeAccess,
+        ).toHaveBeenCalledWith({ userUuid, organizationUuid }, [projectUuid]);
+        expect(getAccessibleSpaceUuids).not.toHaveBeenCalled();
+        expect(findSummaryContents).toHaveBeenCalledWith(
+            {
+                projectUuids: [projectUuid],
+                uuids: ['dashboard-1', 'chart-1', 'sql-chart-1', 'app-1'],
+                contentTypes: [
+                    ContentType.DASHBOARD,
+                    ContentType.CHART,
+                    ContentType.DATA_APP,
+                    ContentType.DOCUMENT,
+                ],
+                search: undefined,
+                dataAppVizsFilter: undefined,
+                sharedWithMe: true,
+                spaceUuids: undefined,
+                documents: { allowedSpaceUuids: [], grantedUuids: [] },
+            },
+            expect.any(Object),
+            expect.objectContaining({ page: 1, pageSize: 10 }),
+        );
+    });
+
+    it('restricts to requested grantable content types', async () => {
+        const findSummaryContents = vi.fn(emptyModelPage);
+        const deps = createService({
+            contentModel: {
+                findSummaryContents,
+            } as unknown as ContentModel,
+            sharedWithMeUuids: {
+                dashboard: ['dashboard-1'],
+                chart: ['chart-1'],
+                sqlChart: [],
+                app: ['app-1'],
+            },
+        });
+
+        await deps.service.find(
+            createUser(),
+            { sharedWithMe: true, contentTypes: [ContentType.DASHBOARD] },
+            {},
+            { page: 1, pageSize: 10 },
+        );
+
+        expect(findSummaryContents).toHaveBeenCalledWith(
+            expect.objectContaining({
+                uuids: ['dashboard-1'],
+                contentTypes: [ContentType.DASHBOARD],
+            }),
+            expect.any(Object),
+            expect.any(Object),
+        );
+    });
+
+    it('returns an empty page without querying content when nothing is granted', async () => {
+        const findSummaryContents = vi.fn(emptyModelPage);
+        const deps = createService({
+            contentModel: {
+                findSummaryContents,
+            } as unknown as ContentModel,
+        });
+
+        await expect(
+            deps.service.find(
+                createUser(),
+                { sharedWithMe: true },
+                {},
+                { page: 2, pageSize: 25 },
+            ),
+        ).resolves.toEqual({
+            data: [],
+            pagination: {
+                page: 2,
+                pageSize: 25,
+                totalPageCount: 0,
+                totalResults: 0,
+            },
+        });
+        expect(findSummaryContents).not.toHaveBeenCalled();
+    });
+
+    it('returns an empty page for space-only requests without resolving grants', async () => {
+        const deps = createService({
+            sharedWithMeUuids: { dashboard: ['dashboard-1'] },
+        });
+
+        await expect(
+            deps.service.find(
+                createUser(),
+                { sharedWithMe: true, contentTypes: [ContentType.SPACE] },
+                {},
+                { page: 1, pageSize: 10 },
+            ),
+        ).resolves.toMatchObject({ data: [] });
+        expect(
+            deps.directAccessService.findSharedWithMeAccess,
+        ).not.toHaveBeenCalled();
+    });
+});

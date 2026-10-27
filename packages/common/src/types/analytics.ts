@@ -1,3 +1,6 @@
+import { getAgentClientLabel, type AgentIdentityClaim } from './agentIdentity';
+import { AI_AGENT_TAG } from './aiPrincipal';
+
 export type UserWithCount = {
     userUuid: string;
     firstName: string;
@@ -8,6 +11,18 @@ export type ActivityViews = {
     count: number;
     uuid: string;
     name: string;
+};
+export type ChartActivityViews = {
+    count: number;
+    uuid: string;
+    name: string;
+    slug: string;
+};
+export type DashboardActivityViews = {
+    count: number;
+    uuid: string;
+    name: string;
+    slug: string;
 };
 export type UserActivity = {
     numberUsers: number;
@@ -29,12 +44,13 @@ export type UserActivity = {
         date: Date;
         average_number_of_weekly_queries_per_user: string;
     }[];
-    dashboardViews: ActivityViews[];
+    dashboardViews: DashboardActivityViews[];
     userMostViewedDashboards: (UserWithCount & {
         dashboardName: string;
         dashboardUuid: string;
+        dashboardSlug: string;
     })[];
-    chartViews: ActivityViews[];
+    chartViews: ChartActivityViews[];
 };
 
 export type ApiUserActivity = {
@@ -47,6 +63,8 @@ export type ApiUserActivityDownloadCsv = {
     status: 'ok';
 };
 
+export type UnusedContentReason = 'never_viewed' | 'not_viewed_recently';
+
 export type UnusedContentItem = {
     lastViewedAt: Date | null;
     lastViewedByUserUuid: string | null;
@@ -57,7 +75,9 @@ export type UnusedContentItem = {
     contentUuid: string;
     contentName: string;
     contentType: 'chart' | 'dashboard';
+    spaceUuid: string;
     viewsCount: number;
+    reason: UnusedContentReason;
 };
 
 export type UnusedContent = {
@@ -65,9 +85,21 @@ export type UnusedContent = {
     dashboards: UnusedContentItem[];
 };
 
+export type UnusedContentOptions = {
+    stalenessChartDays: number;
+    stalenessDashboardDays: number;
+    protectRecentDays: number;
+    limit: number;
+};
+
 export type ViewStatistics = {
     views: number;
     firstViewedAt: Date | string | null;
+};
+
+export type DetailedViewStatistics = ViewStatistics & {
+    uniqueViewerCount: number;
+    anonymousViewCount: number;
 };
 
 export type DownloadAuditEntry = {
@@ -97,6 +129,14 @@ export type ApiDownloadActivity = {
     results: DownloadActivityResults;
 };
 
+export enum QuerySurface {
+    APP = 'app',
+    SLACK = 'slack',
+    MCP = 'mcp',
+    CLI = 'cli',
+    API = 'api',
+}
+
 export enum QueryExecutionContext {
     DASHBOARD = 'dashboardView',
     AUTOREFRESHED_DASHBOARD = 'autorefreshedDashboard',
@@ -111,6 +151,7 @@ export enum QueryExecutionContext {
     SCHEDULED_DELIVERY = 'scheduledDelivery',
     CSV = 'csvDownload',
     GSHEETS = 'gsheets',
+    GSHEETS_ADDON = 'gsheetsAddon',
     SCHEDULED_GSHEETS_CHART = 'scheduledGsheetsChart',
     SCHEDULED_GSHEETS_DASHBOARD = 'scheduledGsheetsDashboard',
     SCHEDULED_GSHEETS_SQL_CHART = 'scheduledGsheetsSqlChart',
@@ -127,5 +168,51 @@ export enum QueryExecutionContext {
     CLI = 'cli',
     METRICS_EXPLORER = 'metricsExplorer',
     PRE_AGGREGATE_MATERIALIZATION = 'preAggregateMaterialization',
+    COMPOSE_SQL_RUNNER = 'composeSqlRunner',
+    PYTHON_RUNNER = 'pythonRunner',
+    MULTI_SOURCE_QUERY = 'multiSourceQuery',
     DATA_APP_SAMPLE = 'dataAppSample',
+    DESKTOP = 'desktop',
 }
+
+export type AiAccessQueryContext =
+    | QueryExecutionContext.DATA_APP_SAMPLE
+    | QueryExecutionContext.AI
+    | QueryExecutionContext.MCP_RUN_METRIC_QUERY
+    | QueryExecutionContext.MCP_RUN_SQL
+    | QueryExecutionContext.MCP_SEARCH_FIELD_VALUES;
+
+export const isAiAccessQueryContext = (
+    context: QueryExecutionContext,
+): context is AiAccessQueryContext =>
+    context === QueryExecutionContext.DATA_APP_SAMPLE ||
+    context === QueryExecutionContext.AI ||
+    context === QueryExecutionContext.MCP_RUN_METRIC_QUERY ||
+    context === QueryExecutionContext.MCP_RUN_SQL ||
+    context === QueryExecutionContext.MCP_SEARCH_FIELD_VALUES;
+
+export const withAgentMarkerTag = <
+    T extends { query_context: QueryExecutionContext },
+>(
+    tags: T,
+    agentIdentity: AgentIdentityClaim | null = null,
+): T & {
+    agent?: 'true';
+    agent_surface?: string;
+    agent_client?: string;
+    agent_uuid?: string;
+} => {
+    const marked = isAiAccessQueryContext(tags.query_context)
+        ? { ...tags, [AI_AGENT_TAG]: 'true' as const }
+        : tags;
+    return agentIdentity
+        ? {
+              ...marked,
+              agent_surface: agentIdentity.act.surface,
+              agent_client: getAgentClientLabel(agentIdentity.act.client_id),
+              ...(agentIdentity.act.agent_uuid
+                  ? { agent_uuid: agentIdentity.act.agent_uuid }
+                  : {}),
+          }
+        : marked;
+};

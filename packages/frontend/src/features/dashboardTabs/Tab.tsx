@@ -1,6 +1,6 @@
 import { Draggable } from '@hello-pangea/dnd';
 import type { DashboardTab } from '@lightdash/common';
-import { ActionIcon, Group, Menu, Tabs, Tooltip } from '@mantine-8/core';
+import { ActionIcon, Group, Menu, Tabs, Tooltip } from '@mantine/core';
 import {
     IconCopy,
     IconDotsVertical,
@@ -51,21 +51,20 @@ const DraggableTab: FC<DraggableTabProps> = ({
                 >
                     <Tooltip
                         label={tab.name}
-                        withinPortal
                         position="top"
-                        withArrow
                         openDelay={500}
                         color="dark"
-                        variant="xs"
                         disabled={!isTruncated}
                         maw={300}
-                        multiline
                     >
                         <Tabs.Tab
                             ref={ref}
                             key={idx}
                             value={tab.uuid}
-                            maw={`${100 / (sortedTabs.length || 1)}vw`}
+                            // A stylesheet may lift the cap; unset, it is a share of the viewport
+                            maw={`var(--dashboard-tab-max-width, ${
+                                100 / (sortedTabs.length || 1)
+                            }vw)`}
                             opacity={isEditMode && tab.hidden ? 0.55 : 1}
                             styles={{
                                 tabSection: {
@@ -76,9 +75,7 @@ const DraggableTab: FC<DraggableTabProps> = ({
                                 isEditMode ? (
                                     <ActionIcon
                                         {...provided.dragHandleProps}
-                                        variant="subtle"
                                         size="xs"
-                                        color="gray"
                                     >
                                         <MantineIcon
                                             size="md"
@@ -89,18 +86,9 @@ const DraggableTab: FC<DraggableTabProps> = ({
                             }
                             rightSection={
                                 isEditMode ? (
-                                    <Menu
-                                        position="bottom"
-                                        withArrow
-                                        withinPortal
-                                        shadow="md"
-                                    >
+                                    <Menu position="bottom" withArrow>
                                         <Menu.Target>
-                                            <ActionIcon
-                                                color="gray"
-                                                variant="subtle"
-                                                size="xs"
-                                            >
+                                            <ActionIcon size="xs">
                                                 <MantineIcon
                                                     icon={IconDotsVertical}
                                                 />

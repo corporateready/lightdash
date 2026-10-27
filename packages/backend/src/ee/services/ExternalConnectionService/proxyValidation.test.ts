@@ -1,0 +1,459 @@
+import { CUSTOM_HEADER_LIMITS, ParameterError } from '@lightdash/common';
+import {
+    assertSafeApiKeyHeaderName,
+    buildOutboundUrl,
+    computeMinuteWindow,
+    EXTERNAL_RESPONSE_HEADER_MAX_BYTES,
+    filterExternalResponseHeaders,
+    normalizeAndValidatePath,
+    serializeRequestBody,
+    validateCustomHeaders,
+} from './proxyValidation';
+
+describe('normalizeAndValidatePath', () => {
+    const prefixes = ['/v1/', '/public/data'];
+
+    it('accepts a path that prefix-matches an allowlisted prefix', () => {
+        expect(normalizeAndValidatePath('/v1/users', prefixes)).toBe(
+            '/v1/users',
+        );
+    });
+
+    it('accepts an exact prefix match', () => {
+        expect(normalizeAndValidatePath('/public/data', prefixes)).toBe(
+            '/public/data',
+        );
+    });
+
+    it('rejects a path that matches no prefix', () => {
+        expect(() => normalizeAndValidatePath('/admin', prefixes)).toThrow(
+            ParameterError,
+        );
+    });
+
+    it('rejects an absolute http URL', () => {
+        expect(() =>
+            normalizeAndValidatePath('http://evil.com/v1/x', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects an absolute https URL', () => {
+        expect(() =>
+            normalizeAndValidatePath('https://evil.com/v1/x', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects a protocol-relative //host (leading double slash)', () => {
+        expect(() =>
+            normalizeAndValidatePath('//evil.com/v1/x', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects a scheme-relative path with backslashes', () => {
+        expect(() =>
+            normalizeAndValidatePath('/v1\\..\\..\\etc', prefixes),
+        ).toThrow(ParameterError);
+        expect(() =>
+            normalizeAndValidatePath('\\\\evil.com\\x', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects raw .. traversal', () => {
+        expect(() =>
+            normalizeAndValidatePath('/v1/../admin', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects percent-encoded .. (%2e%2e) traversal', () => {
+        expect(() =>
+            normalizeAndValidatePath('/v1/%2e%2e/admin', prefixes),
+        ).toThrow(ParameterError);
+        expect(() =>
+            normalizeAndValidatePath('/v1/%2E%2E/admin', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects double-encoded .. (%252e%252e) that escapes the prefix once the URL parser collapses it', () => {
+        // The single decode turns %252e%252e into the inert string %2e%2e (no
+        // literal ".."), but buildOutboundUrl's `new URL()` then collapses it to
+        // "..", so /v1/%252e%252e/admin would resolve to /admin — outside /v1/.
+        expect(() =>
+            normalizeAndValidatePath('/v1/%252e%252e/admin', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects chained double-encoded traversal that escapes to another path', () => {
+        expect(() =>
+            normalizeAndValidatePath(
+                '/v1/%252e%252e/%252e%252e/secret',
+                prefixes,
+            ),
+        ).toThrow(ParameterError);
+    });
+
+    it('still accepts a legitimate path with a literal dot in a segment', () => {
+        // Regression guard: the collapse check must not over-reject normal dots.
+        expect(normalizeAndValidatePath('/v1/users.json', prefixes)).toBe(
+            '/v1/users.json',
+        );
+    });
+
+    it('rejects encoded path separators used to smuggle a host (%2f%2f)', () => {
+        expect(() =>
+            normalizeAndValidatePath('/%2f%2fevil.com', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects an @ that could be read as userinfo when re-parsed', () => {
+        expect(() =>
+            normalizeAndValidatePath('/v1/x@evil.com', prefixes),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects an embedded NUL or control char', () => {
+        // eslint-disable-next-line no-control-regex
+        expect(() => normalizeAndValidatePath('/v1/x\x00y', prefixes)).toThrow(
+            ParameterError,
+        );
+    });
+
+    it('requires a leading slash', () => {
+        expect(() => normalizeAndValidatePath('v1/users', prefixes)).toThrow(
+            ParameterError,
+        );
+    });
+
+    it('strips a query string from the path (query is passed separately)', () => {
+        expect(normalizeAndValidatePath('/v1/users?evil=1', prefixes)).toBe(
+            '/v1/users',
+        );
+    });
+
+    describe('segment-aware prefix matching', () => {
+        const segmentPrefixes = ['/v1/users'];
+
+        it('rejects a path that starts with the prefix but continues with non-separator chars', () => {
+            expect(() =>
+                normalizeAndValidatePath('/v1/users-admin', segmentPrefixes),
+            ).toThrow(ParameterError);
+            expect(() =>
+                normalizeAndValidatePath('/v1/usersecrets', segmentPrefixes),
+            ).toThrow(ParameterError);
+            expect(() =>
+                normalizeAndValidatePath('/v1/usersxxx', segmentPrefixes),
+            ).toThrow(ParameterError);
+        });
+
+        it('accepts the exact prefix', () => {
+            expect(normalizeAndValidatePath('/v1/users', segmentPrefixes)).toBe(
+                '/v1/users',
+            );
+        });
+
+        it('accepts the prefix with a trailing slash', () => {
+            expect(
+                normalizeAndValidatePath('/v1/users/', segmentPrefixes),
+            ).toBe('/v1/users/');
+        });
+
+        it('accepts a path that extends the prefix after a slash', () => {
+            expect(
+                normalizeAndValidatePath('/v1/users/123', segmentPrefixes),
+            ).toBe('/v1/users/123');
+        });
+    });
+});
+
+describe('buildOutboundUrl', () => {
+    it('joins origin + path and serializes query via URLSearchParams', () => {
+        const url = buildOutboundUrl('https://api.example.com', '/v1/users', {
+            page: '2',
+            q: 'a b&c',
+        });
+        expect(url).toBe('https://api.example.com/v1/users?page=2&q=a+b%26c');
+    });
+
+    it('handles an origin with a trailing slash without doubling', () => {
+        const url = buildOutboundUrl(
+            'https://api.example.com/',
+            '/v1/users',
+            undefined,
+        );
+        expect(url).toBe('https://api.example.com/v1/users');
+    });
+
+    it('handles an origin that includes a base path', () => {
+        const url = buildOutboundUrl(
+            'https://api.example.com/base',
+            '/v1/x',
+            undefined,
+        );
+        expect(url).toBe('https://api.example.com/base/v1/x');
+    });
+
+    it('keeps the host pinned to the origin even if path looks hostlike', () => {
+        // path is already validated, but URL construction must not be fooled
+        const url = buildOutboundUrl(
+            'https://api.example.com',
+            '/v1/evil.com',
+            undefined,
+        );
+        expect(new URL(url).host).toBe('api.example.com');
+    });
+
+    it('omits the query string when query is empty', () => {
+        const url = buildOutboundUrl('https://api.example.com', '/v1/x', {});
+        expect(url).toBe('https://api.example.com/v1/x');
+    });
+
+    describe('self-enforces origin host invariant (defense-in-depth SSRF)', () => {
+        // These tests call buildOutboundUrl DIRECTLY, bypassing normalizeAndValidatePath,
+        // to prove the builder defends independently against host-escaping paths.
+
+        it('throws on a path that looks like "@evil.com"', () => {
+            expect(() =>
+                buildOutboundUrl(
+                    'https://api.example.com',
+                    '@evil.com',
+                    undefined,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('throws on a path that looks like "//evil.com"', () => {
+            expect(() =>
+                buildOutboundUrl(
+                    'https://api.example.com',
+                    '//evil.com',
+                    undefined,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('throws on a path that looks like "https://evil.com"', () => {
+            expect(() =>
+                buildOutboundUrl(
+                    'https://api.example.com',
+                    'https://evil.com',
+                    undefined,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('throws on a path that looks like "\\\\evil.com"', () => {
+            expect(() =>
+                buildOutboundUrl(
+                    'https://api.example.com',
+                    '\\\\evil.com',
+                    undefined,
+                ),
+            ).toThrow(ParameterError);
+        });
+    });
+});
+
+describe('computeMinuteWindow', () => {
+    it('floors a Date to the start of its minute (UTC)', () => {
+        const d = new Date('2026-06-17T10:23:45.678Z');
+        expect(computeMinuteWindow(d).toISOString()).toBe(
+            '2026-06-17T10:23:00.000Z',
+        );
+    });
+
+    it('is stable across two calls in the same minute', () => {
+        const a = computeMinuteWindow(new Date('2026-06-17T10:23:01.000Z'));
+        const b = computeMinuteWindow(new Date('2026-06-17T10:23:59.999Z'));
+        expect(a.getTime()).toBe(b.getTime());
+    });
+
+    it('advances to the next window at the minute boundary', () => {
+        const a = computeMinuteWindow(new Date('2026-06-17T10:23:59.999Z'));
+        const b = computeMinuteWindow(new Date('2026-06-17T10:24:00.000Z'));
+        expect(b.getTime() - a.getTime()).toBe(60_000);
+    });
+});
+
+describe('serializeRequestBody', () => {
+    it('serializes an object to JSON and reports byte length', () => {
+        const { json, bytes } = serializeRequestBody({ a: 1 });
+        expect(json).toBe('{"a":1}');
+        expect(bytes).toBe(Buffer.byteLength('{"a":1}', 'utf8'));
+    });
+
+    it('treats undefined body as an empty object', () => {
+        const { json } = serializeRequestBody(undefined);
+        expect(json).toBe('{}');
+    });
+
+    it('counts multibyte characters by UTF-8 byte length', () => {
+        const { bytes } = serializeRequestBody({ s: 'é' });
+        // {"s":"é"} -> 'é' is 2 bytes in UTF-8
+        expect(bytes).toBe(Buffer.byteLength('{"s":"é"}', 'utf8'));
+    });
+
+    it('throws ParameterError on a value that cannot be JSON-serialized', () => {
+        const circular: Record<string, unknown> = {};
+        circular.self = circular;
+        expect(() => serializeRequestBody(circular)).toThrow(ParameterError);
+    });
+});
+
+describe('assertSafeApiKeyHeaderName', () => {
+    it.each([['X-Api-Key'], ['Authorization'], ['authorization']])(
+        'accepts the api key header %s',
+        (name) => {
+            expect(() => assertSafeApiKeyHeaderName(name)).not.toThrow();
+        },
+    );
+
+    it.each([
+        ['Host'],
+        ['host'],
+        ['Cookie'],
+        ['Content-Length'],
+        ['Transfer-Encoding'],
+        ['Connection'],
+    ])('rejects the sensitive/hop-by-hop header %s', (name) => {
+        expect(() => assertSafeApiKeyHeaderName(name)).toThrow(ParameterError);
+    });
+
+    it.each([['Bad Header'], ['x:y'], ['has\nnewline'], ['']])(
+        'rejects the invalid token %j',
+        (name) => {
+            expect(() => assertSafeApiKeyHeaderName(name)).toThrow(
+                ParameterError,
+            );
+        },
+    );
+});
+
+describe('validateCustomHeaders', () => {
+    it('accepts a valid header set', () => {
+        expect(() =>
+            validateCustomHeaders(
+                {
+                    'anthropic-version': '2023-06-01',
+                    Accept: 'application/vnd.github+json',
+                    'User-Agent': 'my-app/1.0',
+                },
+                null,
+            ),
+        ).not.toThrow();
+    });
+
+    it.each([['Authorization'], ['Host'], ['Content-Type'], ['X-Api-Key']])(
+        'rejects the forbidden header name %s (case-insensitive)',
+        (name) => {
+            expect(() => validateCustomHeaders({ [name]: 'v' }, null)).toThrow(
+                ParameterError,
+            );
+        },
+    );
+
+    it.each([['Bad Header'], ['häder'], ['a'.repeat(129)]])(
+        'rejects the invalid header name %j',
+        (name) => {
+            expect(() => validateCustomHeaders({ [name]: 'v' }, null)).toThrow(
+                ParameterError,
+            );
+        },
+    );
+
+    it.each([
+        ['CRLF injection', 'a\r\nX-Evil: 1'],
+        ['NUL', 'a\x00b'],
+        ['empty', ''],
+        ['over the length cap', 'v'.repeat(1025)],
+    ])('rejects a value with %s', (_label, value) => {
+        expect(() =>
+            validateCustomHeaders({ 'X-Custom': value }, null),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects case-insensitive duplicate names', () => {
+        expect(() =>
+            validateCustomHeaders({ 'X-Version': '1', 'x-version': '2' }, null),
+        ).toThrow(ParameterError);
+    });
+
+    it('rejects more than the header count cap', () => {
+        const headers = Object.fromEntries(
+            Array.from(
+                { length: CUSTOM_HEADER_LIMITS.maxCount + 1 },
+                (_, i) => [`X-H-${i}`, 'v'],
+            ),
+        );
+        expect(() => validateCustomHeaders(headers, null)).toThrow(
+            ParameterError,
+        );
+    });
+
+    it('rejects a collision with the api key header (case-insensitive)', () => {
+        expect(() =>
+            validateCustomHeaders({ 'x-service-key': 'v' }, 'X-Service-Key'),
+        ).toThrow(ParameterError);
+    });
+});
+
+describe('filterExternalResponseHeaders', () => {
+    const requestUrl = 'https://api.example.com/v1/items?page=1';
+
+    it('exposes supported cache, pagination, and rate-limit headers only', () => {
+        expect(
+            filterExternalResponseHeaders({
+                headers: {
+                    'Retry-After': '3',
+                    'X-RateLimit-Remaining': '9',
+                    ETag: '"abc"',
+                    'Set-Cookie': 'session=secret',
+                    Server: 'internal-proxy',
+                    'Content-Length': '123',
+                },
+                requestUrl,
+                queryApiKeyName: null,
+            }),
+        ).toEqual({
+            'retry-after': '3',
+            'x-ratelimit-remaining': '9',
+            etag: '"abc"',
+        });
+    });
+
+    it('removes an injected query API key from reusable Link targets', () => {
+        expect(
+            filterExternalResponseHeaders({
+                headers: {
+                    Link: '<https://api.example.com/v1/items?page=2&api_key=secret>; rel="next", <https://docs.example.com/items?api_key=secret>; rel="help"',
+                },
+                requestUrl: `${requestUrl}&api_key=secret`,
+                queryApiKeyName: 'api_key',
+            }),
+        ).toEqual({
+            link: '</v1/items?page=2>; rel="next", <https://docs.example.com/items>; rel="help"',
+        });
+    });
+
+    it('omits malformed Link values instead of exposing them unsanitized', () => {
+        expect(
+            filterExternalResponseHeaders({
+                headers: { Link: 'https://api.example.com/v1/items?page=2' },
+                requestUrl,
+                queryApiKeyName: 'api_key',
+            }),
+        ).toEqual({});
+    });
+
+    it('rejects exposed response metadata over the aggregate byte cap', () => {
+        expect(() =>
+            filterExternalResponseHeaders({
+                headers: {
+                    'Retry-After': '1'.repeat(
+                        EXTERNAL_RESPONSE_HEADER_MAX_BYTES,
+                    ),
+                },
+                requestUrl,
+                queryApiKeyName: null,
+            }),
+        ).toThrow(ParameterError);
+    });
+});

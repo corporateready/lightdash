@@ -1,0 +1,356 @@
+import { ParameterError, PullRequestProvider } from '@lightdash/common';
+import {
+    createPullRequest,
+    getMergeRequest,
+    updateMergeRequest,
+} from '../../../../clients/gitlab/Gitlab';
+import { DeniedPathError } from '../deniedPaths';
+import type { GitlabConnection, GitlabInstallation } from '../types';
+import { GitlabProvider } from './GitlabProvider';
+
+vi.mock('../../../../clients/gitlab/Gitlab', () => ({
+    createPullRequest: vi.fn(),
+    getMergeRequest: vi.fn(),
+    updateMergeRequest: vi.fn(),
+    getGitlabUser: vi.fn(),
+    getOrRefreshToken: vi.fn(),
+}));
+
+const mockCreatePullRequest =
+    createPullRequest as import('vitest').MockedFunction<
+        typeof createPullRequest
+    >;
+const mockGetMergeRequest = getMergeRequest as import('vitest').MockedFunction<
+    typeof getMergeRequest
+>;
+
+const provider = new GitlabProvider({
+    gitlabAppInstallationsModel: {} as never,
+    gitlabConfig: { clientId: 'id', clientSecret: 'secret' },
+    logger: { info: vi.fn(), warn: vi.fn() } as never,
+});
+
+const connection: GitlabConnection = {
+    provider: PullRequestProvider.GITLAB,
+    owner: 'acme',
+    repo: 'analytics',
+    projectSubPath: '.',
+    hostDomain: 'gitlab.com',
+};
+
+const installation: GitlabInstallation = {
+    provider: PullRequestProvider.GITLAB,
+    token: 'gl-token',
+    instanceUrl: 'https://gitlab.com',
+    commitAuthor: { name: 'Jane', email: 'jane@acme.com' },
+};
+
+const fakeSandbox = () => ({
+    sandboxId: 'sbx-1',
+    git: {
+        status: vi.fn().mockResolvedValue({ currentBranch: 'main' }),
+        createBranch: vi.fn().mockResolvedValue(undefined),
+        add: vi.fn().mockResolvedValue(undefined),
+        commit: vi.fn().mockResolvedValue(undefined),
+        push: vi.fn().mockResolvedValue(undefined),
+    },
+    commands: { run: vi.fn().mockResolvedValue({ exitCode: 0, stdout: '' }) },
+});
+
+const openMr = {
+    state: 'open' as const,
+    merged: false,
+    sourceBranch: 'feature/x',
+    sourceProjectId: 1,
+    targetProjectId: 1,
+    webUrl: 'https://gitlab.com/acme/analytics/-/merge_requests/42',
+};
+
+describe('GitlabProvider.getCloneTarget', () => {
+    it('builds an oauth2 HTTPS target', () => {
+        expect(provider.getCloneTarget(connection, installation)).toEqual({
+            url: 'https://gitlab.com/acme/analytics.git',
+            username: 'oauth2',
+            password: 'gl-token',
+        });
+    });
+
+    it('rejects when the repo host differs from the connected app instance', () => {
+        expect(() =>
+            provider.getCloneTarget(
+                { ...connection, hostDomain: 'gitlab.acme.com' },
+                installation, // instanceUrl is https://gitlab.com
+            ),
+        ).toThrow(/does not match the connected GitLab app instance/);
+    });
+});
+
+describe('GitlabProvider.openPullRequest', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it('pushes the branch over oauth2 and opens a merge request', async () => {
+        mockCreatePullRequest.mockResolvedValue({
+            html_url: 'https://gitlab.com/acme/analytics/-/merge_requests/42',
+            title: 'Add metric',
+            number: 42,
+        });
+        const sandbox = fakeSandbox();
+
+        const result = await provider.openPullRequest({
+            sandbox: sandbox as never,
+            connection,
+            installation,
+            title: 'Add metric',
+            description: 'Adds revenue.',
+            user: { userUuid: 'u1' } as never,
+            setStage: vi.fn(),
+            assertStagedChangesAllowed: null,
+            assertPublishAllowed: null,
+        });
+
+        expect(result.prUrl).toBe(
+            'https://gitlab.com/acme/analytics/-/merge_requests/42',
+        );
+        expect(sandbox.git.push).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({
+                remote: 'origin',
+                username: 'oauth2',
+                password: 'gl-token',
+                setUpstream: true,
+            }),
+        );
+        expect(mockCreatePullRequest).toHaveBeenCalledWith(
+            expect.objectContaining({
+                owner: 'acme',
+                repo: 'analytics',
+                base: 'main',
+                token: 'gl-token',
+                hostDomain: 'gitlab.com',
+            }),
+        );
+    });
+
+    it.each(['open', 'update'] as const)(
+        'resolves and stages project paths before committing for %s',
+        async (action) => {
+            mockCreatePullRequest.mockResolvedValue({
+                html_url:
+                    'https://gitlab.com/acme/analytics/-/merge_requests/42',
+                title: 'Add metric',
+                number: 42,
+            });
+            const sandbox = { ...fakeSandbox(), files: { read: vi.fn() } };
+            const args = {
+                sandbox: sandbox as never,
+                connection: { ...connection, projectSubPath: 'analytics/dbt' },
+                installation,
+                title: 'Add metric',
+                description: 'Adds revenue.',
+                user: { userUuid: 'u1' } as never,
+                setStage: vi.fn(),
+                assertStagedChangesAllowed: null,
+                assertPublishAllowed: null,
+            };
+            if (action === 'open') await provider.openPullRequest(args);
+            else
+                await provider.updatePullRequest({
+                    ...args,
+                    prUrl: openMr.webUrl,
+                });
+            expect(sandbox.git.add).toHaveBeenCalledExactlyOnceWith(
+                '/home/user/repo',
+                { files: ['analytics/dbt'] },
+            );
+            expect(sandbox.files.read).toHaveBeenCalledWith(
+                '/home/user/repo/analytics/dbt/target/manifest.json',
+            );
+            expect(sandbox.git.commit).toHaveBeenCalledOnce();
+            expect(sandbox.git.push).toHaveBeenCalledOnce();
+        },
+    );
+
+    it('credits the triggering user as a commit co-author', async () => {
+        mockCreatePullRequest.mockResolvedValue({
+            html_url: 'https://gitlab.com/acme/analytics/-/merge_requests/42',
+            title: 'Add metric',
+            number: 42,
+        });
+        const sandbox = fakeSandbox();
+
+        await provider.openPullRequest({
+            sandbox: sandbox as never,
+            connection,
+            installation,
+            title: 'Add metric',
+            description: 'Adds revenue.',
+            user: {
+                firstName: 'Jane',
+                lastName: 'Doe',
+                email: 'jane@acme.com',
+            } as never,
+            setStage: vi.fn(),
+            assertStagedChangesAllowed: null,
+            assertPublishAllowed: null,
+        });
+
+        expect(sandbox.git.commit).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.stringContaining('Co-authored-by: Jane Doe <jane@acme.com>'),
+            expect.anything(),
+        );
+    });
+
+    it('rejects a CI-touching commit without pushing or opening an MR', async () => {
+        const sandbox = fakeSandbox();
+        // The denied-path gate probes staged paths with `--name-status -z`;
+        // return a CI/workflow path for that call, empty for everything else.
+        sandbox.commands.run = vi.fn(async (cmd: string) =>
+            cmd.includes('--name-status')
+                ? { exitCode: 0, stdout: 'A\0.github/workflows/deploy.yml\0' }
+                : { exitCode: 0, stdout: '' },
+        );
+
+        await expect(
+            provider.openPullRequest({
+                sandbox: sandbox as never,
+                connection,
+                installation,
+                title: 'Add workflow',
+                description: 'Adds CI.',
+                user: { userUuid: 'u1' } as never,
+                setStage: vi.fn(),
+                assertStagedChangesAllowed: null,
+                assertPublishAllowed: null,
+            }),
+        ).rejects.toBeInstanceOf(DeniedPathError);
+
+        expect(mockCreatePullRequest).not.toHaveBeenCalled();
+        expect(sandbox.git.push).not.toHaveBeenCalled();
+    });
+});
+
+describe('GitlabProvider.adoptPullRequest', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    const adopt = (prUrl: string) =>
+        provider.adoptPullRequest({ prUrl, connection, installation });
+
+    it('adopts an open MR in the project', async () => {
+        mockGetMergeRequest.mockResolvedValue(openMr);
+        await expect(
+            adopt('https://gitlab.com/acme/analytics/-/merge_requests/42'),
+        ).resolves.toEqual({
+            prUrl: 'https://gitlab.com/acme/analytics/-/merge_requests/42',
+            owner: 'acme',
+            repo: 'analytics',
+            pullNumber: 42,
+            headRef: 'feature/x',
+        });
+    });
+
+    it('rejects an MR in a different project without calling GitLab', async () => {
+        await expect(
+            adopt('https://gitlab.com/evil/other/-/merge_requests/42'),
+        ).rejects.toThrow(ParameterError);
+        expect(mockGetMergeRequest).not.toHaveBeenCalled();
+    });
+
+    it('rejects an MR on a different host', async () => {
+        await expect(
+            adopt('https://gitlab.acme.com/acme/analytics/-/merge_requests/1'),
+        ).rejects.toThrow(ParameterError);
+        expect(mockGetMergeRequest).not.toHaveBeenCalled();
+    });
+
+    it('rejects a merged MR', async () => {
+        mockGetMergeRequest.mockResolvedValue({ ...openMr, merged: true });
+        await expect(
+            adopt('https://gitlab.com/acme/analytics/-/merge_requests/42'),
+        ).rejects.toThrow(/merged/);
+    });
+
+    it('rejects a closed MR', async () => {
+        mockGetMergeRequest.mockResolvedValue({ ...openMr, state: 'closed' });
+        await expect(
+            adopt('https://gitlab.com/acme/analytics/-/merge_requests/42'),
+        ).rejects.toThrow(/closed/);
+    });
+
+    it('rejects a fork-sourced MR (source project differs)', async () => {
+        mockGetMergeRequest.mockResolvedValue({
+            ...openMr,
+            sourceProjectId: 2,
+        });
+        await expect(
+            adopt('https://gitlab.com/acme/analytics/-/merge_requests/42'),
+        ).rejects.toThrow(/fork/);
+    });
+
+    it('fails safe when the source/target project is unknown', async () => {
+        mockGetMergeRequest.mockResolvedValue({
+            ...openMr,
+            sourceProjectId: null,
+            targetProjectId: null,
+        });
+        await expect(
+            adopt('https://gitlab.com/acme/analytics/-/merge_requests/42'),
+        ).rejects.toThrow(/fork/);
+    });
+});
+
+describe('GitlabProvider publication authority', () => {
+    beforeEach(() => vi.clearAllMocks());
+    it.each(
+        ['open', 'update'].flatMap((action) =>
+            [1, 2, null].map((failAt) => ({ action, failAt })),
+        ),
+    )(
+        '$action checks the push (which creates the remote branch) and PR separately, failing at $failAt',
+        async ({ action, failAt }) => {
+            vi.clearAllMocks();
+            mockCreatePullRequest.mockResolvedValue({
+                html_url: openMr.webUrl,
+                title: 'Change',
+                number: 42,
+            });
+            const sandbox = fakeSandbox();
+            const error = new Error('person deactivated');
+            let checks = 0;
+            const assertPublishAllowed = vi.fn(async () => {
+                checks += 1;
+                if (checks === failAt) throw error;
+            });
+            const args = {
+                sandbox: sandbox as never,
+                connection,
+                installation,
+                title: 'Change',
+                description: 'Change',
+                user: { userUuid: 'u1' } as never,
+                setStage: vi.fn(),
+                assertStagedChangesAllowed: null,
+                assertPublishAllowed,
+            };
+            const result =
+                action === 'open'
+                    ? provider.openPullRequest(args)
+                    : provider.updatePullRequest({
+                          ...args,
+                          prUrl: openMr.webUrl,
+                      });
+            if (failAt) await expect(result).rejects.toBe(error);
+            else await result;
+            expect(sandbox.git.push).toHaveBeenCalledTimes(
+                failAt !== 1 ? 1 : 0,
+            );
+            expect(createPullRequest).toHaveBeenCalledTimes(
+                action === 'open' && failAt === null ? 1 : 0,
+            );
+            expect(updateMergeRequest).toHaveBeenCalledTimes(
+                action === 'update' && failAt === null ? 1 : 0,
+            );
+            expect(assertPublishAllowed).toHaveBeenCalledTimes(failAt ?? 2);
+        },
+    );
+});

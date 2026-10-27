@@ -32,6 +32,7 @@ import {
 import {
     Body,
     Delete,
+    Deprecated,
     Get,
     Middlewares,
     OperationId,
@@ -48,9 +49,11 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import { CatalogSearchContext } from '../models/CatalogModel/CatalogModel';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
@@ -400,11 +403,20 @@ export class CatalogController extends BaseController {
      * @param projectUuid
      * @param table Table name to get metadata for
      * @returns ApiCatalogMetadataResults
+     *
+     * @deprecated No replacement, this endpoint will be removed
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage: 'No replacement, this endpoint will be removed.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/{table}/metadata')
     @OperationId('getMetadata')
+    @Deprecated()
     async getMetadata(
         @Path() projectUuid: string,
         @Path() table: string,
@@ -513,7 +525,6 @@ export class CatalogController extends BaseController {
         @Query() tables?: ApiCatalogSearch['tables'],
         @Query() ownerUserUuids?: ApiCatalogSearch['ownerUserUuids'],
     ): Promise<ApiMetricsCatalog> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const paginateArgs: KnexPaginateArgs | undefined =
@@ -534,7 +545,7 @@ export class CatalogController extends BaseController {
         const results = await this.services
             .getCatalogService()
             .getMetricsCatalog(
-                toSessionUser(req.account),
+                req.account!,
                 projectUuid,
                 CatalogSearchContext.SPOTLIGHT,
                 paginateArgs,
@@ -597,17 +608,11 @@ export class CatalogController extends BaseController {
         @Path() metricName: string,
         @Request() req: express.Request,
     ): Promise<ApiGetMetricPeek> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const results = await this.services
             .getCatalogService()
-            .getMetric(
-                toSessionUser(req.account),
-                projectUuid,
-                tableName,
-                metricName,
-            );
+            .getMetric(req.account!, projectUuid, tableName, metricName);
 
         return {
             status: 'ok',
@@ -630,13 +635,12 @@ export class CatalogController extends BaseController {
         @Request() req: express.Request,
         @Query() tableName?: string,
     ): Promise<ApiMetricsWithAssociatedTimeDimensionResponse> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const results = await this.services
             .getCatalogService()
             .getAllCatalogMetricsWithTimeDimensions(
-                toSessionUser(req.account),
+                req.account!,
                 projectUuid,
                 CatalogSearchContext.SPOTLIGHT,
                 tableName,
@@ -664,13 +668,12 @@ export class CatalogController extends BaseController {
         @Path() tableName: string,
         @Request() req: express.Request,
     ): Promise<ApiFilterDimensionsResponse> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const results = await this.services
             .getCatalogService()
             .getFilterDimensions(
-                toSessionUser(req.account),
+                req.account!,
                 projectUuid,
                 tableName,
                 CatalogSearchContext.METRICS_EXPLORER,
@@ -698,13 +701,12 @@ export class CatalogController extends BaseController {
         @Path() tableName: string,
         @Request() req: express.Request,
     ): Promise<ApiSegmentDimensionsResponse> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const results = await this.services
             .getCatalogService()
             .getSegmentDimensions(
-                toSessionUser(req.account),
+                req.account!,
                 projectUuid,
                 tableName,
                 CatalogSearchContext.METRICS_EXPLORER,
@@ -827,7 +829,14 @@ export class CatalogController extends BaseController {
      * @summary Get metrics tree
      * @deprecated Use POST /metrics/tree instead for large metric lists
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-02-05'), {
+            suffixMessage:
+                'Use POST /metrics/tree instead for large metric lists.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/metrics/tree')
     @OperationId('getMetricsTreeLegacy')
@@ -858,7 +867,15 @@ export class CatalogController extends BaseController {
      * @summary Get metrics tree
      * @deprecated Superseded by saved metrics trees (`/metrics/trees/{uuidOrSlug}`).
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-04-28'), {
+            suffixMessage:
+                'Superseded by saved metrics trees (`/metrics/trees/{uuidOrSlug}`).',
+        }),
+        requireOAuthScopeOperation('CatalogController.getMetricsTree'),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/metrics/tree')
     @OperationId('getMetricsTree')
@@ -893,6 +910,10 @@ export class CatalogController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2026-04-28'), {
+            suffixMessage:
+                'Edges are now persisted via the saved metrics tree update endpoint (`PATCH /metrics/trees/{uuid}`).',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Post('/metrics/tree/edges')
@@ -927,6 +948,10 @@ export class CatalogController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2026-04-28'), {
+            suffixMessage:
+                'Edges are now persisted via the saved metrics tree update endpoint (`PATCH /metrics/trees/{uuid}`).',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Delete(
@@ -993,12 +1018,11 @@ export class CatalogController extends BaseController {
         @Path() projectUuid: string,
         @Request() req: express.Request,
     ): Promise<{ status: 'ok'; results: CatalogOwner[] }> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const results = await this.services
             .getCatalogService()
-            .getMetricOwners(toSessionUser(req.account), projectUuid);
+            .getMetricOwners(req.account!, projectUuid);
 
         return {
             status: 'ok',

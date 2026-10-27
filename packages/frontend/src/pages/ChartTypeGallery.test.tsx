@@ -1,0 +1,1149 @@
+import { Ability } from '@casl/ability';
+import {
+    FeatureFlags,
+    type DataAppViz,
+    type PossibleAbilities,
+} from '@lightdash/common';
+import {
+    act,
+    fireEvent,
+    screen,
+    waitFor,
+    within,
+} from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useAppVersionHistory } from '../features/apps/hooks/useAppVersionHistory';
+import { useCanCreateDataApp } from '../features/apps/hooks/useCanCreateDataApp';
+import { useCanEditDataApp } from '../features/apps/hooks/useCanEditDataApp';
+import { useDeleteApp } from '../features/apps/hooks/useDeleteApp';
+import { useDuplicateApp } from '../features/apps/hooks/useDuplicateApp';
+import { useChartStudioAvailable } from '../features/chartTypes/hooks/useChartStudioAvailable';
+import { useDataAppVisualization } from '../features/chartTypes/hooks/useDataAppVisualization';
+import { useDataAppVisualizations } from '../features/chartTypes/hooks/useDataAppVisualizations';
+import { useDataAppVizDeleteImpact } from '../features/chartTypes/hooks/useDataAppVizDeleteImpact';
+import { useDataAppVizUpgradeImpact } from '../features/chartTypes/hooks/useDataAppVizUpgradeImpact';
+import { useInstallRegistryChartType } from '../features/chartTypes/hooks/useInstallRegistryChartType';
+import { useRegistryChartTypes } from '../features/chartTypes/hooks/useRegistryChartTypes';
+import { useExplores } from '../hooks/useExplores';
+import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
+import { AbilityContext } from '../providers/Ability/context';
+import { renderWithProviders } from '../testing/testUtils';
+import { EventName } from '../types/Events';
+import ChartTypeGallery from './ChartTypeGallery';
+
+const licensedAppMocks = {
+    health: { license: { hasLicenseKey: true, valid: true } },
+};
+const { track } = vi.hoisted(() => ({ track: vi.fn() }));
+vi.mock('../features/chartTypes/hooks/useChartStudioAvailable');
+vi.mock('../providers/Tracking/useTracking', () => ({
+    default: () => ({ track }),
+}));
+
+vi.mock('../hooks/useServerOrClientFeatureFlag', () => ({
+    useServerFeatureFlag: vi.fn(),
+}));
+
+vi.mock('../hooks/useProjectRoute', () => ({
+    useOptionalProjectRoute: () => ({ projectUrlIdentifier: 'jaffle-shop' }),
+}));
+
+vi.mock('../hooks/useProjectUuid', () => ({
+    useProjectUuid: () => 'project-1',
+}));
+
+vi.mock('../features/chartTypes/hooks/useDataAppVisualization', () => ({
+    useDataAppVisualization: vi.fn(),
+}));
+
+vi.mock('../features/chartTypes/hooks/useDataAppVisualizations', () => ({
+    useDataAppVisualizations: vi.fn(),
+}));
+
+vi.mock('../features/chartTypes/hooks/useDataAppVizDeleteImpact', () => ({
+    useDataAppVizDeleteImpact: vi.fn(),
+}));
+
+vi.mock('../features/chartTypes/hooks/useDataAppVizUpgradeImpact', () => ({
+    useDataAppVizUpgradeImpact: vi.fn(),
+}));
+
+vi.mock('../features/apps/hooks/useAppVersionHistory', () => ({
+    useAppVersionHistory: vi.fn(),
+}));
+
+vi.mock('../features/apps/hooks/useCanEditDataApp', () => ({
+    useCanEditDataApp: vi.fn(),
+}));
+
+vi.mock('../features/apps/hooks/useCanCreateDataApp', () => ({
+    useCanCreateDataApp: vi.fn(),
+}));
+
+vi.mock('../features/apps/hooks/useDeleteApp', () => ({
+    useDeleteApp: vi.fn(),
+}));
+
+vi.mock('../features/apps/hooks/useDuplicateApp', () => ({
+    useDuplicateApp: vi.fn(),
+}));
+
+vi.mock('../features/chartTypes/hooks/useRegistryChartTypes', () => ({
+    useRegistryChartTypes: vi.fn(),
+}));
+
+vi.mock('../features/chartTypes/hooks/useInstallRegistryChartType', () => ({
+    useInstallRegistryChartType: vi.fn(),
+}));
+
+vi.mock('../hooks/useExplores', () => ({
+    useExplores: vi.fn(),
+}));
+
+// <Page> resolves the active project through these hooks. Unmocked they hit the
+// network, and the retrying failures outlive the test file's jsdom window.
+vi.mock('../hooks/useActiveProject', () => ({
+    useActiveProjectUuid: () => ({
+        activeProjectUuid: 'project-1',
+        isLoading: false,
+    }),
+}));
+
+vi.mock('../hooks/useProject', () => ({
+    useProject: () => ({ data: undefined, isInitialLoading: false }),
+}));
+
+vi.mock('../features/chartTypes/components/ChartTypeSamplePreview', () => ({
+    default: () => <div data-testid="sample-preview" />,
+}));
+
+const mockedUseDataAppVisualizations = vi.mocked(useDataAppVisualizations);
+
+const makeDataAppViz = (overrides: Partial<DataAppViz>): DataAppViz => ({
+    dataAppVizUuid: 'data-app-viz-1',
+    slug: 'radial-gauge',
+    name: 'Radial gauge',
+    description: 'A gauge for KPI progress',
+    projectUuid: 'project-1',
+    spaceUuid: null,
+    schema: {
+        fields: [
+            { name: 'value', label: 'Value', type: 'metric', required: true },
+        ],
+        configOptions: [],
+        colorPalette: null,
+    },
+    createdAt: new Date('2026-06-30'),
+    createdByUserUuid: 'user-1',
+    icon: null,
+    registrySlug: null,
+    ...overrides,
+});
+
+const setData = (data: DataAppViz[]) => {
+    mockedUseDataAppVisualizations.mockReturnValue({
+        data: {
+            pages: [
+                {
+                    data,
+                    pagination: {
+                        page: 1,
+                        pageSize: 25,
+                        totalPageCount: 1,
+                        totalResults: data.length,
+                    },
+                },
+            ],
+            pageParams: [1],
+        },
+        isInitialLoading: false,
+        isFetching: false,
+        error: null,
+        refetch: vi.fn(),
+        hasNextPage: false,
+        fetchNextPage: vi.fn(),
+        isFetchingNextPage: false,
+    } as unknown as ReturnType<typeof useDataAppVisualizations>);
+};
+
+const setFlags = ({
+    dataApps = false,
+    chartTypeRegistry = true,
+}: {
+    dataApps?: boolean;
+    chartTypeRegistry?: boolean;
+} = {}) => {
+    vi.mocked(useServerFeatureFlag).mockImplementation(
+        (flag) =>
+            ({
+                data: {
+                    id: flag,
+                    enabled:
+                        flag === FeatureFlags.EnableDataApps
+                            ? dataApps
+                            : chartTypeRegistry,
+                },
+                isLoading: false,
+            }) as ReturnType<typeof useServerFeatureFlag>,
+    );
+};
+
+const LocationSearch = () => {
+    const { search } = useLocation();
+    return <div data-testid="location-search">{search}</div>;
+};
+
+const LocationPathname = () => {
+    const { pathname } = useLocation();
+    return <div data-testid="location-pathname">{pathname}</div>;
+};
+
+const renderPage = (
+    initialEntry = '/projects/project-1/chart-studio',
+    ability = new Ability<PossibleAbilities>([]),
+) => {
+    const page = (
+        <MemoryRouter initialEntries={[initialEntry]}>
+            <Routes>
+                <Route
+                    path="/projects/:projectUuid/chart-studio"
+                    element={
+                        <>
+                            <ChartTypeGallery />
+                            <LocationSearch />
+                        </>
+                    }
+                />
+                <Route
+                    path="/projects/:projectUuid/home"
+                    element={<div>home</div>}
+                />
+                <Route
+                    path="/projects/:projectUuid/chart-studio/:slug"
+                    element={<LocationPathname />}
+                />
+                <Route
+                    path="/projects/:projectUuid/tables/:tableId"
+                    element={
+                        <div data-testid="explore-probe">
+                            <LocationSearch />
+                        </div>
+                    }
+                />
+            </Routes>
+        </MemoryRouter>
+    );
+    return renderWithProviders(
+        <AbilityContext.Provider value={ability}>
+            {page}
+        </AbilityContext.Provider>,
+        licensedAppMocks,
+    );
+};
+
+const mockedDeleteApp = vi.fn();
+const mockedUpgradeMutate = vi.fn();
+
+const setRegistryCharts = (
+    charts: Array<{
+        slug: string;
+        state: string;
+        version: string;
+        installedRegistryVersion?: string;
+    }>,
+) => {
+    vi.mocked(useRegistryChartTypes).mockReturnValue({
+        data: {
+            registryEnabled: true,
+            charts: charts.map((chart) => ({
+                name: 'Radial gauge',
+                installedAppUuid: 'data-app-viz-1',
+                changelog: 'Adds things.',
+                installedRegistryVersion: null,
+                ...chart,
+            })),
+        },
+        isInitialLoading: false,
+        error: null,
+    } as unknown as ReturnType<typeof useRegistryChartTypes>);
+};
+
+describe('ChartTypeGallery', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.mocked(useDataAppVisualization).mockReturnValue({
+            data: undefined,
+        } as ReturnType<typeof useDataAppVisualization>);
+        setFlags();
+        vi.mocked(useChartStudioAvailable).mockReturnValue(true);
+        vi.mocked(useCanEditDataApp).mockReturnValue(true);
+        vi.mocked(useCanCreateDataApp).mockReturnValue(true);
+        vi.mocked(useDuplicateApp).mockReturnValue({
+            mutate: vi.fn(),
+            isLoading: false,
+        } as unknown as ReturnType<typeof useDuplicateApp>);
+        mockedDeleteApp.mockResolvedValue(undefined);
+        vi.mocked(useDeleteApp).mockReturnValue({
+            mutateAsync: mockedDeleteApp,
+            isLoading: false,
+        } as unknown as ReturnType<typeof useDeleteApp>);
+        vi.mocked(useDataAppVizDeleteImpact).mockReturnValue({
+            data: { chartCount: 3 },
+            isFetching: false,
+            isError: false,
+            refetch: vi.fn(),
+        } as unknown as ReturnType<typeof useDataAppVizDeleteImpact>);
+        vi.mocked(useDataAppVizUpgradeImpact).mockReturnValue({
+            data: { chartCount: 3, pinnedChartCount: 2 },
+            isFetching: false,
+            isError: false,
+            refetch: vi.fn(),
+        } as unknown as ReturnType<typeof useDataAppVizUpgradeImpact>);
+        setRegistryCharts([]);
+        vi.mocked(useExplores).mockReturnValue({
+            data: [
+                { name: 'orders', label: 'Orders' },
+                { name: 'customers', label: 'Customers' },
+            ],
+            isInitialLoading: false,
+        } as unknown as ReturnType<typeof useExplores>);
+        vi.mocked(useInstallRegistryChartType).mockReturnValue({
+            mutate: mockedUpgradeMutate,
+            isLoading: false,
+        } as unknown as ReturnType<typeof useInstallRegistryChartType>);
+        vi.mocked(useAppVersionHistory).mockReturnValue({
+            versions: [],
+            oldest: null,
+            latest: null,
+            latestReadyVersion: 3,
+            hasOrigin: false,
+            currentThreadNumber: null,
+            hasEarlier: false,
+            isLoading: false,
+            isError: false,
+            isFetchingEarlier: false,
+            fetchEarlier: vi.fn(),
+        });
+    });
+
+    describe('scroll pagination', () => {
+        const observers = new Map<Element, IntersectionObserverCallback>();
+        const fetchNextPage = vi.fn();
+
+        beforeEach(() => {
+            observers.clear();
+            vi.stubGlobal(
+                'IntersectionObserver',
+                vi.fn(function (callback: IntersectionObserverCallback) {
+                    return {
+                        observe: (element: Element) =>
+                            observers.set(element, callback),
+                        disconnect: () => observers.clear(),
+                    };
+                }),
+            );
+            setData([makeDataAppViz({})]);
+            mockedUseDataAppVisualizations.mockReturnValue({
+                ...mockedUseDataAppVisualizations('project-1'),
+                hasNextPage: true,
+                fetchNextPage,
+            });
+        });
+
+        afterEach(() => vi.unstubAllGlobals());
+
+        const intersect = (isIntersecting: boolean) => {
+            const target = screen.getByTestId('chart-types-pagination');
+            const callback = observers.get(target);
+            expect(callback).toBeDefined();
+            act(() => {
+                callback!(
+                    [
+                        {
+                            target,
+                            isIntersecting,
+                            boundingClientRect: target.getBoundingClientRect(),
+                            intersectionRatio: isIntersecting ? 1 : 0,
+                            intersectionRect: target.getBoundingClientRect(),
+                            rootBounds: null,
+                            time: 0,
+                        },
+                    ],
+                    {} as IntersectionObserver,
+                );
+            });
+        };
+
+        it('loads another page only when the bottom approaches the viewport', () => {
+            renderPage();
+
+            expect(
+                screen.queryByRole('button', { name: 'Load more' }),
+            ).not.toBeInTheDocument();
+            expect(fetchNextPage).not.toHaveBeenCalled();
+            intersect(false);
+            expect(fetchNextPage).not.toHaveBeenCalled();
+            intersect(true);
+            expect(fetchNextPage).toHaveBeenCalledOnce();
+        });
+
+        it.each([false, true])(
+            'waits for an active request (next page: %s)',
+            (isFetchingNextPage) => {
+                mockedUseDataAppVisualizations.mockReturnValue({
+                    ...mockedUseDataAppVisualizations('project-1'),
+                    isFetching: true,
+                    isFetchingNextPage,
+                });
+                renderPage();
+                intersect(true);
+
+                expect(fetchNextPage).not.toHaveBeenCalled();
+                if (isFetchingNextPage) {
+                    expect(screen.getByRole('status')).toHaveTextContent(
+                        'Loading more chart types…',
+                    );
+                }
+            },
+        );
+
+        it('stops observing after the last page', () => {
+            mockedUseDataAppVisualizations.mockReturnValue({
+                ...mockedUseDataAppVisualizations('project-1'),
+                hasNextPage: false,
+            });
+            renderPage();
+
+            expect(
+                screen.queryByTestId('chart-types-pagination'),
+            ).not.toBeInTheDocument();
+            expect(observers.size).toBe(0);
+            expect(fetchNextPage).not.toHaveBeenCalled();
+        });
+
+        it('does not paginate installed charts while browsing the library', () => {
+            renderPage('/projects/project-1/chart-studio?tab=chart-library');
+
+            expect(
+                screen.queryByTestId('chart-types-pagination'),
+            ).not.toBeInTheDocument();
+            expect(fetchNextPage).not.toHaveBeenCalled();
+        });
+
+        it('disconnects the observer when the gallery unmounts', () => {
+            const view = renderPage();
+            expect(observers.size).toBe(1);
+
+            view.unmount();
+
+            expect(observers.size).toBe(0);
+        });
+    });
+
+    it('lists the custom chart types and opens the detail modal', () => {
+        setData([
+            makeDataAppViz({}),
+            makeDataAppViz({ dataAppVizUuid: 'viz-2', name: 'Bar race' }),
+        ]);
+        renderPage();
+
+        expect(screen.getByText('Bar race')).toBeInTheDocument();
+        expect(screen.getByText('Chart Studio')).toBeInTheDocument();
+        expect(document.title).toContain('Chart Studio');
+        expect(screen.getByText('(2)')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+
+        expect(screen.getByText('Preview in explorer')).toBeInTheDocument();
+        expect(
+            screen.getByRole('link', { name: 'Edit' }).closest('a'),
+        ).toHaveAttribute(
+            'href',
+            '/projects/jaffle-shop/chart-studio/radial-gauge',
+        );
+        expect(screen.getByText('v3')).toBeInTheDocument();
+        // Typed field breakdown, matching the library modal.
+        expect(screen.getByText('Value')).toBeInTheDocument();
+        expect(screen.getByText('metric')).toBeInTheDocument();
+    });
+
+    it('separates installed chart types and the chart library into top-level tabs', () => {
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        const chartTypesTab = screen.getByRole('tab', {
+            name: 'Installed chart types (1)',
+        });
+        const libraryTab = screen.getByRole('tab', {
+            name: 'Chart type library Beta',
+        });
+
+        expect(chartTypesTab).toHaveAttribute('aria-selected', 'true');
+        expect(libraryTab).toHaveAttribute('aria-selected', 'false');
+        expect(screen.getByText('Radial gauge')).toBeInTheDocument();
+
+        fireEvent.click(libraryTab);
+
+        expect(libraryTab).toHaveAttribute('aria-selected', 'true');
+        expect(screen.getByTestId('location-search')).toHaveTextContent(
+            '?tab=chart-library',
+        );
+        expect(
+            screen.queryByRole('button', { name: 'Radial gauge' }),
+        ).not.toBeInTheDocument();
+
+        fireEvent.click(chartTypesTab);
+
+        expect(screen.getByTestId('location-search')).toBeEmptyDOMElement();
+    });
+
+    it('opens the chart library tab from a deep link', () => {
+        setData([makeDataAppViz({})]);
+        renderPage('/projects/project-1/chart-studio?tab=chart-library');
+
+        expect(
+            screen.getByRole('tab', { name: 'Chart type library Beta' }),
+        ).toHaveAttribute('aria-selected', 'true');
+        expect(
+            screen.queryByRole('button', { name: 'Radial gauge' }),
+        ).not.toBeInTheDocument();
+    });
+
+    it.each(['', '?tab=chart-library'])(
+        'shows chart types without tabs when the registry flag is disabled (%s)',
+        (query) => {
+            setFlags({ chartTypeRegistry: false });
+            setData([makeDataAppViz({})]);
+            renderPage(`/projects/project-1/chart-studio${query}`);
+
+            expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+            expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+            expect(screen.queryByRole('tabpanel')).not.toBeInTheDocument();
+            expect(screen.getByText('Radial gauge')).toBeInTheDocument();
+        },
+    );
+
+    it.each([{ registryEnabled: false, charts: [] }, undefined])(
+        'shows chart types without tabs until the registry is available (%j)',
+        (data) => {
+            vi.mocked(useRegistryChartTypes).mockReturnValue({
+                data,
+                isInitialLoading: data === undefined,
+                error: null,
+            } as unknown as ReturnType<typeof useRegistryChartTypes>);
+            setData([makeDataAppViz({})]);
+            renderPage('/projects/project-1/chart-studio?tab=chart-library');
+
+            expect(useRegistryChartTypes).toHaveBeenCalledWith(
+                'project-1',
+                true,
+            );
+            expect(
+                screen.queryByRole('tab', { name: /Chart type library/ }),
+            ).not.toBeInTheDocument();
+            expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+            expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+            expect(screen.queryByRole('tabpanel')).not.toBeInTheDocument();
+            expect(screen.getByText('Radial gauge')).toBeInTheDocument();
+        },
+    );
+
+    it('shows origin author and last update in the detail modal', () => {
+        const originVersion = {
+            version: 1,
+            createdAt: new Date('2026-07-01'),
+            statusUpdatedAt: new Date('2026-07-01'),
+            createdByUser: {
+                userUuid: 'user-1',
+                firstName: 'Ada',
+                lastName: 'Lovelace',
+            },
+        };
+        vi.mocked(useAppVersionHistory).mockReturnValue({
+            versions: [],
+            oldest: originVersion,
+            latest: originVersion,
+            latestReadyVersion: 1,
+            hasOrigin: true,
+            currentThreadNumber: null,
+            hasEarlier: false,
+            isLoading: false,
+            isError: false,
+            isFetchingEarlier: false,
+            fetchEarlier: vi.fn(),
+        } as unknown as ReturnType<typeof useAppVersionHistory>);
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+
+        expect(screen.getByText('Built by')).toBeInTheDocument();
+        expect(screen.getByText('Ada Lovelace')).toBeInTheDocument();
+        expect(screen.getByText('Last updated')).toBeInTheDocument();
+    });
+
+    it('links the card menu actions and deletes after confirmation', async () => {
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        expect(
+            screen.getByLabelText('Edit Radial gauge').closest('a'),
+        ).toHaveAttribute(
+            'href',
+            '/projects/jaffle-shop/chart-studio/radial-gauge',
+        );
+
+        fireEvent.click(screen.getByLabelText('Actions for Radial gauge'));
+
+        fireEvent.click(screen.getByText('Preview in explorer'));
+        expect(
+            screen.getByText(
+                'Choose the table to preview this chart type with.',
+            ),
+        ).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+        fireEvent.click(screen.getByLabelText('Actions for Radial gauge'));
+        fireEvent.click(screen.getByText('Delete'));
+
+        expect(screen.getByText('Delete chart type')).toBeInTheDocument();
+
+        expect(
+            screen.getByText(
+                '3 saved charts are built on this chart type and will show an error.',
+            ),
+        ).toBeInTheDocument();
+        expect(useDataAppVizDeleteImpact).toHaveBeenCalledWith(
+            'project-1',
+            'data-app-viz-1',
+        );
+        const confirmButton = screen.getByRole('button', { name: 'Delete' });
+        await waitFor(() => expect(confirmButton).toBeEnabled());
+        fireEvent.click(confirmButton);
+
+        await waitFor(() =>
+            expect(mockedDeleteApp).toHaveBeenCalledWith({
+                projectUuid: 'project-1',
+                appUuid: 'data-app-viz-1',
+                successTitle: 'Chart type deleted',
+            }),
+        );
+    });
+
+    it('opens the delete confirmation from the detail modal', () => {
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+        fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+        expect(screen.getByText('Delete chart type')).toBeInTheDocument();
+        fireEvent.keyDown(screen.getByText('Delete chart type'), {
+            key: 'Escape',
+        });
+        expect(screen.getByText('Delete chart type')).toBeInTheDocument();
+        expect(
+            screen.getByRole('dialog', { name: 'Radial gauge' }),
+        ).toBeInTheDocument();
+    });
+
+    it('labels the action Uninstall for official chart types', async () => {
+        setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+        renderPage();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+        expect(
+            screen.queryByRole('button', { name: 'Delete' }),
+        ).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Uninstall' }));
+
+        expect(screen.getByText('Uninstall chart type')).toBeInTheDocument();
+
+        const confirmButton = within(
+            screen.getByRole('dialog', { name: 'Uninstall chart type' }),
+        ).getByRole('button', { name: 'Uninstall' });
+        await waitFor(() => expect(confirmButton).toBeEnabled());
+        fireEvent.click(confirmButton);
+
+        await waitFor(() =>
+            expect(mockedDeleteApp).toHaveBeenCalledWith({
+                projectUuid: 'project-1',
+                appUuid: 'data-app-viz-1',
+                successTitle: 'Chart type uninstalled',
+            }),
+        );
+    });
+
+    it('badges official chart types that have a registry update', () => {
+        setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+        setRegistryCharts([
+            {
+                slug: 'radial-gauge',
+                state: 'update_available',
+                version: '1.2.0',
+            },
+        ]);
+        renderPage();
+
+        expect(screen.getByText('Update available')).toBeInTheDocument();
+    });
+
+    it('upgrades an official chart type through the confirmation modal', () => {
+        setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+        setRegistryCharts([
+            {
+                slug: 'radial-gauge',
+                state: 'update_available',
+                version: '1.2.0',
+            },
+        ]);
+        renderPage();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+
+        expect(
+            screen.getByText('Update available: v1.2.0'),
+        ).toBeInTheDocument();
+
+        // The button opens the blast-radius confirmation instead of
+        // upgrading directly.
+        fireEvent.click(
+            screen.getByRole('button', { name: 'Upgrade to v1.2.0' }),
+        );
+        expect(mockedUpgradeMutate).not.toHaveBeenCalled();
+        expect(
+            screen.getByText('3 saved charts use this chart type'),
+        ).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Upgrade' }));
+
+        expect(mockedUpgradeMutate).toHaveBeenCalledWith(
+            {
+                projectUuid: 'project-1',
+                chartSlug: 'radial-gauge',
+                upgradeConsumingCharts: false,
+            },
+            expect.anything(),
+        );
+    });
+
+    it('opens upgrades from the library even when the chart is outside the loaded gallery', async () => {
+        setData([]);
+        const viz = makeDataAppViz({ registrySlug: 'radial-gauge' });
+        vi.mocked(useDataAppVisualization).mockReturnValue({
+            data: viz,
+        } as ReturnType<typeof useDataAppVisualization>);
+        setRegistryCharts([
+            {
+                slug: 'radial-gauge',
+                state: 'update_available',
+                version: '1.2.0',
+            },
+        ]);
+        renderPage('/projects/project-1/chart-studio?tab=chart-library');
+
+        fireEvent.click(
+            screen.getByRole('button', {
+                name: 'Updates available for 1 already installed chart',
+            }),
+        );
+        fireEvent.click(
+            await screen.findByRole('button', {
+                name: /Radial gauge.*Upgrade to v1.2.0/,
+            }),
+        );
+        expect(useDataAppVisualization).toHaveBeenCalledWith(
+            'project-1',
+            'data-app-viz-1',
+            null,
+        );
+        expect(
+            screen.getByRole('dialog', { name: /Radial gauge/ }),
+        ).toBeInTheDocument();
+        fireEvent.click(
+            screen.getByRole('button', { name: 'Upgrade to v1.2.0' }),
+        );
+        expect(
+            screen.getByText('3 saved charts use this chart type'),
+        ).toBeInTheDocument();
+        expect(mockedUpgradeMutate).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole('button', { name: 'Upgrade' }));
+        expect(mockedUpgradeMutate).toHaveBeenCalledWith(
+            {
+                projectUuid: 'project-1',
+                chartSlug: 'radial-gauge',
+                upgradeConsumingCharts: false,
+            },
+            expect.anything(),
+        );
+    });
+
+    it('shows the registry version for installed official chart types', () => {
+        setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+        setRegistryCharts([
+            {
+                slug: 'radial-gauge',
+                state: 'installed',
+                version: '1.2.0',
+                installedRegistryVersion: '1.2.0',
+            },
+        ]);
+        renderPage();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+
+        // Registry semver, not the internal app version (v3 in the mock).
+        expect(screen.getByText('v1.2.0')).toBeInTheDocument();
+        expect(screen.queryByText('v3')).not.toBeInTheDocument();
+    });
+
+    it('shows no update affordance when the installed version is current', () => {
+        setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+        setRegistryCharts([
+            { slug: 'radial-gauge', state: 'installed', version: '1.2.0' },
+        ]);
+        renderPage();
+
+        expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+
+        expect(
+            screen.queryByRole('button', { name: /Upgrade to v/ }),
+        ).not.toBeInTheDocument();
+    });
+
+    it('replaces details with the table picker and dismisses all dialogs on Escape', async () => {
+        const user = userEvent.setup();
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        await user.click(screen.getByText('Radial gauge'));
+        await user.click(
+            screen.getByRole('button', { name: 'Preview in explorer' }),
+        );
+
+        await waitFor(() =>
+            expect(screen.getByPlaceholderText('Select a table')).toHaveFocus(),
+        );
+        await user.click(screen.getByPlaceholderText('Select a table'));
+        expect(screen.getByRole('listbox')).toBeVisible();
+        await user.keyboard('{Escape}');
+        expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+        expect(screen.getAllByRole('dialog')).toHaveLength(1);
+        expect(
+            screen.queryByRole('dialog', { name: 'Radial gauge' }),
+        ).not.toBeInTheDocument();
+
+        await user.tab();
+        expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+        await user.keyboard('{Escape}');
+
+        expect(
+            screen.queryByRole('dialog', { name: 'Preview in explorer' }),
+        ).not.toBeInTheDocument();
+        expect(
+            track.mock.calls.filter(
+                ([event]) => event.name === EventName.CHART_TYPE_DETAIL_VIEWED,
+            ),
+        ).toHaveLength(1);
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it.each(['Cancel', 'Close'])(
+        'dismisses the table picker with %s without reopening details',
+        async (action) => {
+            const user = userEvent.setup();
+            setData([makeDataAppViz({})]);
+            renderPage();
+            await user.click(screen.getByText('Radial gauge'));
+            await user.click(
+                screen.getByRole('button', { name: 'Preview in explorer' }),
+            );
+            await user.click(
+                within(
+                    screen.getByRole('dialog', { name: 'Preview in explorer' }),
+                ).getByRole('button', { name: action }),
+            );
+            expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        },
+    );
+
+    it('previews in the explorer with the chosen table and config open', () => {
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+        fireEvent.click(
+            screen.getByRole('button', { name: 'Preview in explorer' }),
+        );
+
+        const tableInput = screen.getByPlaceholderText('Select a table');
+        fireEvent.click(tableInput);
+        fireEvent.click(screen.getByText('Orders'));
+        fireEvent.click(
+            screen.getByRole('button', { name: 'Open in explorer' }),
+        );
+
+        expect(screen.getByTestId('explore-probe')).toBeInTheDocument();
+        expect(screen.getByTestId('location-search')).toHaveTextContent(
+            'dataAppVizUuid=data-app-viz-1',
+        );
+        expect(screen.getByTestId('location-search')).toHaveTextContent(
+            'chartSidebar=configure',
+        );
+    });
+
+    it('hides edit and delete actions from non-editors', () => {
+        vi.mocked(useCanEditDataApp).mockReturnValue(false);
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        expect(
+            screen.queryByLabelText('Edit Radial gauge'),
+        ).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByLabelText('Actions for Radial gauge'));
+
+        expect(screen.getByText('Preview in explorer')).toBeInTheDocument();
+        expect(screen.queryByText('Delete')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByText('Radial gauge'));
+
+        expect(
+            screen.queryByRole('button', { name: 'Delete' }),
+        ).not.toBeInTheDocument();
+    });
+
+    it('shows the empty state when the project has no chart types', () => {
+        setData([]);
+        renderPage();
+
+        expect(
+            screen.getByText(/Chart types are custom visualizations/),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByPlaceholderText('Search by name or description'),
+        ).not.toBeInTheDocument();
+    });
+
+    it('shows a no-results message for an empty searched page', async () => {
+        setData([makeDataAppViz({})]);
+        renderPage();
+
+        fireEvent.change(
+            screen.getByPlaceholderText('Search by name or description'),
+            {
+                target: { value: 'prog' },
+            },
+        );
+        setData([]);
+
+        await waitFor(() =>
+            expect(mockedUseDataAppVisualizations).toHaveBeenLastCalledWith(
+                'project-1',
+                'prog',
+            ),
+        );
+
+        await waitFor(() =>
+            expect(
+                screen.getByText(/No chart types match/),
+            ).toBeInTheDocument(),
+        );
+    });
+
+    it('redirects home without Chart Studio, the library or data apps', async () => {
+        setData([]);
+        vi.mocked(useChartStudioAvailable).mockReturnValue(false);
+        setFlags({ dataApps: false, chartTypeRegistry: false });
+        renderPage();
+
+        expect(await screen.findByText('home')).toBeInTheDocument();
+    });
+
+    it('stays open without Chart Studio when the library flag is on', async () => {
+        setData([]);
+        vi.mocked(useChartStudioAvailable).mockReturnValue(false);
+        setFlags({ chartTypeRegistry: true });
+        renderPage();
+
+        expect(
+            await screen.findByText('Installed chart types'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText('home')).not.toBeInTheDocument();
+    });
+
+    it('redirects home without a licence, even with the library flag on', async () => {
+        setData([]);
+        vi.mocked(useChartStudioAvailable).mockReturnValue(false);
+        setFlags({ dataApps: true, chartTypeRegistry: true });
+        renderWithProviders(
+            <MemoryRouter initialEntries={['/projects/project-1/chart-studio']}>
+                <Routes>
+                    <Route
+                        path="/projects/:projectUuid/chart-studio"
+                        element={<ChartTypeGallery />}
+                    />
+                    <Route
+                        path="/projects/:projectUuid/home"
+                        element={<div>home</div>}
+                    />
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        expect(await screen.findByText('home')).toBeInTheDocument();
+    });
+
+    it('offers a new chart type with data apps and the library off when Chart Studio is available', async () => {
+        setData([makeDataAppViz({})]);
+        setFlags({ dataApps: false, chartTypeRegistry: false });
+        renderPage(
+            undefined,
+            new Ability<PossibleAbilities>([
+                { action: 'create', subject: 'DataApp' },
+            ]),
+        );
+
+        expect(screen.queryByText('home')).not.toBeInTheDocument();
+        expect(await screen.findByText('New chart type')).toBeInTheDocument();
+    });
+
+    it('hides the new-chart-type button without Chart Studio, even with data apps on', async () => {
+        setData([makeDataAppViz({})]);
+        vi.mocked(useChartStudioAvailable).mockReturnValue(false);
+        setFlags({ dataApps: true, chartTypeRegistry: true });
+        renderPage(
+            undefined,
+            new Ability<PossibleAbilities>([
+                { action: 'create', subject: 'DataApp' },
+            ]),
+        );
+
+        await screen.findByText('Installed chart types');
+        expect(screen.queryByText('New chart type')).not.toBeInTheDocument();
+    });
+
+    describe('official (registry-installed) chart types', () => {
+        it('shows the Official badge and a fork action instead of edit', () => {
+            setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+            renderPage();
+
+            expect(screen.getByText('Built by Lightdash')).toBeInTheDocument();
+            expect(
+                screen.queryByLabelText('Edit Radial gauge'),
+            ).not.toBeInTheDocument();
+            expect(
+                screen.getByLabelText('Fork Radial gauge'),
+            ).toBeInTheDocument();
+        });
+
+        it('hides the fork action from users who cannot create data apps', () => {
+            vi.mocked(useCanCreateDataApp).mockReturnValue(false);
+            setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+            renderPage();
+
+            expect(
+                screen.queryByLabelText('Fork Radial gauge'),
+            ).not.toBeInTheDocument();
+            expect(
+                screen.queryByLabelText('Edit Radial gauge'),
+            ).not.toBeInTheDocument();
+        });
+
+        it('opens the fork modal from the card and submits the fork', () => {
+            const mockedDuplicate = vi.fn();
+            vi.mocked(useDuplicateApp).mockReturnValue({
+                mutate: mockedDuplicate,
+                isLoading: false,
+            } as unknown as ReturnType<typeof useDuplicateApp>);
+            setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+            renderPage();
+
+            fireEvent.click(screen.getByLabelText('Fork Radial gauge'));
+
+            expect(screen.getByText('Fork to customize')).toBeInTheDocument();
+            expect(screen.getByLabelText(/Name/)).toHaveValue(
+                'Radial gauge (custom)',
+            );
+
+            fireEvent.click(screen.getAllByRole('button', { name: 'Fork' })[0]);
+
+            expect(mockedDuplicate).toHaveBeenCalledWith(
+                {
+                    projectUuid: 'project-1',
+                    appUuid: 'data-app-viz-1',
+                    name: 'Radial gauge (custom)',
+                },
+                expect.objectContaining({ onSuccess: expect.any(Function) }),
+            );
+        });
+
+        it('keeps the detail modal open when dismissing the fork dialog', async () => {
+            const user = userEvent.setup();
+            setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+            renderPage();
+
+            fireEvent.click(screen.getByText('Radial gauge'));
+
+            expect(
+                screen.getByRole('button', { name: /Fork to customize/ }),
+            ).toBeInTheDocument();
+            expect(screen.queryByText('Edit')).not.toBeInTheDocument();
+
+            await user.click(
+                screen.getByRole('button', { name: 'Fork to customize' }),
+            );
+            await user.keyboard('{Escape}');
+
+            expect(
+                screen.queryByRole('dialog', { name: 'Fork to customize' }),
+            ).not.toBeInTheDocument();
+            expect(
+                screen.getByRole('dialog', { name: /Radial gauge/ }),
+            ).toBeInTheDocument();
+        });
+
+        it.each(['card', 'detail modal'])(
+            'opens the forked chart type by its returned slug from the %s',
+            async (entryPoint) => {
+                vi.mocked(useDuplicateApp).mockReturnValue({
+                    mutate: vi.fn((_params, options) => {
+                        options.onSuccess({
+                            appUuid: 'forked-app-uuid',
+                            slug: 'radial-gauge-custom-2',
+                            version: 1,
+                        });
+                    }),
+                    isLoading: false,
+                } as unknown as ReturnType<typeof useDuplicateApp>);
+                setData([makeDataAppViz({ registrySlug: 'radial-gauge' })]);
+                renderPage();
+
+                if (entryPoint === 'card') {
+                    fireEvent.click(screen.getByLabelText('Fork Radial gauge'));
+                } else {
+                    fireEvent.click(screen.getByText('Radial gauge'));
+                    fireEvent.click(
+                        screen.getByRole('button', {
+                            name: /Fork to customize/,
+                        }),
+                    );
+                }
+
+                fireEvent.click(screen.getByRole('button', { name: 'Fork' }));
+
+                await waitFor(() =>
+                    expect(
+                        screen.getByTestId('location-pathname'),
+                    ).toHaveTextContent(
+                        '/projects/jaffle-shop/chart-studio/radial-gauge-custom-2',
+                    ),
+                );
+            },
+        );
+    });
+});

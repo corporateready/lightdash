@@ -26,7 +26,7 @@ export const addSqlRunnerQueryListener = (
     startListening: typeof startAppListening,
 ) => {
     startListening({
-        matcher: isAnyOf(runSqlQuery.fulfilled),
+        actionCreator: runSqlQuery.fulfilled,
         effect: async (_, listenerApi) => {
             const state = listenerApi.getState();
             const resultsRunner = selectSqlRunnerResultsRunner(state);
@@ -211,3 +211,16 @@ export const addLimitChangeListener = (
         },
     });
 };
+
+export const addAutomaticPivotFailureListener = (
+    startListening: typeof startAppListening,
+    projectUuid: string,
+    onFailure: () => void,
+) =>
+    startListening({
+        actionCreator: prepareAndFetchChartData.rejected,
+        effect: (_, listenerApi) => {
+            if (listenerApi.getState().sqlRunner.projectUuid === projectUuid)
+                onFailure();
+        },
+    });

@@ -1,0 +1,153 @@
+.root {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    background-color: var(--mantine-color-body);
+}
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.panel[hidden] {
+    display: none;
+}
+
+/* Editor and results are flush panes; hairlines do the separating. */
+.pane {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.paneHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--mantine-spacing-sm);
+    flex-shrink: 0;
+    min-height: rem(44px);
+    padding: 0 var(--mantine-spacing-sm);
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.toolbarDivider {
+    align-self: center;
+    height: var(--mantine-spacing-md);
+    margin: 0 rem(4px);
+}
+
+.paneBody {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Charts breathe inside the pane; tables sit flush so the pane is their frame. */
+.paneBody[data-padded='true'] {
+    padding: var(--mantine-spacing-md);
+}
+
+.editorSurface {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+}
+
+.editorSurface[data-scroll='true'] {
+    overflow-y: auto;
+}
+
+.resultsBody {
+    height: 100%;
+    position: relative;
+    overflow: auto;
+}
+
+/* Previous results stay readable but clearly stale while the next run is in flight */
+.resultsBody[data-running] .previousResults {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.runningBar {
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: rem(2px);
+    overflow: hidden;
+}
+
+.runningBar::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 38%;
+    border-radius: rem(1px);
+    background-color: var(--mantine-color-text);
+    animation: runningSweep 1.4s ease-in-out infinite;
+}
+
+@keyframes runningSweep {
+    from {
+        left: -40%;
+    }
+    to {
+        left: 100%;
+    }
+}
+
+.skeletonRow {
+    display: flex;
+    align-items: center;
+    gap: var(--mantine-spacing-lg);
+    height: rem(28px);
+    padding: 0 var(--mantine-spacing-sm);
+    border-bottom: 1px solid var(--mantine-color-ldGray-1);
+}
+
+.emptyHints {
+    justify-content: center;
+    padding-top: calc(2 * var(--mantine-spacing-md));
+}
+
+.errorBlock {
+    padding: var(--mantine-spacing-sm);
+    background-color: var(--mantine-color-red-light);
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+/* A slim canvas-coloured band between the panes carries the grip, so the
+   divider reads as structure rather than empty space. */
+.resizeHandle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    height: rem(9px);
+    border-top: 1px solid var(--mantine-color-default-border);
+    border-bottom: 1px solid var(--mantine-color-default-border);
+    background-color: var(--ld-color-page);
+    cursor: row-resize;
+}
+
+.resizeHandle::before {
+    content: '';
+    width: rem(32px);
+    height: rem(3px);
+    border-radius: rem(2px);
+    background-color: var(--mantine-color-ldGray-3);
+    transition: background-color 120ms ease;
+}
+
+.resizeHandle:hover::before,
+.resizeHandle[data-active]::before {
+    background-color: var(--mantine-color-ldGray-5);
+}

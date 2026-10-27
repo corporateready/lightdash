@@ -1,4 +1,5 @@
 import { LightdashMode } from '@lightdash/common';
+import noop from 'lodash/noop';
 import {
     memo,
     useCallback,
@@ -18,8 +19,13 @@ import {
     type PageData,
     type SectionData,
     type TrackingData,
+    type TrackingContextType,
 } from './types';
 import useTracking from './useTracking';
+
+type PendingTrack = (analytics: typeof rudderSDK) => void;
+
+const pendingTracks: PendingTrack[] = [];
 
 const TrackingProviderMain: FC<React.PropsWithChildren<TrackingData>> = ({
     rudder,
@@ -84,6 +90,13 @@ const TrackingProviderMain: FC<React.PropsWithChildren<TrackingData>> = ({
         }
     }, [rudder, writeKey, dataPlaneUrl]);
 
+    useEffect(() => {
+        if (!rudderAnalytics) return;
+        pendingTracks
+            .splice(0)
+            .forEach((pendingTrack) => pendingTrack(rudderAnalytics));
+    }, [rudderAnalytics]);
+
     const page = useCallback(
         (rudderPageEvent: PageData): void => {
             const newPageContext = getLightdashPageProperties(rudderPageEvent);
@@ -102,16 +115,32 @@ const TrackingProviderMain: FC<React.PropsWithChildren<TrackingData>> = ({
 
     const track = useCallback(
         ({ name, properties = {} }: EventData): void => {
-            rudderAnalytics?.track(
-                `${LIGHTDASH_APP_NAME}.${name}`,
-                properties,
-                {
-                    ...lightdashContext,
-                    section: sectionContext,
-                } as rudderSDK.apiOptions,
-            );
+            const sendTrack: PendingTrack = (analytics) =>
+                analytics.track(
+                    `${LIGHTDASH_APP_NAME}.${name}`,
+                    // The SDK's apiObject rejects null, but explicit nulls are
+                    // meaningful in event payloads
+                    properties as rudderSDK.apiObject,
+                    {
+                        ...lightdashContext,
+                        section: sectionContext,
+                    } as rudderSDK.apiOptions,
+                );
+
+            if (rudderAnalytics) {
+                sendTrack(rudderAnalytics);
+            } else if (rudder || (writeKey && dataPlaneUrl)) {
+                pendingTracks.push(sendTrack);
+            }
         },
-        [rudderAnalytics, sectionContext, lightdashContext],
+        [
+            rudderAnalytics,
+            rudder,
+            writeKey,
+            dataPlaneUrl,
+            sectionContext,
+            lightdashContext,
+        ],
     );
     const identify = useCallback(
         ({ id, traits }: IdentifyData) => {
@@ -142,6 +171,13 @@ const TrackingProviderMain: FC<React.PropsWithChildren<TrackingData>> = ({
     );
 };
 
+const disabledTrackingContext: TrackingContextType = {
+    data: {},
+    page: noop,
+    track: noop,
+    identify: noop,
+};
+
 interface TrackingProviderProps extends TrackingData {
     enabled?: boolean;
 }
@@ -156,7 +192,11 @@ const TrackingProvider: FC<React.PropsWithChildren<TrackingProviderProps>> = ({
             <TrackingProviderMain {...rest}>{children}</TrackingProviderMain>
         );
     } else {
-        return <>{children}</>;
+        return (
+            <TrackingContext.Provider value={disabledTrackingContext}>
+                {children}
+            </TrackingContext.Provider>
+        );
     }
 };
 
@@ -164,8 +204,11 @@ const NestedTrackingProvider: FC<
     React.PropsWithChildren<Partial<TrackingData>>
 > = ({ children, ...rest }) => (
     <TrackingContext.Consumer>
-        {({ data }) => (
-            <TrackingProvider {...{ ...data, ...rest }}>
+        {(context) => (
+            <TrackingProvider
+                {...{ ...context.data, ...rest }}
+                enabled={context !== disabledTrackingContext}
+            >
                 {children || null}
             </TrackingProvider>
         )}

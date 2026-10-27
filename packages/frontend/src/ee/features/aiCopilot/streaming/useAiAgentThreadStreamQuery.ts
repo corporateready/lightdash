@@ -1,3 +1,8 @@
+import { shallowEqual } from 'react-redux';
+import {
+    isAiAgentThreadStreamRecoveryActive,
+    type StreamPart,
+} from '../store/aiAgentThreadStreamSlice';
 import { useAiAgentStoreSelector } from '../store/hooks';
 
 export const useAiAgentThreadStreamQuery = (threadUuid: string) => {
@@ -13,8 +18,46 @@ export const useAiAgentThreadStreamQuery = (threadUuid: string) => {
 export const useAiAgentThreadStreaming = (threadUuid: string) =>
     useAiAgentStoreSelector((state) => {
         const threadStream = state.aiAgentThreadStream[threadUuid];
-        return threadStream?.isStreaming;
+        return threadStream?.connection.status === 'streaming';
     });
+
+export const useAiAgentThreadRecoveryActive = (threadUuid: string) =>
+    useAiAgentStoreSelector((state) => {
+        const threadStream = state.aiAgentThreadStream[threadUuid];
+        return (
+            threadStream !== undefined &&
+            isAiAgentThreadStreamRecoveryActive(threadStream.connection)
+        );
+    });
+
+// Keep completed parts available so batched terminal tool results are not lost.
+export const useAiAgentProjectStreamParts = (
+    projectUuid: string | undefined,
+): StreamPart[] =>
+    useAiAgentStoreSelector(
+        (state) =>
+            Object.values(state.aiAgentThreadStream).flatMap((threadStream) =>
+                threadStream.projectUuid === projectUuid
+                    ? threadStream.parts
+                    : [],
+            ),
+        shallowEqual,
+    );
+
+export const useAiAgentStreamParts = (
+    projectUuid: string | undefined,
+    agentUuid: string | undefined,
+): StreamPart[] =>
+    useAiAgentStoreSelector(
+        (state) =>
+            Object.values(state.aiAgentThreadStream).flatMap((threadStream) =>
+                threadStream.projectUuid === projectUuid &&
+                threadStream.agentUuid === agentUuid
+                    ? threadStream.parts
+                    : [],
+            ),
+        shallowEqual,
+    );
 
 export const useAiAgentThreadMessageStreaming = (
     threadUuid: string,
@@ -23,7 +66,7 @@ export const useAiAgentThreadMessageStreaming = (
     useAiAgentStoreSelector((state) => {
         const threadStream = state.aiAgentThreadStream[threadUuid];
         return (
-            threadStream?.isStreaming &&
-            threadStream?.messageUuid === messageUuid
+            threadStream?.connection.status === 'streaming' &&
+            threadStream.messageUuid === messageUuid
         );
     });

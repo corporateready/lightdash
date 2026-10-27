@@ -1,0 +1,74 @@
+import {
+    type ApiError,
+    type CiChecks,
+    type MergePullRequestResult,
+} from '@lightdash/common';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { type LightdashApi } from '../../../../api';
+import useToaster from '../../../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../../../../providers/LightdashApi/useLightdashApi';
+
+type MergeArgs = {
+    prUrl: string;
+    /** Expected head SHA — the merge is rejected if the PR head has moved on. */
+    sha: string | null;
+};
+
+const mergePullRequest = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    { prUrl, sha }: MergeArgs,
+): Promise<MergePullRequestResult> =>
+    lightdashApi<MergePullRequestResult>({
+        version: 'v1',
+        url: `/ee/projects/${projectUuid}/ai-writeback/merge-pull-request`,
+        method: 'POST',
+        body: JSON.stringify({ prUrl, sha: sha ?? undefined }),
+    });
+
+/**
+ * Merge a write-back pull request from the chat PR card. On success it
+ * invalidates the PR's CI/merge status so the card flips to its terminal
+ * "Merged" state; failures (conflicts, blocked branch, stale head) surface as a
+ * toast.
+ */
+export const useMergePullRequest = (projectUuid: string) => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
+
+    return useMutation<MergePullRequestResult, ApiError, MergeArgs>({
+        mutationFn: (args) => mergePullRequest(lightdashApi, projectUuid, args),
+        onSuccess: (result, { prUrl }) => {
+            // No success toast — the PR card flips to its "Merged" state with
+            // confetti, which is feedback enough.
+            // Optimistically flip the card to its merged state. Without this the
+            // button briefly reverts to the clickable green "Merge PR" until the
+            // CI-checks query refetches the merged verdict from GitHub (a few
+            // seconds), and the "Merged" purple state + confetti only fire then.
+            // Prefix match covers every pinned-commit variant of the key.
+            if (result.merged) {
+                queryClient.setQueriesData<CiChecks | null>(
+                    { queryKey: ['pullRequestCiChecks', projectUuid, prUrl] },
+                    (old) => (old ? { ...old, merged: true } : old),
+                );
+            }
+            void queryClient.invalidateQueries({
+                queryKey: ['pullRequestCiChecks', projectUuid, prUrl],
+            });
+            // Refresh the in-thread workstreams panel too so its PR badge flips
+            // to "Merged" — that query is keyed by thread, not prUrl (#41).
+            void queryClient.invalidateQueries({
+                predicate: (query) =>
+                    query.queryKey.includes(projectUuid) &&
+                    query.queryKey.includes('workstreams'),
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to merge pull request',
+                apiError: error,
+            });
+        },
+    });
+};

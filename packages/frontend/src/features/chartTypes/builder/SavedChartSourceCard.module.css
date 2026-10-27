@@ -1,0 +1,72 @@
+/* Matches the example cards' row width, so the two read as one column. One
+   shared height for the offers and the attached card: the canvas centres the
+   whole start page, so a slot that changed height would move everything. */
+.emptyCard,
+.attachedCard {
+    width: 836px;
+    max-width: 100%;
+    min-height: 84px;
+    padding: var(--mantine-spacing-sm) var(--mantine-spacing-sm)
+        var(--mantine-spacing-sm) 14px;
+}
+
+/* Side by side the two offers stretch to one height, so each one centres
+   what it holds instead of leaving the shorter one top-heavy. */
+.emptyCard {
+    display: flex;
+    align-items: center;
+}
+
+.emptyCard > * {
+    flex: 1;
+    min-width: 0;
+}
+
+.attachedCard {
+    background: var(--mantine-color-body);
+    border: 1px solid var(--mantine-color-ldGray-2);
+    border-radius: var(--mantine-radius-md);
+}
+
+.attachedWrapper {
+    position: relative;
+    width: 836px;
+    max-width: 100%;
+}
+
+/* Hangs under the card without adding to the slot's height. */
+.rowsNote {
+    position: absolute;
+    top: calc(100% + var(--mantine-spacing-xs));
+    left: 0;
+    right: 0;
+}
+
+.iconTile,
+.iconTileAccent {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--mantine-radius-md);
+}
+
+.iconTile {
+    background: var(--mantine-color-ldGray-1);
+    color: var(--mantine-color-ldGray-7);
+}
+
+.iconTileAccent {
+    background: var(--ld-field-dimension-bg);
+    color: var(--ld-field-dimension-color);
+}
+
+.fieldBadge {
+    height: 20px;
+    padding: 0 8px 0 6px;
+    border-radius: var(--mantine-radius-xl);
+    background: var(--mantine-color-ldGray-1);
+    color: var(--mantine-color-ldGray-7);
+}

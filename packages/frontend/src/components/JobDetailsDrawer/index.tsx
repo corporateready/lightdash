@@ -5,26 +5,23 @@ import {
     type JobStep,
 } from '@lightdash/common';
 import {
-    ActionIcon,
     Alert,
     Box,
-    CopyButton,
-    Drawer,
     Group,
     Loader,
     Stack,
     Text,
     Title,
-    useMantineTheme,
+    Drawer,
+    Button,
     type DefaultMantineColor,
 } from '@mantine/core';
 import { useInterval } from '@mantine/hooks';
 import {
     IconAlertTriangle,
     IconAlertTriangleFilled,
-    IconCheck,
     IconCircleCheckFilled,
-    IconCopy,
+    IconDownload,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import duration from 'dayjs/plugin/duration';
@@ -36,8 +33,10 @@ import {
     runningStepsInfo,
 } from '../../hooks/useRefreshServer';
 import useActiveJob from '../../providers/ActiveJob/useActiveJob';
+import { CopyActionIcon } from '../common/CopyActionIcon';
 import MantineIcon from '../common/MantineIcon';
 import { NAVBAR_HEIGHT } from '../common/Page/constants';
+import { formatFailedJobLog } from './failedJobLog';
 import ProjectCompileLog from './ProjectCompileLog';
 
 dayjs.extend(duration);
@@ -118,7 +117,6 @@ const StepIcon: FC<StepIconProps> = ({ step }) => {
 };
 
 const JobDetailsDrawer: FC = () => {
-    const theme = useMantineTheme();
     const { isJobsDrawerOpen, setIsJobsDrawerOpen, activeJob } = useActiveJob();
 
     // Force re-render every second so elapsed timers update in real-time
@@ -148,6 +146,7 @@ const JobDetailsDrawer: FC = () => {
             closeOnClickOutside
             withOverlay
             withCloseButton
+            closeButtonProps={{ 'aria-label': 'Close job details', size: 44 }}
             position="right"
             opened={isJobsDrawerOpen}
             onClose={() => setIsJobsDrawerOpen(false)}
@@ -157,15 +156,18 @@ const JobDetailsDrawer: FC = () => {
                 },
             }}
             title={
-                <Group noWrap align="center" spacing="xs">
+                <Group wrap="nowrap" align="center" gap="xs">
                     <DrawerIcon job={activeJob} />
 
                     <Box>
-                        <Title order={4} fw={600}>
-                            {jobStatusLabel(activeJob.jobStatus)}
+                        <Title order={4}>
+                            {jobStatusLabel(
+                                activeJob.jobStatus,
+                                activeJob.jobType,
+                            )}
                         </Title>
                         {hasSteps && (
-                            <Text c="ldGray.6" fz="sm" fw={500}>{`${
+                            <Text c="dimmed" fz="sm" fw={500}>{`${
                                 runningStepsInfo(activeJob.steps)
                                     .completedStepsMessage
                             } steps complete - ${durationSince(
@@ -177,15 +179,41 @@ const JobDetailsDrawer: FC = () => {
             }
         >
             <Stack p="sm">
+                {activeJob.jobStatus === JobStatusType.ERROR && (
+                    <Stack gap="xs">
+                        <Button
+                            variant="default"
+                            size="xs"
+                            leftSection={<MantineIcon icon={IconDownload} />}
+                            onClick={() => {
+                                const url = URL.createObjectURL(
+                                    new Blob([formatFailedJobLog(activeJob)], {
+                                        type: 'text/plain;charset=utf-8',
+                                    }),
+                                );
+                                const link = document.createElement('a');
+                                link.href = url;
+                                link.download = `compilation-${activeJob.jobUuid}.txt`;
+                                link.click();
+                                setTimeout(() => URL.revokeObjectURL(url), 0);
+                            }}
+                        >
+                            Download captured logs
+                        </Button>
+                        <Text size="xs" c="dimmed">
+                            Includes saved errors and captured dbt messages.
+                            Some command output may be unavailable.
+                        </Text>
+                    </Stack>
+                )}
                 {activeJob.steps?.map((step) => (
                     <Alert
-                        variant="light"
                         key={step.jobUuid}
                         color={statusInfo(step.stepStatus)}
                         icon={<StepIcon step={step} />}
                         title={step.stepLabel}
                     >
-                        <Stack spacing={1} sx={{ flex: 1, minWidth: 0 }}>
+                        <Stack gap={1} flex={1} miw={0}>
                             <Text fz="xs" fw={500}>
                                 {jobStepStatusLabel(step.stepStatus)} (
                                 {jobStepDuration(step)})
@@ -194,17 +222,18 @@ const JobDetailsDrawer: FC = () => {
                                 <Stack
                                     mt="xs"
                                     pt="xs"
-                                    sx={{
-                                        border: `1px solid ${theme.colors.red[2]}`,
-                                        borderRadius: theme.radius.sm,
-                                        padding: theme.spacing.xs,
+                                    style={{
+                                        border: '1px solid var(--mantine-color-red-2)',
+                                        borderRadius:
+                                            'var(--mantine-radius-sm)',
+                                        padding: 'var(--mantine-spacing-xs)',
                                         width: '100%',
                                         flexShrink: 0,
                                     }}
                                     pos="relative"
-                                    spacing="xs"
+                                    gap="xs"
                                 >
-                                    <CopyButton
+                                    <CopyActionIcon
                                         value={
                                             step.stepError +
                                                 step.stepDbtLogs
@@ -216,30 +245,14 @@ const JobDetailsDrawer: FC = () => {
                                                     .map((log) => log.info.msg)
                                                     .join('\n') || ''
                                         }
-                                    >
-                                        {({ copied, copy }) => (
-                                            <ActionIcon
-                                                onClick={copy}
-                                                pos="absolute"
-                                                top={6}
-                                                right={4}
-                                                size="xs"
-                                            >
-                                                {copied ? (
-                                                    <MantineIcon
-                                                        icon={IconCheck}
-                                                    />
-                                                ) : (
-                                                    <MantineIcon
-                                                        icon={IconCopy}
-                                                    />
-                                                )}
-                                            </ActionIcon>
-                                        )}
-                                    </CopyButton>
+                                        pos="absolute"
+                                        top={6}
+                                        right={4}
+                                        size="xs"
+                                    />
                                     <Stack
-                                        spacing="xs"
-                                        sx={{
+                                        gap="xs"
+                                        style={{
                                             maxHeight: '200px',
                                             overflow: 'auto',
                                             whiteSpace: 'pre-wrap',
@@ -249,8 +262,8 @@ const JobDetailsDrawer: FC = () => {
                                     >
                                         <Text
                                             size="xs"
-                                            color="red"
-                                            sx={{
+                                            c="red"
+                                            style={{
                                                 width: '100%',
                                                 wordBreak: 'normal',
                                                 overflowWrap: 'break-word',
@@ -268,8 +281,9 @@ const JobDetailsDrawer: FC = () => {
                                                     key={log.info.ts}
                                                     size="xs"
                                                     pt="xs"
-                                                    sx={{
-                                                        borderTop: `1px solid ${theme.colors.red[2]}`,
+                                                    style={{
+                                                        borderTop:
+                                                            '1px solid var(--mantine-color-red-2)',
                                                         overflowWrap:
                                                             'break-word',
                                                     }}

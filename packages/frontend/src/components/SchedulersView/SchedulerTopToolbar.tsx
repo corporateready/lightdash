@@ -7,7 +7,7 @@ import {
     Tooltip,
     useMantineTheme,
     type GroupProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconTrash, IconUserEdit } from '@tabler/icons-react';
 import { memo, type FC } from 'react';
 import { type useSchedulerFilters } from '../../features/scheduler/hooks/useSchedulerFilters';
@@ -17,6 +17,7 @@ import DestinationFilter from './filters/DestinationFilter';
 import FormatFilter from './filters/FormatFilter';
 import { ResourceTypeFilter } from './filters/ResourceTypeFilter';
 import { SearchFilter } from './filters/SearchFilter';
+import classes from './SchedulerTopToolbar.module.css';
 
 type SchedulerTopToolbarProps = GroupProps &
     Pick<
@@ -74,21 +75,26 @@ export const SchedulerTopToolbar: FC<SchedulerTopToolbarProps> = memo(
 
         return (
             <Group
+                className={classes.toolbar}
                 justify="space-between"
                 p={`${theme.spacing.sm} ${theme.spacing.md}`}
                 wrap="nowrap"
                 {...props}
             >
-                <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
+                <Group
+                    className={classes.filters}
+                    gap="xs"
+                    wrap="nowrap"
+                    flex={1}
+                    miw={0}
+                >
                     <SearchFilter search={search} setSearch={setSearch} />
 
                     <Divider
                         orientation="vertical"
                         w={1}
                         h={20}
-                        style={{
-                            alignSelf: 'center',
-                        }}
+                        visibleFrom="sm"
                     />
 
                     <ResourceTypeFilter
@@ -100,9 +106,7 @@ export const SchedulerTopToolbar: FC<SchedulerTopToolbarProps> = memo(
                         orientation="vertical"
                         w={1}
                         h={20}
-                        style={{
-                            alignSelf: 'center',
-                        }}
+                        visibleFrom="sm"
                     />
 
                     <FormatFilter
@@ -130,7 +134,12 @@ export const SchedulerTopToolbar: FC<SchedulerTopToolbarProps> = memo(
                     />
                 </Group>
 
-                <Group gap="sm" wrap="nowrap" style={{ flexShrink: 0 }}>
+                <Group
+                    className={classes.actions}
+                    gap="sm"
+                    wrap="nowrap"
+                    flex="0 0 auto"
+                >
                     {hasSelection && onBulkReassign && !hideBulkReassign && (
                         <>
                             <Text size="sm" c="dimmed">
@@ -151,12 +160,7 @@ export const SchedulerTopToolbar: FC<SchedulerTopToolbarProps> = memo(
                     )}
                     {hasActiveFilters && onClearFilters && !hasSelection && (
                         <Tooltip label="Clear all filters">
-                            <ActionIcon
-                                variant="subtle"
-                                size="sm"
-                                color="gray"
-                                onClick={onClearFilters}
-                            >
+                            <ActionIcon size="sm" onClick={onClearFilters}>
                                 <MantineIcon icon={IconTrash} />
                             </ActionIcon>
                         </Tooltip>

@@ -4,9 +4,13 @@ import {
     type Field,
     type TableCalculation,
 } from '@lightdash/common';
-import { ActionIcon, Flex, Menu, Text } from '@mantine-8/core';
-import { IconCheck, IconChevronDown } from '@tabler/icons-react';
+import { ActionIcon, Flex, Menu, Text } from '@mantine/core';
+import { IconCheck, IconDots } from '@tabler/icons-react';
 import { useMemo, type FC } from 'react';
+import {
+    selectTileChartSorts,
+    useDashboardSelector,
+} from '../../features/dashboard/store';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import {
     getSortDirectionOrder,
@@ -24,11 +28,13 @@ type Props = {
 
 const ColumnHeaderSortMenuOptions: FC<Props> = ({ item, tileUuid }) => {
     const itemFieldId = getItemId(item);
-    const chartSort = useDashboardContext((c) => c.chartSort);
-    const setChartSort = useDashboardContext((c) => c.setChartSort);
+    const tileSorts = useDashboardSelector((state) =>
+        selectTileChartSorts(state, tileUuid),
+    );
+    const setTileChartSorts = useDashboardContext((c) => c.setTileChartSorts);
 
     const isSorted = (sortDirection: SortDirection) =>
-        chartSort[tileUuid]?.some(
+        tileSorts.some(
             (sorts) =>
                 sorts.fieldId === itemFieldId &&
                 sorts.descending === (sortDirection === SortDirection.DESC),
@@ -47,37 +53,28 @@ const ColumnHeaderSortMenuOptions: FC<Props> = ({ item, tileUuid }) => {
                         onClick={() => {
                             // Replace sortField for this tileUuid
                             // TODO update this code if you want to add multi-sorting
-                            setChartSort({
-                                ...chartSort,
-                                [tileUuid]: [
-                                    {
-                                        fieldId: itemFieldId,
-                                        descending:
-                                            sortDirection ===
-                                            SortDirection.DESC,
-                                    },
-                                ],
-                            });
+                            setTileChartSorts(tileUuid, [
+                                {
+                                    fieldId: itemFieldId,
+                                    descending:
+                                        sortDirection === SortDirection.DESC,
+                                },
+                            ]);
                         }}
                     >
                         Sort{' '}
-                        <Text span fz="inherit" lh="inherit" fw={500}>
+                        <Text span fw={500}>
                             {getSortLabel(item, sortDirection)}
                         </Text>
                     </Menu.Item>
                 ))}
-            {chartSort[tileUuid]?.some(
-                (sorts) => sorts.fieldId === itemFieldId,
-            ) && (
+            {tileSorts.some((sorts) => sorts.fieldId === itemFieldId) && (
                 <>
                     <Menu.Divider />
                     <Menu.Item
                         color={'red'}
                         onClick={() => {
-                            setChartSort({
-                                ...chartSort,
-                                [tileUuid]: [],
-                            });
+                            setTileChartSorts(tileUuid, []);
                         }}
                     >
                         Remove sort
@@ -94,20 +91,20 @@ const DashboardHeaderContextMenu: FC<HeaderProps & { tileUuid: string }> = ({
 }) => {
     const meta = header.column.columnDef.meta as TableColumn['meta'];
     const item = meta?.item;
-    const chartSort = useDashboardContext((c) => c.chartSort);
+    const tileSorts = useDashboardSelector((state) =>
+        selectTileChartSorts(state, tileUuid),
+    );
 
     const iconSort = useMemo(() => {
         if (item === undefined) return undefined;
 
-        const sort = chartSort[tileUuid]?.find(
-            (s) => s.fieldId === getItemId(item),
-        );
+        const sort = tileSorts.find((s) => s.fieldId === getItemId(item));
         if (sort) {
             return getSortIcon(item, sort.descending);
         } else {
             return undefined;
         }
-    }, [item, chartSort, tileUuid]);
+    }, [item, tileSorts]);
     if (item) {
         return (
             <Flex
@@ -122,10 +119,16 @@ const DashboardHeaderContextMenu: FC<HeaderProps & { tileUuid: string }> = ({
                     // Show the sort icon next to the title, and the dropdown menu on the right
                     iconSort ? <MantineIcon icon={iconSort} /> : <div></div>
                 }
-                <Menu withinPortal withArrow shadow="md">
+                <Menu withArrow>
                     <Menu.Target>
-                        <ActionIcon size="xs" variant="light" bg="transparent">
-                            <MantineIcon icon={IconChevronDown} />
+                        <ActionIcon
+                            size="xs"
+                            variant="light"
+                            color="gray"
+                            bg="transparent"
+                            aria-label="Context menu"
+                        >
+                            <MantineIcon icon={IconDots} />
                         </ActionIcon>
                     </Menu.Target>
 

@@ -2,19 +2,22 @@ import {
     BinType,
     CompiledExploreJoin,
     CustomDimensionType,
+    DimensionType,
     Explore,
     ForbiddenError,
     isCustomBinDimension,
     JoinRelationship,
     MetricType,
     SupportedDbtAdapter,
+    TableCalculationTotalMode,
+    TableCalculationType,
+    TimeFrames,
     WeekDay,
+    type TableCalculation,
 } from '@lightdash/common';
 import {
     bigqueryClientMock,
     COMPILED_DIMENSION,
-    COMPILED_MONTH_NAME_DIMENSION,
-    COMPILED_WEEK_NAME_DIMENSION,
     CUSTOM_SQL_DIMENSION,
     EXPLORE,
     INTRINSIC_USER_ATTRIBUTES,
@@ -28,14 +31,56 @@ import {
 import {
     applyLimitToSqlQuery,
     assertValidDimensionRequiredAttribute,
+    findDateGrainTableCalcWarnings,
     findMetricInflationWarnings,
+    findUnnestCrossProductWarnings,
     getCustomBinDimensionSql,
     getCustomSqlDimensionSql,
     getJoinedTables,
+    getSumOfRowsTableCalculations,
     replaceUserAttributesAsStrings,
+    replaceUserAttributesInSqlTable,
     sortDayOfWeekName,
     sortMonthName,
+    sortQuarterName,
 } from './utils';
+
+describe('getSumOfRowsTableCalculations', () => {
+    const tableCalculation = (
+        name: string,
+        type?: TableCalculationType,
+        totalMode = TableCalculationTotalMode.SUM_OF_ROWS,
+    ): TableCalculation => ({
+        name,
+        displayName: name,
+        sql: '1',
+        type,
+        totalMode,
+    });
+
+    it('returns only numeric sum-of-rows calculations', () => {
+        const metricQuery = {
+            ...METRIC_QUERY_WITH_CUSTOM_DIMENSION,
+            tableCalculations: [
+                tableCalculation('implicit-number'),
+                tableCalculation('number', TableCalculationType.NUMBER),
+                tableCalculation('string', TableCalculationType.STRING),
+                tableCalculation('date', TableCalculationType.DATE),
+                tableCalculation(
+                    'formula',
+                    TableCalculationType.NUMBER,
+                    TableCalculationTotalMode.FORMULA,
+                ),
+            ],
+        };
+
+        expect(
+            getSumOfRowsTableCalculations(metricQuery).map(
+                (calculation) => calculation.name,
+            ),
+        ).toEqual(['implicit-number', 'number']);
+    });
+});
 
 describe('replaceUserAttributes', () => {
     it('method with no user attribute should return same sqlFilter', () => {
@@ -133,6 +178,36 @@ describe('replaceUserAttributes', () => {
         ).toEqual("('1' IN ('1', '2'))");
     });
 
+    it('escapes each value individually for a multi-value attribute (IN list)', () => {
+        // Multiple values render as a comma-separated quoted list, each value
+        // escaped on its own — the supported way to build an IN clause.
+        expect(
+            replaceUserAttributesAsStrings(
+                'col IN (${lightdash.attribute.test})',
+                INTRINSIC_USER_ATTRIBUTES,
+                {
+                    test: ['US', 'CA', "O'Brien"],
+                },
+                warehouseClientMock,
+            ),
+        ).toEqual("(col IN ('US', 'CA', 'O''Brien'))");
+    });
+
+    it('escapes (does not inject) a single pre-quoted comma-separated value', () => {
+        // Regression: a single value that smuggles quotes/commas to fake an IN
+        // list is escaped to one string literal, not interpolated as raw SQL.
+        expect(
+            replaceUserAttributesAsStrings(
+                'col IN (${lightdash.attribute.test})',
+                INTRINSIC_USER_ATTRIBUTES,
+                {
+                    test: ["US', 'CA', 'UK"],
+                },
+                warehouseClientMock,
+            ),
+        ).toEqual("(col IN ('US'', ''CA'', ''UK'))");
+    });
+
     it('method should replace sqlFilter with multiple user attributes', () => {
         const userAttributes = { test: ['1'], another: ['2'] };
         const sqlFilter =
@@ -206,6 +281,71 @@ describe('replaceUserAttributes', () => {
                 warehouseClientMock,
             ),
         ).toEqual('(\'mock@lightdash.com\' = "mock@lightdash.com")');
+    });
+
+    it('should escape single quotes in a user attribute value to prevent SQL injection', () => {
+        expect(
+            replaceUserAttributesAsStrings(
+                'email = ${lightdash.attribute.region}',
+                INTRINSIC_USER_ATTRIBUTES,
+                { region: ["x' OR '1'='1"] },
+                warehouseClientMock,
+            ),
+        ).toEqual("(email = 'x'' OR ''1''=''1')");
+    });
+
+    it('should escape an intrinsic email value containing quotes and comments', () => {
+        expect(
+            replaceUserAttributesAsStrings(
+                'customer_email = ${lightdash.user.email}',
+                { email: "x'/**/OR/**/1=1/**/--@evil.com" },
+                {},
+                warehouseClientMock,
+            ),
+        ).toEqual("(customer_email = 'x''OR1=1')");
+    });
+
+    it('should escape every value in a multi-value user attribute', () => {
+        expect(
+            replaceUserAttributesAsStrings(
+                'region IN (${lightdash.attribute.region})',
+                INTRINSIC_USER_ATTRIBUTES,
+                { region: ['EU', "x'; DROP TABLE users; --"] },
+                warehouseClientMock,
+            ),
+        ).toEqual("(region IN ('EU', 'x''; DROP TABLE users; '))");
+    });
+});
+
+describe('replaceUserAttributesInSqlTable', () => {
+    it('should interpolate an identifier-safe user attribute into a table reference', () => {
+        expect(
+            replaceUserAttributesInSqlTable(
+                'analytics_${lightdash.attribute.tenant}.orders',
+                INTRINSIC_USER_ATTRIBUTES,
+                { tenant: ['acme'] },
+            ),
+        ).toEqual('analytics_acme.orders');
+    });
+
+    it('should throw when a user attribute value is not identifier-safe', () => {
+        expect(() =>
+            replaceUserAttributesInSqlTable(
+                'analytics_${lightdash.attribute.tenant}.orders',
+                INTRINSIC_USER_ATTRIBUTES,
+                { tenant: ['acme JOIN secrets s ON 1=1 --'] },
+            ),
+        ).toThrow(ForbiddenError);
+    });
+
+    it('should not run validation when the table references no user attributes', () => {
+        expect(
+            replaceUserAttributesInSqlTable(
+                'analytics.orders',
+                INTRINSIC_USER_ATTRIBUTES,
+                { tenant: ["x'; DROP TABLE users; --"] },
+            ),
+        ).toEqual('analytics.orders');
     });
 });
 
@@ -313,6 +453,14 @@ describe('with custom dimensions', () => {
                 )`,
             ],
             join: 'CROSS JOIN age_range_cte',
+            exprs: {
+                age_range: `CASE
+                    WHEN "table1".dim1 IS NULL THEN NULL
+WHEN "table1".dim1 >= age_range_cte.min_id + age_range_cte.bin_width * 0 AND "table1".dim1 < age_range_cte.min_id + age_range_cte.bin_width * 1 THEN CONCAT(age_range_cte.min_id + age_range_cte.bin_width * 0, ' - ', age_range_cte.min_id + age_range_cte.bin_width * 1)
+WHEN "table1".dim1 >= age_range_cte.min_id + age_range_cte.bin_width * 1 AND "table1".dim1 < age_range_cte.min_id + age_range_cte.bin_width * 2 THEN CONCAT(age_range_cte.min_id + age_range_cte.bin_width * 1, ' - ', age_range_cte.min_id + age_range_cte.bin_width * 2)
+ELSE CONCAT(age_range_cte.min_id + age_range_cte.bin_width * 2, ' - ', age_range_cte.max_id)
+                    END`,
+            },
             selects: {
                 age_range: `CASE
                     WHEN "table1".dim1 IS NULL THEN NULL
@@ -364,6 +512,9 @@ ELSE 2
                 )`,
             ],
             join: 'CROSS JOIN age_range_cte',
+            exprs: {
+                age_range: `CONCAT(age_range_cte.min_id, ' - ', age_range_cte.max_id)`,
+            },
             selects: {
                 age_range: `CONCAT(age_range_cte.min_id, ' - ', age_range_cte.max_id) AS \`age_range\``,
             },
@@ -371,7 +522,7 @@ ELSE 2
         });
     });
 
-    it('getCustomDimensionSql with sorted custom dimension ', () => {
+    it('getCustomDimensionSql with sorted custom dimension', () => {
         expect(
             getCustomBinDimensionSql({
                 warehouseSqlBuilder: bigqueryClientMock,
@@ -394,6 +545,14 @@ ELSE 2
                 )`,
             ],
             join: 'CROSS JOIN age_range_cte',
+            exprs: {
+                age_range: `CASE
+                    WHEN "table1".dim1 IS NULL THEN NULL
+WHEN "table1".dim1 >= age_range_cte.min_id + age_range_cte.bin_width * 0 AND "table1".dim1 < age_range_cte.min_id + age_range_cte.bin_width * 1 THEN CONCAT(age_range_cte.min_id + age_range_cte.bin_width * 0, ' - ', age_range_cte.min_id + age_range_cte.bin_width * 1)
+WHEN "table1".dim1 >= age_range_cte.min_id + age_range_cte.bin_width * 1 AND "table1".dim1 < age_range_cte.min_id + age_range_cte.bin_width * 2 THEN CONCAT(age_range_cte.min_id + age_range_cte.bin_width * 1, ' - ', age_range_cte.min_id + age_range_cte.bin_width * 2)
+ELSE CONCAT(age_range_cte.min_id + age_range_cte.bin_width * 2, ' - ', age_range_cte.max_id)
+                    END`,
+            },
             selects: {
                 age_range: `CASE
                     WHEN "table1".dim1 IS NULL THEN NULL
@@ -419,39 +578,25 @@ const ignoreIndentation = (sql: string) => sql.replace(/\s+/g, ' ');
 describe('Time frame sorting', () => {
     it('sortMonthName SQL', () => {
         expect(
-            ignoreIndentation(
-                sortMonthName(COMPILED_MONTH_NAME_DIMENSION, '"', false),
-            ),
+            ignoreIndentation(sortMonthName('"table1_dim1"', false)),
         ).toStrictEqual(ignoreIndentation(MONTH_NAME_SORT_SQL));
     });
     it('sortMonthName Descending SQL', () => {
         expect(
-            ignoreIndentation(
-                sortMonthName(COMPILED_MONTH_NAME_DIMENSION, '"', true),
-            ),
+            ignoreIndentation(sortMonthName('"table1_dim1"', true)),
         ).toStrictEqual(ignoreIndentation(MONTH_NAME_SORT_DESCENDING_SQL));
     });
     it('sortDayOfWeekName SQL for Saturday startOfWeek', () => {
         expect(
             ignoreIndentation(
-                sortDayOfWeekName(
-                    COMPILED_WEEK_NAME_DIMENSION,
-                    undefined,
-                    `"`,
-                    true,
-                ),
+                sortDayOfWeekName('"table1_dim1"', undefined, true),
             ),
         ).toStrictEqual(ignoreIndentation(WEEK_NAME_SORT_DESCENDING_SQL));
     });
     it('sortDayOfWeekName SQL for Sunday startOfWeek', () => {
         expect(
             ignoreIndentation(
-                sortDayOfWeekName(
-                    COMPILED_WEEK_NAME_DIMENSION,
-                    WeekDay.SUNDAY,
-                    `"`,
-                    false,
-                ),
+                sortDayOfWeekName('"table1_dim1"', WeekDay.SUNDAY, false),
             ),
         ).toStrictEqual(ignoreIndentation(WEEK_NAME_SORT_SQL)); // same as undefined
     });
@@ -459,12 +604,7 @@ describe('Time frame sorting', () => {
     it('sortDayOfWeekName SQL for Wednesday startOfWeek', () => {
         expect(
             ignoreIndentation(
-                sortDayOfWeekName(
-                    COMPILED_WEEK_NAME_DIMENSION,
-                    WeekDay.WEDNESDAY,
-                    `"`,
-                    false,
-                ),
+                sortDayOfWeekName('"table1_dim1"', WeekDay.WEDNESDAY, false),
             ),
         ).toStrictEqual(
             ignoreIndentation(`(
@@ -480,6 +620,18 @@ describe('Time frame sorting', () => {
             END
         )`),
         );
+    });
+
+    it('uses an already-rendered identifier without changing its escaping', () => {
+        const fieldSql = '"table1_""month"""';
+
+        const monthSql = sortMonthName(fieldSql, false);
+        const daySql = sortDayOfWeekName(fieldSql, undefined, false);
+        const quarterSql = sortQuarterName(fieldSql, false);
+
+        expect(monthSql.match(/"table1_""month"""/g)).toHaveLength(12);
+        expect(daySql.match(/"table1_""month"""/g)).toHaveLength(7);
+        expect(quarterSql.match(/"table1_""month"""/g)).toHaveLength(4);
     });
 });
 
@@ -797,6 +949,51 @@ describe('applyLimitToSqlQuery', () => {
 });
 
 describe('findMetricInflationWarnings', () => {
+    it('does not ask unnested tables for a primary key but still flags parent metrics', () => {
+        const result = findMetricInflationWarnings({
+            tables: {
+                sessions: { primaryKey: ['id'] },
+                sessions__hits: {
+                    nestedFrom: { parentTable: 'sessions', columnPath: 'hits' },
+                },
+            },
+            possibleJoins: [
+                {
+                    table: 'sessions__hits',
+                    sqlOn: 'TRUE',
+                    compiledSqlOn: 'TRUE',
+                    tablesReferences: ['sessions'],
+                    relationship: JoinRelationship.ONE_TO_MANY,
+                },
+            ],
+            baseTable: 'sessions',
+            joinedTables: new Set(['sessions__hits']),
+            metrics: [
+                {
+                    name: 'total_pageviews',
+                    type: MetricType.SUM,
+                    table: 'sessions',
+                    label: 'Total pageviews',
+                },
+                {
+                    name: 'total_revenue',
+                    type: MetricType.SUM,
+                    table: 'sessions__hits',
+                    label: 'Total revenue',
+                },
+            ],
+        });
+
+        expect(
+            result.some((warning) =>
+                warning.message.includes('missing a primary key definition'),
+            ),
+        ).toBe(false);
+        expect(result.map((warning) => warning.fields)).toEqual([
+            ['sessions_total_pageviews'],
+        ]);
+    });
+
     it('should return no warnings when there are no metrics', () => {
         const result = findMetricInflationWarnings({
             tables: {
@@ -1445,5 +1642,186 @@ describe('getJoinedTables', () => {
         const result = getJoinedTables(explore, ['orders', 'users']);
 
         expect(result).toContain('intermediary_table');
+    });
+});
+
+describe('findUnnestCrossProductWarnings', () => {
+    const tables = {
+        sessions: {},
+        sessions__hits: {
+            nestedFrom: { parentTable: 'sessions', columnPath: 'hits' },
+        },
+        sessions__hits__product: {
+            nestedFrom: {
+                parentTable: 'sessions__hits',
+                columnPath: 'hits.product',
+            },
+        },
+        sessions__hits__promotion: {
+            nestedFrom: {
+                parentTable: 'sessions__hits',
+                columnPath: 'hits.promotion',
+            },
+        },
+        sessions__customDimensions: {
+            nestedFrom: {
+                parentTable: 'sessions',
+                columnPath: 'customDimensions',
+            },
+        },
+        users: {},
+    };
+
+    it('does not warn for a single ancestry chain of unnests', () => {
+        expect(
+            findUnnestCrossProductWarnings({
+                tables,
+                joinedTables: new Set([
+                    'sessions__hits',
+                    'sessions__hits__product',
+                ]),
+            }),
+        ).toEqual([]);
+    });
+
+    it('does not warn when only regular joins are present', () => {
+        expect(
+            findUnnestCrossProductWarnings({
+                tables,
+                joinedTables: new Set(['users', 'sessions__hits']),
+            }),
+        ).toEqual([]);
+    });
+
+    it('warns once naming the independent unnests, not their shared ancestors', () => {
+        const result = findUnnestCrossProductWarnings({
+            tables,
+            joinedTables: new Set([
+                'sessions__hits',
+                'sessions__hits__product',
+                'sessions__hits__promotion',
+                'sessions__customDimensions',
+            ]),
+        });
+        expect(result).toHaveLength(1);
+        expect(result[0].tables).toEqual([
+            'sessions__hits__product',
+            'sessions__hits__promotion',
+            'sessions__customDimensions',
+        ]);
+        expect(result[0].message).toContain(
+            'Repeated columns **"sessions__hits__product"**, **"sessions__hits__promotion"** and **"sessions__customDimensions"** are unnested together',
+        );
+        expect(result[0].message).not.toContain('"sessions__hits"');
+    });
+});
+
+describe('findDateGrainTableCalcWarnings (GLITCH-506)', () => {
+    // A day-or-coarser DATE_TRUNC of a TIMESTAMP base column: this is the
+    // dimension the GLITCH-452 cast collapses to a real DATE (loses time-of-day).
+    const dimensions = {
+        orders_order_date_day: {
+            type: DimensionType.DATE,
+            timeInterval: TimeFrames.DAY,
+            timeIntervalBaseDimensionType: DimensionType.TIMESTAMP,
+            label: 'Order date day',
+        },
+        // A plain string dimension — never a cast target.
+        orders_status: {
+            type: DimensionType.STRING,
+            label: 'Status',
+        },
+    };
+
+    const sqlCalc = (name: string, sql: string): TableCalculation => ({
+        name,
+        displayName: name,
+        sql,
+    });
+
+    it('warns when a sql calc applies sub-day ops to a cast date dimension', () => {
+        const warnings = findDateGrainTableCalcWarnings({
+            tableCalculations: [
+                sqlCalc(
+                    'hours_in',
+                    'EXTRACT(HOUR FROM ${orders.order_date_day})',
+                ),
+            ],
+            dimensions,
+            useTimezoneAwareDateTrunc: true,
+        });
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0].fields).toContain('orders_order_date_day');
+        expect(warnings[0].message).toMatch(/raw timestamp/i);
+    });
+
+    it('warns for + interval hours and ::timestamp casts', () => {
+        expect(
+            findDateGrainTableCalcWarnings({
+                tableCalculations: [
+                    sqlCalc(
+                        'shift',
+                        "${orders.order_date_day} + interval '6 hours'",
+                    ),
+                ],
+                dimensions,
+                useTimezoneAwareDateTrunc: true,
+            }),
+        ).toHaveLength(1);
+        expect(
+            findDateGrainTableCalcWarnings({
+                tableCalculations: [
+                    sqlCalc('recast', '${orders.order_date_day}::timestamp'),
+                ],
+                dimensions,
+                useTimezoneAwareDateTrunc: true,
+            }),
+        ).toHaveLength(1);
+    });
+
+    it('does NOT warn for day-or-coarser date math (no spam)', () => {
+        expect(
+            findDateGrainTableCalcWarnings({
+                tableCalculations: [
+                    sqlCalc(
+                        'next_week',
+                        "${orders.order_date_day} + interval '7 days'",
+                    ),
+                    sqlCalc(
+                        'is_nye',
+                        "CASE WHEN ${orders.order_date_day} = '2024-01-01' THEN 1 END",
+                    ),
+                ],
+                dimensions,
+                useTimezoneAwareDateTrunc: true,
+            }),
+        ).toEqual([]);
+    });
+
+    it('does NOT warn when the timezone-aware flag is off', () => {
+        expect(
+            findDateGrainTableCalcWarnings({
+                tableCalculations: [
+                    sqlCalc(
+                        'hours_in',
+                        'EXTRACT(HOUR FROM ${orders.order_date_day})',
+                    ),
+                ],
+                dimensions,
+                useTimezoneAwareDateTrunc: false,
+            }),
+        ).toEqual([]);
+    });
+
+    it('does NOT warn for sub-day ops on a non-cast dimension', () => {
+        expect(
+            findDateGrainTableCalcWarnings({
+                tableCalculations: [
+                    sqlCalc('hours_in', 'EXTRACT(HOUR FROM ${orders.status})'),
+                ],
+                dimensions,
+                useTimezoneAwareDateTrunc: true,
+            }),
+        ).toEqual([]);
     });
 });

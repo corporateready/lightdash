@@ -1,29 +1,41 @@
+import { type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import {
     AxisSide,
+    CartesianSeriesType,
     getEChartsChartTypeFromChartKind,
+    getReadableTextColor,
     ValueLabelPositionOptions,
     type CartesianChartDisplay,
     type ChartKind,
 } from '@lightdash/common';
 import {
+    TextInput,
     Box,
     Flex,
     Group,
-    SegmentedControl,
     Stack,
     Text,
-    TextInput,
+    SegmentedControl,
 } from '@mantine/core';
 import { IconAlignLeft, IconAlignRight } from '@tabler/icons-react';
 import MantineIcon from '../../common/MantineIcon';
+import {
+    SeriesDepthControl,
+    type SeriesDrawOrderControl,
+} from '../../VisualizationConfigs/ChartConfigPanel/Series/SeriesDrawOrder';
+import drawOrderStyles from '../../VisualizationConfigs/ChartConfigPanel/Series/seriesDrawOrder.module.css';
 import ColorSelector from '../../VisualizationConfigs/ColorSelector';
 import { Config } from '../../VisualizationConfigs/common/Config';
+import { GrabIcon } from '../../VisualizationConfigs/common/GrabIcon';
+import classes from './CartesianChartSeries.module.css';
 import { CartesianChartTypeConfig } from './CartesianChartTypeConfig';
 import { CartesianChartValueLabelConfig } from './CartesianChartValueLabelConfig';
 
 const LABEL_WIDTH = 120;
 
 type SingleSeriesConfigurationProps = {
+    dragHandleProps?: DraggableProvidedDragHandleProps | null;
+    drawOrder?: SeriesDrawOrderControl;
     reference: string;
     color: string | undefined;
     colors: string[];
@@ -31,6 +43,7 @@ type SingleSeriesConfigurationProps = {
     type: NonNullable<CartesianChartDisplay['series']>[number]['type'];
     whichYAxis?: number;
     valueLabelPosition: ValueLabelPositionOptions | undefined;
+    valueLabelColor?: string;
     selectedChartType: ChartKind;
     onColorChange: (reference: string, color: string) => void;
     onLabelChange: (reference: string, label: string) => void;
@@ -43,52 +56,64 @@ type SingleSeriesConfigurationProps = {
         reference: string,
         position: ValueLabelPositionOptions,
     ) => void;
+    onValueLabelColorChange: (
+        reference: string,
+        color: string | undefined,
+    ) => void;
 };
 
 export const SingleSeriesConfiguration = ({
     reference,
+    dragHandleProps,
+    drawOrder,
     color,
     colors,
     label,
     type,
     whichYAxis = 0,
     valueLabelPosition,
+    valueLabelColor,
     selectedChartType,
     onColorChange,
     onLabelChange,
     onTypeChange,
     onAxisChange,
     onValueLabelPositionChange,
+    onValueLabelColorChange,
 }: SingleSeriesConfigurationProps) => {
+    const resolvedType =
+        type ?? getEChartsChartTypeFromChartKind(selectedChartType);
+    const seriesColor = color ?? colors[0];
+    const automaticLabelColor =
+        resolvedType === CartesianSeriesType.BAR &&
+        valueLabelPosition === ValueLabelPositionOptions.INSIDE
+            ? getReadableTextColor(seriesColor)
+            : seriesColor;
+
     return (
-        <Stack key={reference} spacing="xs">
-            <Stack
-                pl="sm"
-                spacing="xs"
-                sx={(theme) => ({
-                    backgroundColor: theme.colors.ldGray[0],
-                    borderRadius: theme.radius.md,
-                    padding: theme.spacing.xs,
-                })}
-            >
-                <Config.Subheading>{reference}</Config.Subheading>
+        <Stack key={reference} gap="xs">
+            <Stack gap="xs" className={classes.seriesCard}>
+                <Group
+                    gap="xs"
+                    wrap="nowrap"
+                    className={drawOrderStyles.seriesHeader}
+                >
+                    {dragHandleProps && (
+                        <GrabIcon dragHandleProps={dragHandleProps} />
+                    )}
+                    <Config.Subheading>{reference}</Config.Subheading>
+                    {drawOrder && <SeriesDepthControl control={drawOrder} />}
+                </Group>
                 <Flex justify="flex-start" align="center" wrap="nowrap">
                     <Config.Label w={LABEL_WIDTH}>Label</Config.Label>
                     <Group
-                        spacing="xs"
-                        position="left"
-                        noWrap
+                        gap="xs"
+                        justify="flex-start"
+                        wrap="nowrap"
                         grow
-                        style={{ flex: 3 }}
+                        flex={3}
                     >
-                        <Box
-                            sx={{
-                                flex: 1,
-                                display: 'flex',
-                                flexDirection: 'row',
-                                alignItems: 'center',
-                            }}
-                        >
+                        <Group gap={0} flex={1} wrap="nowrap">
                             <Box w="20px">
                                 <ColorSelector
                                     color={color}
@@ -100,57 +125,54 @@ export const SingleSeriesConfiguration = ({
                                 />
                             </Box>
                             <TextInput
+                                size="xs"
                                 maw="100%"
-                                radius="md"
                                 value={label}
                                 onChange={(e) =>
                                     onLabelChange(reference, e.target.value)
                                 }
-                                sx={(theme) => ({
-                                    input: {
-                                        border: `1px solid ${theme.colors.ldGray[2]}`,
-                                    },
-                                    flex: 1,
-                                    marginLeft: theme.spacing.xs,
-                                })}
+                                flex={1}
+                                ml="xs"
                             />
-                        </Box>
+                        </Group>
                     </Group>
                 </Flex>
                 <Flex justify="flex-start" align="center" wrap="nowrap">
                     <Config.Label w={LABEL_WIDTH}>Chart Type</Config.Label>
                     <CartesianChartTypeConfig
                         canSelectDifferentTypeFromBaseChart={true}
-                        type={
-                            type ??
-                            getEChartsChartTypeFromChartKind(selectedChartType)
-                        }
+                        type={resolvedType}
                         onChangeType={(value) => onTypeChange(reference, value)}
                     />
                 </Flex>
                 <Flex justify="flex-start" align="center" wrap="nowrap">
                     <Config.Label w={LABEL_WIDTH}>Y Axis</Config.Label>
                     <SegmentedControl
-                        sx={{ minWidth: '130px', flex: 1 }}
-                        radius="md"
+                        miw={130}
+                        flex={1}
+                        fz="sm"
                         data={[
                             {
                                 value: 'left',
                                 label: (
-                                    <Group spacing="xs" noWrap>
+                                    <Group gap="xs" wrap="nowrap">
                                         <MantineIcon
                                             icon={IconAlignLeft}
                                             color="ldDark.8"
                                         />
-                                        <Text>Left</Text>
+                                        <Text inherit>Left</Text>
                                     </Group>
                                 ),
                             },
                             {
                                 value: 'right',
                                 label: (
-                                    <Group spacing="xs" noWrap position="right">
-                                        <Text>Right</Text>
+                                    <Group
+                                        gap="xs"
+                                        wrap="nowrap"
+                                        justify="flex-end"
+                                    >
+                                        <Text inherit>Right</Text>
                                         <MantineIcon
                                             icon={IconAlignRight}
                                             color="ldDark.8"
@@ -173,12 +195,18 @@ export const SingleSeriesConfiguration = ({
                 <Flex justify="flex-start" align="center" wrap="nowrap">
                     <Config.Label w={LABEL_WIDTH}>Value labels</Config.Label>
                     <CartesianChartValueLabelConfig
+                        colors={colors}
+                        defaultColor={automaticLabelColor}
+                        valueLabelColor={valueLabelColor}
                         valueLabelPosition={
                             valueLabelPosition ??
                             ValueLabelPositionOptions.HIDDEN
                         }
                         onChangeValueLabelPosition={(position) =>
                             onValueLabelPositionChange(reference, position)
+                        }
+                        onChangeValueLabelColor={(nextColor) =>
+                            onValueLabelColorChange(reference, nextColor)
                         }
                     />
                 </Flex>

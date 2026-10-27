@@ -1,0 +1,61 @@
+import { ActionIcon, type ActionIconProps, Tooltip } from '@mantine/core';
+import { type FC } from 'react';
+import { type AiAgentAskClickedSource } from '../../../../../providers/Tracking/types';
+import { useUiStrings } from '../../../../providers/Embed/useUiStrings';
+import { AiAgentIcon } from '../AiAgentIcon';
+import { useAskAiAgentAction } from './useAskAiAgentAction';
+
+type Props = {
+    projectUuid: string | undefined;
+    chartUuid?: string;
+    dashboardUuid?: string;
+    dataAppUuid?: string;
+    clickedFrom: AiAgentAskClickedSource;
+    variant?: ActionIconProps['variant'];
+    size?: ActionIconProps['size'];
+    radius?: ActionIconProps['radius'];
+    iconSize?: number;
+};
+
+/**
+ * Icon button that opens the AI agent launcher panel for a new conversation.
+ * Renders nothing when AI agents are not enabled, the user lacks permission,
+ * or no default agent can be resolved.
+ */
+export const AskAiAgentButton: FC<Props> = ({
+    projectUuid,
+    chartUuid,
+    dashboardUuid,
+    dataAppUuid,
+    clickedFrom,
+    variant = 'subtle',
+    size = 'sm',
+    radius,
+    iconSize = 16,
+}) => {
+    const getUiString = useUiStrings();
+    const { canAsk, handleClick } = useAskAiAgentAction({
+        projectUuid,
+        chartUuid,
+        dashboardUuid,
+        dataAppUuid,
+        clickedFrom,
+    });
+
+    if (!canAsk) return null;
+
+    return (
+        <Tooltip label={getUiString('tileMenu.askAi')}>
+            <ActionIcon
+                aria-label={getUiString('tileMenu.askAi')}
+                variant={variant}
+                size={size}
+                radius={radius}
+                color="gray"
+                onClick={handleClick}
+            >
+                <AiAgentIcon size={iconSize} />
+            </ActionIcon>
+        </Tooltip>
+    );
+};

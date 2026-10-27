@@ -4,27 +4,45 @@ import {
     AzureAdSsoConfigSummary,
     FeatureFlags,
     ForbiddenError,
+    GenericOidcSsoConfig,
+    GenericOidcSsoConfigSummary,
+    GoogleSsoConfig,
+    GoogleSsoConfigSummary,
+    isPublicEmailProviderDomain,
     NotFoundError,
+    OktaSsoConfig,
+    OktaSsoConfigSummary,
+    OneLoginSsoConfig,
+    OneLoginSsoConfigSummary,
     OrganizationSsoMethodFlags,
     OrganizationSsoProvider,
     ParameterError,
+    UnexpectedServerError,
     UpsertAzureAdSsoConfig,
+    UpsertGenericOidcSsoConfig,
+    UpsertGoogleSsoConfig,
+    UpsertOktaSsoConfig,
+    UpsertOneLoginSsoConfig,
     type RegisteredAccount,
 } from '@lightdash/common';
 import { LightdashConfig } from '../../config/parseConfig';
 import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { OrganizationAllowedEmailDomainsModel } from '../../models/OrganizationAllowedEmailDomainsModel';
+import { OrganizationDomainVerificationModel } from '../../models/OrganizationDomainVerificationModel';
 import {
+    OrganizationSsoConfigLookup,
     OrganizationSsoMethod,
     OrganizationSsoModel,
 } from '../../models/OrganizationSsoModel';
 import { UserModel } from '../../models/UserModel';
+import { validatePublicHttpUrl } from '../../utils/ssrfProtection';
 import { BaseService } from '../BaseService';
 
 type OrganizationSsoServiceArguments = {
     lightdashConfig: LightdashConfig;
     organizationSsoModel: OrganizationSsoModel;
     organizationAllowedEmailDomainsModel: OrganizationAllowedEmailDomainsModel;
+    organizationDomainVerificationModel: OrganizationDomainVerificationModel;
     featureFlagModel: FeatureFlagModel;
     userModel: UserModel;
 };
@@ -41,12 +59,75 @@ const toSummary = (
     allowPassword: method.allowPassword,
 });
 
+const toOktaSummary = (
+    method: OrganizationSsoMethod<OrganizationSsoProvider.OKTA>,
+): OktaSsoConfigSummary => ({
+    oauth2Issuer: method.config.oauth2Issuer,
+    oktaDomain: method.config.oktaDomain,
+    oauth2ClientId: method.config.oauth2ClientId,
+    authorizationServerId: method.config.authorizationServerId,
+    extraScopes: method.config.extraScopes,
+    hasClientSecret: !!method.config.oauth2ClientSecret,
+    enabled: method.enabled,
+    overrideEmailDomains: method.overrideEmailDomains,
+    emailDomains: method.emailDomains,
+    allowPassword: method.allowPassword,
+});
+
+const toGenericOidcSummary = (
+    method: OrganizationSsoMethod<OrganizationSsoProvider.GENERIC_OIDC>,
+): GenericOidcSsoConfigSummary => ({
+    clientId: method.config.clientId,
+    metadataDocumentEndpoint: method.config.metadataDocumentEndpoint,
+    scopes: method.config.scopes,
+    hasClientSecret: !!method.config.clientSecret,
+    enabled: method.enabled,
+    overrideEmailDomains: method.overrideEmailDomains,
+    emailDomains: method.emailDomains,
+    allowPassword: method.allowPassword,
+});
+
+const toOneLoginSummary = (
+    method: OrganizationSsoMethod<OrganizationSsoProvider.ONELOGIN>,
+): OneLoginSsoConfigSummary => ({
+    oauth2Issuer: method.config.oauth2Issuer,
+    oauth2ClientId: method.config.oauth2ClientId,
+    hasClientSecret: !!method.config.oauth2ClientSecret,
+    enabled: method.enabled,
+    overrideEmailDomains: method.overrideEmailDomains,
+    emailDomains: method.emailDomains,
+    allowPassword: method.allowPassword,
+});
+
+const toGoogleSummary = (
+    method: OrganizationSsoMethod<OrganizationSsoProvider.GOOGLE>,
+): GoogleSsoConfigSummary => ({
+    enabled: method.enabled,
+    overrideEmailDomains: method.overrideEmailDomains,
+    emailDomains: method.emailDomains,
+    allowPassword: method.allowPassword,
+});
+
+// Okta dashboard tile launches identify the provider with an `iss` URL.
+const normalizeIssuerUrl = (issuer: string) => {
+    try {
+        const url = new URL(issuer);
+        url.hash = '';
+        url.search = '';
+        return url.href.replace(/\/$/, '').toLowerCase();
+    } catch {
+        return undefined;
+    }
+};
+
 export class OrganizationSsoService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
 
     private readonly organizationSsoModel: OrganizationSsoModel;
 
     private readonly organizationAllowedEmailDomainsModel: OrganizationAllowedEmailDomainsModel;
+
+    private readonly organizationDomainVerificationModel: OrganizationDomainVerificationModel;
 
     private readonly featureFlagModel: FeatureFlagModel;
 
@@ -56,6 +137,7 @@ export class OrganizationSsoService extends BaseService {
         lightdashConfig,
         organizationSsoModel,
         organizationAllowedEmailDomainsModel,
+        organizationDomainVerificationModel,
         featureFlagModel,
         userModel,
     }: OrganizationSsoServiceArguments) {
@@ -64,6 +146,8 @@ export class OrganizationSsoService extends BaseService {
         this.organizationSsoModel = organizationSsoModel;
         this.organizationAllowedEmailDomainsModel =
             organizationAllowedEmailDomainsModel;
+        this.organizationDomainVerificationModel =
+            organizationDomainVerificationModel;
         this.featureFlagModel = featureFlagModel;
         this.userModel = userModel;
     }
@@ -75,7 +159,6 @@ export class OrganizationSsoService extends BaseService {
             user: {
                 userUuid: account.user.userUuid,
                 organizationUuid: account.organization?.organizationUuid,
-                organizationName: account.organization?.name,
             },
             featureFlagId: FeatureFlags.SsoOrganizationSettings,
         });
@@ -85,24 +168,6 @@ export class OrganizationSsoService extends BaseService {
             );
         }
     }
-
-    /**
-     * Domains no single organization should ever be able to claim.
-     * Not exhaustive — covers the obvious public providers and corporate
-     * domains we know can't legitimately belong to a single Lightdash org.
-     */
-    private static readonly DISALLOWED_DOMAINS = new Set([
-        'gmail.com',
-        'googlemail.com',
-        'google.com',
-        'microsoft.com',
-        'onmicrosoft.com',
-        'outlook.com',
-        'hotmail.com',
-        'live.com',
-        'yahoo.com',
-        'icloud.com',
-    ]);
 
     private static validateEmailDomains(domains: string[]): void {
         const normalized = domains.map((d) => d.trim().toLowerCase());
@@ -121,14 +186,61 @@ export class OrganizationSsoService extends BaseService {
             );
         }
 
-        const disallowed = normalized.filter((d) =>
-            OrganizationSsoService.DISALLOWED_DOMAINS.has(d),
-        );
+        // Public providers (gmail, outlook, …) can never belong to one org —
+        // see the shared blocklist in @lightdash/common.
+        const disallowed = normalized.filter(isPublicEmailProviderDomain);
         if (disallowed.length > 0) {
             throw new ParameterError(
                 `These domains can't be claimed: ${disallowed.join(
                     ', ',
                 )}. Use a domain or subdomain that identifies your organization.`,
+            );
+        }
+    }
+
+    /**
+     * A provider may only route email domains the organization has proven it
+     * owns. Verified domains are the source of truth for SSO routing; this is
+     * the server-side backstop behind the verified-domain picker in the UI.
+     */
+    private async assertEmailDomainsVerified(
+        organizationUuid: string,
+        domains: string[],
+    ): Promise<void> {
+        const verified = new Set(
+            (
+                await this.organizationDomainVerificationModel.findVerifiedDomains(
+                    organizationUuid,
+                )
+            ).map((d) => d.domain),
+        );
+        const unverified = domains
+            .map((d) => d.trim().toLowerCase())
+            .filter((d) => !verified.has(d));
+        if (unverified.length > 0) {
+            throw new ParameterError(
+                `These domains must be verified before they can be used for SSO: ${unverified.join(
+                    ', ',
+                )}. Verify them in Settings → Verified domains.`,
+            );
+        }
+    }
+
+    /**
+     * SSO provider URLs (the OIDC discovery document, the Okta domain) are
+     * fetched server-side during issuer discovery, so they must resolve to a
+     * public https address. Rejects localhost, private and internal-network
+     * addresses (DNS-resolved). Validated when the config is saved.
+     */
+    private static async assertPublicSsoUrl(
+        rawUrl: string,
+        label: string,
+    ): Promise<void> {
+        try {
+            await validatePublicHttpUrl(rawUrl);
+        } catch {
+            throw new ParameterError(
+                `${label} must be a valid public https URL — localhost, private and internal network addresses are not allowed.`,
             );
         }
     }
@@ -177,6 +289,12 @@ export class OrganizationSsoService extends BaseService {
 
         if (data.emailDomains && data.emailDomains.length > 0) {
             OrganizationSsoService.validateEmailDomains(data.emailDomains);
+            if (data.overrideEmailDomains) {
+                await this.assertEmailDomainsVerified(
+                    organizationUuid,
+                    data.emailDomains,
+                );
+            }
         }
 
         const existing = await this.organizationSsoModel.findMethod(
@@ -217,7 +335,9 @@ export class OrganizationSsoService extends BaseService {
             OrganizationSsoProvider.AZUREAD,
         );
         if (!refreshed) {
-            throw new Error('Failed to read back upserted SSO configuration');
+            throw new UnexpectedServerError(
+                'Failed to read back upserted SSO configuration',
+            );
         }
         return toSummary(refreshed);
     }
@@ -235,6 +355,407 @@ export class OrganizationSsoService extends BaseService {
         await this.organizationSsoModel.delete(
             organizationUuid,
             OrganizationSsoProvider.AZUREAD,
+        );
+    }
+
+    async getOktaConfig(
+        account: RegisteredAccount,
+    ): Promise<OktaSsoConfigSummary | null> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const method = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.OKTA,
+        );
+        return method ? toOktaSummary(method) : null;
+    }
+
+    async upsertOktaConfig(
+        account: RegisteredAccount,
+        data: UpsertOktaSsoConfig,
+    ): Promise<OktaSsoConfigSummary> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+
+        if (
+            !data.oauth2ClientId?.trim() ||
+            !data.oauth2Issuer?.trim() ||
+            !data.oktaDomain?.trim()
+        ) {
+            throw new ParameterError(
+                'oauth2ClientId, oauth2Issuer and oktaDomain are required',
+            );
+        }
+
+        // The Okta domain builds the issuer URL fetched server-side during
+        // discovery — require a public https URL.
+        await OrganizationSsoService.assertPublicSsoUrl(
+            `https://${data.oktaDomain.trim().replace(/^https?:\/\//, '')}`,
+            'Okta domain',
+        );
+
+        if (data.emailDomains && data.emailDomains.length > 0) {
+            OrganizationSsoService.validateEmailDomains(data.emailDomains);
+            if (data.overrideEmailDomains) {
+                await this.assertEmailDomainsVerified(
+                    organizationUuid,
+                    data.emailDomains,
+                );
+            }
+        }
+
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.OKTA,
+        );
+
+        const clientSecret =
+            data.oauth2ClientSecret?.trim() ||
+            existing?.config.oauth2ClientSecret;
+        if (!clientSecret) {
+            throw new ParameterError('oauth2ClientSecret is required');
+        }
+
+        const oauth2Issuer = normalizeIssuerUrl(data.oauth2Issuer);
+        if (!oauth2Issuer) {
+            throw new ParameterError('oauth2Issuer must be a valid URL');
+        }
+
+        const config: OktaSsoConfig = {
+            oauth2Issuer,
+            oktaDomain: data.oktaDomain.trim(),
+            oauth2ClientId: data.oauth2ClientId.trim(),
+            oauth2ClientSecret: clientSecret,
+            authorizationServerId: data.authorizationServerId?.trim() || null,
+            extraScopes: data.extraScopes?.trim() || null,
+        };
+
+        const flags: Partial<OrganizationSsoMethodFlags> = {
+            enabled: data.enabled,
+            overrideEmailDomains: data.overrideEmailDomains,
+            emailDomains: data.emailDomains,
+            allowPassword: data.allowPassword,
+        };
+
+        await this.organizationSsoModel.upsert(
+            organizationUuid,
+            OrganizationSsoProvider.OKTA,
+            config,
+            flags,
+            account.user.userUuid,
+        );
+
+        const refreshed = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.OKTA,
+        );
+        if (!refreshed) {
+            throw new UnexpectedServerError(
+                'Failed to read back upserted SSO configuration',
+            );
+        }
+        return toOktaSummary(refreshed);
+    }
+
+    async deleteOktaConfig(account: RegisteredAccount): Promise<void> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.OKTA,
+        );
+        if (!existing) {
+            throw new NotFoundError('No Okta SSO configuration found');
+        }
+        await this.organizationSsoModel.delete(
+            organizationUuid,
+            OrganizationSsoProvider.OKTA,
+        );
+    }
+
+    async getGenericOidcConfig(
+        account: RegisteredAccount,
+    ): Promise<GenericOidcSsoConfigSummary | null> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const method = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GENERIC_OIDC,
+        );
+        return method ? toGenericOidcSummary(method) : null;
+    }
+
+    async upsertGenericOidcConfig(
+        account: RegisteredAccount,
+        data: UpsertGenericOidcSsoConfig,
+    ): Promise<GenericOidcSsoConfigSummary> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+
+        if (!data.clientId?.trim() || !data.metadataDocumentEndpoint?.trim()) {
+            throw new ParameterError(
+                'clientId and metadataDocumentEndpoint are required',
+            );
+        }
+
+        // The discovery document URL is fetched server-side during discovery —
+        // require a public https URL.
+        await OrganizationSsoService.assertPublicSsoUrl(
+            data.metadataDocumentEndpoint.trim(),
+            'OIDC discovery document URL',
+        );
+
+        if (data.emailDomains && data.emailDomains.length > 0) {
+            OrganizationSsoService.validateEmailDomains(data.emailDomains);
+            if (data.overrideEmailDomains) {
+                await this.assertEmailDomainsVerified(
+                    organizationUuid,
+                    data.emailDomains,
+                );
+            }
+        }
+
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GENERIC_OIDC,
+        );
+
+        const clientSecret =
+            data.clientSecret?.trim() || existing?.config.clientSecret;
+        if (!clientSecret) {
+            throw new ParameterError('clientSecret is required');
+        }
+
+        const config: GenericOidcSsoConfig = {
+            clientId: data.clientId.trim(),
+            clientSecret,
+            metadataDocumentEndpoint: data.metadataDocumentEndpoint.trim(),
+            scopes: data.scopes?.trim() || null,
+        };
+
+        const flags: Partial<OrganizationSsoMethodFlags> = {
+            enabled: data.enabled,
+            overrideEmailDomains: data.overrideEmailDomains,
+            emailDomains: data.emailDomains,
+            allowPassword: data.allowPassword,
+        };
+
+        await this.organizationSsoModel.upsert(
+            organizationUuid,
+            OrganizationSsoProvider.GENERIC_OIDC,
+            config,
+            flags,
+            account.user.userUuid,
+        );
+
+        const refreshed = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GENERIC_OIDC,
+        );
+        if (!refreshed) {
+            throw new UnexpectedServerError(
+                'Failed to read back upserted SSO configuration',
+            );
+        }
+        return toGenericOidcSummary(refreshed);
+    }
+
+    async deleteGenericOidcConfig(account: RegisteredAccount): Promise<void> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GENERIC_OIDC,
+        );
+        if (!existing) {
+            throw new NotFoundError('No OIDC SSO configuration found');
+        }
+        await this.organizationSsoModel.delete(
+            organizationUuid,
+            OrganizationSsoProvider.GENERIC_OIDC,
+        );
+    }
+
+    async getOneLoginConfig(
+        account: RegisteredAccount,
+    ): Promise<OneLoginSsoConfigSummary | null> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const method = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.ONELOGIN,
+        );
+        return method ? toOneLoginSummary(method) : null;
+    }
+
+    async upsertOneLoginConfig(
+        account: RegisteredAccount,
+        data: UpsertOneLoginSsoConfig,
+    ): Promise<OneLoginSsoConfigSummary> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+
+        if (!data.oauth2ClientId?.trim() || !data.oauth2Issuer?.trim()) {
+            throw new ParameterError(
+                'oauth2ClientId and oauth2Issuer are required',
+            );
+        }
+
+        // The issuer builds the token/userinfo URLs fetched server-side during
+        // the callback — require a public https URL.
+        await OrganizationSsoService.assertPublicSsoUrl(
+            data.oauth2Issuer.trim(),
+            'OneLogin issuer URL',
+        );
+
+        if (data.emailDomains && data.emailDomains.length > 0) {
+            OrganizationSsoService.validateEmailDomains(data.emailDomains);
+            if (data.overrideEmailDomains) {
+                await this.assertEmailDomainsVerified(
+                    organizationUuid,
+                    data.emailDomains,
+                );
+            }
+        }
+
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.ONELOGIN,
+        );
+
+        const clientSecret =
+            data.oauth2ClientSecret?.trim() ||
+            existing?.config.oauth2ClientSecret;
+        if (!clientSecret) {
+            throw new ParameterError('oauth2ClientSecret is required');
+        }
+
+        const config: OneLoginSsoConfig = {
+            oauth2Issuer: data.oauth2Issuer.trim(),
+            oauth2ClientId: data.oauth2ClientId.trim(),
+            oauth2ClientSecret: clientSecret,
+        };
+
+        const flags: Partial<OrganizationSsoMethodFlags> = {
+            enabled: data.enabled,
+            overrideEmailDomains: data.overrideEmailDomains,
+            emailDomains: data.emailDomains,
+            allowPassword: data.allowPassword,
+        };
+
+        await this.organizationSsoModel.upsert(
+            organizationUuid,
+            OrganizationSsoProvider.ONELOGIN,
+            config,
+            flags,
+            account.user.userUuid,
+        );
+
+        const refreshed = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.ONELOGIN,
+        );
+        if (!refreshed) {
+            throw new UnexpectedServerError(
+                'Failed to read back upserted SSO configuration',
+            );
+        }
+        return toOneLoginSummary(refreshed);
+    }
+
+    async deleteOneLoginConfig(account: RegisteredAccount): Promise<void> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.ONELOGIN,
+        );
+        if (!existing) {
+            throw new NotFoundError('No OneLogin SSO configuration found');
+        }
+        await this.organizationSsoModel.delete(
+            organizationUuid,
+            OrganizationSsoProvider.ONELOGIN,
+        );
+    }
+
+    async getGoogleConfig(
+        account: RegisteredAccount,
+    ): Promise<GoogleSsoConfigSummary | null> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const method = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GOOGLE,
+        );
+        return method ? toGoogleSummary(method) : null;
+    }
+
+    /**
+     * Google has no per-org credentials (it uses the shared instance OAuth
+     * app), so the stored config is empty and only the flags are meaningful.
+     * A row exists purely to record an org's explicit policy — most commonly
+     * `enabled: false` to disable Google sign-in for the org's domains.
+     */
+    async upsertGoogleConfig(
+        account: RegisteredAccount,
+        data: UpsertGoogleSsoConfig,
+    ): Promise<GoogleSsoConfigSummary> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+
+        if (data.emailDomains && data.emailDomains.length > 0) {
+            OrganizationSsoService.validateEmailDomains(data.emailDomains);
+            if (data.overrideEmailDomains) {
+                await this.assertEmailDomainsVerified(
+                    organizationUuid,
+                    data.emailDomains,
+                );
+            }
+        }
+
+        const config: GoogleSsoConfig = {};
+
+        const flags: Partial<OrganizationSsoMethodFlags> = {
+            enabled: data.enabled,
+            overrideEmailDomains: data.overrideEmailDomains,
+            emailDomains: data.emailDomains,
+            allowPassword: data.allowPassword,
+        };
+
+        await this.organizationSsoModel.upsert(
+            organizationUuid,
+            OrganizationSsoProvider.GOOGLE,
+            config,
+            flags,
+            account.user.userUuid,
+        );
+
+        const refreshed = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GOOGLE,
+        );
+        if (!refreshed) {
+            throw new UnexpectedServerError(
+                'Failed to read back upserted SSO configuration',
+            );
+        }
+        return toGoogleSummary(refreshed);
+    }
+
+    async deleteGoogleConfig(account: RegisteredAccount): Promise<void> {
+        await this.assertFeatureEnabled(account);
+        const organizationUuid = this.assertCanManageSso(account);
+        const existing = await this.organizationSsoModel.findMethod(
+            organizationUuid,
+            OrganizationSsoProvider.GOOGLE,
+        );
+        if (!existing) {
+            throw new NotFoundError('No Google SSO configuration found');
+        }
+        await this.organizationSsoModel.delete(
+            organizationUuid,
+            OrganizationSsoProvider.GOOGLE,
         );
     }
 
@@ -269,31 +790,94 @@ export class OrganizationSsoService extends BaseService {
     }
 
     /**
-     * Returns the full Azure AD config for a specific org (DB only, no fallback).
+     * Returns the full config for a specific org + provider (DB only, no env
+     * fallback). Used by the login/callback routes to build the per-org
+     * passport strategy.
      */
-    async getAzureAdConfigForOrganization(
+    async getConfigForOrganization<P extends OrganizationSsoProvider>(
         organizationUuid: string,
-    ): Promise<AzureAdSsoConfig | undefined> {
+        provider: P,
+    ): Promise<OrganizationSsoMethod<P>['config'] | undefined> {
         const method = await this.organizationSsoModel.findMethod(
             organizationUuid,
-            OrganizationSsoProvider.AZUREAD,
+            provider,
         );
         return method?.config;
     }
 
     /**
-     * Returns the first enabled per-org Azure AD method whose whitelist
-     * matches the email's domain. Used by the login/callback routes.
+     * Returns the first enabled per-org method for the given provider whose
+     * whitelist matches the email's domain. Used by the login/callback routes.
      */
-    async findEnabledAzureAdMethodForEmail(
+    async findEnabledMethodForEmail<P extends OrganizationSsoProvider>(
         email: string,
-    ): Promise<
-        OrganizationSsoMethod<OrganizationSsoProvider.AZUREAD> | undefined
-    > {
+        provider: P,
+    ): Promise<OrganizationSsoMethod<P> | undefined> {
         const matches = await this.findEnabledMethodsForEmail(email);
         return matches.find(
-            (m): m is OrganizationSsoMethod<OrganizationSsoProvider.AZUREAD> =>
-                m.provider === OrganizationSsoProvider.AZUREAD,
+            (m): m is OrganizationSsoMethod<P> => m.provider === provider,
+        );
+    }
+
+    /**
+     * Callback-time counterpart to {@link findEnabledMethodForEmail}. Given the
+     * org + provider whose strategy authenticated the request, confirms the
+     * IdP-asserted email is actually routed to that org's enabled method.
+     * Strategy selection is gated on the user-supplied login hint, so this
+     * re-applies the routing rule to the asserted identity to keep the two ends
+     * consistent — including the existing-user org-membership filter in
+     * {@link findEnabledMethodsForEmail}, without which another org's IdP could
+     * assert an existing user's address and have it accepted.
+     */
+    async isEmailDomainAllowedForOrgSso(
+        email: string,
+        organizationUuid: string,
+        provider: OrganizationSsoProvider,
+    ): Promise<boolean> {
+        const matches = await this.findEnabledMethodsForEmail(email);
+        return matches.some(
+            (m) =>
+                m.organizationUuid === organizationUuid &&
+                m.provider === provider,
+        );
+    }
+
+    /**
+     * Resolves a provider's per-org method when a login arrives with no email
+     * hint (e.g. launched from the IdP's app tile). Only succeeds when exactly
+     * one org has the provider enabled — the dedicated-instance case. With zero
+     * or several, the org cannot be inferred and the caller falls back to the
+     * hint-based flow.
+     *
+     * SECURITY: no permission check, like the other login-route lookups here
+     * ({@link findEnabledMethodForEmail}, {@link getConfigForOrganization}):
+     * it runs before any user or org context exists. The decrypted config is
+     * only ever used to build the passport strategy server-side and must not
+     * be returned to clients or called from authenticated code paths — those
+     * go through the `createAuditedAbility`-guarded methods above. Choosing an
+     * org here only decides which IdP the browser is sent to; the callback
+     * still enforces {@link isEmailDomainAllowedForOrgSso} on the asserted
+     * email.
+     */
+    async findSoleEnabledMethodForProvider<P extends OrganizationSsoProvider>(
+        provider: P,
+    ): Promise<OrganizationSsoConfigLookup<P> | undefined> {
+        const methods =
+            await this.organizationSsoModel.findEnabledMethodsForProvider(
+                provider,
+            );
+        return methods.length === 1 ? methods[0] : undefined;
+    }
+
+    async findEnabledOktaMethodForIssuer(
+        issuer: string,
+    ): Promise<
+        OrganizationSsoConfigLookup<OrganizationSsoProvider.OKTA> | undefined
+    > {
+        const normalizedIssuer = normalizeIssuerUrl(issuer);
+        if (!normalizedIssuer) return undefined;
+        return this.organizationSsoModel.findEnabledOktaMethodByStoredIssuer(
+            normalizedIssuer,
         );
     }
 }

@@ -1,0 +1,1009 @@
+import { ParameterError } from '@lightdash/common';
+import { createHash } from 'crypto';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Agent } from 'undici';
+import {
+    afterAll,
+    afterEach,
+    beforeAll,
+    describe,
+    expect,
+    it,
+    vi,
+} from 'vitest';
+import {
+    ChartRegistryClient,
+    chartRegistryFetch,
+    createPinnedLookup,
+    resolveRegistryHost,
+    type ChartRegistryFetch as ChartRegistryFetchType,
+} from './ChartRegistryClient';
+
+const BASE = 'https://charts.example.com';
+const MAX_TEST_BYTES = 1024 * 1024;
+
+const entry = {
+    slug: 'sankey',
+    name: 'Sankey Diagram',
+    description: 'Flow between categories',
+    version: '1.2.0',
+    publishedAt: '2026-08-31T00:00:00.000Z',
+    tags: ['flow'],
+    changelog: 'Initial release',
+    minLightdashVersion: null,
+    vizSchema: { fields: [], configOptions: [], colorPalette: null },
+    thumbnail: 'charts/sankey/1.2.0/thumb.png',
+    thumbnailDark: null,
+    preview: null,
+    screenshots: ['charts/sankey/1.2.0/screenshot-1.png'],
+    artifacts: {
+        source: {
+            path: 'charts/sankey/1.2.0/source.tar',
+            sha256: 'a'.repeat(64),
+        },
+        dist: { path: 'charts/sankey/1.2.0/dist.tar', sha256: 'b'.repeat(64) },
+    },
+};
+
+const index = {
+    schemaVersion: 1,
+    generatedAt: '2026-08-31T00:00:00.000Z',
+    charts: [entry],
+};
+
+const jsonResponse = (body: unknown) => ({
+    status: 200,
+    body: Buffer.from(JSON.stringify(body)),
+    contentType: 'application/json',
+});
+
+const makeClient = (
+    fetchImpl: ReturnType<typeof vi.fn>,
+    url: string | null = BASE,
+    channel: 'stable' | 'next' = 'stable',
+) =>
+    new ChartRegistryClient({
+        lightdashConfig: {
+            appRuntime: {
+                chartRegistry: { url, allowInsecure: false, channel },
+            },
+        } as never,
+        fetchImpl: fetchImpl as unknown as ChartRegistryFetchType,
+    });
+
+describe('ChartRegistryClient', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('is disabled when url is null', () => {
+        expect(makeClient(vi.fn(), null).isEnabled()).toBe(false);
+    });
+
+    it('is enabled when a url is configured', () => {
+        expect(makeClient(vi.fn()).isEnabled()).toBe(true);
+    });
+
+    it('exposes the configured base url', () => {
+        expect(makeClient(vi.fn()).getBaseUrl()).toBe(BASE);
+        expect(makeClient(vi.fn(), null).getBaseUrl()).toBeNull();
+    });
+
+    it('fetches, validates, and caches the index', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(index));
+        const client = makeClient(fetchImpl);
+        await client.getIndex();
+        await client.getIndex();
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+        expect(fetchImpl).toHaveBeenCalledWith(
+            `${BASE}/index.json`,
+            expect.any(Number),
+        );
+    });
+
+    it('fetches index-next.json on the next channel and keeps beta entries', async () => {
+        const betaIndex = {
+            ...index,
+            charts: [{ ...index.charts[0], channel: 'beta' }],
+        };
+        const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(betaIndex));
+        const client = makeClient(fetchImpl, BASE, 'next');
+        const result = await client.getIndex();
+        expect(fetchImpl).toHaveBeenCalledWith(
+            `${BASE}/index-next.json`,
+            expect.any(Number),
+        );
+        expect(result.charts[0].channel).toBe('beta');
+    });
+
+    it('serves the stale cache when a refetch fails', async () => {
+        vi.useFakeTimers();
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockRejectedValueOnce(new Error('network down'));
+        const client = makeClient(fetchImpl);
+
+        const first = await client.getIndex();
+        expect(first.charts).toHaveLength(1);
+
+        await vi.advanceTimersByTimeAsync(61 * 60 * 1000);
+
+        const second = await client.getIndex();
+        expect(second.charts).toHaveLength(1);
+        expect(second).toBe(first);
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it('forceRefresh fetches even when the cache is fresh and updates it', async () => {
+        const updated = {
+            ...index,
+            charts: [{ ...index.charts[0], version: '1.3.0' }],
+        };
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockResolvedValueOnce(jsonResponse(updated));
+        const client = makeClient(fetchImpl);
+
+        await client.getIndex();
+        const refreshed = await client.getIndex({ forceRefresh: true });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(refreshed.charts[0].version).toBe('1.3.0');
+        // The forced result replaces the cache for later plain reads.
+        expect((await client.getIndex()).charts[0].version).toBe('1.3.0');
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to the stale cache when a forced refresh fails', async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockRejectedValueOnce(new Error('network down'));
+        const client = makeClient(fetchImpl);
+
+        const first = await client.getIndex();
+        const second = await client.getIndex({ forceRefresh: true });
+        expect(second).toBe(first);
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it('revalidates with the stored ETag and keeps the index on 304', async () => {
+        vi.useFakeTimers();
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ...jsonResponse(index),
+                etag: 'W/"abc"',
+            })
+            .mockResolvedValueOnce({
+                status: 304,
+                body: Buffer.alloc(0),
+                contentType: null,
+            });
+        const client = makeClient(fetchImpl);
+
+        const first = await client.getIndex();
+        await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+        const second = await client.getIndex();
+        expect(second).toBe(first);
+        expect(fetchImpl).toHaveBeenNthCalledWith(
+            2,
+            `${BASE}/index.json`,
+            expect.any(Number),
+            { headers: { 'if-none-match': 'W/"abc"' } },
+        );
+        // The 304 refreshed the TTL: an immediate third read stays cached.
+        const third = await client.getIndex();
+        expect(third).toBe(first);
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it('sends If-Modified-Since when only Last-Modified was stored', async () => {
+        vi.useFakeTimers();
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ...jsonResponse(index),
+                lastModified: 'Thu, 11 Sep 2026 10:00:00 GMT',
+            })
+            .mockResolvedValueOnce({
+                status: 304,
+                body: Buffer.alloc(0),
+                contentType: null,
+            });
+        const client = makeClient(fetchImpl);
+
+        await client.getIndex();
+        await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+        await client.getIndex();
+        expect(fetchImpl).toHaveBeenNthCalledWith(
+            2,
+            `${BASE}/index.json`,
+            expect.any(Number),
+            {
+                headers: {
+                    'if-modified-since': 'Thu, 11 Sep 2026 10:00:00 GMT',
+                },
+            },
+        );
+    });
+
+    it('rejects a non-2xx index response when nothing is cached', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            status: 404,
+            body: Buffer.from('not found'),
+            contentType: 'text/plain',
+        });
+        await expect(makeClient(fetchImpl).getIndex()).rejects.toThrow(
+            'status 404',
+        );
+    });
+
+    it('rejects an invalid index envelope loudly', async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValue(jsonResponse({ schemaVersion: 99 }));
+        await expect(makeClient(fetchImpl).getIndex()).rejects.toThrow();
+    });
+
+    it('keeps a channel: beta entry in the stable index', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(
+            jsonResponse({
+                ...index,
+                charts: [{ ...entry, channel: 'beta' }],
+            }),
+        );
+        const result = await makeClient(fetchImpl).getIndex();
+        expect(result.charts).toHaveLength(1);
+        expect(result.charts[0].channel).toBe('beta');
+    });
+
+    it('drops an entry with an unrecognized channel and keeps the rest', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(
+            jsonResponse({
+                ...index,
+                charts: [
+                    { ...entry, slug: 'from-the-future', channel: 'alpha' },
+                    entry,
+                ],
+            }),
+        );
+        const result = await makeClient(fetchImpl).getIndex();
+        expect(result.charts.map((c) => c.slug)).toEqual(['sankey']);
+    });
+
+    it('drops a malformed entry and keeps the rest', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(
+            jsonResponse({
+                ...index,
+                charts: [{ slug: 'broken' }, entry],
+            }),
+        );
+        const result = await makeClient(fetchImpl).getIndex();
+        expect(result.charts.map((c) => c.slug)).toEqual(['sankey']);
+    });
+
+    it('rejects a non-JSON index loudly', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            status: 200,
+            body: Buffer.from('not json'),
+            contentType: 'application/json',
+        });
+        await expect(makeClient(fetchImpl).getIndex()).rejects.toThrow();
+    });
+
+    it('returns undefined for an unknown slug', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(index));
+        const client = makeClient(fetchImpl);
+        expect(await client.getEntry('does-not-exist')).toBeUndefined();
+    });
+
+    it('verifies artifact digests and throws on mismatch', async () => {
+        const distBytes = Buffer.from('dist-tar-bytes');
+        const goodSha = createHash('sha256').update(distBytes).digest('hex');
+        const goodEntry = {
+            ...entry,
+            artifacts: {
+                ...entry.artifacts,
+                dist: {
+                    path: 'charts/sankey/1.2.0/dist.tar',
+                    sha256: goodSha,
+                },
+            },
+        };
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(
+                jsonResponse({ ...index, charts: [goodEntry] }),
+            )
+            .mockResolvedValueOnce({
+                status: 200,
+                body: distBytes,
+                contentType: 'application/x-tar',
+            });
+        const client = makeClient(fetchImpl);
+        const buf = await client.downloadArtifact(
+            (await client.getEntry('sankey'))!,
+            'dist',
+        );
+        expect(buf.equals(distBytes)).toBe(true);
+
+        const tampered = vi
+            .fn()
+            .mockResolvedValueOnce(
+                jsonResponse({ ...index, charts: [goodEntry] }),
+            )
+            .mockResolvedValueOnce({
+                status: 200,
+                body: Buffer.from('evil'),
+                contentType: 'application/x-tar',
+            });
+        const client2 = makeClient(tampered);
+        await expect(
+            client2.downloadArtifact(
+                (await client2.getEntry('sankey'))!,
+                'dist',
+            ),
+        ).rejects.toThrow(/digest/i);
+    });
+
+    it('refuses artifact paths that resolve outside the base URL', async () => {
+        const evil = {
+            ...entry,
+            artifacts: {
+                ...entry.artifacts,
+                dist: {
+                    path: 'https://evil.example.com/x.tar',
+                    sha256: 'a'.repeat(64),
+                },
+            },
+        };
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse({ ...index, charts: [evil] }));
+        const client = makeClient(fetchImpl);
+        await expect(
+            client.downloadArtifact((await client.getEntry('sankey'))!, 'dist'),
+        ).rejects.toThrow(/outside/i);
+    });
+
+    it('only serves assets under chart slugs present in the index', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(index));
+        const client = makeClient(fetchImpl);
+        expect(
+            await client.getAsset('charts/other/1.0.0/steal.png'),
+        ).toBeUndefined();
+    });
+
+    it('serves a previous version screenshot no longer enumerated in the index', async () => {
+        // The index lists only each chart's latest version, and the listing
+        // and asset requests can be served from different index cache
+        // generations across a publish — older versions are immutable and
+        // still served by the registry, so they must stay proxyable.
+        const oldBytes = Buffer.from('old-version-bytes');
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockResolvedValueOnce({
+                status: 200,
+                body: oldBytes,
+                contentType: 'image/png',
+            });
+        const client = makeClient(fetchImpl);
+        const asset = await client.getAsset(
+            'charts/sankey/1.1.0/screenshot-1.png',
+        );
+        expect(asset?.buffer.equals(oldBytes)).toBe(true);
+    });
+
+    it('rejects non-image and malformed asset paths without fetching', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(index));
+        const client = makeClient(fetchImpl);
+        expect(
+            await client.getAsset('charts/sankey/1.2.0/dist.tar'),
+        ).toBeUndefined();
+        expect(
+            await client.getAsset('charts/sankey/1.2.0/../../../etc/pw.png'),
+        ).toBeUndefined();
+        expect(
+            await client.getAsset('charts/sankey/not-semver/shot.png'),
+        ).toBeUndefined();
+        expect(await client.getAsset('index.json')).toBeUndefined();
+        // Shape-rejected paths short-circuit before any fetch, index included.
+        expect(fetchImpl).toHaveBeenCalledTimes(0);
+    });
+
+    it('serves an asset path enumerated in the index', async () => {
+        const thumbBytes = Buffer.from('thumb-bytes');
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockResolvedValueOnce({
+                status: 200,
+                body: thumbBytes,
+                contentType: 'image/png',
+            });
+        const client = makeClient(fetchImpl);
+        const asset = await client.getAsset(entry.thumbnail);
+        expect(asset?.buffer.equals(thumbBytes)).toBe(true);
+        expect(asset?.contentType).toBe('image/png');
+        expect(fetchImpl).toHaveBeenLastCalledWith(
+            `${BASE}/${entry.thumbnail}`,
+            expect.any(Number),
+        );
+    });
+
+    it('treats a non-2xx asset response as absent', async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockResolvedValueOnce({
+                status: 404,
+                body: Buffer.from('<html>not found</html>'),
+                contentType: 'text/html',
+            });
+        const client = makeClient(fetchImpl);
+        expect(await client.getAsset(entry.thumbnail)).toBeUndefined();
+    });
+
+    it('rejects an asset content-type outside the image allowlist (e.g. svg)', async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockResolvedValueOnce({
+                status: 200,
+                body: Buffer.from('<svg onload="alert(1)"></svg>'),
+                contentType: 'image/svg+xml',
+            });
+        const client = makeClient(fetchImpl);
+        expect(await client.getAsset(entry.thumbnail)).toBeUndefined();
+    });
+
+    describe('generic or missing content-type (magic-byte sniffing)', () => {
+        const webp = Buffer.concat([
+            Buffer.from('RIFF'),
+            Buffer.from([0x10, 0, 0, 0]),
+            Buffer.from('WEBPVP8 '),
+        ]);
+        const samples: [string, Buffer][] = [
+            [
+                'image/png',
+                Buffer.from([
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0,
+                ]),
+            ],
+            ['image/jpeg', Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0])],
+            ['image/webp', webp],
+            ['image/gif', Buffer.from('GIF89a')],
+        ];
+        const getWith = async (body: Buffer, contentType: string | null) => {
+            const fetchImpl = vi
+                .fn()
+                .mockResolvedValueOnce(jsonResponse(index))
+                .mockResolvedValueOnce({ status: 200, body, contentType });
+            return makeClient(fetchImpl).getAsset(entry.thumbnail);
+        };
+
+        it.each(samples)(
+            'serves %s sniffed from octet-stream',
+            async (type, body) => {
+                const asset = await getWith(body, 'application/octet-stream');
+                expect(asset?.contentType).toBe(type);
+            },
+        );
+
+        it('serves a sniffed image when content-type is missing', async () => {
+            const asset = await getWith(samples[0][1], null);
+            expect(asset?.contentType).toBe('image/png');
+        });
+
+        it('ignores the file extension and trusts the bytes', async () => {
+            // entry.thumbnail is a .png path; the body is a GIF
+            const asset = await getWith(
+                Buffer.from('GIF89a'),
+                'application/octet-stream',
+            );
+            expect(asset?.contentType).toBe('image/gif');
+        });
+
+        it('rejects octet-stream bodies that are not a known image', async () => {
+            expect(
+                await getWith(
+                    Buffer.from('<svg onload="alert(1)"></svg>'),
+                    'application/octet-stream',
+                ),
+            ).toBeUndefined();
+            expect(
+                await getWith(Buffer.from('RIFF....WAVE'), null),
+            ).toBeUndefined();
+        });
+    });
+
+    it('rejects an asset with a missing content-type', async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce(jsonResponse(index))
+            .mockResolvedValueOnce({
+                status: 200,
+                body: Buffer.from('bytes'),
+                contentType: null,
+            });
+        const client = makeClient(fetchImpl);
+        expect(await client.getAsset(entry.thumbnail)).toBeUndefined();
+    });
+});
+
+describe('ChartRegistryClient.getVersionEntry', () => {
+    const snapshot = {
+        slug: 'sankey',
+        name: 'Sankey Diagram',
+        description: 'Flow between categories',
+        version: '1.1.0',
+        publishedAt: '2026-08-01T00:00:00.000Z',
+        tags: [],
+        changelog: '',
+        minLightdashVersion: null,
+        vizSchema: { fields: [], configOptions: [], colorPalette: null },
+        preview: null,
+        screenshots: [{ fileName: 'thumb.png' }],
+        icon: null,
+        artifacts: {
+            source: { sha256: 'c'.repeat(64) },
+            dist: { sha256: 'd'.repeat(64) },
+        },
+    };
+
+    it('fetches charts/<slug>/<version>/entry.json and reconstructs paths', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(snapshot));
+        const client = makeClient(fetchImpl);
+        const resolved = await client.getVersionEntry('sankey', '1.1.0');
+        expect(fetchImpl).toHaveBeenCalledWith(
+            `${BASE}/charts/sankey/1.1.0/entry.json`,
+            expect.any(Number),
+        );
+        expect(resolved?.artifacts.source.path).toBe(
+            'charts/sankey/1.1.0/source.tar',
+        );
+        expect(resolved?.thumbnail).toBe('charts/sankey/1.1.0/thumb.png');
+    });
+
+    it('returns undefined on 404', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            status: 404,
+            body: Buffer.from(''),
+            contentType: null,
+        });
+        await expect(
+            makeClient(fetchImpl).getVersionEntry('sankey', '9.9.9'),
+        ).resolves.toBeUndefined();
+    });
+
+    it('rejects an invalid slug or version before fetching', async () => {
+        const fetchImpl = vi.fn();
+        const client = makeClient(fetchImpl);
+        await expect(
+            client.getVersionEntry('../index', '1.1.0'),
+        ).rejects.toThrow(/slug/);
+        await expect(client.getVersionEntry('sankey', '1.1')).rejects.toThrow(
+            /version/,
+        );
+        expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it('rejects a snapshot served under another identity', async () => {
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValue(jsonResponse({ ...snapshot, slug: 'radar' }));
+        await expect(
+            makeClient(fetchImpl).getVersionEntry('sankey', '1.1.0'),
+        ).rejects.toThrow(/radar/);
+    });
+
+    it('rejects a non-2xx response and non-JSON body loudly', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            status: 500,
+            body: Buffer.from(''),
+            contentType: null,
+        });
+        await expect(
+            makeClient(fetchImpl).getVersionEntry('sankey', '1.1.0'),
+        ).rejects.toThrow(/status 500/);
+        const badJson = vi.fn().mockResolvedValue({
+            status: 200,
+            body: Buffer.from('{nope'),
+            contentType: 'application/json',
+        });
+        await expect(
+            makeClient(badJson).getVersionEntry('sankey', '1.1.0'),
+        ).rejects.toThrow(/not valid JSON/);
+    });
+});
+
+// Exercises the real network layer (chartRegistryFetch / defaultFetch)
+// against a real HTTP server, rather than the injected fetchImpl used above.
+describe('ChartRegistryClient real network (defaultFetch)', () => {
+    let server: http.Server | undefined;
+
+    // setupVitest.ts stubs global fetch as a network safety net; these tests
+    // specifically need the real implementation, restored afterward.
+    beforeAll(() => {
+        vi.unstubAllGlobals();
+    });
+
+    afterAll(() => {
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => new Response('', { status: 200 })),
+        );
+    });
+
+    afterEach(async () => {
+        if (server) {
+            await new Promise<void>((resolve) => {
+                server!.close(() => resolve());
+            });
+            server = undefined;
+        }
+    });
+
+    const startServer = (
+        handler: (req: http.IncomingMessage, res: http.ServerResponse) => void,
+    ): Promise<string> =>
+        new Promise((resolve) => {
+            server = http.createServer(handler);
+            server.listen(0, '127.0.0.1', () => {
+                const { port } = server!.address() as AddressInfo;
+                resolve(`http://127.0.0.1:${port}`);
+            });
+        });
+
+    const makeRealClient = (
+        baseUrl: string,
+        authorizationHeader: string | null = null,
+    ) =>
+        new ChartRegistryClient({
+            lightdashConfig: {
+                appRuntime: {
+                    chartRegistry: {
+                        url: baseUrl,
+                        allowInsecure: true,
+                        authorizationHeader,
+                    },
+                },
+            } as never,
+        });
+
+    it('does not follow a redirect from the registry', async () => {
+        const baseUrl = await startServer((req, res) => {
+            if (req.url === '/index.json') {
+                res.writeHead(302, {
+                    Location: 'http://169.254.169.254/latest/meta-data/',
+                });
+                res.end();
+                return;
+            }
+            res.writeHead(404);
+            res.end();
+        });
+        const client = makeRealClient(baseUrl);
+        await expect(client.getIndex()).rejects.toThrow(/redirect/i);
+    });
+
+    it('aborts a response exceeding an injected byte cap, even without a content-length header', async () => {
+        const baseUrl = await startServer((req, res) => {
+            res.writeHead(200, { 'content-type': 'application/octet-stream' });
+            // Two writes with no pre-set content-length force chunked
+            // transfer-encoding, so only the streaming cap can catch this.
+            res.write(Buffer.alloc(32, 1));
+            res.write(Buffer.alloc(32, 2));
+            res.end();
+        });
+        await expect(
+            chartRegistryFetch(`${baseUrl}/big`, {
+                maxBytes: 16,
+                allowInsecure: true,
+            }),
+        ).rejects.toThrow(/maximum allowed size/i);
+    });
+
+    it('treats a non-2xx asset response as absent end-to-end', async () => {
+        const baseUrl = await startServer((req, res) => {
+            if (req.url === '/index.json') {
+                res.writeHead(200, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(index));
+                return;
+            }
+            if (req.url === '/charts/sankey/1.2.0/thumb.png') {
+                res.writeHead(404, { 'content-type': 'text/html' });
+                res.end('<html>not found</html>');
+                return;
+            }
+            res.writeHead(404);
+            res.end();
+        });
+        const client = makeRealClient(baseUrl);
+        expect(
+            await client.getAsset('charts/sankey/1.2.0/thumb.png'),
+        ).toBeUndefined();
+    });
+
+    it('round-trips a binary asset byte-for-byte', async () => {
+        const imageBytes = Buffer.from(
+            Array.from({ length: 2048 }, (_, i) => i % 256),
+        );
+        const baseUrl = await startServer((req, res) => {
+            if (req.url === '/index.json') {
+                res.writeHead(200, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(index));
+                return;
+            }
+            if (req.url === '/charts/sankey/1.2.0/thumb.png') {
+                res.writeHead(200, { 'content-type': 'image/png' });
+                res.end(imageBytes);
+                return;
+            }
+            res.writeHead(404);
+            res.end();
+        });
+        const client = makeRealClient(baseUrl);
+        const asset = await client.getAsset('charts/sankey/1.2.0/thumb.png');
+        expect(asset?.buffer.equals(imageBytes)).toBe(true);
+        expect(asset?.contentType).toBe('image/png');
+    });
+
+    it('sends the configured Authorization header on index and asset requests', async () => {
+        const seen: Record<string, string | undefined> = {};
+        const baseUrl = await startServer((req, res) => {
+            seen[req.url ?? ''] = req.headers.authorization;
+            if (req.url === '/index.json') {
+                res.writeHead(200, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(index));
+                return;
+            }
+            if (req.url === '/charts/sankey/1.2.0/thumb.png') {
+                res.writeHead(200, { 'content-type': 'image/png' });
+                res.end(Buffer.from([1, 2, 3]));
+                return;
+            }
+            res.writeHead(404);
+            res.end();
+        });
+        const client = makeRealClient(baseUrl, 'Bearer secret-token');
+        await client.getAsset('charts/sankey/1.2.0/thumb.png');
+        expect(seen['/index.json']).toBe('Bearer secret-token');
+        expect(seen['/charts/sankey/1.2.0/thumb.png']).toBe(
+            'Bearer secret-token',
+        );
+    });
+
+    it('sends no Authorization header when none is configured', async () => {
+        let authorization: string | undefined = 'unset';
+        const baseUrl = await startServer((req, res) => {
+            authorization = req.headers.authorization;
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(index));
+        });
+        await makeRealClient(baseUrl).getIndex();
+        expect(authorization).toBeUndefined();
+    });
+
+    // Private-host mode is for self-hosted mirrors on internal networks:
+    // private/loopback addresses are allowed, but unlike allowInsecure the
+    // transport stays https-only and the connection stays pinned to the
+    // resolved address.
+    describe('private-host mode (allowPrivateAddresses without allowInsecure)', () => {
+        it('still refuses a plain-http registry URL', async () => {
+            let reached = false;
+            const baseUrl = await startServer((req, res) => {
+                reached = true;
+                res.writeHead(200, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(index));
+            });
+            await expect(
+                chartRegistryFetch(`${baseUrl}/index.json`, {
+                    maxBytes: MAX_TEST_BYTES,
+                    allowPrivateAddresses: true,
+                }),
+            ).rejects.toThrow(ParameterError);
+            expect(reached).toBe(false);
+        });
+
+        it('lets an https request to a loopback address past URL validation', async () => {
+            // The fixture server speaks plain http, so the request fails at
+            // the TLS handshake — proving the private-address gate opened
+            // (strict mode fails earlier, inside validation, see below).
+            const baseUrl = await startServer((req, res) => {
+                res.writeHead(200);
+                res.end();
+            });
+            const httpsUrl = `${baseUrl.replace('http://', 'https://')}/index.json`;
+            const error: unknown = await chartRegistryFetch(httpsUrl, {
+                maxBytes: MAX_TEST_BYTES,
+                allowPrivateAddresses: true,
+            }).catch((e) => e);
+            expect(error).toBeInstanceOf(Error);
+            expect(error).not.toBeInstanceOf(ParameterError);
+        });
+
+        it('strict mode rejects the same loopback https URL inside validation', async () => {
+            await expect(
+                chartRegistryFetch('https://127.0.0.1:9/index.json', {
+                    maxBytes: MAX_TEST_BYTES,
+                }),
+            ).rejects.toThrow(/private/i);
+        });
+
+        it('the client maps allowPrivateHosts to private-host mode, not insecure mode', async () => {
+            const baseUrl = await startServer((req, res) => {
+                res.writeHead(200);
+                res.end();
+            });
+            const httpsBaseUrl = baseUrl.replace('http://', 'https://');
+            const makeLoopbackClient = (allowPrivateHosts: boolean) =>
+                new ChartRegistryClient({
+                    lightdashConfig: {
+                        appRuntime: {
+                            chartRegistry: {
+                                url: httpsBaseUrl,
+                                allowInsecure: false,
+                                allowPrivateHosts,
+                            },
+                        },
+                    } as never,
+                });
+            // Strict: refused inside validation as a private address.
+            await expect(makeLoopbackClient(false).getIndex()).rejects.toThrow(
+                /private/i,
+            );
+            // Private hosts allowed: past validation, fails at the TLS
+            // handshake against the plain-http fixture instead.
+            const error: unknown = await makeLoopbackClient(true)
+                .getIndex()
+                .catch((e) => e);
+            expect(error).toBeInstanceOf(Error);
+            expect(error).not.toBeInstanceOf(ParameterError);
+        });
+    });
+
+    describe('resolveRegistryHost', () => {
+        it('resolves a loopback address when private hosts are allowed', async () => {
+            await expect(
+                resolveRegistryHost('127.0.0.1', {
+                    allowPrivateAddresses: true,
+                }),
+            ).resolves.toEqual({ address: '127.0.0.1', family: 4 });
+        });
+
+        it('rejects a loopback address in strict mode', async () => {
+            await expect(
+                resolveRegistryHost('127.0.0.1', {
+                    allowPrivateAddresses: false,
+                }),
+            ).rejects.toThrow(/private/i);
+        });
+    });
+
+    // Proves the DNS-rebinding fix: createPinnedLookup is the lookup that
+    // chartRegistryFetch hands to undici's Agent so the socket connects to
+    // the address validatePublicHttpUrl already checked, instead of
+    // triggering a second, independently-resolvable DNS lookup.
+    describe('pinned dispatcher (createPinnedLookup)', () => {
+        it('completes a real request when the URL hostname matches the pin, connecting via the pinned address rather than the hostname', async () => {
+            const baseUrl = await startServer((req, res) => {
+                res.writeHead(200, { 'content-type': 'text/plain' });
+                res.end('pinned-ok');
+            });
+            const { port } = new URL(baseUrl);
+            // The request targets "localhost", but the pin maps it straight
+            // to 127.0.0.1 — proving the socket uses the pinned address
+            // rather than re-resolving "localhost" itself.
+            const dispatcher = new Agent({
+                connect: {
+                    lookup: createPinnedLookup('localhost', {
+                        address: '127.0.0.1',
+                        family: 4,
+                    }),
+                },
+            });
+            try {
+                const response = await fetch(`http://localhost:${port}/`, {
+                    dispatcher,
+                } as never);
+                expect(await response.text()).toBe('pinned-ok');
+            } finally {
+                await dispatcher.close();
+            }
+        });
+
+        it('refuses to connect when asked to resolve a hostname other than the one it was pinned for', async () => {
+            const baseUrl = await startServer((req, res) => {
+                res.writeHead(200);
+                res.end('should not be reached');
+            });
+            const { port } = new URL(baseUrl);
+            const dispatcher = new Agent({
+                connect: {
+                    lookup: createPinnedLookup('charts.example.com', {
+                        address: '127.0.0.1',
+                        family: 4,
+                    }),
+                },
+            });
+            try {
+                await expect(
+                    fetch(`http://localhost:${port}/`, {
+                        dispatcher,
+                    } as never),
+                ).rejects.toThrow();
+            } finally {
+                await dispatcher.close();
+            }
+        });
+    });
+});
+
+describe('createPinnedLookup', () => {
+    it('returns the pinned address for the matching hostname', async () => {
+        const lookup = createPinnedLookup('charts.example.com', {
+            address: '203.0.113.5',
+            family: 4,
+        });
+        const result = await new Promise((resolve, reject) => {
+            lookup('charts.example.com', {}, (err, address, family) => {
+                if (err) reject(err);
+                else resolve({ address, family });
+            });
+        });
+        expect(result).toEqual({ address: '203.0.113.5', family: 4 });
+    });
+
+    it('returns the pinned address for a case-insensitive hostname match', async () => {
+        const lookup = createPinnedLookup('Charts.Example.com', {
+            address: '203.0.113.5',
+            family: 4,
+        });
+        const result = await new Promise((resolve, reject) => {
+            lookup('charts.example.com', {}, (err, address, family) => {
+                if (err) reject(err);
+                else resolve({ address, family });
+            });
+        });
+        expect(result).toEqual({ address: '203.0.113.5', family: 4 });
+    });
+
+    it('honors the { all: true } lookup option by returning an address array', async () => {
+        const lookup = createPinnedLookup('charts.example.com', {
+            address: '203.0.113.5',
+            family: 4,
+        });
+        const result = await new Promise((resolve, reject) => {
+            lookup(
+                'charts.example.com',
+                { all: true },
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (err: unknown, addrs: any) => {
+                    if (err) reject(err);
+                    else resolve(addrs);
+                },
+            );
+        });
+        expect(result).toEqual([{ address: '203.0.113.5', family: 4 }]);
+    });
+
+    it('errors for a hostname different from the one it was pinned for', async () => {
+        const lookup = createPinnedLookup('charts.example.com', {
+            address: '203.0.113.5',
+            family: 4,
+        });
+        await expect(
+            new Promise((resolve, reject) => {
+                lookup('evil.example.com', {}, (err) => {
+                    if (err) reject(err);
+                    else resolve(undefined);
+                });
+            }),
+        ).rejects.toThrow(/unexpected hostname/i);
+    });
+});

@@ -3,11 +3,21 @@ import {
     type ApiDownloadCsv,
     type ApiError,
     type ApiScheduledDownloadCsv,
+    type GsheetExportProgress,
 } from '@lightdash/common';
 import { notifications } from '@mantine/notifications';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { getCsvFileUrl } from '../../../api/csv';
 import useToaster from '../../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
+
+const getProgressSubtitle = (progress: GsheetExportProgress | null): string => {
+    if (!progress) return 'This may take a few minutes...';
+    if (progress.phase === 'query') return 'Running query...';
+    return progress.attempt > 1
+        ? `Writing to Google Sheets... (retry ${progress.attempt})`
+        : 'Writing to Google Sheets...';
+};
 
 const useExportToGoogleSheetStart = ({
     getGsheetLink,
@@ -45,7 +55,8 @@ export const useExportToGoogleSheet = ({
 }: {
     getGsheetLink: () => Promise<ApiScheduledDownloadCsv>;
 }) => {
-    const { showToastApiError } = useToaster();
+    const lightdashApi = useLightdashApi();
+    const { showToastApiError, showToastInfo } = useToaster();
 
     const exportToGoogleSheetStartMutation = useExportToGoogleSheetStart({
         getGsheetLink,
@@ -62,7 +73,7 @@ export const useExportToGoogleSheet = ({
         queryKey: [`google-sheets`, startGoogleSheetExportData?.jobId],
         queryFn: () =>
             startGoogleSheetExportData
-                ? getCsvFileUrl(startGoogleSheetExportData)
+                ? getCsvFileUrl(lightdashApi, startGoogleSheetExportData)
                 : Promise.reject({
                       error: new Error(
                           "Couldn't create scheduler job for google sheets export",
@@ -85,9 +96,17 @@ export const useExportToGoogleSheet = ({
         },
         onSuccess: (data) => {
             if (data?.url && data.status === SchedulerJobStatus.COMPLETED) {
-                window.open(data.url, '_blank');
+                window.open(data.url, '_blank', 'noopener,noreferrer');
                 notifications.hide('exporting-gsheets');
+                return;
             }
+            showToastInfo({
+                title: 'Exporting Google Sheets',
+                subtitle: getProgressSubtitle(data?.progress ?? null),
+                loading: true,
+                key: 'exporting-gsheets',
+                autoClose: false,
+            });
         },
         onError: () => {
             notifications.hide('exporting-gsheets');

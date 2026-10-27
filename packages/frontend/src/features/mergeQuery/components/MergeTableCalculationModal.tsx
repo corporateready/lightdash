@@ -1,0 +1,300 @@
+import {
+    CustomFormatType,
+    getItemId,
+    MAX_MERGE_TABLE_CALCULATION_FORMULA_LENGTH,
+    MERGE_TABLE_NAME,
+    MetricType,
+    NumberSeparator,
+    snakeCaseName,
+    type CustomFormat,
+    type MergeTableCalculation,
+} from '@lightdash/common';
+import { extractColumnRefs, parse } from '@lightdash/formula';
+import { Stack, Text, TextInput } from '@mantine/core';
+import { useForm } from '@mantine/form';
+import { IconCalculator, IconPencil } from '@tabler/icons-react';
+import omit from 'lodash/omit';
+import { useMemo, useState, type FC } from 'react';
+import MantineModal from '../../../components/common/MantineModal';
+import { type FieldSuggestionItem } from '../../../components/common/SuggestionList';
+import { FormatForm } from '../../../components/Explorer/FormatForm';
+import {
+    explorerActions,
+    selectSorts,
+    useExplorerDispatch,
+    useExplorerSelector,
+} from '../../explorer/store';
+import { FormulaEditor } from '../../tableCalculation/components/FormulaForm/FormulaEditor';
+import { useMerge } from '../context/useMerge';
+import { getMergeTableCalculationSuggestions } from '../utils/getMergeTableCalculationSuggestions';
+
+const useCalculationFormatForm = (format: CustomFormat | undefined) =>
+    useForm<CustomFormat>({
+        initialValues: {
+            type: CustomFormatType.DEFAULT,
+            separator: NumberSeparator.DEFAULT,
+            ...format,
+        },
+    });
+
+// Merge calculations compile to numeric merged fields.
+const MergeCalculationFormatForm: FC<{
+    form: ReturnType<typeof useCalculationFormatForm>;
+}> = ({ form }) => (
+    <FormatForm
+        format={form.values}
+        formatInputProps={form.getInputProps}
+        setFormatFieldValue={form.setFieldValue}
+        itemType={MetricType.NUMBER}
+    />
+);
+
+const withFormat = (
+    calculation: MergeTableCalculation,
+    format: CustomFormat,
+): MergeTableCalculation =>
+    format.type === CustomFormatType.DEFAULT
+        ? omit(calculation, 'format')
+        : { ...calculation, format };
+
+const withFormulaPrefix = (formula: string) =>
+    formula.startsWith('=') ? formula : `=${formula}`;
+
+const nextCalculationName = (
+    displayName: string,
+    calculations: MergeTableCalculation[],
+    current?: MergeTableCalculation,
+) => {
+    const base = snakeCaseName(displayName);
+    const names = new Set(
+        calculations
+            .filter((calculation) => calculation.name !== current?.name)
+            .map((calculation) => calculation.name),
+    );
+    for (let suffix = 0; suffix < 100; suffix += 1) {
+        const candidate = suffix === 0 ? base : `${base}_${suffix}`;
+        if (!names.has(candidate)) return candidate;
+    }
+    throw new Error(`Table calculation ID "${displayName}" already exists.`);
+};
+
+export const MergeTableCalculationModal: FC<{
+    opened: boolean;
+    onClose: () => void;
+    tableCalculation?: MergeTableCalculation;
+}> = ({ opened, onClose, tableCalculation }) => {
+    const merge = useMerge();
+    const dispatch = useExplorerDispatch();
+    const sorts = useExplorerSelector(selectSorts);
+    const [displayName, setDisplayName] = useState(
+        tableCalculation?.displayName ?? '',
+    );
+    const [formula, setFormula] = useState(tableCalculation?.formula ?? '=');
+    const [error, setError] = useState<string | null>(null);
+    const [referenceOpened, setReferenceOpened] = useState(false);
+    const formatForm = useCalculationFormatForm(tableCalculation?.format);
+
+    const fieldSuggestions = useMemo<FieldSuggestionItem[]>(() => {
+        return getMergeTableCalculationSuggestions(merge.mergeResults);
+    }, [merge.mergeResults]);
+
+    const validateFormula = () => {
+        const normalized = withFormulaPrefix(formula.trim());
+        if (normalized.length > MAX_MERGE_TABLE_CALCULATION_FORMULA_LENGTH) {
+            const message = `Formula must be ${MAX_MERGE_TABLE_CALCULATION_FORMULA_LENGTH.toLocaleString()} characters or fewer`;
+            setError(message);
+            return message;
+        }
+        try {
+            const references = extractColumnRefs(parse(normalized));
+            const available = new Set(
+                fieldSuggestions.map((suggestion) => suggestion.id),
+            );
+            const unknown = references.filter(
+                (reference) => !available.has(reference),
+            );
+            const nextError =
+                unknown.length > 0
+                    ? `Unknown merged field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`
+                    : null;
+            setError(nextError);
+            return nextError;
+        } catch (nextError) {
+            const message =
+                nextError instanceof Error
+                    ? nextError.message
+                    : 'Invalid formula';
+            setError(message);
+            return message;
+        }
+    };
+
+    const handleSave = () => {
+        const nameError = displayName.trim() ? null : 'Name is required';
+        if (nameError) {
+            setError(nameError);
+            return;
+        }
+        if (validateFormula()) return;
+
+        const name =
+            tableCalculation &&
+            tableCalculation.displayName === displayName.trim()
+                ? tableCalculation.name
+                : nextCalculationName(
+                      displayName.trim(),
+                      merge.tableCalculations,
+                      tableCalculation,
+                  );
+        const calculation = withFormat(
+            {
+                name,
+                displayName: displayName.trim(),
+                // Required by the existing public contract. Formula wins at compile.
+                sql: '',
+                formula: withFormulaPrefix(formula.trim()),
+            },
+            formatForm.values,
+        );
+        if (tableCalculation) {
+            merge.updateTableCalculation(tableCalculation.name, calculation);
+            if (tableCalculation.name !== calculation.name) {
+                const oldFieldId = getItemId({
+                    table: MERGE_TABLE_NAME,
+                    name: tableCalculation.name,
+                });
+                const newFieldId = getItemId({
+                    table: MERGE_TABLE_NAME,
+                    name: calculation.name,
+                });
+                dispatch(
+                    explorerActions.setSortFields(
+                        sorts.map((sort) =>
+                            sort.fieldId === oldFieldId
+                                ? { ...sort, fieldId: newFieldId }
+                                : sort,
+                        ),
+                    ),
+                );
+            }
+        } else {
+            merge.addTableCalculation(calculation);
+        }
+        onClose();
+    };
+
+    return (
+        <MantineModal
+            opened={opened}
+            onClose={onClose}
+            title={`${tableCalculation ? 'Edit' : 'Create'} Table Calculation`}
+            icon={IconCalculator}
+            size="xl"
+            onConfirm={handleSave}
+            confirmLabel={tableCalculation ? 'Save changes' : 'Create formula'}
+            modalRootProps={{ closeOnClickOutside: false }}
+        >
+            <Stack gap="sm">
+                <Text size="sm" fw={600}>
+                    Formula
+                </Text>
+                <FormulaEditor
+                    explore={undefined}
+                    metricQuery={
+                        merge.mergeResults?.metricQuery ?? {
+                            exploreName: 'merge',
+                            dimensions: [],
+                            metrics: [],
+                            filters: {},
+                            sorts: [],
+                            limit: 500,
+                            tableCalculations: [],
+                        }
+                    }
+                    fieldSuggestionsOverride={fieldSuggestions}
+                    initialContent={formula}
+                    onTextChange={setFormula}
+                    onBlur={validateFormula}
+                    referenceOpened={referenceOpened}
+                    onReferenceToggle={setReferenceOpened}
+                />
+                {error && (
+                    <Text size="xs" c="red.7">
+                        {error}
+                    </Text>
+                )}
+                <TextInput
+                    label="Name"
+                    value={displayName}
+                    onChange={(event) =>
+                        setDisplayName(event.currentTarget.value)
+                    }
+                    error={!displayName.trim() ? 'Name is required' : null}
+                    data-testid="merge-table-calculation-name"
+                />
+                <Text size="sm" fw={600}>
+                    Format
+                </Text>
+                <MergeCalculationFormatForm form={formatForm} />
+            </Stack>
+        </MantineModal>
+    );
+};
+
+export const MergeTableCalculationFormatModal: FC<{
+    tableCalculation: MergeTableCalculation;
+    onClose: () => void;
+}> = ({ tableCalculation, onClose }) => {
+    const merge = useMerge();
+    const formatForm = useCalculationFormatForm(tableCalculation.format);
+    return (
+        <MantineModal
+            opened
+            onClose={onClose}
+            title="Format table calculation"
+            icon={IconPencil}
+            size="xl"
+            onConfirm={() => {
+                merge.updateTableCalculation(
+                    tableCalculation.name,
+                    withFormat(tableCalculation, formatForm.values),
+                );
+                onClose();
+            }}
+            confirmLabel="Save changes"
+        >
+            <MergeCalculationFormatForm form={formatForm} />
+        </MantineModal>
+    );
+};
+
+export const DeleteMergeTableCalculationModal: FC<{
+    tableCalculation: MergeTableCalculation;
+    onClose: () => void;
+}> = ({ tableCalculation, onClose }) => {
+    const merge = useMerge();
+    const dispatch = useExplorerDispatch();
+    const sorts = useExplorerSelector(selectSorts);
+    return (
+        <MantineModal
+            opened
+            onClose={onClose}
+            title="Delete Table Calculation"
+            variant="delete"
+            resourceType="table calculation"
+            onConfirm={() => {
+                merge.removeTableCalculation(tableCalculation.name);
+                const fieldId = getItemId({
+                    table: MERGE_TABLE_NAME,
+                    name: tableCalculation.name,
+                });
+                dispatch(
+                    explorerActions.setSortFields(
+                        sorts.filter((sort) => sort.fieldId !== fieldId),
+                    ),
+                );
+                onClose();
+            }}
+        />
+    );
+};

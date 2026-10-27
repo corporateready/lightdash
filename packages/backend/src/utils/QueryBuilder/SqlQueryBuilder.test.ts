@@ -14,13 +14,13 @@ import {
     QUERY_WITH_LIMIT_ONLY_LIMIT_SQL,
     QUERY_WITH_LIMIT_SQL,
     QUERY_WITH_NESTED_FILTERS_SQL,
-    QUERY_WITH_SUBQUERY_SEMICOLON_COMMENTS_SQL,
-    QUERY_WITH_SUBQUERY_SQL,
     QUERY_WITH_TWO_FILTERS_SQL,
     SECOND_FILTER_RULE,
     SIMPLE_FILTER_RULE,
     SIMPLE_QUERY_SQL,
     SIMPLE_REFERENCE_MAP,
+    UNWRAPPED_FROM_SUBQUERY_SQL,
+    UNWRAPPED_FROM_SUBQUERY_WITH_COMMENTS_SQL,
 } from './SqlQueryBuilder.mocks';
 
 describe('SqlQueryBuilder class', () => {
@@ -124,7 +124,7 @@ describe('SqlQueryBuilder class', () => {
                 },
                 DEFAULT_CONFIG,
             );
-            expect(queryBuilder.toSql()).toBe(QUERY_WITH_SUBQUERY_SQL);
+            expect(queryBuilder.toSql()).toBe(UNWRAPPED_FROM_SUBQUERY_SQL);
         });
 
         it('should handle SQL with semicolons and comments in FROM', () => {
@@ -146,8 +146,39 @@ describe('SqlQueryBuilder class', () => {
                 DEFAULT_CONFIG,
             );
             expect(queryBuilder.toSql()).toBe(
-                QUERY_WITH_SUBQUERY_SEMICOLON_COMMENTS_SQL,
+                UNWRAPPED_FROM_SUBQUERY_WITH_COMMENTS_SQL,
             );
+        });
+
+        it('should hoist a parameterized script prelude before filtering', () => {
+            const queryBuilder = new SqlQueryBuilder(
+                {
+                    referenceMap: SIMPLE_REFERENCE_MAP,
+                    select: ['test_field'],
+                    from: {
+                        name: 'subquery',
+                        sql: 'DECLARE suffix STRING DEFAULT ${ld.parameters.suffix}; SELECT test_field FROM source_table',
+                    },
+                    filters: {
+                        id: 'filter_group_1',
+                        and: [SIMPLE_FILTER_RULE],
+                    },
+                    parameters: { suffix: 'active' },
+                    limit: undefined,
+                },
+                DEFAULT_CONFIG,
+            );
+
+            const { sql, parameterReferences, usedParameters } =
+                queryBuilder.getSqlAndReferences();
+
+            expect(sql).toMatch(/^DECLARE suffix STRING DEFAULT 'active';\n/);
+            expect(sql).not.toContain('(DECLARE');
+            expect(sql).toContain(
+                'FROM (\nSELECT test_field FROM source_table\n) AS "subquery"',
+            );
+            expect(parameterReferences).toEqual(['suffix']);
+            expect(usedParameters).toEqual({ suffix: 'active' });
         });
     });
 
@@ -327,6 +358,31 @@ describe('SqlQueryBuilder class', () => {
             );
 
             expect(queryBuilder.toSql()).toContain('LIMIT 10 OFFSET 5');
+        });
+
+        // PROD-7880: an outer LIMIT applied after a subquery wrap lets the
+        // optimizer drop the user's ORDER BY, returning arbitrary rows. The
+        // builder must keep ORDER BY adjacent to LIMIT in the emitted SQL.
+        it('should keep user ORDER BY adjacent to LIMIT (no subquery wrap)', () => {
+            const queryBuilder = new SqlQueryBuilder(
+                {
+                    referenceMap: SIMPLE_REFERENCE_MAP,
+                    select: ['test_field'],
+                    from: {
+                        name: 'subquery',
+                        sql: 'SELECT badge, COUNT(DISTINCT user_id) AS active_profiles FROM exploded GROUP BY 1 ORDER BY active_profiles DESC, badge ASC LIMIT 5',
+                    },
+                    limit: 500,
+                },
+                DEFAULT_CONFIG,
+            );
+
+            const sql = queryBuilder.toSql();
+            expect(sql).not.toMatch(/\)\s*AS\s*"sql_query"/i);
+            expect(sql).not.toMatch(/\)\s*AS\s*"subquery"/i);
+            expect(sql).toMatch(
+                /ORDER BY active_profiles DESC, badge ASC\s+LIMIT 5\s*$/i,
+            );
         });
     });
 

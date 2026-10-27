@@ -1,9 +1,11 @@
-import type { CatalogItem } from '@lightdash/common';
-import { ActionIcon, Badge, Group, Tooltip } from '@mantine/core';
+import { interpolateUiString, type CatalogItem } from '@lightdash/common';
+import { Group, ActionIcon, Badge, Tooltip } from '@mantine/core';
 import { IconCode, IconX } from '@tabler/icons-react';
-import type { FC } from 'react';
+import type { CSSProperties, FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
-import { useCategoryStyles } from '../styles/useCategoryStyles';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
+import { useCategoryColors } from '../styles/useCategoryColors';
+import styles from './CatalogCategory.module.css';
 
 type Props = {
     category: Pick<
@@ -21,7 +23,16 @@ export const CatalogCategory: FC<Props> = ({
     onRemove,
     showYamlIcon = false,
 }) => {
-    const { classes } = useCategoryStyles(category.color);
+    const colors = useCategoryColors(category.color);
+    const getUiString = useUiStrings();
+
+    const categoryVars = {
+        '--category-text-color': colors.textColor,
+        '--category-background-color': colors.backgroundColor,
+        '--category-hover-background-color': colors.hoverBackgroundColor,
+        '--category-border-color': colors.borderColor,
+        '--category-focus-outline-color': colors.focusOutlineColor,
+    } as CSSProperties;
 
     return (
         <Badge
@@ -29,17 +40,15 @@ export const CatalogCategory: FC<Props> = ({
             pos="relative"
             size="sm"
             radius="md"
-            variant="light"
             onClick={onClick}
             py={10}
             h={24}
+            pr={onRemove ? 2 : 8}
             rightSection={
                 showYamlIcon && (
                     <Tooltip
-                        variant="xs"
                         maw={200}
                         position="top"
-                        withinPortal
                         openDelay={200}
                         fz="xs"
                         label="This category cannot be removed from this metric because it was defined in the .yml file."
@@ -53,36 +62,23 @@ export const CatalogCategory: FC<Props> = ({
                     </Tooltip>
                 )
             }
-            className={classes.base}
-            styles={() => ({
-                root: {
-                    fontSize: '12px',
-                    textTransform: 'none',
-                    fontWeight: 500,
-                    paddingRight: onRemove ? 2 : 8,
-                },
-            })}
+            className={styles.base}
+            style={categoryVars}
         >
-            <Group spacing={1}>
+            <Group gap={1}>
                 {category.name}
                 {onRemove && (
                     <ActionIcon
-                        variant="subtle"
-                        color="gray"
+                        aria-label={interpolateUiString(
+                            getUiString('metrics.removeCategory'),
+                            { category: category.name },
+                        )}
                         size={14}
                         onClick={onRemove}
-                        sx={(theme) => ({
-                            '&:focus': {
-                                backgroundColor: theme.fn.rgba(
-                                    theme.colors.ldGray[5],
-                                    0.35,
-                                ),
-                                outline: 'none',
-                            },
-                        })}
+                        className={styles.removeButton}
                     >
                         <MantineIcon
-                            className={classes.removeIcon}
+                            color={colors.removeIconColor}
                             icon={IconX}
                             strokeWidth={2.5}
                         />

@@ -1,4 +1,6 @@
 import {
+    isAppScheduler,
+    isChartScheduler,
     isCreateSchedulerGoogleChatTarget,
     isCreateSchedulerMsTeamsTarget,
     isDashboardScheduler,
@@ -12,10 +14,14 @@ import {
     type CreateSchedulerTarget,
     type Dashboard,
     type DashboardFilterRule,
+    type Filters,
     type ParametersValuesMap,
+    type SchedulerAiAugmentation,
     type SchedulerAndTargets,
+    type SchedulerAppState,
     type SchedulerCsvOptions,
     type SchedulerImageOptions,
+    type SchedulerPdfOptions,
 } from '@lightdash/common';
 import { createFormContext } from '@mantine/form';
 import intersection from 'lodash/intersection';
@@ -32,24 +38,32 @@ export interface SchedulerFormValues {
         limit: Limit;
         customLimit: number;
         withPdf: boolean;
+        pagePerTab: boolean;
         asAttachment: boolean;
         exportPivotedData: boolean;
+        xlsxFileLayout: NonNullable<SchedulerCsvOptions['xlsxFileLayout']>;
     };
     emailTargets: string[];
     slackTargets: string[];
     msTeamsTargets: string[];
     googleChatTargets: string[];
-    filters?: DashboardFilterRule[];
+    dashboardFilters?: DashboardFilterRule[];
+    chartFilters?: Filters;
     parameters?: ParametersValuesMap;
     customViewportWidth?: number;
     selectedTabs?: string[] | null;
+    /** App deliveries only: snapshot of the app's shareable URL state. */
+    appState?: SchedulerAppState | null;
     thresholds?: Array<{
         fieldId: string;
         operator: ThresholdOperator;
-        value: number;
+        value: number | '';
     }>;
     includeLinks: boolean;
+    plainTextEmail: boolean;
     notificationFrequency?: NotificationFrequency;
+    // Saved to the EE ai-augmentation sub-resource, not the scheduler body.
+    aiAugmentation: SchedulerAiAugmentation | null;
 }
 
 const [SchedulerFormProvider, useSchedulerFormContext, useSchedulerForm] =
@@ -68,19 +82,27 @@ export const DEFAULT_VALUES: SchedulerFormValues = {
         limit: Limit.TABLE,
         customLimit: 1,
         withPdf: false,
+        pagePerTab: false,
         asAttachment: false,
         exportPivotedData: true,
+        xlsxFileLayout: 'zip',
     },
     emailTargets: [],
     slackTargets: [],
     msTeamsTargets: [],
     googleChatTargets: [],
-    filters: [],
+    // undefined = not yet seeded from live dashboard filters; [] = user removed them all
+    dashboardFilters: undefined,
+    // undefined = not yet seeded from the chart's saved filters; {} = user removed them all
+    chartFilters: undefined,
     parameters: undefined,
     customViewportWidth: undefined,
     selectedTabs: null,
+    appState: null,
     thresholds: [],
     includeLinks: true,
+    plainTextEmail: false,
+    aiAugmentation: null,
 };
 
 export const DEFAULT_VALUES_ALERT: SchedulerFormValues = {
@@ -139,8 +161,16 @@ export const getFormValuesFromScheduler = (
         }
         formOptions.asAttachment = options.asAttachment || false;
         formOptions.exportPivotedData = options.exportPivotedData !== false;
+        formOptions.xlsxFileLayout = options.xlsxFileLayout ?? 'zip';
     } else if (isSchedulerImageOptions(options)) {
         formOptions.withPdf = options.withPdf || false;
+        formOptions.pagePerTab = options.pagePerTab || false;
+    }
+    if (
+        schedulerData.format === SchedulerFormat.PDF &&
+        'pagePerTab' in options
+    ) {
+        formOptions.pagePerTab = options.pagePerTab || false;
     }
 
     const emailTargets: string[] = [];
@@ -172,16 +202,32 @@ export const getFormValuesFromScheduler = (
         msTeamsTargets: msTeamsTargets,
         googleChatTargets: googleChatTargets,
         ...(isDashboardScheduler(schedulerData) && {
-            filters: schedulerData.filters,
+            dashboardFilters: schedulerData.filters,
             parameters: schedulerData.parameters,
             customViewportWidth: schedulerData.customViewportWidth,
             selectedTabs: schedulerData.selectedTabs,
         }),
+        ...(isChartScheduler(schedulerData) && {
+            chartFilters: schedulerData.filters,
+            parameters: schedulerData.parameters,
+        }),
+        ...(isAppScheduler(schedulerData) && {
+            appState: schedulerData.appState ?? null,
+        }),
         thresholds: schedulerData.thresholds,
         notificationFrequency: schedulerData.notificationFrequency,
         includeLinks: schedulerData.includeLinks !== false,
+        plainTextEmail: schedulerData.plainTextEmail === true,
+        // Populated separately from the ai-augmentation sub-resource.
+        aiAugmentation: null,
     };
 };
+
+// Emails receive the file as an attachment, Slack channels get it in the message thread.
+export const hasFileAttachmentTargets = (
+    values: Pick<SchedulerFormValues, 'emailTargets' | 'slackTargets'>,
+): boolean =>
+    (values.emailTargets?.length || 0) + (values.slackTargets?.length || 0) > 0;
 
 export const transformFormValues = (
     values: SchedulerFormValues,
@@ -195,20 +241,26 @@ export const transformFormValues = (
                 values.options.limit === Limit.CUSTOM
                     ? values.options.customLimit
                     : values.options.limit,
-            // Only allow attachment for CSV format and if there are email targets
-            asAttachment:
-                values.format === SchedulerFormat.CSV &&
-                (values.emailTargets?.length || 0) > 0
-                    ? values.options.asAttachment
-                    : false,
+            asAttachment: hasFileAttachmentTargets(values)
+                ? values.options.asAttachment
+                : false,
             exportPivotedData: values.options.exportPivotedData,
+            xlsxFileLayout:
+                values.format === SchedulerFormat.XLSX
+                    ? values.options.xlsxFileLayout
+                    : undefined,
         } satisfies SchedulerCsvOptions;
     } else if (values.format === SchedulerFormat.IMAGE) {
         options = {
             withPdf: values.options.withPdf,
+            pagePerTab: values.options.withPdf
+                ? values.options.pagePerTab
+                : undefined,
         } satisfies SchedulerImageOptions;
     } else if (values.format === SchedulerFormat.PDF) {
-        options = {};
+        options = {
+            pagePerTab: values.options.pagePerTab,
+        } satisfies SchedulerPdfOptions;
     }
 
     const emailTargets = (values.emailTargets || []).map((email: string) => ({
@@ -249,17 +301,35 @@ export const transformFormValues = (
         appUuid: null,
         appName: null,
         ...(resourceType === 'dashboard' && {
-            filters: values.filters,
+            filters: values.dashboardFilters,
             parameters: values.parameters,
             customViewportWidth: values.customViewportWidth,
             selectedTabs: values.selectedTabs,
         }),
-        thresholds: values.thresholds,
+        ...(resourceType === 'chart' && {
+            filters: values.chartFilters,
+            parameters: values.parameters,
+        }),
+        thresholds: values.thresholds?.filter(
+            (
+                threshold,
+            ): threshold is typeof threshold & {
+                value: number;
+            } => typeof threshold.value === 'number',
+        ),
+        ...(resourceType === 'app' && {
+            appState: values.appState ?? undefined,
+        }),
         enabled: true,
         notificationFrequency:
             'notificationFrequency' in values
                 ? (values.notificationFrequency as NotificationFrequency)
                 : undefined,
         includeLinks: values.includeLinks !== false,
+        // Plain text only affects email bodies, so it cannot be left on for a
+        // delivery with no email recipients.
+        plainTextEmail:
+            (values.emailTargets?.length || 0) > 0 &&
+            values.plainTextEmail === true,
     };
 };

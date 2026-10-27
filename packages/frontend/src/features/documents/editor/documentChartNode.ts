@@ -1,0 +1,176 @@
+import { type DocumentChartContent } from '@lightdash/common';
+import { Node } from '@tiptap/core';
+import { NodeSelection } from '@tiptap/pm/state';
+import { ReactNodeViewRenderer } from '@tiptap/react';
+import DocumentChartNodeView from './DocumentChartNodeView';
+import { moveTopLevelNode, type MoveDirection } from './moveTopLevelNode';
+
+export const DOCUMENT_CHART_NODE = 'documentChart';
+
+export type { DocumentChartContent };
+
+/**
+ * `chartId` is the chart's stored id, kept through edits; null for a new
+ * chart. `isSaved` is false once the content differs from the saved version.
+ */
+export type DocumentChartAttributes = {
+    content: DocumentChartContent | null;
+    chartId: string | null;
+    isSaved: boolean;
+};
+
+export type EditChartHandler = (
+    position: number,
+    content: DocumentChartContent,
+) => void;
+
+export type DocumentChartNodeOptions = {
+    /** Opens the chart editor for the node at this document position. */
+    onEditChart: EditChartHandler | null;
+};
+
+const CONTENT_ATTRIBUTE = 'data-document-chart';
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Pasted HTML can carry any attribute value, so check the fields rendering
+ * reads; the server validates the full chart when the Document is saved.
+ */
+const isDocumentChartContent = (
+    value: unknown,
+): value is DocumentChartContent => {
+    if (
+        !isRecord(value) ||
+        (value.source !== 'semantic' && value.source !== 'merge') ||
+        !isRecord(value.chart)
+    ) {
+        return false;
+    }
+    const { name, tableName, metricQuery, chartConfig } = value.chart;
+    return (
+        typeof name === 'string' &&
+        typeof tableName === 'string' &&
+        isRecord(metricQuery) &&
+        typeof metricQuery.exploreName === 'string' &&
+        isRecord(chartConfig) &&
+        typeof chartConfig.type === 'string' &&
+        (value.source === 'semantic' || isRecord(value.chart.merge))
+    );
+};
+
+const parseContentAttribute = (
+    value: string | null,
+): DocumentChartContent | null => {
+    if (!value) {
+        return null;
+    }
+    try {
+        const parsed: unknown = JSON.parse(value);
+        return isDocumentChartContent(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+};
+
+export const isEditableChart = (content: DocumentChartContent | null) =>
+    content?.source === 'semantic';
+
+// No group: charts are only allowed at the document's top level (see
+// DocumentWithCharts), so they can never nest in tables, lists or quotes.
+export const DocumentChartNode = Node.create<DocumentChartNodeOptions>({
+    name: DOCUMENT_CHART_NODE,
+    atom: true,
+    selectable: true,
+    draggable: true,
+
+    addOptions() {
+        return { onEditChart: null };
+    },
+
+    addAttributes() {
+        return {
+            content: {
+                default: null,
+                parseHTML: (element: HTMLElement) =>
+                    parseContentAttribute(
+                        element.getAttribute(CONTENT_ATTRIBUTE),
+                    ),
+                renderHTML: () => ({}),
+            },
+            // Pasted charts are new charts, so identity is not read from HTML
+            chartId: {
+                default: null,
+                parseHTML: () => null,
+                renderHTML: () => ({}),
+            },
+            isSaved: {
+                default: false,
+                parseHTML: () => false,
+                renderHTML: () => ({}),
+            },
+        };
+    },
+
+    parseHTML() {
+        return [{ tag: `div[${CONTENT_ATTRIBUTE}]` }];
+    },
+
+    renderHTML({ node }) {
+        return [
+            'div',
+            { [CONTENT_ATTRIBUTE]: JSON.stringify(node.attrs.content) },
+        ];
+    },
+
+    addNodeView() {
+        return ReactNodeViewRenderer(DocumentChartNodeView);
+    },
+
+    addKeyboardShortcuts() {
+        const moveSelectedChart = (direction: MoveDirection) => {
+            const { state, view } = this.editor;
+            const { selection } = state;
+            if (
+                !this.editor.isEditable ||
+                !(selection instanceof NodeSelection) ||
+                selection.node.type.name !== this.name
+            ) {
+                return false;
+            }
+            const moved = moveTopLevelNode(state, selection.from, direction);
+            if (moved) {
+                view.dispatch(moved.tr);
+            }
+            // Handled at an edge too, so the browser does not select text
+            return true;
+        };
+        return {
+            'Mod-Shift-ArrowUp': () => moveSelectedChart(-1),
+            'Mod-Shift-ArrowDown': () => moveSelectedChart(1),
+            Enter: () => {
+                const { selection } = this.editor.state;
+                if (
+                    !this.options.onEditChart ||
+                    !(selection instanceof NodeSelection) ||
+                    selection.node.type.name !== this.name
+                ) {
+                    return false;
+                }
+                const { content } = selection.node
+                    .attrs as DocumentChartAttributes;
+                if (!content || !isEditableChart(content)) {
+                    return false;
+                }
+                this.options.onEditChart(selection.from, content);
+                return true;
+            },
+        };
+    },
+
+    // Charts become chart tags in getDocumentContent, not in the Markdown serializer.
+    addStorage() {
+        return { markdown: { serialize: () => {}, parse: {} } };
+    },
+});

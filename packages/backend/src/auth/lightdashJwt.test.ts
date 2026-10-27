@@ -1,5 +1,6 @@
 import {
     CreateEmbedJwt,
+    EMBED_MAX_SOURCE_SPACE_UUIDS,
     EmbedJwt,
     ForbiddenError,
     ParameterError,
@@ -7,22 +8,26 @@ import {
 import jwt from 'jsonwebtoken';
 import { merge } from 'lodash';
 import { lightdashConfig } from '../config/lightdashConfig';
+import Logger from '../logging/logger';
 import { EncryptionUtil } from '../utils/EncryptionUtil/EncryptionUtil';
 import { decodeLightdashJwt, encodeLightdashJwt } from './lightdashJwt';
 
 // Mock dependencies
-jest.mock('@sentry/node', () => ({
-    captureException: jest.fn(),
+vi.mock('@sentry/node', () => ({
+    captureException: vi.fn(),
 }));
 
-jest.mock('../logging/logger', () => ({
-    error: jest.fn(),
+vi.mock('../logging/logger', () => ({
+    __esModule: true,
+    default: {
+        error: vi.fn(),
+    },
 }));
 
 describe('JwtUtil', () => {
     let encryptionUtil: EncryptionUtil;
     let encodedSecret: Buffer;
-    let mockErrorLogger: jest.Mock;
+    let mockErrorLogger: import('vitest').Mock;
 
     const mockJwtData: CreateEmbedJwt = {
         content: {
@@ -58,11 +63,8 @@ describe('JwtUtil', () => {
         const secret = 'test-secret';
         encodedSecret = encryptionUtil.encrypt(secret);
 
-        // Get the mocked logger and reset it
-        // eslint-disable-next-line
-        const logger = require('../logging/logger');
-        mockErrorLogger = logger.error as jest.Mock;
-        jest.clearAllMocks();
+        mockErrorLogger = Logger.error as import('vitest').Mock;
+        vi.clearAllMocks();
     });
 
     describe('encodeJwt', () => {
@@ -93,6 +95,160 @@ describe('JwtUtil', () => {
     });
 
     describe('decodeJwt', () => {
+        it.each(['jwt', 'legacy', 'invalid', '', null, true])(
+            'rejects signed dashboard tokens with invalid permission mode %s',
+            (permissionsMode) => {
+                const token = encodeLightdashJwt(
+                    {
+                        ...mockJwtData,
+                        writeActions: {
+                            userUuid: 'actor',
+                            spaceUuid: 'space',
+                            permissionsMode,
+                        },
+                    } as unknown as CreateEmbedJwt,
+                    encodedSecret,
+                    '1h',
+                );
+                expect(() => decodeLightdashJwt(token, encodedSecret)).toThrow(
+                    ForbiddenError,
+                );
+            },
+        );
+
+        it.each(['jwt', 'legacy', 'invalid', '', null, true])(
+            'rejects signed AI tokens with invalid permission mode %s',
+            (permissionsMode) => {
+                const token = encodeLightdashJwt(
+                    {
+                        ...mockJwtData,
+                        content: { type: 'aiAgent', agentUuid: 'agent' },
+                        writeActions: {
+                            userUuid: 'actor',
+                            spaceUuid: 'space',
+                            permissionsMode,
+                        },
+                    } as unknown as CreateEmbedJwt,
+                    encodedSecret,
+                    '1h',
+                );
+                expect(() => decodeLightdashJwt(token, encodedSecret)).toThrow(
+                    ForbiddenError,
+                );
+            },
+        );
+
+        const sourceSpaceUuid = '3c90c3cc-0d44-4b50-8888-8dd25736052a';
+
+        it.each([
+            ['a non-array value', 'not-a-list'],
+            ['a non-uuid entry', ['space']],
+            [
+                'more entries than allowed',
+                Array.from(
+                    { length: EMBED_MAX_SOURCE_SPACE_UUIDS + 1 },
+                    () => sourceSpaceUuid,
+                ),
+            ],
+        ])(
+            'rejects signed tokens whose source spaces have %s',
+            (_label, sourceSpaceUuids) => {
+                const token = encodeLightdashJwt(
+                    {
+                        ...mockJwtData,
+                        writeActions: {
+                            userUuid: 'actor',
+                            spaceUuid: 'space',
+                            sourceSpaceUuids,
+                        },
+                    } as unknown as CreateEmbedJwt,
+                    encodedSecret,
+                    '1h',
+                );
+                expect(() => decodeLightdashJwt(token, encodedSecret)).toThrow(
+                    ForbiddenError,
+                );
+            },
+        );
+
+        it('accepts signed tokens with valid source spaces', () => {
+            const token = encodeLightdashJwt(
+                {
+                    ...mockJwtData,
+                    writeActions: {
+                        userUuid: 'actor',
+                        spaceUuid: 'space',
+                        sourceSpaceUuids: [sourceSpaceUuid],
+                    },
+                },
+                encodedSecret,
+                '1h',
+            );
+            expect(
+                decodeLightdashJwt(token, encodedSecret).writeActions
+                    ?.sourceSpaceUuids,
+            ).toEqual([sourceSpaceUuid]);
+        });
+
+        const writeSpaceUuid = '5f2a6c1e-8b7d-4e3a-9c10-2b6f4d8e1a33';
+
+        it.each([
+            ['an empty list', []],
+            ['a non-uuid entry', ['space']],
+            ['duplicate entries', [writeSpaceUuid, writeSpaceUuid]],
+        ])(
+            'rejects signed tokens whose write spaces have %s',
+            (_label, writeSpaceUuids) => {
+                const token = encodeLightdashJwt(
+                    {
+                        ...mockJwtData,
+                        writeActions: { userUuid: 'actor', writeSpaceUuids },
+                    },
+                    encodedSecret,
+                    '1h',
+                );
+                expect(() => decodeLightdashJwt(token, encodedSecret)).toThrow(
+                    ForbiddenError,
+                );
+            },
+        );
+
+        it('rejects signed tokens that set both spaceUuid and writeSpaceUuids', () => {
+            const token = encodeLightdashJwt(
+                {
+                    ...mockJwtData,
+                    writeActions: {
+                        userUuid: 'actor',
+                        spaceUuid: writeSpaceUuid,
+                        writeSpaceUuids: [writeSpaceUuid],
+                    },
+                },
+                encodedSecret,
+                '1h',
+            );
+            expect(() => decodeLightdashJwt(token, encodedSecret)).toThrow(
+                ForbiddenError,
+            );
+        });
+
+        it('accepts signed tokens with valid write spaces', () => {
+            const token = encodeLightdashJwt(
+                {
+                    ...mockJwtData,
+                    writeActions: {
+                        userUuid: 'actor',
+                        writeSpaceUuids: [writeSpaceUuid, sourceSpaceUuid],
+                    },
+                },
+                encodedSecret,
+                '1h',
+            );
+            expect(
+                decodeLightdashJwt(token, encodedSecret).writeActions
+                    ?.writeSpaceUuids,
+            ).toEqual([writeSpaceUuid, sourceSpaceUuid]);
+        });
+
         it('should decode and validate a valid JWT token', () => {
             const token = encodeLightdashJwt(mockJwtData, encodedSecret, '1h');
             const decoded = decodeLightdashJwt(token, encodedSecret);

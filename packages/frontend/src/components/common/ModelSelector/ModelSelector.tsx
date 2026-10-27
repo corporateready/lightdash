@@ -1,113 +1,212 @@
 import type { AiModelOption } from '@lightdash/common';
 import {
+    Box,
     Button,
+    Group,
     Menu,
-    rem,
     ScrollArea,
     Stack,
     Text,
     type ButtonProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconCheck, IconChevronDown } from '@tabler/icons-react';
 import { useMemo, type FC } from 'react';
+import { useUiString } from '../../../ee/providers/Embed/useUiStrings';
 import MantineIcon from '../MantineIcon';
-import { getModelKey } from './utils';
+import { RetiredModelBadge } from './RetiredModelBadge';
+import {
+    filterDeprecatedModelsForPicker,
+    getModelGroupLabel,
+    getModelKey,
+} from './utils';
+
+// Opt-in for composers only: settings pickers set the agent's own model and
+// have no default to fall back to.
+export type AgentDefaultOption = {
+    model: AiModelOption | null;
+    isSelected: boolean;
+    onSelect: () => void;
+};
 
 interface Props extends Omit<ButtonProps, 'value' | 'onChange'> {
     models: AiModelOption[];
     value: string | null;
     onChange: (modelKey: string) => void;
+    reasoningEnabled?: boolean;
+    onReasoningChange?: (enabled: boolean) => void;
+    agentDefault?: AgentDefaultOption;
 }
+
+const SelectedCheck: FC = () => (
+    <MantineIcon icon={IconCheck} size="sm" color="blue" />
+);
 
 export const ModelSelector: FC<Props> = ({
     models,
     value,
     onChange,
+    reasoningEnabled,
+    onReasoningChange,
+    agentDefault,
     ...buttonProps
 }) => {
+    const agentDefaultLabel = useUiString('aiAgent.modelSelector.agentDefault');
     const selectedModel = useMemo(
         () => models.find((m) => getModelKey(m) === value),
         [models, value],
     );
 
+    const visibleModels = useMemo(
+        () => filterDeprecatedModelsForPicker(models, value),
+        [models, value],
+    );
+
     const groupedModels = useMemo(() => {
         const groups = new Map<string, AiModelOption[]>();
-        models.forEach((model) => {
-            const existing = groups.get(model.provider) ?? [];
-            groups.set(model.provider, [...existing, model]);
+        visibleModels.forEach((model) => {
+            const groupLabel = getModelGroupLabel(model);
+            const existing = groups.get(groupLabel);
+            if (existing) {
+                existing.push(model);
+            } else {
+                groups.set(groupLabel, [model]);
+            }
         });
         return groups;
-    }, [models]);
+    }, [visibleModels]);
 
-    const providerGroups = useMemo(
+    const modelGroups = useMemo(
         () => Array.from(groupedModels.keys()),
         [groupedModels],
     );
 
-    if (models.length === 1) {
+    const showReasoning =
+        selectedModel?.supportsReasoning === true &&
+        onReasoningChange !== undefined;
+    const reasoningLabel = reasoningEnabled ? 'High' : null;
+
+    if (visibleModels.length === 1 && !showReasoning) {
         return null;
     }
 
     return (
-        <Menu
-            shadow="md"
-            width={280}
-            position="bottom-start"
-            withinPortal={false}
-        >
+        <Menu width={340} position="top-end" offset={8}>
             <Menu.Target>
                 <Button
-                    variant="subtle"
-                    color="gray"
                     px="xs"
-                    h={rem(36)}
                     {...buttonProps}
                     rightSection={
                         <MantineIcon
                             icon={IconChevronDown}
                             size="sm"
-                            color="ldGray.6"
+                            color="dimmed"
                         />
                     }
                 >
-                    <Text size="sm" fw={500}>
-                        {selectedModel?.displayName ?? 'Select model'}
-                    </Text>
+                    <Group gap={6} wrap="nowrap">
+                        <Text size="xs" fw={600} c="ldGray.8" span>
+                            {selectedModel?.displayName ?? 'Select model'}
+                        </Text>
+                        {showReasoning && reasoningLabel && (
+                            <Text size="xs" fw={500} c="dimmed" span>
+                                {reasoningLabel}
+                            </Text>
+                        )}
+                    </Group>
                 </Button>
             </Menu.Target>
 
             <Menu.Dropdown>
-                <ScrollArea.Autosize mah={200}>
-                    {providerGroups.map((provider, groupIndex) => {
-                        const providerModels =
-                            groupedModels.get(provider) ?? [];
+                {showReasoning && (
+                    <>
+                        <Menu.Label>Reasoning</Menu.Label>
+                        <Menu.Item
+                            onClick={() => onReasoningChange(false)}
+                            rightSection={
+                                !reasoningEnabled ? (
+                                    <MantineIcon
+                                        icon={IconCheck}
+                                        size="sm"
+                                        color="ldGray.7"
+                                    />
+                                ) : null
+                            }
+                        >
+                            Default
+                        </Menu.Item>
+                        <Menu.Item
+                            onClick={() => onReasoningChange(true)}
+                            rightSection={
+                                reasoningEnabled ? (
+                                    <MantineIcon
+                                        icon={IconCheck}
+                                        size="sm"
+                                        color="ldGray.7"
+                                    />
+                                ) : null
+                            }
+                        >
+                            High
+                        </Menu.Item>
+                        {visibleModels.length > 1 && <Menu.Divider />}
+                    </>
+                )}
+                <ScrollArea.Autosize mah={200} scrollbars="y">
+                    {agentDefault && (
+                        <>
+                            <Menu.Item
+                                onClick={agentDefault.onSelect}
+                                rightSection={
+                                    agentDefault.isSelected ? (
+                                        <SelectedCheck />
+                                    ) : null
+                                }
+                            >
+                                <Text size="sm" fw={500}>
+                                    {agentDefaultLabel}
+                                    {agentDefault.model && (
+                                        <Text size="sm" c="dimmed" span>
+                                            {' · '}
+                                            {agentDefault.model.displayName}
+                                        </Text>
+                                    )}
+                                </Text>
+                            </Menu.Item>
+                            <Menu.Divider mx={0} />
+                        </>
+                    )}
+                    {modelGroups.map((groupLabel, groupIndex) => {
+                        const groupModels = groupedModels.get(groupLabel) ?? [];
                         return (
-                            <div key={provider}>
-                                {providerGroups.length > 1 && (
-                                    <Menu.Label>{provider}</Menu.Label>
+                            <Box key={groupLabel}>
+                                {modelGroups.length > 1 && (
+                                    <Menu.Label>{groupLabel}</Menu.Label>
                                 )}
 
-                                {providerModels.map((model) => {
+                                {groupModels.map((model) => {
                                     const modelKey = getModelKey(model);
-                                    const isSelected = modelKey === value;
+                                    const isSelected =
+                                        modelKey === value &&
+                                        !agentDefault?.isSelected;
                                     return (
                                         <Menu.Item
                                             key={modelKey}
                                             onClick={() => onChange(modelKey)}
                                             rightSection={
                                                 isSelected ? (
-                                                    <MantineIcon
-                                                        icon={IconCheck}
-                                                        size="sm"
-                                                        color="blue"
-                                                    />
+                                                    <SelectedCheck />
                                                 ) : null
                                             }
                                         >
                                             <Stack gap={0}>
-                                                <Text size="sm" fw={500}>
-                                                    {model.displayName}
-                                                </Text>
+                                                <Group gap={6} wrap="nowrap">
+                                                    <Text size="sm" fw={500}>
+                                                        {model.displayName}
+                                                    </Text>
+                                                    {model.deprecated && (
+                                                        <RetiredModelBadge />
+                                                    )}
+                                                </Group>
                                                 {model.description && (
                                                     <Text size="xs" c="dimmed">
                                                         {model.description}
@@ -118,10 +217,10 @@ export const ModelSelector: FC<Props> = ({
                                     );
                                 })}
 
-                                {groupIndex < providerGroups.length - 1 && (
-                                    <Menu.Divider />
+                                {groupIndex < modelGroups.length - 1 && (
+                                    <Menu.Divider mx={0} />
                                 )}
-                            </div>
+                            </Box>
                         );
                     })}
                 </ScrollArea.Autosize>

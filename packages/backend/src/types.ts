@@ -1,9 +1,11 @@
 import {
+    DbtExternalModelNode,
     DbtPackages,
     DbtRpcGetManifestResults,
     Explore,
     ExploreError,
     LightdashProjectConfig,
+    ProjectContextEntry,
 } from '@lightdash/common';
 import { WarehouseCatalog } from '@lightdash/warehouses';
 
@@ -11,14 +13,38 @@ export type TrackingParams = {
     userUuid: string;
     organizationUuid: string;
     projectUuid: string;
+    jobUuid?: string;
+};
+
+export type DbtManifestFetchOptions = {
+    externalNodes: DbtExternalModelNode[];
+    signal?: AbortSignal;
+};
+
+export type DbtManifestFetchTimings = {
+    gitRefreshMs: number | null;
+    depsMs: number | null;
+    manifestMs: number;
+};
+
+export type DbtManifestFetchResult = DbtRpcGetManifestResults & {
+    timings: DbtManifestFetchTimings;
+};
+
+export type DbtSourcePreparation = {
+    projectDir: string | null;
+    timings: { gitRefreshMs: number | null; depsMs: number | null };
 };
 
 export interface ProjectAdapter {
+    prepareDbtSource(options?: {
+        signal?: AbortSignal;
+    }): Promise<DbtSourcePreparation>;
     /**
      * Compile all explores
      * @param trackingParams - Optional tracking parameters to track the compilation and lightdash project config (lightdash.config.yml) overrides
      * @param loadSources - Whether to load source information for each explore
-     * @param allowPartialCompilation - When true, fields that fail to compile will be marked with errors instead of failing the entire explore
+     * @param allowPartialCompilation - When false, a field compilation failure fails the entire explore. Defaults to true.
      * @returns A promise that resolves to an array of explores or explore errors
      */
     compileAllExplores(
@@ -27,27 +53,63 @@ export interface ProjectAdapter {
         allowPartialCompilation?: boolean,
     ): Promise<(Explore | ExploreError)[]>;
 
+    prepareExploreStream(
+        trackingParams: TrackingParams | undefined,
+        loadSources?: boolean,
+        allowPartialCompilation?: boolean,
+        deferExploreNaming?: boolean,
+    ): Promise<AsyncIterable<Explore | ExploreError>>;
+
     getDbtPackages(): Promise<DbtPackages | undefined>;
 
-    test(): Promise<void>;
+    /**
+     * Fetch this source's compiled dbt manifest without compiling explores. Used
+     * by the multiple-dbt-sources merge to combine each source's manifest before
+     * a single compile.
+     */
+    getDbtManifest(
+        options?: DbtManifestFetchOptions,
+    ): Promise<DbtManifestFetchResult>;
+
+    test(options?: { signal?: AbortSignal }): Promise<void>;
+
+    releaseDisk(options?: { keepProject?: boolean }): Promise<void>;
 
     destroy(): Promise<void>;
 
     getLightdashProjectConfig(
         trackingParams: TrackingParams | undefined,
     ): Promise<LightdashProjectConfig>;
+
+    getProjectContext(): Promise<ProjectContextEntry[]>;
+
+    /**
+     * Local dbt project directory this adapter reads `lightdash.config.yml` and
+     * `lightdash.project_context.yml` from. Undefined for adapters with no
+     * checkout (manifest-only, dbt Cloud, none). The multiple-dbt-sources merge
+     * passes the primary source's dir to the merged manifest adapter so the
+     * combined compile keeps the primary's project config.
+     */
+    dbtProjectDir?: string;
 }
 
 export interface DbtClient {
-    installDeps?(): Promise<void>;
+    installDeps?(signal?: AbortSignal): Promise<void>;
 
-    getDbtManifest(): Promise<DbtRpcGetManifestResults>;
+    getDbtManifest(
+        options?: DbtManifestFetchOptions,
+    ): Promise<DbtRpcGetManifestResults>;
 
     getDbtPackages?(): Promise<DbtPackages | undefined>;
 
     getSelector(): string | undefined;
 
-    test(): Promise<void>;
+    test(
+        prepareDependencies?: () => Promise<void>,
+        signal?: AbortSignal,
+    ): Promise<void>;
+
+    cleanup?(): Promise<void>;
 }
 
 export type CachedWarehouse = {

@@ -1,60 +1,129 @@
-import { tool } from 'ai';
+import {
+    assertUnreachable,
+    mcpReadContentArgsSchema,
+    mcpReadContentToolDefinition,
+    readContentToolDefinition,
+    toolReadContentArgsSchema,
+    type ToolReadContentStructuredContent,
+} from '@lightdash/common';
+import { tool, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
 import type { ReadContentFn } from '../types/aiAgentDependencies';
 import { toModelOutput } from '../utils/toModelOutput';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
-
-const toolReadContentArgsSchema = z
-    .object({
-        slug: z
-            .string()
-            .min(1)
-            .describe('Slug of the dashboard or chart to read.'),
-        type: z
-            .enum(['dashboard', 'chart'])
-            .describe('Type of Lightdash content to read.'),
-    })
-    .describe(
-        'Read a dashboard or chart as JSON using its slug. Call this before editing.',
-    );
-
-const toolReadContentOutputSchema = z.object({
-    result: z.string(),
-    metadata: z.object({
-        status: z.enum(['success', 'error']),
-    }),
-});
+import { toolErrorOutput } from '../utils/toolErrorHandler';
 
 type Dependencies = {
     readContent: ReadContentFn;
+    documentsEnabled?: boolean;
 };
 
-export const getReadContent = ({ readContent }: Dependencies) =>
-    tool({
-        description: toolReadContentArgsSchema.description,
-        inputSchema: toolReadContentArgsSchema,
-        outputSchema: toolReadContentOutputSchema,
-        execute: async ({ slug, type }) => {
+const toolDefinition = readContentToolDefinition.for('agent');
+
+type ReadContentResult = Awaited<ReturnType<ReadContentFn>>;
+
+// Shown with every dashboard read so the first filter edit has the right shape without a skill round trip.
+const DASHBOARD_READ_HINT =
+    'Filter rules under /filters/dimensions need "target": { "fieldId", "tableName" }; per-tile overrides go in "tileTargets" keyed by tileSlug. Each saved_chart tile carries a read-only "chartQuery" (exploreName, fieldIds) to pick targets without reading charts; never patch chartQuery. Load the "developing-in-lightdash" skill resource "dashboard-reference" before editing filters or tiles.';
+
+const contentResult = ({
+    content,
+    href,
+    type,
+}: {
+    content: unknown;
+    href: string;
+    type: ReadContentResult['type'];
+}) =>
+    [
+        `<${type} href="${href}" />`,
+        ...(type === 'dashboard' ? [DASHBOARD_READ_HINT] : []),
+        '---',
+        JSON.stringify(content, null, 2),
+    ].join('\n');
+
+const toStructuredContent = (
+    read: ReadContentResult,
+): ToolReadContentStructuredContent => {
+    const base = {
+        slug: read.content.slug,
+        name: read.content.name,
+        href: read.href,
+    };
+    switch (read.type) {
+        case 'dashboard':
+        case 'chart':
+        case 'sql_chart':
+        case 'data_app':
+            return { ...base, type: read.type, content: read.content };
+        case 'document':
+            return {
+                ...base,
+                type: read.type,
+                uuid: read.uuid,
+                versionUuid: read.versionUuid,
+                content: read.content,
+            };
+        default:
+            return assertUnreachable(read, 'Unknown read content type');
+    }
+};
+
+export const getReadContent = ({
+    readContent,
+    documentsEnabled = false,
+}: Dependencies) => {
+    const definition = documentsEnabled
+        ? mcpReadContentToolDefinition.for('agent')
+        : toolDefinition;
+    const inputSchema: FlexibleSchema<
+        z.infer<typeof mcpReadContentArgsSchema>
+    > = definition.inputSchema;
+    return tool({
+        ...definition,
+        inputSchema,
+        execute: async (args) => {
+            const { slug, type } = args;
             try {
-                const result = await readContent({ slug, type });
+                (documentsEnabled
+                    ? mcpReadContentArgsSchema
+                    : toolReadContentArgsSchema
+                ).parse(args);
+                // chartId only applies to Documents; ignore it elsewhere.
+                const getReadArgs = (): Parameters<ReadContentFn>[0] =>
+                    type === 'document'
+                        ? { type, slug, chartId: args.chartId ?? null }
+                        : { slug, type };
+                const read = await readContent(getReadArgs());
+                const structuredContent = toStructuredContent(read);
+                const metadata = {
+                    status: 'success' as const,
+                    slug: structuredContent.slug,
+                    name: structuredContent.name,
+                    href: structuredContent.href,
+                    ...(structuredContent.type === 'document'
+                        ? {
+                              uuid: structuredContent.uuid,
+                              versionUuid: structuredContent.versionUuid,
+                          }
+                        : {}),
+                };
 
                 return {
-                    result: JSON.stringify(result.content, null, 2),
-                    metadata: {
-                        status: 'success' as const,
-                    },
+                    result: contentResult({
+                        content: read.type === 'document' ? read : read.content,
+                        href: structuredContent.href,
+                        type: structuredContent.type,
+                    }),
+                    metadata,
+                    structuredContent,
                 };
             } catch (error) {
-                return {
-                    result: toolErrorHandler(
-                        error,
-                        `Error reading ${type} "${slug}"`,
-                    ),
-                    metadata: {
-                        status: 'error' as const,
-                    },
-                };
+                return toolErrorOutput(
+                    error,
+                    `Error reading ${type} "${slug}"`,
+                );
             }
         },
         toModelOutput: ({ output }) => toModelOutput(output),
     });
+};

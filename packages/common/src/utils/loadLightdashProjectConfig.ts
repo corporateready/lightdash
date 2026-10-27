@@ -1,6 +1,6 @@
+import betterAjvErrors from '@sidvind/better-ajv-errors';
 import Ajv from 'ajv';
 import AjvErrors from 'ajv-errors';
-import betterAjvErrors from 'better-ajv-errors';
 import * as yaml from 'js-yaml';
 import { validateParameterNames } from '../compiler/parameters';
 import lightdashProjectConfigSchema from '../schemas/json/lightdash-project-config-1.0.json';
@@ -57,17 +57,30 @@ export const loadLightdashProjectConfig = async (
         configFile.parameters = undefined;
     }
 
-    const { isInvalid: hasInvalidParameterNames, invalidParameters } =
-        validateParameterNames(configFile.parameters);
+    const {
+        isInvalid: hasInvalidParameterNames,
+        invalidParameters,
+        reservedParameters,
+    } = validateParameterNames(configFile.parameters);
 
     if (hasInvalidParameterNames) {
         throw new LightdashProjectConfigError(
             `Invalid lightdash.config.yml with invalid parameter names: ${invalidParameters.join(
                 ', ',
             )}`,
-            {
-                invalidParameters,
-            },
+            { invalidParameters },
+        );
+    }
+
+    // Collisions with a reserved name don't fail config load: the user param wins; warn.
+    if (reservedParameters.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+            `lightdash.config.yml: parameter${
+                reservedParameters.length > 1 ? 's' : ''
+            } ${reservedParameters.join(', ')} ${
+                reservedParameters.length > 1 ? 'override' : 'overrides'
+            } a reserved system variable and will take priority over it.`,
         );
     }
 

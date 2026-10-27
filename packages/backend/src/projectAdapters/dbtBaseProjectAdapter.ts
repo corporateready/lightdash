@@ -1,33 +1,43 @@
 import {
     AnyType,
+    applyMetricFlowMetricsToModels,
     attachTypesToModels,
-    convertExplores,
+    catalogHasTimestampDomains,
     DbtManifestVersion,
-    DbtMetric,
     DbtModelNode,
     DbtPackages,
     DbtRawModelNode,
     DEFAULT_SPOTLIGHT_CONFIG,
+    ensureCatalogTimestampDomainsKey,
     Explore,
     ExploreError,
     friendlyName,
     getCompiledModels,
     getDbtManifestVersion,
+    getDeferredExploreName,
+    getMissingCatalogEntries,
     getModelsFromManifest,
     getSchemaStructureFromDbtModels,
+    haveMissingCatalogEntriesChanged,
     InlineError,
     InlineErrorType,
     isSupportedDbtAdapter,
+    iterateExplores,
     loadLightdashProjectConfig,
-    ManifestValidator,
+    loadProjectContextFile,
     MissingCatalogEntryError,
     normaliseModelDatabase,
     NotFoundError,
     ParseError,
+    setCatalogMissingEntries,
     SupportedDbtAdapter,
     SupportedDbtVersions,
+    type AttachTypesDiagnostics,
     type LightdashProjectConfig,
+    type ProjectContextEntry,
+    type WarehouseCatalogMissingEntry,
 } from '@lightdash/common';
+import { ManifestValidator } from '@lightdash/common/dbt/validation';
 import { WarehouseClient } from '@lightdash/warehouses';
 import * as Sentry from '@sentry/node';
 import fs from 'fs/promises';
@@ -35,9 +45,14 @@ import path from 'path';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
 import { preAggregatePostProcessor } from '../ee/preAggregates/postProcessor';
 import Logger from '../logging/logger';
+import { agentExecutionContext } from '../services/AiAccessService/agentExecutionContext';
+import { traceSpan } from '../tracing/tracing';
 import {
     CachedWarehouse,
     DbtClient,
+    DbtManifestFetchOptions,
+    DbtManifestFetchResult,
+    DbtSourcePreparation,
     ProjectAdapter,
     type TrackingParams,
 } from '../types';
@@ -57,6 +72,14 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
 
     dbtProjectDir?: string;
 
+    private preparation: Promise<DbtSourcePreparation> | null = null;
+
+    private readonly manifestFetches = new Set<
+        Promise<DbtManifestFetchResult>
+    >();
+
+    private preparationTimingsReported = false;
+
     constructor(
         dbtClient: DbtClient,
         warehouseClient: WarehouseClient,
@@ -73,14 +96,32 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
         this.analytics = analytics;
     }
 
-    // eslint-disable-next-line class-methods-use-this
     async destroy(): Promise<void> {
         Logger.debug(`Destroy base project adapter`);
+        await this.releaseDisk();
     }
 
-    public async test(): Promise<void> {
+    async releaseDisk(_options?: { keepProject?: boolean }): Promise<void> {
+        await Promise.allSettled([
+            ...this.manifestFetches,
+            ...(this.preparation ? [this.preparation] : []),
+        ]);
+        await this.dbtClient.cleanup?.();
+        this.preparation = null;
+        this.preparationTimingsReported = false;
+    }
+
+    public async test(options?: { signal?: AbortSignal }): Promise<void> {
         Logger.debug('Test dbt client');
-        await this.dbtClient.test();
+        if (options?.signal) {
+            await this.dbtClient.test(async () => {
+                await this.prepareDbtSource(options);
+            }, options.signal);
+        } else {
+            await this.dbtClient.test(async () => {
+                await this.prepareDbtSource();
+            });
+        }
         Logger.debug('Test warehouse client');
         await this.warehouseClient.test();
     }
@@ -91,6 +132,68 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
             return this.dbtClient.getDbtPackages();
         }
         return undefined;
+    }
+
+    public async prepareDbtSource(options?: {
+        signal?: AbortSignal;
+    }): Promise<DbtSourcePreparation> {
+        options?.signal?.throwIfAborted();
+        this.preparation ??= (async () => {
+            let depsMs: number | null = null;
+            if (this.dbtClient.installDeps !== undefined) {
+                const startedAt = Date.now();
+                if (options?.signal)
+                    await this.dbtClient.installDeps(options.signal);
+                else await this.dbtClient.installDeps();
+                depsMs = Date.now() - startedAt;
+            }
+            return {
+                projectDir: this.dbtClient.installDeps
+                    ? (this.dbtProjectDir ?? null)
+                    : null,
+                timings: { gitRefreshMs: null, depsMs },
+            };
+        })();
+        try {
+            return await this.preparation;
+        } catch (error) {
+            if (options?.signal?.aborted) this.preparation = null;
+            throw error;
+        }
+    }
+
+    public async getDbtManifest(
+        options?: DbtManifestFetchOptions,
+    ): Promise<DbtManifestFetchResult> {
+        const fetch = this.fetchDbtManifest(options);
+        this.manifestFetches.add(fetch);
+        try {
+            return await fetch;
+        } finally {
+            this.manifestFetches.delete(fetch);
+        }
+    }
+
+    private async fetchDbtManifest(
+        options?: DbtManifestFetchOptions,
+    ): Promise<DbtManifestFetchResult> {
+        const preparation = await this.prepareDbtSource(
+            options?.signal ? { signal: options.signal } : undefined,
+        );
+        const timings = this.preparationTimingsReported
+            ? { gitRefreshMs: null, depsMs: null }
+            : preparation.timings;
+        this.preparationTimingsReported = true;
+        Logger.debug(`Get dbt manifest`);
+        const manifestStartedAt = Date.now();
+        const result = await this.dbtClient.getDbtManifest(options);
+        return {
+            ...result,
+            timings: {
+                ...timings,
+                manifestMs: Date.now() - manifestStartedAt,
+            },
+        };
     }
 
     public async getLightdashProjectConfig(
@@ -148,23 +251,62 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
         }
     }
 
+    public async getProjectContext(): Promise<ProjectContextEntry[]> {
+        if (!this.dbtProjectDir) {
+            return [];
+        }
+
+        const configPath = path.join(
+            this.dbtProjectDir,
+            'lightdash.project_context.yml',
+        );
+
+        try {
+            const fileContents = await fs.readFile(configPath, 'utf8');
+            return loadProjectContextFile(fileContents);
+        } catch (e) {
+            Logger.debug(
+                `No lightdash.project_context.yml found in ${configPath}`,
+            );
+
+            if (e instanceof Error && 'code' in e && e.code === 'ENOENT') {
+                return [];
+            }
+            throw e;
+        }
+    }
+
     public async compileAllExplores(
         trackingParams?: TrackingParams,
         loadSources: boolean = false,
-        allowPartialCompilation: boolean = false,
+        allowPartialCompilation: boolean = true,
+        deferExploreNaming: boolean = false,
     ): Promise<(Explore | ExploreError)[]> {
-        Logger.debug('Install dependencies');
-        // Install dependencies for dbt and fetch the manifest - may raise error meaning no explores compile
-        if (this.dbtClient.installDeps !== undefined) {
-            await this.dbtClient.installDeps();
-        }
+        const stream = await this.prepareExploreStream(
+            trackingParams,
+            loadSources,
+            allowPartialCompilation,
+            deferExploreNaming,
+        );
+        const explores: (Explore | ExploreError)[] = [];
+        for await (const explore of stream) explores.push(explore);
+        return explores;
+    }
+
+    public async prepareExploreStream(
+        trackingParams?: TrackingParams,
+        loadSources: boolean = false,
+        allowPartialCompilation: boolean = true,
+        deferExploreNaming: boolean = false,
+    ): Promise<AsyncIterable<Explore | ExploreError>> {
+        await this.prepareDbtSource();
         Logger.debug('Get dbt manifest');
         const { manifest, selectedModelIds } =
             await this.dbtClient.getDbtManifest();
         // Type of the target warehouse
         if (!isSupportedDbtAdapter(manifest.metadata)) {
             throw new ParseError(
-                `Dbt project not supported. Lightdash does not support adapter ${manifest.metadata.adapter_type}`,
+                `Dbt project not supported. dbt adapter ${manifest.metadata.adapter_type} is not supported`,
                 {},
             );
         }
@@ -175,7 +317,7 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
             );
         }
 
-        const models = Sentry.startSpan(
+        const models = traceSpan(
             { op: 'dbt', name: 'filterManifestModels' },
             () => {
                 const startTime = Date.now();
@@ -210,140 +352,305 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
             throw new NotFoundError(`No models found`);
         }
 
-        const [validModels, failedExplores] =
+        const [validatedModels, failedExplores] =
             DbtBaseProjectAdapter._validateDbtModel(
                 adapterType,
                 models,
                 manifestVersion,
+                deferExploreNaming,
             );
 
-        // Validate metrics in the manifest - compile fails if any invalid
-        const metrics = DbtBaseProjectAdapter._validateDbtMetrics(
-            manifestVersion,
-            [
-                DbtManifestVersion.V10,
-                DbtManifestVersion.V11,
-                DbtManifestVersion.V12,
-            ].includes(manifestVersion)
-                ? []
-                : Object.values(manifest.metrics),
+        // Translate MetricFlow definitions (semantic_models + metrics) into
+        // Lightdash metrics on each model, mirroring the CLI compile.
+        // Best-effort: translation failures never abort the compile.
+        const metricFlowTranslation = applyMetricFlowMetricsToModels(
+            validatedModels,
+            manifest,
+            deferExploreNaming
+                ? new Map(
+                      validatedModels.map((model) => [
+                          model.unique_id,
+                          getDeferredExploreName(model),
+                      ]),
+                  )
+                : undefined,
         );
+        if (metricFlowTranslation.error !== null) {
+            Logger.warn(
+                `Failed to translate MetricFlow metrics, continuing without them: ${metricFlowTranslation.error}`,
+            );
+        }
+        metricFlowTranslation.warnings.forEach((warning) =>
+            Logger.debug(warning),
+        );
+        if (
+            metricFlowTranslation.translatedCount > 0 ||
+            metricFlowTranslation.skippedCount > 0
+        ) {
+            Logger.info(
+                `Translated ${metricFlowTranslation.translatedCount} MetricFlow metric(s) into Lightdash metrics (skipped ${metricFlowTranslation.skippedCount} unsupported)`,
+            );
+        }
+        const validModels = metricFlowTranslation.models;
 
         const lightdashProjectConfig =
             await this.getLightdashProjectConfig(trackingParams);
 
-        // Be lazy and try to attach types to the remaining models without refreshing the catalog
-        try {
-            if (this.cachedWarehouse?.warehouseCatalog === undefined) {
-                throw new MissingCatalogEntryError(
-                    `Warehouse catalog is undefined`,
-                    {},
-                );
-            }
-            Logger.info(`Attach types to ${validModels.length} models`);
-            const lazyTypedModels = attachTypesToModels(
-                validModels,
-                this.cachedWarehouse.warehouseCatalog,
-                true,
-                adapterType !== 'snowflake',
-            );
-            Logger.info('Convert explores');
-            const disableTimestampConversion =
-                this.warehouseClient.credentials.type === 'snowflake' &&
-                this.warehouseClient.credentials.disableTimestampConversion ===
-                    true;
+        const typedModels = await this.attachTypes(
+            validModels,
+            adapterType,
+            trackingParams,
+        );
+        Logger.info('Convert explores');
+        const disableTimestampConversion =
+            this.warehouseClient.credentials.type === 'snowflake' &&
+            this.warehouseClient.credentials.disableTimestampConversion ===
+                true;
 
-            const lazyExplores = await convertExplores(
-                lazyTypedModels,
-                loadSources,
-                adapterType,
-                metrics,
-                this.warehouseClient,
-                lightdashProjectConfig,
-                {
-                    disableTimestampConversion,
-                    allowPartialCompilation,
-                    postProcessors,
-                },
-            );
+        const explores = iterateExplores(
+            typedModels,
+            loadSources,
+            adapterType,
+            this.warehouseClient,
+            lightdashProjectConfig,
+            {
+                disableTimestampConversion,
+                allowPartialCompilation,
+                postProcessors,
+                deferExploreNaming,
+            },
+        );
+        const modelsByUniqueId = new Map(
+            models.map((model) => [model.unique_id, model]),
+        );
+        return (async function* compiledExplores() {
+            yield* explores;
+            yield* failedExplores.map((explore) => {
+                const model = explore.dbtModelIdentity
+                    ? modelsByUniqueId.get(explore.dbtModelIdentity.uniqueId)
+                    : undefined;
+                return deferExploreNaming && model
+                    ? { ...explore, name: getDeferredExploreName(model) }
+                    : explore;
+            });
             Logger.info('Finished compiling explores');
-            return [...lazyExplores, ...failedExplores];
+        })();
+    }
+
+    private async attachTypes(
+        models: DbtModelNode[],
+        adapterType: SupportedDbtAdapter,
+        trackingParams: TrackingParams | undefined,
+    ): Promise<DbtModelNode[]> {
+        const caseSensitiveMatching = adapterType !== 'snowflake';
+        const cachedCatalog = this.cachedWarehouse?.warehouseCatalog;
+        if (cachedCatalog === undefined) {
+            return this.attachTypesAfterCatalogFetch(
+                models,
+                caseSensitiveMatching,
+                'no_cache',
+                trackingParams,
+            );
+        }
+        // A cache written before timestamp domains existed would otherwise
+        // be reused forever (only missing entries trigger a refetch),
+        // leaving every column unclassified — refetch it once.
+        if (!catalogHasTimestampDomains(cachedCatalog)) {
+            return this.attachTypesAfterCatalogFetch(
+                models,
+                caseSensitiveMatching,
+                'cache_predates_timestamp_domains',
+                trackingParams,
+            );
+        }
+
+        const { knownMissing, unknownMissing } = getMissingCatalogEntries(
+            cachedCatalog,
+            models,
+            caseSensitiveMatching,
+        );
+        if (unknownMissing.length > 0) {
+            return this.attachTypesAfterCatalogFetch(
+                models,
+                caseSensitiveMatching,
+                'cache_miss',
+                trackingParams,
+            );
+        }
+        if (
+            knownMissing.length > 0 &&
+            (await this.haveKnownMissingEntriesChanged(
+                models,
+                knownMissing,
+                caseSensitiveMatching,
+                trackingParams,
+            ))
+        ) {
+            return this.attachTypesAfterCatalogFetch(
+                models,
+                caseSensitiveMatching,
+                'known_missing_changed',
+                trackingParams,
+            );
+        }
+
+        try {
+            return attachTypesToModels(
+                models,
+                cachedCatalog,
+                true,
+                caseSensitiveMatching,
+                (diagnostics) =>
+                    DbtBaseProjectAdapter.logAttachTypesPhase(
+                        'cached_catalog',
+                        knownMissing,
+                        trackingParams,
+                        diagnostics,
+                    ),
+                knownMissing,
+            );
         } catch (e) {
             if (e instanceof MissingCatalogEntryError) {
-                Logger.info(
-                    'Get warehouse catalog after missing catalog error',
+                return this.attachTypesAfterCatalogFetch(
+                    models,
+                    caseSensitiveMatching,
+                    'cache_miss',
+                    trackingParams,
                 );
-                const modelCatalog =
-                    getSchemaStructureFromDbtModels(validModels);
-                Logger.info(
-                    `Fetching table metadata for ${modelCatalog.length} tables`,
-                );
-
-                const warehouseCatalog =
-                    await this.warehouseClient.getCatalog(modelCatalog);
-                await this.cachedWarehouse?.onWarehouseCatalogChange(
-                    warehouseCatalog,
-                );
-
-                Logger.info(
-                    'Attach types to models after missing catalog error',
-                );
-                // Some types were missing so refresh the schema and try again
-                const typedModels = attachTypesToModels(
-                    validModels,
-                    warehouseCatalog,
-                    false,
-                    adapterType !== 'snowflake',
-                );
-                Logger.info('Convert explores after missing catalog error');
-                const disableTimestampConversion =
-                    this.warehouseClient.credentials.type === 'snowflake' &&
-                    this.warehouseClient.credentials
-                        .disableTimestampConversion === true;
-
-                const explores = await convertExplores(
-                    typedModels,
-                    loadSources,
-                    adapterType,
-                    metrics,
-                    this.warehouseClient,
-                    lightdashProjectConfig,
-                    {
-                        disableTimestampConversion,
-                        allowPartialCompilation,
-                        postProcessors,
-                    },
-                );
-                Logger.info(
-                    'Finished compiling explores after missing catalog error',
-                );
-                return [...explores, ...failedExplores];
             }
             throw e;
         }
     }
 
-    static _validateDbtMetrics(
-        version: DbtManifestVersion,
-        metrics: DbtMetric[],
-    ): DbtMetric[] {
-        const validator = new ManifestValidator(version);
-        metrics.forEach((metric) => {
-            const [isValid, errorMessage] = validator.isDbtMetricValid(metric);
-            if (!isValid) {
-                throw new ParseError(
-                    `Could not parse dbt metric with id ${metric.unique_id}: ${errorMessage}`,
-                    {},
-                );
-            }
+    private async haveKnownMissingEntriesChanged(
+        models: DbtModelNode[],
+        knownMissing: WarehouseCatalogMissingEntry[],
+        caseSensitiveMatching: boolean,
+        trackingParams: TrackingParams | undefined,
+    ): Promise<boolean> {
+        const probeStartedAt = Date.now();
+        const probedTables = knownMissing.map(
+            ({ database, schema, table }) => ({ database, schema, table }),
+        );
+        const probedCatalog =
+            await this.warehouseClient.getCatalog(probedTables);
+        const changed = haveMissingCatalogEntriesChanged(
+            probedCatalog,
+            models,
+            knownMissing,
+            caseSensitiveMatching,
+        );
+        Logger.info('dbt.compile.warehouseCatalogFetch', {
+            event: 'dbt.compile.warehouseCatalogFetch',
+            projectUuid: trackingParams?.projectUuid ?? null,
+            jobUuid: trackingParams?.jobUuid ?? null,
+            warehouseType: this.warehouseClient.credentials.type,
+            reason: 'known_missing_probe',
+            requestedTables: probedTables.length,
+            ...DbtBaseProjectAdapter.countMissingEntries(knownMissing),
+            changed,
+            durationMs: Date.now() - probeStartedAt,
         });
-        return metrics;
+        return changed;
+    }
+
+    private async attachTypesAfterCatalogFetch(
+        models: DbtModelNode[],
+        caseSensitiveMatching: boolean,
+        reason:
+            | 'no_cache'
+            | 'cache_predates_timestamp_domains'
+            | 'cache_miss'
+            | 'known_missing_changed',
+        trackingParams: TrackingParams | undefined,
+    ): Promise<DbtModelNode[]> {
+        const requestedTables = getSchemaStructureFromDbtModels(models);
+        const catalogFetchStartedAt = Date.now();
+        const warehouseCatalog =
+            await this.warehouseClient.getCatalog(requestedTables);
+        const { unknownMissing: missingEntries } = getMissingCatalogEntries(
+            warehouseCatalog,
+            models,
+            caseSensitiveMatching,
+        );
+        Logger.info('dbt.compile.warehouseCatalogFetch', {
+            event: 'dbt.compile.warehouseCatalogFetch',
+            projectUuid: trackingParams?.projectUuid ?? null,
+            jobUuid: trackingParams?.jobUuid ?? null,
+            warehouseType: this.warehouseClient.credentials.type,
+            reason,
+            requestedTables: requestedTables.length,
+            ...DbtBaseProjectAdapter.countMissingEntries(missingEntries),
+            durationMs: Date.now() - catalogFetchStartedAt,
+        });
+        // Clients only create the sidecar when they classify a column;
+        // stamp it (possibly empty) so the staleness check above can't
+        // refetch again on domain-less warehouses.
+        ensureCatalogTimestampDomainsKey(warehouseCatalog);
+        setCatalogMissingEntries(warehouseCatalog, missingEntries);
+        if (!agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.cachedWarehouse?.onWarehouseCatalogChange(
+                warehouseCatalog,
+            );
+
+        return attachTypesToModels(
+            models,
+            warehouseCatalog,
+            false,
+            caseSensitiveMatching,
+            (diagnostics) =>
+                DbtBaseProjectAdapter.logAttachTypesPhase(
+                    'refetched_catalog',
+                    missingEntries,
+                    trackingParams,
+                    diagnostics,
+                ),
+        );
+    }
+
+    private static countMissingEntries(
+        entries: WarehouseCatalogMissingEntry[],
+    ) {
+        return {
+            knownMissingTables: entries.filter(
+                ({ columns }) => columns === null,
+            ).length,
+            knownMissingColumns: entries.reduce(
+                (count, { columns }) => count + (columns?.length ?? 0),
+                0,
+            ),
+        };
+    }
+
+    private static logAttachTypesPhase(
+        catalogSource: 'cached_catalog' | 'refetched_catalog',
+        knownMissing: WarehouseCatalogMissingEntry[],
+        trackingParams: TrackingParams | undefined,
+        diagnostics: AttachTypesDiagnostics,
+    ) {
+        Logger.info('dbt.compile.attachTypes', {
+            event: 'dbt.compile.attachTypes',
+            projectUuid: trackingParams?.projectUuid ?? null,
+            jobUuid: trackingParams?.jobUuid ?? null,
+            catalogSource,
+            ...DbtBaseProjectAdapter.countMissingEntries(knownMissing),
+            durationMs: diagnostics.durationMs,
+            modelCount: diagnostics.modelCount,
+            columnCount: diagnostics.columnCount,
+            catalogTableCount: diagnostics.catalogTableCount,
+            distinctSchemaCount: diagnostics.schemaPairs.length,
+            schemaPairs: diagnostics.schemaPairs.slice(0, 20),
+            exactLookups: diagnostics.exactLookups,
+            caseInsensitiveLookups: diagnostics.caseInsensitiveLookups,
+            missingLookups: diagnostics.missingLookups,
+        });
     }
 
     static _validateDbtModel(
         adapterType: SupportedDbtAdapter,
         models: DbtRawModelNode[],
         manifestVersion: DbtManifestVersion,
+        includeModelIdentity: boolean = false,
     ): [DbtModelNode[], ExploreError[]] {
         const validator = new ManifestValidator(manifestVersion);
         return models.reduce(
@@ -373,22 +680,26 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
                     }
                     const metaGroups: string[] | undefined = model.meta.groups;
                     const exploreError: ExploreError = {
+                        ...(includeModelIdentity
+                            ? {
+                                  dbtModelIdentity: {
+                                      sourceUuid:
+                                          model.lightdash_source_uuid ?? null,
+                                      sourceName:
+                                          model.lightdash_source_name ?? null,
+                                      packageName: model.package_name,
+                                      uniqueId: model.unique_id,
+                                      modelName: model.name,
+                                  },
+                              }
+                            : {}),
                         name: model.name,
                         label: model.meta.label || friendlyName(model.name),
                         groupLabel: model.meta.group_label,
                         ...(metaGroups && metaGroups.length > 0
                             ? { groups: metaGroups }
                             : {}),
-                        errors: [
-                            error.type === InlineErrorType.METADATA_PARSE_ERROR
-                                ? {
-                                      ...error,
-                                      message: `${
-                                          model.name ? `${model.name}: ` : ''
-                                      }${error.message}`,
-                                  }
-                                : error,
-                        ],
+                        errors: [error],
                     };
                     return [validModels, [...invalidModels, exploreError]];
                 }

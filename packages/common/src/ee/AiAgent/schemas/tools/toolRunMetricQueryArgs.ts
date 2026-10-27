@@ -1,13 +1,84 @@
 import { z } from 'zod';
+import { type TableCalculation } from '../../../../types/field';
+import type { Filters } from '../../../../types/filter';
+import type { AiMetricQueryWithFilters } from '../../types';
+import { getValidAiQueryLimit } from '../../validators';
 import {
     customMetricsSchema,
     customMetricsSchemaTransformed,
+    filterAggregationCustomMetrics,
+    type TransformedCustomMetric,
 } from '../customMetrics';
+import { getFieldIdSchema } from '../fieldId';
 import { filtersSchemaTransformed, filtersSchemaV2 } from '../filters';
-import { baseOutputMetadataSchema } from '../outputMetadata';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
+import sortFieldSchema from '../sortField';
 import { tableCalcsSchema } from '../tableCalcs/tableCalcs';
 import { createToolSchema } from '../toolSchemaBuilder';
-import { tableVizConfigSchema } from '../visualizations';
+
+export const tableVizConfigSchema = z
+    .object({
+        exploreName: z
+            .string()
+            .describe(
+                'The name of the explore containing the metrics and dimensions used for table query',
+            ),
+        metrics: z
+            .array(getFieldIdSchema({ additionalDescription: null }))
+            .describe(
+                'The field ids of the metrics to be calculated for the table. They will be grouped by the dimensions.',
+            ),
+        dimensions: z
+            .array(getFieldIdSchema({ additionalDescription: null }))
+            .describe(
+                'The field id for the dimensions to group the metrics by',
+            ),
+        sorts: z
+            .array(sortFieldSchema)
+            .describe(
+                'Sort configuration for the query, it can use a combination of metrics and dimensions.',
+            ),
+
+        limit: z.coerce
+            .number()
+            .nullable()
+            .describe('The maximum number of rows in the table.'),
+    })
+    .describe(
+        'Configuration file for generating a table from a query with metrics and dimensions',
+    );
+
+export type TableVizConfigSchemaType = z.infer<typeof tableVizConfigSchema>;
+
+export const metricQueryTableViz = ({
+    vizConfig,
+    filters,
+    maxLimit,
+    customMetrics,
+    tableCalculations,
+}: {
+    vizConfig: TableVizConfigSchemaType;
+    filters: Filters;
+    maxLimit: number;
+    customMetrics: TransformedCustomMetric[] | null;
+    tableCalculations: TableCalculation[];
+}): AiMetricQueryWithFilters => ({
+    exploreName: vizConfig.exploreName,
+    metrics: vizConfig.metrics,
+    dimensions: vizConfig.dimensions || [],
+    sorts: vizConfig.sorts.map((sort) => ({
+        ...sort,
+        nullsFirst: sort.nullsFirst ?? undefined,
+    })),
+    limit: getValidAiQueryLimit(vizConfig.limit, maxLimit),
+    filters,
+    additionalMetrics: filterAggregationCustomMetrics(customMetrics),
+    customMetrics: customMetrics ?? null,
+    tableCalculations,
+});
 
 export const TOOL_RUN_METRIC_QUERY_DESCRIPTION = `Tool: runMetricQuery
 
@@ -21,9 +92,7 @@ Usage Tips:
 - The query respects the same limits and permissions as other visualization tools
 `;
 
-export const toolRunMetricQueryArgsSchema = createToolSchema({
-    description: TOOL_RUN_METRIC_QUERY_DESCRIPTION,
-})
+export const toolRunMetricQueryArgsSchema = createToolSchema()
     .extend({
         vizConfig: tableVizConfigSchema,
         customMetrics: customMetricsSchema,
@@ -45,9 +114,36 @@ export const toolRunMetricQueryArgsSchemaTransformed =
         filters: filtersSchemaTransformed.parse(data.filters ?? null),
     }));
 
-export const toolRunMetricQueryOutputSchema = z.object({
-    result: z.string(),
-    metadata: baseOutputMetadataSchema,
+export const toolRunMetricQueryStructuredContentSchema = z.object({
+    columns: z
+        .array(
+            z.object({
+                label: z
+                    .string()
+                    .describe('Column header as shown in the CSV result.'),
+            }),
+        )
+        .describe(
+            'Ordered columns of the CSV result. Empty when the query returned no rows.',
+        ),
+    rows: z
+        .array(z.array(z.unknown()))
+        .describe(
+            'Result rows as cell arrays in `columns` order, holding the cell values before CSV serialization (booleans, nulls and empty strings are kept; the CSV prints true as 1 and false, null and empty as blank).',
+        ),
+    rowCount: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe('Number of rows returned; 0 means no results.'),
+    review: z.string().nullable(),
+});
+
+export const toolRunMetricQueryOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema.extend({
+        queryCacheHit: z.boolean().optional(),
+    }),
+    structuredContent: toolRunMetricQueryStructuredContentSchema,
 });
 
 export type ToolRunMetricQueryArgs = z.infer<
@@ -58,4 +154,7 @@ export type ToolRunMetricQueryArgsTransformed = z.infer<
 >;
 export type ToolRunMetricQueryOutput = z.infer<
     typeof toolRunMetricQueryOutputSchema
+>;
+export type ToolRunMetricQueryStructuredContent = z.infer<
+    typeof toolRunMetricQueryStructuredContentSchema
 >;

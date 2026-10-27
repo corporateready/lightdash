@@ -1,15 +1,32 @@
 import type { ApiSuccess, KnexPaginatedData } from '../..';
+import type { AiDeepResearchLimits } from '../aiDeepResearch/types';
+import type { DataAppAnalysisLimits } from '../apps/analysis';
 import type {
+    DataAppClaudeModel,
+    DataAppCodingAgent,
+    DataAppModelVisibility,
+} from '../apps/types';
+import type {
+    AiAgentEvaluationRunSummary,
+    AiAgentMemoryScope,
+    AiAgentMemoryStatus,
     AiAgentSummary,
     AiAgentThreadSummary,
     AiAgentUser,
+    AiModelOption,
 } from './index';
+import type {
+    AiAgentModelConfig,
+    AiPromptTokenUsage,
+    AiThreadCreatedFrom,
+} from './requestTypes';
+import type { ServedSkillMetadata } from './schemas/tools/toolLoadSkillArgs';
 
 export type AiAgentAdminFilters = {
     projectUuids?: string[];
     agentUuids?: string[];
     userUuids?: string[];
-    createdFrom?: 'slack' | 'web_app';
+    createdFrom?: AiThreadCreatedFrom;
     humanScore?: number; // (-1, 0, 1)
     dateFrom?: string; // ISO date string
     dateTo?: string; // ISO date string
@@ -60,27 +77,666 @@ export type ApiAiAgentAdminConversationsResponse = ApiSuccess<
     KnexPaginatedData<AiAgentAdminConversationsSummary>
 >;
 
+export type AiAgentThreadDumpToolCall = {
+    toolCallId: string;
+    parentToolCallId: string | null;
+    name: string;
+    source: 'lightdash' | 'mcp';
+    args: unknown;
+    result: string | null;
+    resultOmitted: string | null;
+    isError: boolean;
+    servedSkill: ServedSkillMetadata | null;
+};
+
+export type AiAgentThreadDumpArtifact = {
+    artifactUuid: string;
+    versionUuid: string;
+    versionNumber: number;
+    artifactType: 'chart' | 'dashboard';
+    title: string | null;
+    description: string | null;
+    chartConfig: Record<string, unknown> | null;
+    dashboardConfig: Record<string, unknown> | null;
+};
+
+export type AiAgentThreadDumpTurn = {
+    promptUuid: string;
+    createdAt: string;
+    respondedAt: string | null;
+    hidden: boolean;
+    user: string;
+    assistant: string | null;
+    error: string | null;
+    interrupted: boolean;
+    feedback: { score: number; comment: string | null } | null;
+    steers: string[];
+    modelConfig: { modelName: string; modelProvider: string } | null;
+    tokenUsage: AiPromptTokenUsage | null;
+    toolCalls: AiAgentThreadDumpToolCall[];
+    artifacts: AiAgentThreadDumpArtifact[];
+};
+
+export type AiAgentThreadDumpAgent = Pick<
+    AiAgentSummary,
+    | 'uuid'
+    | 'name'
+    | 'instruction'
+    | 'tags'
+    | 'integrations'
+    | 'modelConfig'
+    | 'enableDataAccess'
+    | 'enableSelfImprovement'
+    | 'enableContentTools'
+    | 'enableUserContext'
+    | 'enableSqlMode'
+    | 'enableSqlAutoApproval'
+    | 'enableComposerQueries'
+    | 'adminOnly'
+    | 'version'
+>;
+
+export type AiAgentThreadDump = {
+    schemaVersion: 1;
+    generatedAt: string;
+    lightdashVersion: string;
+    defaultProvider: string;
+    organizationUuid: string;
+    projectUuid: string;
+    threadUuid: string;
+    agentUuid: string | null;
+    userUuid: string | null;
+    createdFrom: AiThreadCreatedFrom;
+    title: string | null;
+    agent: AiAgentThreadDumpAgent | null;
+    turns: AiAgentThreadDumpTurn[];
+};
+
+export type ApiAiAgentThreadDumpResponse = ApiSuccess<AiAgentThreadDump>;
+
+export type AiAgentAdminEvalFilters = {
+    projectUuids?: string[];
+    agentUuids?: string[];
+    search?: string;
+};
+
+export type AiAgentAdminEvalSummary = {
+    evalUuid: string;
+    title: string;
+    description: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    agent: Pick<AiAgentSummary, 'uuid' | 'name' | 'imageUrl'>;
+    project: {
+        uuid: string;
+        name: string;
+    };
+    promptCount: number;
+    latestRun: Pick<
+        AiAgentEvaluationRunSummary,
+        'runUuid' | 'status' | 'createdAt' | 'completedAt'
+    > | null;
+};
+
+export type AiAgentAdminEvalsSummary = {
+    evals: AiAgentAdminEvalSummary[];
+};
+
+export type ApiAiAgentAdminEvalsResponse = ApiSuccess<
+    KnexPaginatedData<AiAgentAdminEvalsSummary>
+>;
+
+export type AiAgentAdminEvalPrompt = {
+    evalPromptUuid: string;
+    // Text of the prompt; for thread-referenced prompts this is the original
+    // user prompt, null only if the referenced prompt was deleted
+    prompt: string | null;
+    expectedResponse: string | null;
+    threadUuid: string | null;
+    createdAt: Date;
+};
+
+export type ApiAiAgentAdminEvalPromptsResponse = ApiSuccess<{
+    prompts: AiAgentAdminEvalPrompt[];
+}>;
+
+export type AiAgentAdminMemoryFilters = {
+    projectUuids?: string[];
+    userUuids?: string[];
+    statuses?: AiAgentMemoryStatus[];
+    scopes?: AiAgentMemoryScope[];
+    search?: string; // Search by memory title, slug or body
+};
+
+export type AiAgentAdminMemorySortField = 'generatedAt' | 'citedCount';
+
+export type AiAgentAdminMemorySort = {
+    field: AiAgentAdminMemorySortField;
+    direction: 'asc' | 'desc';
+};
+
+// Admin list row. Independent from the owner-facing AiAgentUserMemoryItem:
+// separate API surfaces, free to diverge
+export type AiAgentAdminMemoryItem = {
+    uuid: string;
+    slug: string;
+    title: string;
+    // Memory body, truncated server-side for the list view
+    summary: string;
+    status: AiAgentMemoryStatus;
+    scope: AiAgentMemoryScope;
+    project: {
+        uuid: string;
+        name: string;
+    };
+    agent: {
+        uuid: string;
+        name: string;
+        imageUrl: string | null;
+    } | null;
+    user: {
+        uuid: string;
+        name: string;
+        email: string | null;
+    } | null;
+    sourceThreadUuid: string | null;
+    citedCount: number;
+    lastCitedAt: string | null;
+    pulledCount: number;
+    lastPulledAt: string | null;
+    generatedAt: string;
+};
+
+export type AiAgentAdminMemoriesSummary = {
+    memories: AiAgentAdminMemoryItem[];
+};
+
+export type ApiAiAgentAdminMemoriesResponse = ApiSuccess<
+    KnexPaginatedData<AiAgentAdminMemoriesSummary>
+>;
+
+export type AiAgentAdminPromptActivityPoint = {
+    date: string;
+    promptCount: number;
+};
+
+export type ApiAiAgentAdminPromptActivityResponse = ApiSuccess<
+    AiAgentAdminPromptActivityPoint[]
+>;
+
+export type McpActivityStatus = 'success' | 'error';
+
+/**
+ * `inbound`: an external MCP client (Claude, Cursor, ...) called a tool on
+ * Lightdash's MCP server. `outbound`: a Lightdash agent called a tool on a
+ * connected external MCP server during a conversation.
+ */
+export type McpActivityDirection = 'inbound' | 'outbound';
+
+export type McpActivityFilters = {
+    projectUuids?: string[];
+    userUuids?: string[];
+    agentUuids?: string[];
+    toolNames?: string[];
+    clientNames?: string[];
+    status?: McpActivityStatus;
+    dateFrom?: string; // ISO date string, inclusive
+    // ISO date string, inclusive but compared as a timestamp: a date-only
+    // value means midnight, excluding the rest of that day — send a full
+    // timestamp to include it
+    dateTo?: string;
+};
+
+export type McpActivitySortField = 'createdAt' | 'durationMs';
+
+export type McpActivitySort = {
+    field: McpActivitySortField;
+    direction: 'asc' | 'desc';
+};
+
+/**
+ * Server-computed display group for session-grouped activity: a session
+ * split into segments on 1h inactivity gaps (sessionless calls chunk the
+ * same way under a shared no-session block). Counts cover the whole
+ * segment, not just the loaded page. Null when the query isn't
+ * session-grouped (e.g. sorted by duration).
+ */
+export type McpActivitySessionGroup = {
+    key: string;
+    callCount: number;
+    errorCount: number;
+};
+
+export type McpActivityItem = {
+    uuid: string;
+    createdAt: string;
+    user: {
+        uuid: string;
+        name: string;
+        email: string | null;
+    };
+    project: {
+        uuid: string;
+        name: string;
+    } | null;
+    agent: {
+        uuid: string;
+        name: string;
+    } | null;
+    toolName: string;
+    toolArgs: Record<string, unknown>;
+    status: McpActivityStatus;
+    errorMessage: string | null;
+    durationMs: number;
+    clientName: string | null;
+    clientVersion: string | null;
+    userAgent: string | null;
+    authType: string;
+    protocolVersion: string | null;
+    sessionId: string | null;
+    sessionGroup: McpActivitySessionGroup | null;
+    direction: McpActivityDirection;
+    // The connected external server an outbound call went to; null for
+    // inbound calls or when the server has since been deleted
+    mcpServer: {
+        uuid: string;
+        name: string;
+    } | null;
+};
+
+export type McpActivitySummary = {
+    toolCalls: McpActivityItem[];
+};
+
+export type ApiMcpActivityResponse = ApiSuccess<
+    KnexPaginatedData<McpActivitySummary>
+>;
+
+export type McpActivityToolCount = {
+    toolName: string;
+    count: number;
+};
+
+export type McpActivityAgentCount = {
+    // null represents tool calls made without an agent
+    agent: {
+        uuid: string;
+        name: string;
+    } | null;
+    count: number;
+};
+
+export type McpActivityStats = {
+    totalCalls: number;
+    errorCalls: number;
+    topTools: McpActivityToolCount[];
+    agents: McpActivityAgentCount[];
+    recentErrors: McpActivityItem[];
+};
+
+// Status is not accepted as a filter: the response already breaks results
+// down by status, and recentErrors is always error-only
+export type McpActivityStatsFilters = Omit<McpActivityFilters, 'status'>;
+
+export type ApiMcpActivityStatsResponse = ApiSuccess<McpActivityStats>;
+
 export type ComputedAiOrganizationSettings = {
+    // Bedrock presets an admin can choose as allowed models.
+    bedrockModelOptions: AiModelOption[];
     isCopilotEnabled: boolean;
     isTrial: boolean;
+    defaultAiAgentModelOptions: AiModelOption[];
+    // Full option list an admin can pick from (ignores visibility restrictions); null for non-admins.
+    // Optional to keep the response schema backwards-compatible for old clients.
+    configurableModelOptions?: AiModelOption[] | null;
+    // True when a BYO key is set that can't serve the review model, so reviews are paused.
+    aiAgentReviewsPausedByByok?: boolean;
 };
 
 // AI Organization Settings Types
+export const BYO_AI_PROVIDERS = [
+    'anthropic',
+    'google',
+    'openai',
+    'bedrock',
+] as const;
+export type ByoAiProvider = (typeof BYO_AI_PROVIDERS)[number];
+
+// Providers whose org credential is a bare API key string. Bedrock is excluded:
+// it also needs a region, so it carries a config object instead.
+export const BYO_AI_API_KEY_PROVIDERS = [
+    'anthropic',
+    'google',
+    'openai',
+] as const;
+export type ByoAiApiKeyProvider = (typeof BYO_AI_API_KEY_PROVIDERS)[number];
+
+export const isByoAiProvider = (provider: string): provider is ByoAiProvider =>
+    (BYO_AI_PROVIDERS as readonly string[]).includes(provider);
+
+export type AiProviderApiKeysSet = Record<ByoAiProvider, boolean>;
+
+export type AiProviderApiKeyHints = Record<ByoAiProvider, string | null>;
+
+// Regions where Bedrock accepts API-key authentication and we can route Claude
+// to an in-region or same-geography inference profile.
+export const BEDROCK_REGIONS = [
+    'ap-northeast-1',
+    'ap-northeast-3',
+    'eu-central-1',
+    'eu-west-1',
+    'us-east-1',
+    'us-west-2',
+] as const;
+export type BedrockRegion = (typeof BEDROCK_REGIONS)[number];
+
+/**
+ * Where Bedrock may process a request. Each value doubles as the cross-region
+ * inference profile prefix (`jp.<modelId>`, `us.<modelId>`, ...): the endpoint
+ * region only receives the request, the profile decides where inference runs.
+ * @ref https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
+ */
+export const BEDROCK_INFERENCE_GEOGRAPHIES = [
+    'jp',
+    'us',
+    'eu',
+    'apac',
+    'global',
+] as const;
+export type BedrockInferenceGeography =
+    (typeof BEDROCK_INFERENCE_GEOGRAPHIES)[number];
+
+export const JAPAN_BEDROCK_REGIONS = [
+    'ap-northeast-1',
+    'ap-northeast-3',
+] as const;
+
+/**
+ * Geographies a credential in `region` may pin inference to, narrowest first —
+ * the first entry is the default, so a credential without an explicit choice
+ * gets the tightest residency its region supports. Wider entries are an
+ * explicit admin opt-out for model availability.
+ *
+ * Every offered geography must have a profile for EVERY model we ship on
+ * Bedrock, because validation is per-credential, not per-model. That excludes
+ * `apac` for Japan: AWS documents US, EU, JP and Global profiles for the
+ * current Claude generation (e.g. Sonnet 4.5), but no APAC profile — a Tokyo
+ * credential widened to `apac` would fail at every prompt.
+ */
+export const getBedrockInferenceGeographiesForRegion = (
+    region: string,
+): BedrockInferenceGeography[] => {
+    if ((JAPAN_BEDROCK_REGIONS as readonly string[]).includes(region)) {
+        return ['jp', 'global'];
+    }
+    if (region.startsWith('us-')) return ['us', 'global'];
+    if (region.startsWith('eu-')) return ['eu', 'global'];
+    if (region.startsWith('ap-')) return ['apac', 'global'];
+    return ['global'];
+};
+
+export const getDefaultBedrockInferenceGeography = (
+    region: string,
+): BedrockInferenceGeography =>
+    getBedrockInferenceGeographiesForRegion(region)[0];
+
+export type OrgBedrockConfig = {
+    region: string;
+    allowedModels: string[];
+};
+
+export type UpdateOrgBedrockConfig = {
+    region: string;
+    allowedModels: string[];
+    // Omit to keep the stored key when changing region or models.
+    apiKey?: string;
+};
+
+/**
+ * Providers an organization may hold more than one credential for. Bedrock
+ * only: it is the one BYO provider whose credential carries a region, so it is
+ * the one a multi-region organization needs several of. The other BYO
+ * providers stay a single key each in `encrypted_provider_api_keys`.
+ */
+export const MULTI_CREDENTIAL_AI_PROVIDERS = ['bedrock'] as const;
+
+export type MultiCredentialAiProvider =
+    (typeof MULTI_CREDENTIAL_AI_PROVIDERS)[number];
+
+/** The decrypted contents of a stored credential. Server-side only. */
+export type AiProviderCredentialConfig = {
+    apiKey: string;
+    region: string;
+    allowedModels: string[];
+    // Absent on rows saved before geographies were configurable; resolves to
+    // the region's default (narrowest) geography.
+    inferenceGeography?: BedrockInferenceGeography;
+};
+
+/**
+ * A named credential as exposed over the API: everything needed to identify
+ * and pick it, never the key itself.
+ */
+export type AiProviderCredential = {
+    uuid: string;
+    provider: MultiCredentialAiProvider;
+    label: string;
+    region: string;
+    allowedModels: string[];
+    apiKeyHint: string;
+    isDefault: boolean;
+    /** Effective geography — the stored choice or the region's default. */
+    inferenceGeography: BedrockInferenceGeography;
+};
+
+export type CreateAiProviderCredential = {
+    provider: MultiCredentialAiProvider;
+    label: string;
+    region: string;
+    allowedModels: string[];
+    apiKey: string;
+    // Omit for the region's default (narrowest) geography.
+    inferenceGeography?: BedrockInferenceGeography;
+    /**
+     * Whether this credential becomes the organization default on creation.
+     * Omitted: the first credential becomes the default, later ones do not
+     * (legacy behavior). `true`: takes over as the default. `false`: stored
+     * without serving any AI traffic until explicitly made the default.
+     */
+    setAsDefault?: boolean;
+};
+
+/** A credential row whose ciphertext could not be read with the current secret. */
+export type UnreadableAiProviderCredential = {
+    uuid: string;
+    label: string;
+};
+
+/**
+ * Bedrock config still held in the organization's legacy single-key blob,
+ * surfaced so an organization that configured Bedrock before named credentials
+ * existed does not open the page to an empty list. Adopted as a real
+ * credential the first time any credential is created.
+ */
+export type LegacyBedrockCredential = {
+    region: string;
+    allowedModels: string[];
+    apiKeyHint: string;
+};
+
+export type AiProviderCredentialsList = {
+    credentials: AiProviderCredential[];
+    legacyBedrock: LegacyBedrockCredential | null;
+    unreadableCredentials: UnreadableAiProviderCredential[];
+};
+
+/** Which credential a project's AI features run on; null means org default. */
+export type ProjectAiCredentialSelection = {
+    credentialUuid: string | null;
+};
+
+export type UpdateAiProviderCredential = {
+    label?: string;
+    region?: string;
+    allowedModels?: string[];
+    // Omit to keep the stored key when changing label, region or models.
+    apiKey?: string;
+    inferenceGeography?: BedrockInferenceGeography;
+};
+
+// Explicit shape rather than a mapped type: TSOA cannot model
+// `Record<Exclude<...>> & {...}` and silently drops the properties.
+export type UpdateAiProviderApiKeys = {
+    anthropic?: string | null;
+    google?: string | null;
+    openai?: string | null;
+    bedrock?: UpdateOrgBedrockConfig | null;
+    providerBaseUrls?: UpdateAiProviderBaseUrls;
+};
+
+// Gateway (e.g. LiteLLM) a provider's org key is sent to instead of the
+// provider's public API. Each requires a stored key; null clears it.
+export type UpdateAiProviderBaseUrls = {
+    anthropic?: string | null;
+    google?: string | null;
+    openai?: string | null;
+};
+
+export type AiProviderBaseUrls = Record<ByoAiApiKeyProvider, string | null>;
+
+export type AiOrgProviderModelVisibility = {
+    enabled: boolean;
+    // Preset names; omitted or empty = all models of the provider allowed
+    allowedModels?: string[];
+};
+
+export type AiOrgModelVisibility = Partial<
+    Record<ByoAiProvider, AiOrgProviderModelVisibility>
+>;
+
 export type AiOrganizationSettings = {
     organizationUuid: string;
     aiAgentsVisible: boolean;
+    aiAgentReviewsEnabled: boolean;
+    aiAgentMemoryEnabled: boolean;
+    deepResearchLimits: AiDeepResearchLimits;
+    deepResearchRawSqlEnabled: boolean;
+    // Optional for clients talking to an older server; defaults to true.
+    mcpEnabled?: boolean;
+    mcpContentWritesEnabled: boolean;
+    mcpAgentsEnabled: boolean;
+    // Customer consent for data apps to call AI at runtime (analysis, insights).
+    // Optional to keep the response schema backwards-compatible for old clients.
+    dataAppRuntimeAiEnabled?: boolean;
+    // Whether viewers may carry a data-app investigation on in Ask AI.
+    dataAppContinueInAskAiEnabled?: boolean;
+    // Org default for running AI analysis when a data app loads.
+    dataAppAutoAnalysisEnabled?: boolean;
+    // Per-run ceilings and daily caps for AI analysis in data apps.
+    dataAppAnalysisLimits?: DataAppAnalysisLimits;
+    // Org-wide guidance prepended to every AI analysis summary; app-level
+    // instructions are appended to it. Optional for old clients.
+    dataAppAnalysisDefaultInstructions?: string | null;
+    requireExplicitSlackChannelLinking?: boolean;
+    defaultAiAgentModelConfig: AiAgentModelConfig | null;
+    // Optional to keep the response schema backwards-compatible for old clients.
+    modelVisibility?: AiOrgModelVisibility | null;
+    // Which Data App Claude models (opus/sonnet/haiku) users can pick. Optional
+    // for backwards compatibility with old clients; unset = all visible.
+    dataAppModelVisibility?: DataAppModelVisibility | null;
+    providerApiKeysSet: AiProviderApiKeysSet;
+    providerApiKeyHints: AiProviderApiKeyHints;
+    // Region and allowed models for a stored Bedrock config; never the API key.
+    bedrockConfig: OrgBedrockConfig | null;
+    providerBaseUrls: AiProviderBaseUrls;
+    threadRetentionHours?: number | null;
 };
 
-export type CreateAiOrganizationSettings = AiOrganizationSettings;
-
-export type UpdateAiOrganizationSettings = Omit<
+export type CreateAiOrganizationSettings = Omit<
     AiOrganizationSettings,
-    'organizationUuid' | 'isTrial' | 'isCopilotEnabled'
->;
+    | 'providerApiKeysSet'
+    | 'providerApiKeyHints'
+    | 'aiAgentMemoryEnabled'
+    | 'bedrockConfig'
+    | 'providerBaseUrls'
+> & {
+    providerApiKeys?: UpdateAiProviderApiKeys;
+};
+
+export type UpdateAiOrganizationSettings = {
+    aiAgentsVisible?: boolean;
+    aiAgentReviewsEnabled?: boolean;
+    deepResearchLimits?: AiDeepResearchLimits;
+    deepResearchRawSqlEnabled?: boolean;
+    mcpEnabled?: boolean;
+    mcpContentWritesEnabled?: boolean;
+    mcpAgentsEnabled?: boolean;
+    dataAppRuntimeAiEnabled?: boolean;
+    dataAppContinueInAskAiEnabled?: boolean;
+    dataAppAutoAnalysisEnabled?: boolean;
+    dataAppAnalysisLimits?: DataAppAnalysisLimits;
+    dataAppAnalysisDefaultInstructions?: string | null;
+    requireExplicitSlackChannelLinking?: boolean;
+    defaultAiAgentModelConfig?: AiAgentModelConfig | null;
+    modelVisibility?: AiOrgModelVisibility | null;
+    dataAppModelVisibility?: DataAppModelVisibility | null;
+    providerApiKeys?: UpdateAiProviderApiKeys;
+    threadRetentionHours?: number | null;
+};
 
 export type ApiAiOrganizationSettingsResponse = ApiSuccess<
     AiOrganizationSettings & ComputedAiOrganizationSettings
 >;
 
+export type AiOrganizationRuntimeSettings = {
+    isCopilotEnabled: boolean;
+    isTrial: boolean;
+    // Available to all members so client setup reflects organization consent.
+    mcpEnabled?: boolean;
+    aiAgentsVisible: boolean;
+    aiAgentMemoryEnabled: boolean;
+    aiAgentReviewsEnabled: boolean;
+    aiAgentReviewsAvailable: boolean;
+    defaultAiAgentModelConfig: AiAgentModelConfig | null;
+    defaultAiAgentModelOptions: AiModelOption[];
+    dataAppCodingAgent: DataAppCodingAgent;
+    visibleDataAppModels: DataAppClaudeModel[];
+    // Whether data apps may call AI at runtime; optional for old clients.
+    dataAppRuntimeAiEnabled?: boolean;
+    // Whether viewers may continue a data-app investigation in Ask AI.
+    dataAppContinueInAskAiEnabled?: boolean;
+    // Org default for running AI analysis when a data app loads.
+    dataAppAutoAnalysisEnabled?: boolean;
+    // Org retention ceiling, surfaced so agent editors can see what caps
+    // their agent-level window. Optional for backwards compatibility.
+    threadRetentionHours?: number | null;
+};
+
+export type ApiAiOrganizationRuntimeSettingsResponse =
+    ApiSuccess<AiOrganizationRuntimeSettings>;
+
+export type ApiAiProviderCredentialsResponse =
+    ApiSuccess<AiProviderCredentialsList>;
+
+export type ApiAiProviderCredentialCreatedResponse = ApiSuccess<{
+    uuid: string;
+}>;
+
+export type ApiProjectAiCredentialResponse =
+    ApiSuccess<ProjectAiCredentialSelection>;
+
 export type ApiUpdateAiOrganizationSettingsResponse =
     ApiSuccess<AiOrganizationSettings>;
+
+/**
+ * What an org-level retention window of `retentionHours` would delete on the
+ * next cleanup run. Backs the confirmation dialog shown before lowering the
+ * org ceiling.
+ */
+export type AiThreadRetentionPreview = {
+    threadCount: number;
+    agentCount: number;
+};
+
+export type ApiAiThreadRetentionPreviewResponse =
+    ApiSuccess<AiThreadRetentionPreview>;

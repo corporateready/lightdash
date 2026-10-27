@@ -1,6 +1,55 @@
-import { JWT_HEADER_NAME, type DashboardFilters } from '@lightdash/common';
-import { useCallback, useEffect, type RefObject } from 'react';
+import {
+    APP_SDK_APP_STATE_MESSAGE,
+    APP_SDK_APP_STATE_RESPONSE_MESSAGE,
+    APP_SDK_COLOR_SCHEME_MESSAGE,
+    APP_SDK_COLOR_SCHEME_REQUEST_MESSAGE,
+    APP_SDK_DATA_APP_VIZ_CONTEXT_MESSAGE,
+    APP_SDK_INSIGHT_ACTION_MESSAGE,
+    APP_SDK_INSIGHTS_MESSAGE,
+    APP_SDK_INSIGHTS_REQUEST_MESSAGE,
+    APP_SDK_MOUNTED_QUERIES_MESSAGE,
+    APP_SDK_VIZ_CONTEXT_REQUEST_MESSAGE,
+    DATA_APP_ANALYSIS_INSTRUCTIONS_MAX_CHARS,
+    APP_SDK_VIZ_DRILL_DOWN_PATH,
+    APP_SDK_VIZ_POINT_MENU_PATH,
+    APP_SDK_VIZ_SUBTOTALS_PATH,
+    APP_SDK_VIZ_UNDERLYING_DATA_OPEN_PATH,
+    APP_SDK_VIZ_UNDERLYING_DATA_PATH,
+    APP_SDK_EXPLORE_BASE_TABLE_PATH,
+    extractAppSdkRouteProjectUuid,
+    extractExploreBaseTable,
+    isAllowedAppSdkRoute,
+    isAppSdkScheduleDownloadRoute,
+    JWT_HEADER_NAME,
+    LightdashAppPreviewTokenHeader,
+    LightdashAppUuidHeader,
+    LightdashSignedDownloadHeader,
+    parseAppSdkExploreBaseTableRequest,
+    type AppColorScheme,
+    type AppSdkExploreBaseTableResult,
+    type DashboardFilters,
+    type DataAppInsightAction,
+    type DataAppInsightsPayload,
+    type DataAppVizContext,
+    type ExternalFetchRequest,
+    type ExternalFetchResponse,
+    type QueryExecutionContext,
+} from '@lightdash/common';
+import { useCallback, useEffect, useRef, type RefObject } from 'react';
+import { validate as isValidUuid } from 'uuid';
 import useEmbed from '../../../ee/providers/Embed/useEmbed';
+import {
+    getGdriveAccessToken,
+    triggerGdriveLogin,
+} from '../../../hooks/gdrive/useGdrive';
+import useApp from '../../../providers/App/useApp';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
+import type { DeliveryCaptureAccumulator } from '../deliveryCapture/deliveryCaptureAccumulator';
+import {
+    handleGsheetExport,
+    type GsheetExportColumn,
+    type GsheetExportRow,
+} from './handleGsheetExport';
 
 // Same key the SDK persists `instanceUrl` under (sdk/index.tsx, api.ts).
 // Duplicated rather than imported to avoid threading a shared export through
@@ -18,6 +67,170 @@ const resolveFetchUrl = (path: string): string => {
     if (!instanceUrl) return path;
     // SDK persists with a trailing slash; `path` always starts with `/`.
     return `${instanceUrl.replace(/\/$/, '')}${path}`;
+};
+
+const getEmbedAuthHeaders = (
+    embedToken: string | undefined,
+): Record<string, string> =>
+    embedToken ? { [JWT_HEADER_NAME]: embedToken } : {};
+
+type AppStateBridgeErrorCode =
+    | 'conflict'
+    | 'feature_disabled'
+    | 'forbidden'
+    | 'invalid'
+    | 'unavailable'
+    | 'unknown';
+
+type AppStateBridgeError = {
+    code: AppStateBridgeErrorCode;
+    message: string;
+    current?: unknown;
+};
+
+/**
+ * Map an app state API failure to the SDK's error codes. A 409 carries the
+ * key's current value so the SDK can retry an updater on top of it.
+ */
+export const mapAppStateApiError = (
+    httpStatus: number,
+    error: { message?: string; data?: unknown } | undefined,
+): AppStateBridgeError => {
+    const message =
+        error?.message ?? `App state request failed (${httpStatus})`;
+    const data =
+        typeof error?.data === 'object' && error.data !== null
+            ? (error.data as Record<string, unknown>)
+            : {};
+    if (httpStatus === 409) {
+        return { code: 'conflict', message, current: data.current ?? null };
+    }
+    if (httpStatus === 403) {
+        return {
+            code:
+                data.code === 'feature_not_enabled'
+                    ? 'feature_disabled'
+                    : 'forbidden',
+            message,
+        };
+    }
+    if (httpStatus === 400 || httpStatus === 422) {
+        return { code: 'invalid', message };
+    }
+    return { code: 'unknown', message };
+};
+
+type AppStateBridgeRequest = {
+    id: string;
+    op: unknown;
+    key?: unknown;
+    value?: unknown;
+    expectedVersion?: unknown;
+    limit?: unknown;
+    beforeVersion?: unknown;
+};
+
+/** Resolve an SDK app state op to the REST call the host makes as the viewer. */
+export const resolveAppStateRequest = (
+    base: string,
+    req: AppStateBridgeRequest,
+): {
+    method: 'GET' | 'PUT' | 'DELETE';
+    path: string;
+    body?: unknown;
+} | null => {
+    const key =
+        typeof req.key === 'string' ? encodeURIComponent(req.key) : null;
+    switch (req.op) {
+        case 'get':
+            return { method: 'GET', path: base };
+        case 'set-user':
+            return key
+                ? {
+                      method: 'PUT',
+                      path: `${base}/user/${key}`,
+                      body: { value: req.value },
+                  }
+                : null;
+        case 'delete-user':
+            return key
+                ? { method: 'DELETE', path: `${base}/user/${key}` }
+                : null;
+        case 'set-shared':
+            return key
+                ? {
+                      method: 'PUT',
+                      path: `${base}/shared/${key}`,
+                      body: {
+                          value: req.value,
+                          expectedVersion:
+                              typeof req.expectedVersion === 'number'
+                                  ? req.expectedVersion
+                                  : null,
+                      },
+                  }
+                : null;
+        case 'delete-shared':
+            return key
+                ? { method: 'DELETE', path: `${base}/shared/${key}` }
+                : null;
+        case 'history': {
+            if (!key) return null;
+            const params = new URLSearchParams();
+            if (typeof req.limit === 'number') {
+                params.set('limit', String(req.limit));
+            }
+            if (typeof req.beforeVersion === 'number') {
+                params.set('beforeVersion', String(req.beforeVersion));
+            }
+            const query = params.toString();
+            return {
+                method: 'GET',
+                path: `${base}/shared/${key}/history${query ? `?${query}` : ''}`,
+            };
+        }
+        default:
+            return null;
+    }
+};
+
+// Headers every API call made on the app's behalf carries: embed auth and
+// self-reported app attribution (the backend tags warehouse queries with it).
+const getAppSdkRequestHeaders = (
+    embedToken: string | undefined,
+    appUuid: string,
+): Record<string, string> => ({
+    'Content-Type': 'application/json',
+    ...getEmbedAuthHeaders(embedToken),
+    ...(appUuid ? { [LightdashAppUuidHeader]: appUuid } : {}),
+});
+
+const fetchExploreBaseTable = async ({
+    projectUuid,
+    exploreName,
+    embedToken,
+    appUuid,
+}: {
+    projectUuid: string;
+    exploreName: string;
+    embedToken: string | undefined;
+    appUuid: string;
+}): Promise<string | null> => {
+    try {
+        const res = await fetch(
+            resolveFetchUrl(
+                `/api/v1/projects/${projectUuid}/explores/${encodeURIComponent(exploreName)}`,
+            ),
+            {
+                method: 'GET',
+                headers: getAppSdkRequestHeaders(embedToken, appUuid),
+            },
+        );
+        if (!res.ok) return null;
+        return extractExploreBaseTable(await res.json());
+    } catch {
+        return null;
+    }
 };
 
 export type QueryEventTableCalculation = {
@@ -55,38 +268,106 @@ export type QueryEvent = {
 };
 
 /**
- * Routes the SDK is allowed to call through the postMessage bridge.
- * Everything else is rejected. Patterns use :param for path segments.
+ * Shared null/empty field defaults for a terminal (ready/error) QueryEvent.
+ * A terminal event carries no query shape of its own — only the fields the
+ * emitter actually knows (id, queryUuid, status, rowCount/durationMs/error)
+ * vary between call sites.
  */
-const ALLOWED_ROUTES: Array<{ method: string; pattern: RegExp }> = [
-    // Async metric query execution
-    {
-        method: 'POST',
-        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/metric-query$/,
-    },
-    // Poll for query results
-    {
-        method: 'GET',
-        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/[^/]+$/,
-    },
-    // Get current user
-    { method: 'GET', pattern: /^\/api\/v1\/user$/ },
-];
+const TERMINAL_EVENT_DEFAULTS: Pick<
+    QueryEvent,
+    | 'label'
+    | 'exploreName'
+    | 'dimensions'
+    | 'metrics'
+    | 'filters'
+    | 'sorts'
+    | 'tableCalculations'
+    | 'additionalMetrics'
+    | 'limit'
+    | 'rawMetricQuery'
+> = {
+    label: null,
+    exploreName: '',
+    dimensions: [],
+    metrics: [],
+    filters: {},
+    sorts: [],
+    tableCalculations: [],
+    additionalMetrics: [],
+    limit: 0,
+    rawMetricQuery: null,
+};
 
-function isAllowedRoute(method: string, path: string): boolean {
-    return ALLOWED_ROUTES.some(
-        (route) =>
-            route.method === method.toUpperCase() && route.pattern.test(path),
-    );
-}
+/**
+ * A single external-connection fetch proxied through the bridge, reported for
+ * the external-requests inspector tab. Single-shot lifecycle: one `pending`
+ * event when the fetch starts, one terminal `ready`/`error` event when it
+ * settles — matched by `id` (no queryUuid remap like metric queries need).
+ */
+export type ExternalRequestEvent = {
+    id: string;
+    timestamp: number;
+    /** Connection alias the app called, e.g. `stripe`. */
+    alias: string;
+    method: 'GET' | 'POST';
+    path: string;
+    query: Record<string, string> | null;
+    /** JSON request body (POST); null for GET or an empty body. */
+    requestBody: unknown;
+    status: 'pending' | 'ready' | 'error';
+    /** Upstream HTTP status (null until the fetch settles / on proxy error). */
+    httpStatus: number | null;
+    contentType: string | null;
+    /** Parsed response body; null until the fetch settles. */
+    responseBody: unknown;
+    truncated: boolean | null;
+    durationMs: number | null;
+    error: string | null;
+};
+
+// Routes the SDK is allowed to call through the postMessage bridge live in
+// @lightdash/common (APP_SDK_ALLOWED_ROUTES) — shared with the CLI preview
+// proxy so preview and deployed authority can't drift. Everything else is
+// rejected.
+
+// Keep in sync with MAX_URL_STATE_CHARS in packages/query-sdk/src/urlState.ts.
+// Caps what an app can push into the host page's URL / browser history.
+const MAX_URL_STATE_CHARS = 4096;
+
+const UNAVAILABLE_INSIGHTS: DataAppInsightsPayload = {
+    status: 'unavailable',
+    analysisId: null,
+    headline: null,
+    summary: null,
+    limitations: [],
+    dataAsOf: null,
+    generatedAt: null,
+    stale: false,
+    canInvestigate: false,
+    canContinue: false,
+    error: null,
+    anomalies: [],
+};
 
 const isMetricQueryPost = (method: string, path: string): boolean =>
     method.toUpperCase() === 'POST' &&
     /^\/api\/v2\/projects\/[^/]+\/query\/metric-query$/.test(path);
 
+const isChartQueryPost = (method: string, path: string): boolean =>
+    method.toUpperCase() === 'POST' &&
+    /^\/api\/v2\/projects\/[^/]+\/query\/chart$/.test(path);
+
 const isQueryResultGet = (method: string, path: string): boolean =>
     method.toUpperCase() === 'GET' &&
     /^\/api\/v2\/projects\/[^/]+\/query\/[^/]+$/.test(path);
+
+/** Capability manifest reported by the iframe SDK bundle. */
+export type SdkManifest = {
+    sdkVersion: string;
+    features: string[];
+    fixes: string[];
+    navigationId?: string;
+};
 
 export type ElementSelectedEvent = {
     /** Bracketed reference produced by the iframe inspector, e.g. `[button "Save"]`. */
@@ -114,8 +395,8 @@ export type ElementSelectedEvent = {
  * availability state itself — the parent owns it and is responsible for
  * resetting on iframe `src` change.
  */
-export function useAppSdkBridge(
-    iframeRef: RefObject<HTMLIFrameElement | null>,
+export type UseAppSdkBridgeParams = {
+    iframeRef: RefObject<HTMLIFrameElement | null>;
     /**
      * The origin this iframe is expected to load from. When previews are
      * served cross-origin this is `https://{customer}.lightdash.app`; in
@@ -126,26 +407,185 @@ export function useAppSdkBridge(
      * matching our iframe's contentWindow (unforgeable); origin is a
      * defence-in-depth check for the non-sandboxed/dev case.
      */
-    expectedPreviewOrigin: string,
-    onQueryEvent?: (event: QueryEvent) => void,
-    onElementSelected?: (event: ElementSelectedEvent) => void,
-    onInspectorAvailable?: () => void,
-    onScreenshotAvailable?: () => void,
+    expectedPreviewOrigin: string;
+    /** Project the proxied EE external-fetch calls run against. */
+    projectUuid: string;
+    /** App the proxied EE external-fetch calls are attributed to. */
+    appUuid: string;
+    /** Signed token binding this bridge to the rendered app version. */
+    previewToken: string;
+    onQueryEvent?: (event: QueryEvent) => void;
+    onElementSelected?: (event: ElementSelectedEvent) => void;
+    onInspectorAvailable?: () => void;
+    onScreenshotAvailable?: () => void;
     /**
      * When set, these filters are stamped onto every intercepted metric-query
      * POST before it reaches the backend. Used by dashboard data-app tiles so
      * the dashboard filter bar applies to the app's queries. The iframe SDK
      * is not involved — generated apps stay filter-agnostic.
      */
-    dashboardFilters?: DashboardFilters,
+    dashboardFilters?: DashboardFilters;
     /**
      * When true, `invalidateCache` is stamped onto every intercepted
      * metric-query POST so the backend bypasses the warehouse results cache —
      * mirrors what chart tiles send after the dashboard refresh button is
      * pressed. Set by `DashboardDataAppTile`; left undefined elsewhere.
      */
-    invalidateCache?: boolean,
-) {
+    invalidateCache?: boolean;
+    /**
+     * Feature capabilities the host page opts into. Currently gates the
+     * Google Sheets export flow — hosts that don't pass `gsheetExport: true`
+     * will receive an error response for those requests.
+     */
+    capabilities?: { gsheetExport?: boolean };
+    onLineageAvailable?: () => void;
+    onLineageSelected?: (event: { queryUuid: string }) => void;
+    /**
+     * Fires when the iframe SDK reports its capability manifest
+     * (`lightdash:sdk:manifest`) — sent by SDKs new enough to have a feature
+     * registry. Old bundles never send it; the parent owns the "no manifest
+     * yet" timeout that classifies them as legacy.
+     */
+    onSdkManifest?: (manifest: SdkManifest) => void;
+    onRuntimeError?: (navigationId: string) => void;
+    /**
+     * Called when the iframe acknowledges painting the matching render context.
+     */
+    onVizRendered?: (renderId: string) => void;
+    /** Identity attached to the next viz context push and its acknowledgement. */
+    vizRenderId?: string;
+    /** Called when the iframe SDK requests its initial viz context. */
+    onVizContextRequest?: () => void;
+    /**
+     * When provided, external-connection fetches proxied through this bridge
+     * are reported for the external-requests inspector tab — mirrors
+     * `onQueryEvent` for metric queries. Emits `pending` when the fetch starts
+     * and a terminal `ready`/`error` event when it settles.
+     */
+    onExternalRequestEvent?: (event: ExternalRequestEvent) => void;
+    // When set, the host pushes this render context into the iframe over the
+    // existing bridge — on load and on every change. Only set for data app vizs.
+    dataAppVizContext?: DataAppVizContext;
+    /** Enables host-provided subtotals for custom chart types. */
+    dataAppVizMode?: boolean;
+    /** Saved chart identity supplied by the host for external fetch authorization. */
+    chartContext?: ExternalFetchRequest['chartContext'];
+    /**
+     * Rewrites the viz underlying-data virtual route
+     * (`APP_SDK_VIZ_UNDERLYING_DATA_PATH`) into the real API request, which
+     * then flows through the standard pipeline (allowlist, project pinning,
+     * authenticated fetch). Absent = the capability is off and the virtual
+     * route answers with an error — availability is enforced here, not in the
+     * iframe's menu. Throws on invalid intent (untrusted iframe input).
+     */
+    rewriteVizUnderlyingDataRequest?: (intentBody: unknown) => {
+        method: 'POST';
+        path: string;
+        body: unknown;
+    };
+    /**
+     * Handles the host-owned underlying-data dialog route. Never forwarded to
+     * the API; the handler resolves the click intent and opens Lightdash UI.
+     */
+    onVizUnderlyingDataIntent?: (intentBody: unknown) => void;
+    /**
+     * Handles the viz drill-down virtual route
+     * (`APP_SDK_VIZ_DRILL_DOWN_PATH`): resolves the click intent and opens the
+     * host drill dialog. Never forwarded to the API. Absent = the capability
+     * is off and the route answers with an error — availability is enforced
+     * here, not in the iframe's menu. Throws on invalid intent (untrusted
+     * iframe input).
+     */
+    onVizDrillDownIntent?: (intentBody: unknown) => void;
+    /**
+     * Handles the viz point-menu virtual route
+     * (`APP_SDK_VIZ_POINT_MENU_PATH`): the host renders its native data-point
+     * context menu at the intent's coordinates. Never forwarded to the API.
+     * Absent = the capability is reported unavailable to the iframe.
+     */
+    onVizPointMenuIntent?: (intentBody: unknown) => { shown: boolean };
+    onVizSubtotalsIntent?: (
+        intentBody: unknown,
+    ) => Promise<{ rows: DataAppVizContext['rows'] }>;
+    // When set, `lightdash:sdk:url-state-change` messages from the iframe SDK
+    // are validated and forwarded. Left undefined, they're ignored.
+    onUrlStateChange?: (state: Record<string, unknown>) => void;
+    /** When set, every metric/chart query POST is recorded into this accumulator
+     *  (initiation, response, terminal) — the delivery/preview capture source. */
+    deliveryCapture?: DeliveryCaptureAccumulator;
+    /** Rides as `deliveryRender: true` on the `lightdash:sdk:ready` handshake
+     *  so the iframe SDK's `useDeliveryRender()` reports true. Absent (never
+     *  `false`) on interactive loads, so old SDKs ignore the unknown field
+     *  and new SDKs on old hosts default to false. */
+    captureRender?: boolean;
+    /** When set, stamped as `context` onto metric/chart POST bodies (delivery
+     *  renders send SCHEDULED_DELIVERY for honest attribution). */
+    queryContextOverride?: QueryExecutionContext;
+    /**
+     * The light/dark mode the app should render in — the host's resolved
+     * scheme. Pushed on load and on every change so a host theme toggle
+     * restyles the app without reloading the iframe. Bundles built before the
+     * SDK understood the message ignore it.
+     */
+    colorScheme: AppColorScheme;
+    /**
+     * The host's AI analysis of the current view, pushed into the app on
+     * change and whenever the SDK asks. Null when the feature is off; the
+     * app's `useInsights()` then stays idle.
+     */
+    insights?: DataAppInsightsPayload | null;
+    /** The viewer clicked an analysis action the app rendered. */
+    onInsightAction?: (action: DataAppInsightAction) => void;
+    /** The app subscribed to analysis: it renders `useInsights`/`useAiPrompt`. */
+    onInsightsInUse?: () => void;
+    /** Author guidance for the analysis model declared in app code, or null
+     *  when the running bundle declares none. */
+    onInsightInstructionsChange?: (instructions: string | null) => void;
+    /** Which query uuids the app currently has on screen (SDKs that report). */
+    onMountedQueriesChange?: (queryUuids: string[]) => void;
+};
+
+export function useAppSdkBridge({
+    iframeRef,
+    expectedPreviewOrigin,
+    projectUuid,
+    appUuid,
+    previewToken,
+    onQueryEvent,
+    onElementSelected,
+    onInspectorAvailable,
+    onScreenshotAvailable,
+    dashboardFilters,
+    invalidateCache,
+    capabilities,
+    onLineageAvailable,
+    onLineageSelected,
+    onExternalRequestEvent,
+    dataAppVizContext,
+    dataAppVizMode = false,
+    chartContext,
+    rewriteVizUnderlyingDataRequest,
+    onVizUnderlyingDataIntent,
+    onVizDrillDownIntent,
+    onVizPointMenuIntent,
+    onVizSubtotalsIntent,
+    onUrlStateChange,
+    onSdkManifest,
+    onRuntimeError,
+    onVizRendered,
+    vizRenderId,
+    onVizContextRequest,
+    deliveryCapture,
+    captureRender,
+    queryContextOverride,
+    colorScheme,
+    insights = null,
+    onInsightAction,
+    onInsightsInUse,
+    onInsightInstructionsChange,
+    onMountedQueriesChange,
+}: UseAppSdkBridgeParams) {
+    const lightdashApi = useLightdashApi();
     // Embed mode adapts the bridge's outgoing fetches in two ways:
     //   - Attaches the embed JWT header in lieu of session cookies
     //     (the parent in embed mode has no session, only the JWT).
@@ -154,6 +594,58 @@ export function useAppSdkBridge(
     //     don't break on `client.auth.getUser()`. The SDK protocol is
     //     unchanged — the rewrite happens entirely on the parent side.
     const { embedToken, projectUuid: embedProjectUuid } = useEmbed();
+    const { health, user } = useApp();
+
+    // Maps queryUuid → POST request id. The SDK transport assigns a fresh
+    // request id to the POST (`/metric-query`) and again to each GET poll
+    // (`/query/{uuid}`), so terminal events emitted from the GET handler
+    // would otherwise carry a different id than the pending/running events
+    // emitted from the POST handler. We record the mapping when the POST
+    // resolves with a queryUuid, then re-key ready/error events to the
+    // POST id so consumers can track the full pending → ready/error
+    // lifecycle by a single stable id (without this, MinimalApp's
+    // in-flight set never drains and the screenshot indicator never
+    // mounts).
+    const queryUuidToPostIdRef = useRef<Map<string, string>>(new Map());
+
+    // Push the render context into the iframe. Sent in response to the iframe's
+    // `viz-context-request` handshake (the renderer mounts after its bundle
+    // loads, so a single push on `load` can arrive before its listener exists)
+    // and re-sent whenever the context changes. No-op for non-viz apps.
+    const pushDataAppVizContext = useCallback(() => {
+        if (!dataAppVizContext) return;
+        iframeRef.current?.contentWindow?.postMessage(
+            {
+                type: APP_SDK_DATA_APP_VIZ_CONTEXT_MESSAGE,
+                ...dataAppVizContext,
+                ...(vizRenderId ? { renderId: vizRenderId } : {}),
+            },
+            '*',
+        );
+    }, [iframeRef, dataAppVizContext, vizRenderId]);
+
+    // Tell the iframe which scheme to render in. Wildcard target for the same
+    // reason as every other outbound message: the sandboxed iframe has an
+    // opaque origin, and the payload is a single non-sensitive enum.
+    const pushColorScheme = useCallback(() => {
+        iframeRef.current?.contentWindow?.postMessage(
+            { type: APP_SDK_COLOR_SCHEME_MESSAGE, colorScheme },
+            '*',
+        );
+    }, [iframeRef, colorScheme]);
+
+    // Push the analysis in; the SDK validates the payload on its side.
+    // A host with nothing to offer says so, so the app hides its AI controls
+    // instead of showing an "Analyse" that the backend would reject.
+    const pushInsights = useCallback(() => {
+        iframeRef.current?.contentWindow?.postMessage(
+            {
+                type: APP_SDK_INSIGHTS_MESSAGE,
+                payload: insights ?? UNAVAILABLE_INSIGHTS,
+            },
+            '*',
+        );
+    }, [iframeRef, insights]);
 
     const handleMessage = useCallback(
         async (event: MessageEvent) => {
@@ -171,13 +663,146 @@ export function useAppSdkBridge(
 
             const { data } = event;
 
+            if (data?.type === 'lightdash:sdk:runtime-error') {
+                if (
+                    typeof data.navigationId === 'string' &&
+                    isValidUuid(data.navigationId)
+                ) {
+                    onRuntimeError?.(data.navigationId);
+                }
+                return;
+            }
+
             if (data?.type === 'lightdash:inspect:available') {
                 onInspectorAvailable?.();
                 return;
             }
 
+            if (data?.type === 'lightdash:sdk:manifest') {
+                if (!onSdkManifest) return;
+                // Untrusted app payload: require sane strings, cap sizes, and
+                // drop anything malformed rather than partially trusting it.
+                const sdkVersion: unknown = data.sdkVersion;
+                const features: unknown = data.features;
+                // Fix reporting was added after feature reporting. An older
+                // otherwise-valid manifest omits it, which means no fixes are
+                // known rather than that its feature report is unusable.
+                const fixes: unknown = data.fixes;
+                if (
+                    typeof sdkVersion !== 'string' ||
+                    sdkVersion.length === 0 ||
+                    sdkVersion.length > 50 ||
+                    !Array.isArray(features) ||
+                    features.length > 200 ||
+                    !features.every(
+                        (f: unknown): f is string =>
+                            typeof f === 'string' &&
+                            f.length > 0 &&
+                            f.length <= 100,
+                    )
+                ) {
+                    return;
+                }
+                const validFixes =
+                    fixes === undefined ||
+                    !Array.isArray(fixes) ||
+                    fixes.length > 200 ||
+                    !fixes.every(
+                        (fix: unknown): fix is string =>
+                            typeof fix === 'string' &&
+                            fix.length > 0 &&
+                            fix.length <= 100,
+                    )
+                        ? []
+                        : fixes;
+                onSdkManifest({
+                    sdkVersion,
+                    features,
+                    fixes: validFixes,
+                    ...(typeof data.navigationId === 'string' &&
+                    isValidUuid(data.navigationId)
+                        ? { navigationId: data.navigationId }
+                        : {}),
+                });
+                return;
+            }
+
+            if (data?.type === 'lightdash:sdk:viz-rendered') {
+                if (vizRenderId && data.renderId === vizRenderId) {
+                    onVizRendered?.(vizRenderId);
+                }
+                return;
+            }
+
             if (data?.type === 'lightdash:sdk:screenshot-available') {
                 onScreenshotAvailable?.();
+                return;
+            }
+
+            // Handshake: the iframe's viz renderer asks for the current context
+            // once its listener is mounted. Reply with a push (no-op if this
+            // isn't a data app viz).
+            if (data?.type === APP_SDK_VIZ_CONTEXT_REQUEST_MESSAGE) {
+                onVizContextRequest?.();
+                pushDataAppVizContext();
+                return;
+            }
+
+            // Same handshake for the color scheme: the SDK asks as soon as its
+            // listener is live, so it can't miss the load-time push.
+            if (data?.type === APP_SDK_COLOR_SCHEME_REQUEST_MESSAGE) {
+                pushColorScheme();
+                return;
+            }
+
+            if (data?.type === APP_SDK_INSIGHTS_REQUEST_MESSAGE) {
+                const { inUse, instructions } = data as {
+                    inUse?: unknown;
+                    instructions?: unknown;
+                };
+                if (inUse === true) {
+                    onInsightsInUse?.();
+                }
+                // App code is untrusted: cap the author guidance here so a
+                // runaway string never reaches the analysis request.
+                onInsightInstructionsChange?.(
+                    typeof instructions === 'string'
+                        ? instructions
+                              .trim()
+                              .slice(
+                                  0,
+                                  DATA_APP_ANALYSIS_INSTRUCTIONS_MAX_CHARS,
+                              ) || null
+                        : null,
+                );
+                pushInsights();
+                return;
+            }
+
+            if (data?.type === APP_SDK_INSIGHT_ACTION_MESSAGE) {
+                const { action, anomalyId } = data as {
+                    action?: unknown;
+                    anomalyId?: unknown;
+                };
+                if (action === 'analyse') {
+                    onInsightAction?.({ action });
+                } else if (
+                    (action === 'investigate' || action === 'continue') &&
+                    typeof anomalyId === 'string'
+                ) {
+                    onInsightAction?.({ action, anomalyId });
+                }
+                return;
+            }
+
+            if (data?.type === APP_SDK_MOUNTED_QUERIES_MESSAGE) {
+                const { queryUuids } = data as { queryUuids?: unknown };
+                if (
+                    Array.isArray(queryUuids) &&
+                    queryUuids.every((q) => typeof q === 'string')
+                ) {
+                    onMountedQueriesChange?.(queryUuids);
+                }
                 return;
             }
 
@@ -189,9 +814,314 @@ export function useAppSdkBridge(
                 return;
             }
 
+            if (data?.type === 'lightdash:lineage:available') {
+                // Only trust announces that carry proof of stamped elements.
+                // Legacy SDK bundles announced unconditionally, enabling the
+                // Inspect-data toggle in apps where clicks can never resolve.
+                const stampCount: unknown = data.stampCount;
+                if (typeof stampCount === 'number' && stampCount > 0) {
+                    onLineageAvailable?.();
+                }
+                return;
+            }
+
+            if (data?.type === 'lightdash:sdk:url-state-change') {
+                if (!onUrlStateChange) return;
+                const state: unknown = data.state;
+                // Untrusted app payload: accept only a plain object under the
+                // size cap, and warn — a silent drop looks like a broken URL.
+                const reject = (reason: string) =>
+                    console.warn(
+                        `[lightdash] Ignoring app URL state update: ${reason}`,
+                    );
+                if (
+                    typeof state !== 'object' ||
+                    state === null ||
+                    Array.isArray(state)
+                ) {
+                    reject('not a plain object');
+                    return;
+                }
+                try {
+                    if (JSON.stringify(state).length > MAX_URL_STATE_CHARS) {
+                        reject(`over ${MAX_URL_STATE_CHARS} chars serialized`);
+                        return;
+                    }
+                } catch {
+                    reject('not JSON-serializable');
+                    return;
+                }
+                onUrlStateChange(state as Record<string, unknown>);
+                return;
+            }
+
+            if (data?.type === 'lightdash:lineage:selected') {
+                const queryUuid =
+                    typeof data.queryUuid === 'string' ? data.queryUuid : '';
+                if (queryUuid && onLineageSelected) {
+                    onLineageSelected({ queryUuid });
+                }
+                return;
+            }
+
+            if (data?.type === 'lightdash:sdk:gsheet-export-request') {
+                const req = data as {
+                    id: string;
+                    title: string;
+                    columns: GsheetExportColumn[];
+                    rows: GsheetExportRow[];
+                };
+                const respondGsheet = (resp: {
+                    fileUrl?: string;
+                    error?: string;
+                }) =>
+                    iframeRef.current?.contentWindow?.postMessage(
+                        {
+                            type: 'lightdash:sdk:gsheet-export-response',
+                            id: req.id,
+                            ...resp,
+                        },
+                        '*',
+                    );
+                // Guard against iframe requests that arrive before health/user
+                // queries resolve — otherwise the non-null assertions below
+                // throw a TypeError that the app developer sees as a generic
+                // "Export failed" with no diagnostic.
+                if (!health.data || !user.data) {
+                    respondGsheet({
+                        error: 'Still loading, try again shortly',
+                    });
+                    return;
+                }
+                try {
+                    const { fileUrl } = await handleGsheetExport(
+                        {
+                            title: req.title,
+                            columns: req.columns,
+                            rows: req.rows,
+                        },
+                        {
+                            capability: capabilities?.gsheetExport === true,
+                            health: health.data,
+                            ability: user.data.ability,
+                            projectUuid: projectUuid ?? '',
+                            organizationUuid: user.data.organizationUuid ?? '',
+                            getAccessToken: () =>
+                                getGdriveAccessToken(lightdashApi),
+                            triggerLogin: triggerGdriveLogin,
+                            lightdashApi: ({ url, method, body }) =>
+                                lightdashApi({
+                                    url,
+                                    method,
+                                    body: body ?? undefined,
+                                }),
+                        },
+                    );
+                    respondGsheet({ fileUrl });
+                } catch (e) {
+                    respondGsheet({
+                        error: e instanceof Error ? e.message : 'Export failed',
+                    });
+                }
+                return;
+            }
+
+            if (data?.type === APP_SDK_APP_STATE_MESSAGE) {
+                const req = data as AppStateBridgeRequest;
+                const respondAppState = (response: {
+                    result?: unknown;
+                    error?: AppStateBridgeError;
+                }) => {
+                    iframeRef.current?.contentWindow?.postMessage(
+                        {
+                            type: APP_SDK_APP_STATE_RESPONSE_MESSAGE,
+                            id: req.id,
+                            ...response,
+                        },
+                        '*',
+                    );
+                };
+                // The backend authorizes the viewer against the app and
+                // enforces the flag and caps; the host only routes the call.
+                const resolved = resolveAppStateRequest(
+                    `/api/v1/ee/projects/${projectUuid}/apps/${appUuid}/state`,
+                    req,
+                );
+                if (!resolved) {
+                    respondAppState({
+                        error: {
+                            code: 'invalid',
+                            message: 'Unknown app state request',
+                        },
+                    });
+                    return;
+                }
+                try {
+                    const res = await fetch(resolveFetchUrl(resolved.path), {
+                        method: resolved.method,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...getEmbedAuthHeaders(embedToken),
+                        },
+                        ...(resolved.body !== undefined
+                            ? { body: JSON.stringify(resolved.body) }
+                            : {}),
+                        // Writes flushed as the page unloads must outlive it.
+                        keepalive: resolved.method !== 'GET',
+                    });
+                    const json = await res.json();
+                    if (json.status === 'ok') {
+                        respondAppState({
+                            result:
+                                req.op === 'history'
+                                    ? (json.results?.versions ?? [])
+                                    : json.results,
+                        });
+                    } else {
+                        respondAppState({
+                            error: mapAppStateApiError(res.status, json.error),
+                        });
+                    }
+                } catch (err) {
+                    respondAppState({
+                        error: {
+                            code: 'unavailable',
+                            message:
+                                err instanceof Error
+                                    ? err.message
+                                    : 'App state request failed',
+                        },
+                    });
+                }
+                return;
+            }
+
+            if (data?.type === 'lightdash:sdk:external-fetch') {
+                const {
+                    id: externalId,
+                    alias,
+                    method: externalMethod,
+                    path: externalPath,
+                    query: externalQuery,
+                    body: externalBody,
+                } = data;
+
+                const respondExternal = (response: {
+                    result?: unknown;
+                    error?: string;
+                }) => {
+                    iframeRef.current?.contentWindow?.postMessage(
+                        {
+                            type: 'lightdash:sdk:external-fetch-response',
+                            id: externalId,
+                            ...response,
+                        },
+                        '*',
+                    );
+                };
+
+                // Report the fetch to the external-requests inspector. Base
+                // request fields are captured up front; each call overlays the
+                // lifecycle status (and, on settle, the response/duration).
+                const startedAt = Date.now();
+                const emitExternal = (
+                    fields: Partial<ExternalRequestEvent> & {
+                        status: ExternalRequestEvent['status'];
+                    },
+                ) => {
+                    onExternalRequestEvent?.({
+                        id: externalId,
+                        timestamp: startedAt,
+                        alias: typeof alias === 'string' ? alias : 'unknown',
+                        method: externalMethod === 'POST' ? 'POST' : 'GET',
+                        path:
+                            typeof externalPath === 'string'
+                                ? externalPath
+                                : '',
+                        query:
+                            (externalQuery as
+                                | Record<string, string>
+                                | undefined) ?? null,
+                        requestBody: externalBody ?? null,
+                        httpStatus: null,
+                        contentType: null,
+                        responseBody: null,
+                        truncated: null,
+                        durationMs: null,
+                        error: null,
+                        ...fields,
+                    });
+                };
+
+                emitExternal({ status: 'pending' });
+
+                // Host-supplied chart context only; the backend resolves the
+                // alias, attaches secrets, and authorizes this endpoint, so
+                // ALLOWED_ROUTES is deliberately not consulted here.
+                const externalFetchPath = `/api/v1/ee/projects/${projectUuid}/apps/${appUuid}/external-fetch`;
+                const externalFetchBody: ExternalFetchRequest = {
+                    connectionAlias: alias,
+                    method: externalMethod ?? 'GET',
+                    path: externalPath,
+                    query: externalQuery,
+                    body: externalBody,
+                    chartContext,
+                };
+
+                try {
+                    const res = await fetch(
+                        resolveFetchUrl(externalFetchPath),
+                        {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                ...getEmbedAuthHeaders(embedToken),
+                            },
+                            body: JSON.stringify(externalFetchBody),
+                        },
+                    );
+                    const json = await res.json();
+                    if (json.status === 'ok') {
+                        const result = json.results as
+                            | ExternalFetchResponse
+                            | undefined;
+                        emitExternal({
+                            status: 'ready',
+                            httpStatus: result?.status ?? null,
+                            contentType: result?.contentType ?? null,
+                            responseBody: result?.body ?? null,
+                            truncated: result?.truncated ?? null,
+                            durationMs: Date.now() - startedAt,
+                        });
+                        respondExternal({ result: json.results });
+                    } else {
+                        const errorMessage =
+                            json.error?.message ??
+                            `External fetch failed (${res.status})`;
+                        emitExternal({
+                            status: 'error',
+                            error: errorMessage,
+                            durationMs: Date.now() - startedAt,
+                        });
+                        respondExternal({ error: errorMessage });
+                    }
+                } catch (err) {
+                    const errorMessage =
+                        err instanceof Error ? err.message : 'Unknown error';
+                    emitExternal({
+                        status: 'error',
+                        error: errorMessage,
+                        durationMs: Date.now() - startedAt,
+                    });
+                    respondExternal({ error: errorMessage });
+                }
+                return;
+            }
+
             if (data?.type !== 'lightdash:sdk:fetch') return;
 
-            const { id, method, path, body, metadata } = data;
+            const { id, metadata } = data;
+            let { method, path, body } = data;
 
             const respond = (response: {
                 result?: unknown;
@@ -207,24 +1137,201 @@ export function useAppSdkBridge(
                 );
             };
 
-            if (!isAllowedRoute(method, path)) {
+            // Bridge-only virtual route: the viz posts semantic click intent;
+            // the host rewrites it into the real underlying-data request, then
+            // the standard pipeline (allowlist, project pinning, auth) applies.
+            if (path === APP_SDK_VIZ_UNDERLYING_DATA_PATH) {
+                if (!rewriteVizUnderlyingDataRequest) {
+                    respond({
+                        error: 'Underlying data is not available for this visualization.',
+                    });
+                    return;
+                }
+                try {
+                    ({ method, path, body } =
+                        rewriteVizUnderlyingDataRequest(body));
+                } catch (err) {
+                    respond({
+                        error:
+                            err instanceof Error
+                                ? err.message
+                                : 'Invalid underlying-data request.',
+                    });
+                    return;
+                }
+            }
+
+            if (path === APP_SDK_VIZ_UNDERLYING_DATA_OPEN_PATH) {
+                if (!onVizUnderlyingDataIntent) {
+                    respond({
+                        error: 'Underlying data is not available for this visualization.',
+                    });
+                    return;
+                }
+                try {
+                    onVizUnderlyingDataIntent(body);
+                    respond({ result: {} });
+                } catch (err) {
+                    respond({
+                        error:
+                            err instanceof Error
+                                ? err.message
+                                : 'Invalid underlying-data request.',
+                    });
+                }
+                return;
+            }
+
+            // Bridge-only virtual route: the viz posts a drill click intent;
+            // the host resolves it and opens its drill dialog. Answered here —
+            // nothing is forwarded to the API.
+            if (path === APP_SDK_VIZ_DRILL_DOWN_PATH) {
+                if (!onVizDrillDownIntent) {
+                    respond({
+                        error: 'Drill-down is not available for this visualization.',
+                    });
+                    return;
+                }
+                try {
+                    onVizDrillDownIntent(body);
+                    respond({ result: {} });
+                } catch (err) {
+                    respond({
+                        error:
+                            err instanceof Error
+                                ? err.message
+                                : 'Invalid drill-down request.',
+                    });
+                }
+                return;
+            }
+
+            // Bridge-only virtual route: the viz posts a data-point click;
+            // the host renders its native context menu. Answered here —
+            // nothing is forwarded to the API.
+            if (path === APP_SDK_VIZ_POINT_MENU_PATH) {
+                if (!onVizPointMenuIntent) {
+                    respond({
+                        error: 'The data point menu is not available for this visualization.',
+                    });
+                    return;
+                }
+                try {
+                    respond({ result: onVizPointMenuIntent(body) });
+                } catch (err) {
+                    respond({
+                        error:
+                            err instanceof Error
+                                ? err.message
+                                : 'Invalid point-menu request.',
+                    });
+                }
+                return;
+            }
+
+            if (path === APP_SDK_VIZ_SUBTOTALS_PATH) {
+                const unavailable = {
+                    error: 'Subtotals are not available for this visualization.',
+                };
+                if (
+                    !dataAppVizMode ||
+                    method.toUpperCase() !== 'POST' ||
+                    !onVizSubtotalsIntent
+                ) {
+                    respond(unavailable);
+                    return;
+                }
+                // The failure reason stays in the host; the iframe is untrusted.
+                try {
+                    respond({ result: await onVizSubtotalsIntent(body) });
+                } catch {
+                    respond(unavailable);
+                }
+                return;
+            }
+
+            // Host-answered virtual route: only the base table leaves the
+            // host, never the explore itself.
+            if (path === APP_SDK_EXPLORE_BASE_TABLE_PATH) {
+                const request = parseAppSdkExploreBaseTableRequest(body);
+                if (request === null) {
+                    respond({ error: 'Invalid explore base-table request.' });
+                    return;
+                }
+                const result: AppSdkExploreBaseTableResult = {
+                    baseTable: await fetchExploreBaseTable({
+                        projectUuid,
+                        exploreName: request.exploreName,
+                        embedToken,
+                        appUuid,
+                    }),
+                };
+                respond({ result });
+                return;
+            }
+
+            if (!isAllowedAppSdkRoute(method, path)) {
                 respond({ error: `Blocked: ${method} ${path}` });
                 return;
             }
 
-            // Stamp dashboard filters and the cache-invalidation flag onto
-            // outgoing metric-query bodies. The backend drops filters whose
-            // fields aren't in the query's explore, so it's safe to send the
-            // full set on every call. `invalidateCache` mirrors what charts
-            // send on a dashboard refresh so the app's queries bypass the
-            // warehouse results cache too.
+            const requestProjectUuid = extractAppSdkRouteProjectUuid(path);
+            if (
+                requestProjectUuid !== null &&
+                requestProjectUuid !== projectUuid
+            ) {
+                respond({
+                    error: `Blocked: request targets project ${requestProjectUuid}, but this app belongs to ${projectUuid}`,
+                });
+                return;
+            }
+
+            // Record the pre-stamp body — dashboard filters/invalidateCache/
+            // context are per-render decoration, not part of the query's identity.
+            if (
+                isMetricQueryPost(method, path) ||
+                isChartQueryPost(method, path)
+            ) {
+                deliveryCapture?.onInitiation({
+                    requestId: id,
+                    method,
+                    path,
+                    body,
+                    label:
+                        ((metadata as Record<string, unknown> | undefined)
+                            ?.label as string | undefined) ?? null,
+                });
+            }
+
+            // Stamp dashboard filters, the cache-invalidation flag, and a
+            // query-context override onto outgoing query bodies. The backend
+            // drops filters whose fields aren't in the query's/chart's
+            // explore, so it's safe to send the full set on every call. All
+            // three apply to inline metric queries AND linked (/query/chart)
+            // charts, so a dashboard filter, refresh, or delivery-capture
+            // context reaches linked charts too. App attribution rides on the
+            // LightdashAppUuidHeader instead (see the fetch below).
+            const stampFilters =
+                (isMetricQueryPost(method, path) ||
+                    isChartQueryPost(method, path)) &&
+                !!dashboardFilters;
+            const stampInvalidate =
+                (isMetricQueryPost(method, path) ||
+                    isChartQueryPost(method, path)) &&
+                !!invalidateCache;
+            const stampContext =
+                (isMetricQueryPost(method, path) ||
+                    isChartQueryPost(method, path)) &&
+                !!queryContextOverride;
             const effectiveBody =
-                isMetricQueryPost(method, path) &&
-                (dashboardFilters || invalidateCache)
+                stampFilters || stampInvalidate || stampContext
                     ? {
                           ...(body as Record<string, unknown> | undefined),
-                          ...(dashboardFilters ? { dashboardFilters } : {}),
-                          ...(invalidateCache ? { invalidateCache } : {}),
+                          ...(stampFilters ? { dashboardFilters } : {}),
+                          ...(stampInvalidate ? { invalidateCache } : {}),
+                          ...(stampContext
+                              ? { context: queryContextOverride }
+                              : {}),
                       }
                     : body;
 
@@ -273,6 +1380,42 @@ export function useAppSdkBridge(
                     ? `/api/v1/embed/${embedProjectUuid}/user-info`
                     : path;
 
+            // Emits a terminal `error` QueryEvent re-keyed to the POST id
+            // when a metric-query POST fails before the SDK ever gets a
+            // queryUuid. Without it, the pending entry stays in
+            // MinimalApp's in-flight set forever and the screenshot
+            // indicator never mounts. The GET-poll error/ready paths
+            // already emit their own terminal events, so this only runs
+            // for the POST.
+            const emitPostFailure = (errorMessage: string) => {
+                if (
+                    !isMetricQueryPost(method, path) &&
+                    !isChartQueryPost(method, path)
+                )
+                    return;
+                deliveryCapture?.onPostFailure(id, errorMessage);
+                if (!onQueryEvent) return;
+                onQueryEvent({
+                    id,
+                    timestamp: Date.now(),
+                    label: null,
+                    exploreName: '',
+                    dimensions: [],
+                    metrics: [],
+                    filters: {},
+                    sorts: [],
+                    tableCalculations: [],
+                    additionalMetrics: [],
+                    limit: 0,
+                    queryUuid: null,
+                    status: 'error',
+                    rowCount: null,
+                    durationMs: null,
+                    error: errorMessage,
+                    rawMetricQuery: null,
+                });
+            };
+
             try {
                 // SDK embeds: a bare `fetch(path)` resolves against the
                 // host's origin, not Lightdash. Rewrite to an absolute URL
@@ -280,9 +1423,19 @@ export function useAppSdkBridge(
                 const res = await fetch(resolveFetchUrl(effectivePath), {
                     method,
                     headers: {
-                        'Content-Type': 'application/json',
-                        ...(embedToken
-                            ? { [JWT_HEADER_NAME]: embedToken }
+                        ...getAppSdkRequestHeaders(embedToken, appUuid),
+                        ...(isMetricQueryPost(method, path)
+                            ? {
+                                  [LightdashAppPreviewTokenHeader]:
+                                      previewToken,
+                              }
+                            : {}),
+                        // The SDK fetches the export's fileUrl from inside
+                        // the sandboxed iframe, where session cookies don't
+                        // attach — ask the backend for a SIGNED URL that
+                        // survives that credential-less fetch.
+                        ...(isAppSdkScheduleDownloadRoute(method, path)
+                            ? { [LightdashSignedDownloadHeader]: 'true' }
                             : {}),
                     },
                     ...(effectiveBody
@@ -293,15 +1446,48 @@ export function useAppSdkBridge(
                 const json = await res.json();
 
                 if (json.status === 'ok') {
+                    if (
+                        isMetricQueryPost(method, path) ||
+                        isChartQueryPost(method, path)
+                    ) {
+                        deliveryCapture?.onPostResponse(
+                            id,
+                            json.results ?? null,
+                        );
+                    }
+
                     // Track metric query initiation response (has queryUuid)
                     if (
-                        isMetricQueryPost(method, path) &&
+                        (isMetricQueryPost(method, path) ||
+                            isChartQueryPost(method, path)) &&
                         onQueryEvent &&
                         json.results?.queryUuid
                     ) {
                         const initLabel = (
                             metadata as Record<string, unknown> | undefined
                         )?.label as string | undefined;
+
+                        // Displaced by results-cache dedupe (see ref comment
+                        // above); `queryUuid: null` avoids masking the real terminal.
+                        const displacedId = queryUuidToPostIdRef.current.get(
+                            json.results.queryUuid,
+                        );
+                        if (displacedId !== undefined && displacedId !== id) {
+                            onQueryEvent({
+                                ...TERMINAL_EVENT_DEFAULTS,
+                                id: displacedId,
+                                timestamp: Date.now(),
+                                queryUuid: null,
+                                status: 'ready',
+                                rowCount: null,
+                                durationMs: null,
+                                error: null,
+                            });
+                        }
+                        queryUuidToPostIdRef.current.set(
+                            json.results.queryUuid,
+                            id,
+                        );
                         onQueryEvent({
                             id,
                             timestamp: Date.now(),
@@ -331,21 +1517,31 @@ export function useAppSdkBridge(
                     }
 
                     // Track query result polling responses
-                    if (isQueryResultGet(method, path) && onQueryEvent) {
+                    if (isQueryResultGet(method, path)) {
                         const result = json.results;
+                        // Re-key terminal events to the POST id so consumers
+                        // see a single stable id across the pending →
+                        // ready/error lifecycle. Falls back to the GET id
+                        // only if the mapping is missing (shouldn't happen
+                        // in normal flow — the POST always runs first).
+                        const lifecycleId: string =
+                            (result?.queryUuid &&
+                                queryUuidToPostIdRef.current.get(
+                                    result.queryUuid,
+                                )) ??
+                            id;
                         if (result?.status === 'ready') {
-                            onQueryEvent({
-                                id,
+                            queryUuidToPostIdRef.current.delete(
+                                result.queryUuid,
+                            );
+                            deliveryCapture?.onTerminal(result.queryUuid, {
+                                status: 'ready',
+                                rowCount: result.totalResults ?? null,
+                            });
+                            onQueryEvent?.({
+                                ...TERMINAL_EVENT_DEFAULTS,
+                                id: lifecycleId,
                                 timestamp: Date.now(),
-                                label: null,
-                                exploreName: '',
-                                dimensions: [],
-                                metrics: [],
-                                filters: {},
-                                sorts: [],
-                                tableCalculations: [],
-                                additionalMetrics: [],
-                                limit: 0,
                                 queryUuid: result.queryUuid,
                                 status: 'ready',
                                 // Use totalResults (full row count across all
@@ -357,50 +1553,51 @@ export function useAppSdkBridge(
                                     result.metadata?.performance
                                         ?.initialQueryExecutionMs ?? null,
                                 error: null,
-                                rawMetricQuery: null,
                             });
                         } else if (
                             result?.status === 'error' ||
                             result?.status === 'expired'
                         ) {
-                            onQueryEvent({
-                                id,
+                            queryUuidToPostIdRef.current.delete(
+                                result.queryUuid,
+                            );
+                            deliveryCapture?.onTerminal(result.queryUuid, {
+                                status: 'error',
+                                error: result.error ?? 'Query failed',
+                            });
+                            onQueryEvent?.({
+                                ...TERMINAL_EVENT_DEFAULTS,
+                                id: lifecycleId,
                                 timestamp: Date.now(),
-                                label: null,
-                                exploreName: '',
-                                dimensions: [],
-                                metrics: [],
-                                filters: {},
-                                sorts: [],
-                                tableCalculations: [],
-                                additionalMetrics: [],
-                                limit: 0,
                                 queryUuid: result.queryUuid,
                                 status: 'error',
                                 rowCount: null,
                                 durationMs: null,
                                 error: result.error ?? 'Query failed',
-                                rawMetricQuery: null,
                             });
                         }
                     }
 
                     respond({ result: json.results });
                 } else {
-                    respond({
-                        error:
-                            json.error?.message ?? `API error (${res.status})`,
-                    });
+                    const errorMessage =
+                        json.error?.message ?? `API error (${res.status})`;
+                    emitPostFailure(errorMessage);
+                    respond({ error: errorMessage });
                 }
             } catch (err) {
-                respond({
-                    error: err instanceof Error ? err.message : 'Unknown error',
-                });
+                const errorMessage =
+                    err instanceof Error ? err.message : 'Unknown error';
+                emitPostFailure(errorMessage);
+                respond({ error: errorMessage });
             }
         },
         [
             iframeRef,
             expectedPreviewOrigin,
+            projectUuid,
+            appUuid,
+            previewToken,
             onQueryEvent,
             onElementSelected,
             onInspectorAvailable,
@@ -409,6 +1606,35 @@ export function useAppSdkBridge(
             invalidateCache,
             embedToken,
             embedProjectUuid,
+            capabilities,
+            onLineageAvailable,
+            onLineageSelected,
+            onExternalRequestEvent,
+            pushDataAppVizContext,
+            rewriteVizUnderlyingDataRequest,
+            onVizUnderlyingDataIntent,
+            onVizDrillDownIntent,
+            onVizPointMenuIntent,
+            onVizSubtotalsIntent,
+            pushColorScheme,
+            onUrlStateChange,
+            onSdkManifest,
+            onRuntimeError,
+            onVizRendered,
+            vizRenderId,
+            onVizContextRequest,
+            dataAppVizMode,
+            chartContext,
+            health.data,
+            user.data,
+            deliveryCapture,
+            queryContextOverride,
+            pushInsights,
+            onInsightAction,
+            onInsightsInUse,
+            onInsightInstructionsChange,
+            onMountedQueriesChange,
+            lightdashApi,
         ],
     );
 
@@ -417,6 +1643,17 @@ export function useAppSdkBridge(
         return () => window.removeEventListener('message', handleMessage);
     }, [handleMessage]);
 
+    // Re-push on every host theme change so an already-loaded app restyles in
+    // place. The initial value also rides in the iframe URL hash, which the SDK
+    // applies as the app boots — this message would arrive too late for that.
+    useEffect(() => {
+        pushColorScheme();
+    }, [pushColorScheme]);
+
+    useEffect(() => {
+        pushInsights();
+    }, [pushInsights]);
+
     const handleIframeLoad = useCallback(() => {
         // `*` because the load event fires once for the initial about:blank
         // (which inherits the parent's origin) and again after the iframe
@@ -424,10 +1661,28 @@ export function useAppSdkBridge(
         // first call logs a noisy postMessage warning. The :ready signal
         // carries no sensitive data, so wildcard is safe here.
         iframeRef.current?.contentWindow?.postMessage(
-            { type: 'lightdash:sdk:ready' },
+            {
+                type: 'lightdash:sdk:ready',
+                // Omitted (not `false`) outside capture modes so old SDKs —
+                // which ignore unknown fields — and new SDKs on old hosts
+                // both default to `useDeliveryRender() === false`.
+                ...(captureRender ? { deliveryRender: true } : {}),
+                // Lets the SDK address app-scoped routes (AI prompts).
+                ...(appUuid ? { appUuid } : {}),
+            },
             '*',
         );
-    }, [iframeRef]);
+        pushColorScheme();
+        pushInsights();
+    }, [iframeRef, pushColorScheme, pushInsights, captureRender, appUuid]);
+
+    // Re-push the render context whenever the host's field mapping or rows
+    // change, so an already-loaded iframe re-renders live. The initial delivery
+    // is driven by the iframe's `viz-context-request` handshake, so no push on
+    // `load` is needed here.
+    useEffect(() => {
+        pushDataAppVizContext();
+    }, [pushDataAppVizContext]);
 
     const enableInspector = useCallback(() => {
         iframeRef.current?.contentWindow?.postMessage(
@@ -443,9 +1698,36 @@ export function useAppSdkBridge(
         );
     }, [iframeRef]);
 
+    const enableLineage = useCallback(() => {
+        iframeRef.current?.contentWindow?.postMessage(
+            { type: 'lightdash:lineage:enable' },
+            '*',
+        );
+    }, [iframeRef]);
+
+    const disableLineage = useCallback(() => {
+        iframeRef.current?.contentWindow?.postMessage(
+            { type: 'lightdash:lineage:disable' },
+            '*',
+        );
+    }, [iframeRef]);
+
+    const highlightLineage = useCallback(
+        (queryUuid: string | null) => {
+            iframeRef.current?.contentWindow?.postMessage(
+                { type: 'lightdash:lineage:highlight', queryUuid },
+                '*',
+            );
+        },
+        [iframeRef],
+    );
+
     return {
         handleIframeLoad,
         enableInspector,
         disableInspector,
+        enableLineage,
+        disableLineage,
+        highlightLineage,
     };
 }

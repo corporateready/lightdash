@@ -1,22 +1,14 @@
-import {
-    Anchor,
-    Breadcrumbs,
-    Button,
-    Group,
-    Stack,
-    Text,
-    useMantineTheme,
-} from '@mantine-8/core';
+import { Anchor, Breadcrumbs, Button, Group, Stack, Text } from '@mantine/core';
 import {
     IconGripVertical,
     IconPlayerPlay,
     IconPlus,
 } from '@tabler/icons-react';
 import { type FC, type ReactNode } from 'react';
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import { NAVBAR_HEIGHT } from '../../../../../components/common/Page/constants';
+import ResizableSplitter from '../../../../../components/common/ResizableSplitter';
+import { useProjectUuid } from '../../../../../hooks/useProjectUuid';
 import {
     useAiAgentEvaluation,
     useAiAgentEvaluationRuns,
@@ -31,15 +23,10 @@ type EvalSectionLayoutProps = {
 };
 
 export const EvalSectionLayout: FC<EvalSectionLayoutProps> = ({ children }) => {
-    const theme = useMantineTheme();
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
-    const { projectUuid, agentUuid, evalUuid, runUuid } = useParams<{
-        projectUuid: string;
-        agentUuid: string;
-        evalUuid?: string;
-        runUuid?: string;
-    }>();
+    const { agentUuid, evalUuid, runUuid } = useParams();
+    const projectUuid = useProjectUuid();
     const { selectedThreadUuid, isSidebarOpen, clearThread } =
         useEvalSectionContext();
     // Fetch evaluation data if we're on an eval detail page
@@ -140,7 +127,7 @@ export const EvalSectionLayout: FC<EvalSectionLayoutProps> = ({ children }) => {
                 key="evaluation"
                 size="lg"
                 onClick={handleNavigateToEvaluation}
-                style={{ cursor: 'pointer' }}
+                className={styles.breadcrumbLink}
                 td="none"
                 fw={500}
             >
@@ -200,14 +187,20 @@ export const EvalSectionLayout: FC<EvalSectionLayoutProps> = ({ children }) => {
     };
 
     return (
-        <PanelGroup
-            direction="horizontal"
-            style={{ height: `calc(100vh - ${NAVBAR_HEIGHT}px)` }}
+        <ResizableSplitter
+            withHandle
+            lineSize={1.5}
+            handleColor="ldGray.2"
+            handleIcon={
+                <MantineIcon color="gray" icon={IconGripVertical} size="sm" />
+            }
+            classNames={{ handle: styles.resizeHandle }}
+            orientation="horizontal"
         >
-            <Panel
+            <ResizableSplitter.Pane
                 id="eval-content"
                 defaultSize={isSidebarOpen ? 40 : 100}
-                minSize={30}
+                min={30}
             >
                 <Stack gap="sm" mt="lg" pr="md">
                     <Stack gap="md">
@@ -226,50 +219,29 @@ export const EvalSectionLayout: FC<EvalSectionLayoutProps> = ({ children }) => {
                     </Stack>
                     {children}
                 </Stack>
-            </Panel>
+            </ResizableSplitter.Pane>
 
             {isSidebarOpen && (
-                <>
-                    <PanelResizeHandle
-                        className={styles.resizeHandle}
-                        style={{
-                            width: 1.5,
-                            backgroundColor: theme.colors.ldGray[2],
-                            cursor: 'col-resize',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                        }}
-                    >
-                        <MantineIcon
-                            color="gray"
-                            icon={IconGripVertical}
-                            size="sm"
+                <ResizableSplitter.Pane
+                    id="thread-preview"
+                    defaultSize={60}
+                    min={25}
+                    max={70}
+                    className={styles.threadPanel}
+                >
+                    {!!selectedThreadUuid && !!projectUuid && !!agentUuid && (
+                        <ThreadPreviewSidebar
+                            projectUuid={projectUuid}
+                            agentUuid={agentUuid}
+                            threadUuid={selectedThreadUuid}
+                            isOpen={isSidebarOpen}
+                            onClose={handleCloseSidebar}
+                            evalUuid={evalUuid}
+                            runUuid={runUuid}
                         />
-                    </PanelResizeHandle>
-                    <Panel
-                        id="thread-preview"
-                        defaultSize={60}
-                        minSize={25}
-                        maxSize={70}
-                        className={styles.threadPanel}
-                    >
-                        {!!selectedThreadUuid &&
-                            !!projectUuid &&
-                            !!agentUuid && (
-                                <ThreadPreviewSidebar
-                                    projectUuid={projectUuid}
-                                    agentUuid={agentUuid}
-                                    threadUuid={selectedThreadUuid}
-                                    isOpen={isSidebarOpen}
-                                    onClose={handleCloseSidebar}
-                                    evalUuid={evalUuid}
-                                    runUuid={runUuid}
-                                />
-                            )}
-                    </Panel>
-                </>
+                    )}
+                </ResizableSplitter.Pane>
             )}
-        </PanelGroup>
+        </ResizableSplitter>
     );
 };

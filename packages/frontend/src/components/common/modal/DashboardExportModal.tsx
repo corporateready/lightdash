@@ -1,4 +1,9 @@
-import { type Dashboard } from '@lightdash/common';
+import {
+    SchedulerFormat,
+    type Dashboard,
+    type ExportContentFormat,
+    type SchedulerCsvOptions,
+} from '@lightdash/common';
 import {
     Button,
     Checkbox,
@@ -9,23 +14,31 @@ import {
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconCsv,
     IconFileExport,
+    IconFileTypePdf,
+    IconFileTypeXls,
     IconHelpCircle,
     IconLayoutDashboard,
     IconScreenshot,
 } from '@tabler/icons-react';
 import { useCallback, useState, type FC } from 'react';
-import { useLocation } from 'react-router';
+import {
+    selectDateZoomGranularity,
+    selectParameterValues,
+    useDashboardAllFilters,
+    useDashboardSelector,
+} from '../../../features/dashboard/store';
 import { PreviewAndCustomizeScreenshot } from '../../../features/preview';
+import { CsvFormattingOptions } from '../../../features/scheduler/components/CsvFormattingOptions';
+import { Limit, Values } from '../../../features/scheduler/components/types';
 import { CUSTOM_WIDTH_OPTIONS } from '../../../features/scheduler/constants';
 import {
-    useExportCsvDashboard,
-    useExportDashboard,
+    useExportDashboardContent,
+    useExportDashboardContentPreview,
 } from '../../../hooks/dashboard/useDashboard';
-import useDashboardContext from '../../../providers/Dashboard/useDashboardContext';
 import Callout from '../Callout';
 import MantineIcon from '../MantineIcon';
 import MantineModal, { type MantineModalProps } from '../MantineModal';
@@ -44,32 +57,41 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
     gridWidth,
     dashboard,
 }) => {
-    const [exportType, setExportType] = useState<'image' | 'csv'>('image');
-    const location = useLocation();
-
-    // CSV export state
-    const exportCsvDashboardMutation = useExportCsvDashboard();
-    const dashboardFilters = useDashboardContext((c) => c.allFilters);
-    const dateZoomGranularity = useDashboardContext(
-        (c) => c.dateZoomGranularity,
+    const [exportType, setExportType] = useState<ExportContentFormat>(
+        SchedulerFormat.IMAGE,
     );
+    const isDataExport =
+        exportType === SchedulerFormat.CSV ||
+        exportType === SchedulerFormat.XLSX;
+    const exportDashboardContentMutation = useExportDashboardContent();
+    const dashboardFilters = useDashboardAllFilters();
+    const dateZoomGranularity = useDashboardSelector(selectDateZoomGranularity);
+    const parameterValues = useDashboardSelector(selectParameterValues);
 
-    // Image export state
     const [previews, setPreviews] = useState<Record<string, string>>({});
     const [previewChoice, setPreviewChoice] = useState<
         (typeof CUSTOM_WIDTH_OPTIONS)[number]['value'] | undefined
     >(CUSTOM_WIDTH_OPTIONS[1].value);
-    const exportDashboardMutation = useExportDashboard();
+    const exportPreviewMutation = useExportDashboardContentPreview();
 
+    const [formatted, setFormatted] = useState<Values>(Values.FORMATTED);
+    const [limit, setLimit] = useState<Limit>(Limit.TABLE);
+    const [customLimit, setCustomLimit] = useState(1);
+    const [exportPivotedData, setExportPivotedData] = useState(true);
+    const [xlsxFileLayout, setXlsxFileLayout] =
+        useState<NonNullable<SchedulerCsvOptions['xlsxFileLayout']>>('zip');
     const isDashboardTabsAvailable =
         dashboard?.tabs !== undefined && dashboard.tabs.length > 0;
-
     const [allTabsSelected, setAllTabsSelected] = useState(true);
     const [selectedTabs, setSelectedTabs] = useState<string[]>(
         dashboard?.tabs?.map((tab) => tab.uuid) || [],
     );
 
-    // Check if the selected tabs have tiles so we can disable the export button if not
+    const exportSelectedTabs =
+        isDashboardTabsAvailable && !allTabsSelected && selectedTabs.length > 0
+            ? selectedTabs
+            : null;
+
     const hasTilesInSelectedTabs = useCallback(() => {
         if (allTabsSelected) {
             return dashboard.tiles.length > 0;
@@ -79,91 +101,96 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
         );
     }, [allTabsSelected, dashboard.tiles, selectedTabs]);
 
-    // Helper function to create consistent cache keys
+    // Filters and parameters are part of the key so a cached preview is not
+    // reused after the user changes the dashboard view.
     const getPreviewKey = useCallback(
         (width: string) => {
-            return `${width}-${selectedTabs.join('-')}`;
+            return `${width}-${selectedTabs.join('-')}-${JSON.stringify(
+                dashboardFilters,
+            )}-${JSON.stringify(parameterValues)}`;
         },
-        [selectedTabs],
+        [selectedTabs, dashboardFilters, parameterValues],
     );
 
-    // Get the current preview based on the key
     const currentPreview = previewChoice
         ? previews[getPreviewKey(previewChoice)]
         : undefined;
 
-    const handleCsvExport = useCallback(() => {
-        exportCsvDashboardMutation.mutate({
+    const getCsvOptions = useCallback(
+        (): SchedulerCsvOptions => ({
+            formatted: formatted === Values.FORMATTED,
+            limit: limit === Limit.CUSTOM ? customLimit : limit,
+            asAttachment: false,
+            exportPivotedData,
+            xlsxFileLayout:
+                exportType === SchedulerFormat.XLSX
+                    ? xlsxFileLayout
+                    : undefined,
+        }),
+        [
+            customLimit,
+            exportPivotedData,
+            exportType,
+            formatted,
+            limit,
+            xlsxFileLayout,
+        ],
+    );
+
+    const handleAsyncExport = useCallback(() => {
+        exportDashboardContentMutation.mutate({
             dashboard,
-            filters: dashboardFilters,
-            dateZoomGranularity: dateZoomGranularity,
-            selectedTabs:
-                isDashboardTabsAvailable &&
-                !allTabsSelected &&
-                selectedTabs.length > 0
-                    ? selectedTabs
-                    : null,
+            format: exportType,
+            options: isDataExport ? getCsvOptions() : {},
+            dashboardFilters,
+            dateZoomGranularity,
+            parameters: parameterValues,
+            customViewportWidth:
+                exportType === SchedulerFormat.IMAGE && previewChoice
+                    ? parseInt(previewChoice)
+                    : undefined,
+            selectedTabs: exportSelectedTabs,
         });
         onClose();
     }, [
-        exportCsvDashboardMutation,
         dashboard,
         dashboardFilters,
         dateZoomGranularity,
-        isDashboardTabsAvailable,
-        allTabsSelected,
-        selectedTabs,
+        exportDashboardContentMutation,
+        exportSelectedTabs,
+        exportType,
+        getCsvOptions,
+        isDataExport,
         onClose,
+        parameterValues,
+        previewChoice,
     ]);
 
     const handleImageExport = useCallback(() => {
         if (previewChoice && previews[getPreviewKey(previewChoice)]) {
-            window.open(previews[getPreviewKey(previewChoice)], '_blank');
+            window.open(
+                previews[getPreviewKey(previewChoice)],
+                '_blank',
+                'noopener,noreferrer',
+            );
             return;
         }
 
-        const queryParams = new URLSearchParams(location.search);
-
-        exportDashboardMutation.mutate({
-            dashboard,
-            gridWidth: undefined,
-            queryFilters: `?${queryParams.toString()}`,
-            selectedTabs:
-                isDashboardTabsAvailable &&
-                !allTabsSelected &&
-                selectedTabs.length > 0
-                    ? selectedTabs
-                    : null,
-        });
-    }, [
-        previewChoice,
-        previews,
-        getPreviewKey,
-        exportDashboardMutation,
-        location.search,
-        dashboard,
-        isDashboardTabsAvailable,
-        allTabsSelected,
-        selectedTabs,
-    ]);
+        handleAsyncExport();
+    }, [getPreviewKey, handleAsyncExport, previewChoice, previews]);
 
     const handlePreviewClick = useCallback(async () => {
-        const queryParams = new URLSearchParams(location.search);
-
-        const url = await exportDashboardMutation.mutateAsync({
+        const url = await exportPreviewMutation.mutateAsync({
             dashboard,
-            gridWidth: previewChoice ? parseInt(previewChoice) : undefined,
-            queryFilters: `?${queryParams.toString()}`,
-            isPreview: true,
-            selectedTabs:
-                isDashboardTabsAvailable &&
-                !allTabsSelected &&
-                selectedTabs.length > 0
-                    ? selectedTabs
-                    : null,
+            customViewportWidth: previewChoice
+                ? parseInt(previewChoice)
+                : undefined,
+            dashboardFilters,
+            dateZoomGranularity,
+            parameters: parameterValues,
+            selectedTabs: exportSelectedTabs,
         });
 
-        // Store the preview with the proper key
         if (previewChoice) {
             const key = getPreviewKey(previewChoice);
             setPreviews((prev) => ({
@@ -172,21 +199,36 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
             }));
         }
     }, [
-        location.search,
-        exportDashboardMutation,
         dashboard,
-        previewChoice,
-        isDashboardTabsAvailable,
-        allTabsSelected,
-        selectedTabs,
+        dashboardFilters,
+        dateZoomGranularity,
+        exportPreviewMutation,
+        exportSelectedTabs,
         getPreviewKey,
+        parameterValues,
+        previewChoice,
     ]);
 
     const renderActions = () => {
-        if (exportType === 'csv') {
+        if (exportType === SchedulerFormat.PDF) {
             return (
                 <Button
-                    onClick={handleCsvExport}
+                    loading={exportDashboardContentMutation.isLoading}
+                    onClick={handleAsyncExport}
+                    disabled={!hasTilesInSelectedTabs()}
+                    leftSection={<MantineIcon icon={IconFileTypePdf} />}
+                >
+                    Export PDF
+                </Button>
+            );
+        }
+
+        if (exportType === SchedulerFormat.CSV) {
+            return (
+                <Button
+                    loading={exportDashboardContentMutation.isLoading}
+                    onClick={handleAsyncExport}
+                    disabled={limit === Limit.CUSTOM && customLimit < 1}
                     leftSection={<MantineIcon icon={IconCsv} />}
                 >
                     Export CSV
@@ -194,9 +236,22 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
             );
         }
 
+        if (exportType === SchedulerFormat.XLSX) {
+            return (
+                <Button
+                    loading={exportDashboardContentMutation.isLoading}
+                    onClick={handleAsyncExport}
+                    disabled={limit === Limit.CUSTOM && customLimit < 1}
+                    leftSection={<MantineIcon icon={IconFileTypeXls} />}
+                >
+                    Export XLSX
+                </Button>
+            );
+        }
+
         return (
             <Button
-                loading={exportDashboardMutation.isLoading}
+                loading={exportDashboardContentMutation.isLoading}
                 onClick={handleImageExport}
                 disabled={!hasTilesInSelectedTabs()}
                 leftSection={
@@ -224,36 +279,54 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
                     <Input.Label>Export format</Input.Label>
                     <SegmentedControl
                         data={[
-                            { label: 'Image', value: 'image' },
-                            { label: '.csv', value: 'csv' },
+                            { label: 'Image', value: SchedulerFormat.IMAGE },
+                            { label: 'PDF', value: SchedulerFormat.PDF },
+                            { label: '.csv', value: SchedulerFormat.CSV },
+                            { label: '.xlsx', value: SchedulerFormat.XLSX },
                         ]}
                         w="min-content"
-                        radius="md"
                         value={exportType}
                         onChange={(value) =>
-                            setExportType(value as 'image' | 'csv')
+                            setExportType(value as ExportContentFormat)
                         }
                     />
-                    {exportType === 'csv' && (
+                    {isDataExport && (
                         <Text fs="italic" fz="sm" c="dimmed">
-                            All charts from all tabs will be exported as tables
-                            in a ZIP file.
+                            Charts from the selected tabs will be exported as
+                            tables
+                            {exportType === SchedulerFormat.XLSX &&
+                            xlsxFileLayout === 'workbook'
+                                ? ' in one workbook.'
+                                : ' in a ZIP file.'}
                         </Text>
                     )}
                 </Stack>
 
-                {exportType === 'csv' && (
-                    <>
+                {isDataExport && (
+                    <Stack gap="xs">
                         {!!dateZoomGranularity && (
                             <Callout
                                 title="Date zoom is enabled"
                                 variant="info"
                             >
-                                Your CSV export will include data for the
-                                selected date zoom granularity.
+                                Your export will include data for the selected
+                                date zoom granularity.
                             </Callout>
                         )}
-                    </>
+                        <CsvFormattingOptions
+                            format={exportType}
+                            formatted={formatted}
+                            onFormattedChange={setFormatted}
+                            limit={limit}
+                            onLimitChange={setLimit}
+                            customLimit={customLimit}
+                            onCustomLimitChange={setCustomLimit}
+                            exportPivotedData={exportPivotedData}
+                            onExportPivotedDataChange={setExportPivotedData}
+                            xlsxFileLayout={xlsxFileLayout}
+                            onXlsxFileLayoutChange={setXlsxFileLayout}
+                        />
+                    </Stack>
                 )}
 
                 {isDashboardTabsAvailable && dashboard.tabs.length > 1 && (
@@ -262,10 +335,7 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
                             <Group gap="xs">
                                 Tabs
                                 <Tooltip
-                                    withinPortal={true}
                                     maw={400}
-                                    variant="xs"
-                                    multiline
                                     label="When unchecked, choose specific tabs to include in the export."
                                 >
                                     <MantineIcon
@@ -329,11 +399,11 @@ export const DashboardExportModal: FC<DashboardExportModalProps> = ({
                     </Stack>
                 )}
 
-                {exportType === 'image' && (
+                {exportType === SchedulerFormat.IMAGE && (
                     <Stack gap="xs">
                         <PreviewAndCustomizeScreenshot
                             containerWidth={gridWidth}
-                            exportMutation={exportDashboardMutation}
+                            isLoading={exportPreviewMutation.isLoading}
                             previewChoice={previewChoice}
                             setPreviewChoice={setPreviewChoice}
                             onPreviewClick={handlePreviewClick}

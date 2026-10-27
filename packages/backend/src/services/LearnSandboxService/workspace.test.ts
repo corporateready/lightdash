@@ -1,0 +1,255 @@
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import {
+    DOWNLOADED_CONTENT_FOLDERS,
+    isDownloadedContentPath,
+    isEditablePath,
+    loadLearnBundle,
+    materialiseWorkspace,
+    renderProfiles,
+    validateYaml,
+    writeCliConfig,
+} from './workspace';
+
+describe('workspace helpers', () => {
+    it('isEditablePath allows the files lightdash download writes, one level deep', () => {
+        [
+            'lightdash/charts/revenue-by-payment-method.yml',
+            'lightdash/dashboards/jaffle-shop-overview.yml',
+            'lightdash/spaces/training.space.yml',
+        ].forEach((p) => {
+            expect(isEditablePath(p)).toBe(true);
+            expect(isDownloadedContentPath(p)).toBe(true);
+        });
+        [
+            'lightdash/.lightdash-metadata.json',
+            'lightdash/charts/nested/a.yml',
+            'lightdash/charts/../../profiles.yml',
+            'lightdash/spaces/training.yml',
+            'lightdash/other/a.yml',
+            '.config/lightdash/config.yaml',
+            'models/orders.yml',
+        ].forEach((p) => expect(isDownloadedContentPath(p)).toBe(false));
+        expect(isEditablePath('lightdash/charts/../../profiles.yml')).toBe(
+            false,
+        );
+        expect(isEditablePath('lightdash/.lightdash-metadata.json')).toBe(
+            false,
+        );
+    });
+
+    it('isEditablePath allows models yml', () => {
+        expect(isEditablePath('models/orders.yml')).toBe(true);
+        expect(isEditablePath('models/nested/a.yml')).toBe(true);
+        expect(isEditablePath('models/orders.sql')).toBe(false);
+        expect(isEditablePath('dbt_project.yml')).toBe(false);
+        expect(isEditablePath('lightdash/charts/a.sql')).toBe(false);
+        expect(isEditablePath('models/../dbt_project.yml')).toBe(false);
+        expect(isEditablePath('/models/a.yml')).toBe(false);
+    });
+    it('renderProfiles locks the database at open time and the filesystem after', () => {
+        const profile = parseYaml(renderProfiles('/data/jaffle_shop.duckdb'))
+            .jaffle_shop.outputs.jaffle;
+        // dbt-duckdb passes `config_options` to duckdb.connect() and applies
+        // `settings` with SET afterwards. DuckDB only honours access_mode
+        // and enable_external_access at open time, and only accepts
+        // disabled_filesystems once the database is running, so each has
+        // exactly one place it can live.
+        expect(profile.config_options).toEqual({
+            access_mode: 'READ_ONLY',
+            enable_external_access: false,
+        });
+        expect(profile.settings).toEqual({
+            disabled_filesystems: 'LocalFileSystem',
+            memory_limit: '256MB',
+        });
+        expect(profile.path).toBe('/data/jaffle_shop.duckdb');
+    });
+    it('validateYaml reports a parse error', () => {
+        expect(validateYaml('a: 1\n')).toBeNull();
+        expect(validateYaml('a: [1,\n')).toMatch(/./);
+    });
+    it('loads the shipped bundle', async () => {
+        const bundle = await loadLearnBundle();
+        expect(bundle.version).toBe(1);
+        expect(bundle.files.some((f) => f.path === 'dbt_project.yml')).toBe(
+            true,
+        );
+    });
+    it('materialises bundle plus overlay and writes profiles.yml', async () => {
+        const dir = await mkdtemp(path.join(tmpdir(), 'learn-ws-'));
+        try {
+            await materialiseWorkspace({
+                bundle: {
+                    version: 1,
+                    files: [
+                        {
+                            path: 'dbt_project.yml',
+                            content: 'name: jaffle_shop\n',
+                        },
+                        { path: 'models/orders.yml', content: 'version: 2\n' },
+                    ],
+                },
+                overlay: [
+                    {
+                        path: 'models/orders.yml',
+                        content: 'version: 2\nmodels: []\n',
+                    },
+                ],
+                workspaceDir: dir,
+                profiles: { databasePath: '/data/jaffle_shop.duckdb' },
+            });
+            expect(
+                await readFile(
+                    path.join(dir, 'project', 'models', 'orders.yml'),
+                    'utf8',
+                ),
+            ).toBe('version: 2\nmodels: []\n');
+            const profiles = await readFile(
+                path.join(dir, 'profiles.yml'),
+                'utf8',
+            );
+            expect(profiles).toContain('jaffle_shop:');
+            expect(profiles).toContain('path: /data/jaffle_shop.duckdb');
+            expect(profiles).toBe(renderProfiles('/data/jaffle_shop.duckdb'));
+            expect(
+                (
+                    await stat(path.join(dir, 'project', 'dbt_project.yml'))
+                ).isFile(),
+            ).toBe(true);
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+    it('materialises kept downloads where the CLI looks for them, and refuses anything else under lightdash/', async () => {
+        const dir = await mkdtemp(path.join(tmpdir(), 'learn-ws-'));
+        const bundle = { version: 1 as const, files: [] };
+        const profiles = { databasePath: '/data/jaffle_shop.duckdb' };
+        const kept = [
+            {
+                path: 'lightdash/charts/revenue-by-payment-method.yml',
+                content: 'name: Revenue by payment type\n',
+            },
+            {
+                path: 'lightdash/dashboards/jaffle-shop-overview.yml',
+                content: 'name: Overview\n',
+            },
+            {
+                path: 'lightdash/spaces/training.space.yml',
+                content: 'name: Training\n',
+            },
+        ];
+        try {
+            await materialiseWorkspace({
+                bundle,
+                overlay: kept,
+                workspaceDir: dir,
+                profiles,
+            });
+            await Promise.all(
+                kept.map(async (file) =>
+                    expect(
+                        await readFile(
+                            path.join(dir, 'project', ...file.path.split('/')),
+                            'utf8',
+                        ),
+                    ).toBe(file.content),
+                ),
+            );
+            await expect(
+                materialiseWorkspace({
+                    bundle,
+                    overlay: [
+                        {
+                            path: 'lightdash/.lightdash-metadata.json',
+                            content: '{}',
+                        },
+                    ],
+                    workspaceDir: dir,
+                    profiles,
+                }),
+            ).rejects.toThrow('non-editable overlay path');
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('accepts one file kind per download folder, and no other folder', () => {
+        expect(DOWNLOADED_CONTENT_FOLDERS).toEqual([
+            'lightdash/charts',
+            'lightdash/dashboards',
+            'lightdash/spaces',
+        ]);
+        const names = ['a.yml', 'a.space.yml'];
+        const accepted = [
+            ...DOWNLOADED_CONTENT_FOLDERS,
+            'lightdash/apps',
+            'lightdash',
+        ].flatMap((folder) =>
+            names
+                .map((name) => `${folder}/${name}`)
+                .filter(isDownloadedContentPath),
+        );
+        expect(accepted).toEqual([
+            'lightdash/charts/a.yml',
+            'lightdash/charts/a.space.yml',
+            'lightdash/dashboards/a.yml',
+            'lightdash/dashboards/a.space.yml',
+            'lightdash/spaces/a.space.yml',
+        ]);
+    });
+
+    it('writeCliConfig puts the token where the CLI reads it, readable by the owner only', async () => {
+        const dir = await mkdtemp(path.join(tmpdir(), 'learn-ws-'));
+        try {
+            const file = await writeCliConfig({
+                workspaceDir: dir,
+                apiKey: 'ldpat_abc',
+                serverUrl: 'https://learn.test',
+                projectUuid: 'copy',
+            });
+            expect(file).toBe(
+                path.join(dir, '.config', 'lightdash', 'config.yaml'),
+            );
+            const permissions = async (target: string) =>
+                ((await stat(target)).mode % 0o1000).toString(8);
+            expect(await permissions(file)).toBe('600');
+            expect(
+                await permissions(path.join(dir, '.config', 'lightdash')),
+            ).toBe('700');
+            expect(parseYaml(await readFile(file, 'utf8'))).toEqual({
+                context: {
+                    apiKey: 'ldpat_abc',
+                    serverUrl: 'https://learn.test',
+                    project: 'copy',
+                },
+            });
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+    it('throws when an overlay path is not editable', async () => {
+        const dir = await mkdtemp(path.join(tmpdir(), 'learn-ws-'));
+        try {
+            await expect(
+                materialiseWorkspace({
+                    bundle: { version: 1, files: [] },
+                    overlay: [
+                        {
+                            path: 'models/../dbt_project.yml',
+                            content: 'name: jaffle_shop\n',
+                        },
+                    ],
+                    workspaceDir: dir,
+                    profiles: { databasePath: '/data/jaffle_shop.duckdb' },
+                }),
+            ).rejects.toThrow(
+                'Refusing to materialise non-editable overlay path: models/../dbt_project.yml',
+            );
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+});

@@ -3,7 +3,8 @@ import { Select } from '@mantine/core';
 import { IconChevronDown } from '@tabler/icons-react';
 import { useState, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
-import { useSelectStyles } from '../../styles/useSelectStyles';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
+import selectStyles from '../../styles/selectStyles.module.css';
 
 type Props = {
     dimension: TimeDimensionConfig;
@@ -14,15 +15,16 @@ export const TimeDimensionIntervalPicker: FC<Props> = ({
     dimension,
     onChange,
 }) => {
-    const { classes } = useSelectStyles();
+    const getUiString = useUiStrings();
     const [optimisticInterval, setOptimisticInterval] = useState(
         dimension.interval,
     );
     return (
         <Select
+            aria-label={getUiString('metrics.granularity')}
+            allowDeselect={false}
             w={100}
             size="xs"
-            radius="md"
             color="gray"
             data={[
                 {
@@ -43,17 +45,18 @@ export const TimeDimensionIntervalPicker: FC<Props> = ({
                 },
             ]}
             value={optimisticInterval}
-            onChange={(value: TimeFrames) => {
+            onChange={(value) => {
                 if (!value) return;
-                setOptimisticInterval(value);
+                const interval = value as TimeFrames;
+                setOptimisticInterval(interval);
 
                 onChange({
-                    interval: value,
+                    interval,
                     field: dimension.field,
                     table: dimension.table,
                 });
             }}
-            withinPortal
+            comboboxProps={{ withinPortal: true }}
             rightSection={
                 <MantineIcon
                     color="ldGray.7"
@@ -62,9 +65,10 @@ export const TimeDimensionIntervalPicker: FC<Props> = ({
                 />
             }
             classNames={{
-                input: classes.input,
-                item: classes.item,
-                rightSection: classes.rightSection,
+                wrapper: selectStyles.wrapper,
+                input: selectStyles.input,
+                option: selectStyles.option,
+                section: selectStyles.rightSection,
             }}
         />
     );

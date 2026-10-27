@@ -7,23 +7,28 @@ import {
     ParseError,
     SentryConfig,
     WarehouseTypes,
+    WeekDay,
 } from '@lightdash/common';
 import { VERSION } from '../version';
 import {
     getFloatArrayFromEnvironmentVariable,
     getFloatFromEnvironmentVariable,
+    getGroupProjectAccessSetupConfig,
     getIntegerFromEnvironmentVariable,
     getMaybeBase64EncodedFromEnvironmentVariable,
     getMultiProjectSetupConfig,
     getObjectFromEnvironmentVariable,
     getStringRecordFromEnvironmentVariable,
+    getUpdateSetupConfig,
+    getUserAttributesSetupConfig,
     parseConfig,
     parseOrganizationMemberRoleArray,
+    parseUsageEventsS3Config,
 } from './parseConfig';
 
-jest.mock('fs/promises', () => ({
-    readFile: jest.fn(),
-    writeFile: jest.fn(),
+vi.mock('fs/promises', () => ({
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
 }));
 
 beforeEach(() => {
@@ -35,9 +40,1006 @@ beforeEach(() => {
     };
 });
 
+describe('Python E2B template configuration', () => {
+    it('defaults to the python template at the running version', () => {
+        expect(parseConfig().appRuntime).toMatchObject({
+            e2bPythonTemplateName: 'lightdash-python-runner',
+            e2bPythonTemplateTag: VERSION,
+        });
+    });
+
+    it.each<[NodeJS.ProcessEnv, string, string]>([
+        [
+            { E2B_PYTHON_TEMPLATE_TAG: 'pinned' },
+            'lightdash-python-runner',
+            'pinned',
+        ],
+        [{ E2B_PYTHON_TEMPLATE_TAG: '' }, 'lightdash-python-runner', ''],
+        [{ E2B_PYTHON_TEMPLATE_NAME: 'custom' }, 'custom', VERSION],
+        [{ E2B_PYTHON_TEMPLATE_NAME: '' }, 'lightdash-python-runner', VERSION],
+    ])('uses configured settings: %o', (env, name, tag) => {
+        Object.assign(process.env, env);
+        expect(parseConfig().appRuntime).toMatchObject({
+            e2bPythonTemplateName: name,
+            e2bPythonTemplateTag: tag,
+        });
+    });
+});
+
+describe('agent result identity check configuration', () => {
+    it.each([
+        [undefined, true],
+        ['false', false],
+        ['true', true],
+        ['', true],
+        ['FALSE', true],
+        ['0', true],
+    ])('parses %s as %s', (value, expected) => {
+        if (value !== undefined)
+            process.env.AGENT_RESULT_IDENTITY_CHECK_ENABLED = value;
+        expect(parseConfig().ai.agentResultIdentityCheckEnabled).toBe(expected);
+    });
+});
+
+describe('Snowflake AI OAuth configuration', () => {
+    it('ignores legacy OAuth environment settings', () => {
+        process.env.SNOWFLAKE_AI_OAUTH_ACCOUNT = 'legacy-account';
+        process.env.SNOWFLAKE_AI_OAUTH_CLIENT_ID = 'ai-client';
+        process.env.SNOWFLAKE_AI_OAUTH_CLIENT_SECRET = 'ai-secret';
+        process.env.SNOWFLAKE_AI_OAUTH_AUTHORIZATION_ENDPOINT =
+            'https://snowflake.example/authorize';
+        process.env.SNOWFLAKE_AI_OAUTH_TOKEN_ENDPOINT =
+            'https://snowflake.example/token';
+        expect(parseConfig().auth.snowflakeAi).toEqual({
+            loginPath: '/login/snowflake-ai',
+            callbackPath: '/oauth/redirect/snowflake-ai',
+            testAccountUrlOrigin: null,
+        });
+    });
+    it.each([undefined, ''])(
+        'disables the test origin when it is %s',
+        (value) => {
+            if (value !== undefined)
+                process.env.SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN = value;
+            const warning = vi
+                .spyOn(console, 'warn')
+                .mockImplementation(() => {});
+            try {
+                expect(
+                    parseConfig().auth.snowflakeAi.testAccountUrlOrigin,
+                ).toBeNull();
+                expect(warning).not.toHaveBeenCalledWith(
+                    expect.stringContaining(
+                        'SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN',
+                    ),
+                );
+            } finally {
+                warning.mockRestore();
+            }
+        },
+    );
+    it.each(['http://snowflake-ai-stub:3900', 'https://localhost:3900'])(
+        'accepts the exact origin %s and warns once',
+        (value) => {
+            process.env.SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN = value;
+            const warning = vi
+                .spyOn(console, 'warn')
+                .mockImplementation(() => {});
+            try {
+                expect(
+                    parseConfig().auth.snowflakeAi.testAccountUrlOrigin,
+                ).toBe(value);
+                expect(
+                    warning.mock.calls.filter(([message]) =>
+                        String(message).includes(
+                            'SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN',
+                        ),
+                    ),
+                ).toEqual([[expect.stringContaining('for tests only')]]);
+            } finally {
+                warning.mockRestore();
+            }
+        },
+    );
+    it.each([
+        'not-a-url',
+        'null',
+        ' ',
+        'http://snowflake-ai-stub:3900/',
+        'http://snowflake-ai-stub:3900/path',
+        'http://snowflake-ai-stub:3900?query=value',
+        'http://snowflake-ai-stub:3900#fragment',
+        'http://user:secret@snowflake-ai-stub:3900',
+        'http://*.example:3900',
+        'http://SNOWFLAKE-AI-STUB:3900',
+        'http://snowflake-ai-stub:80',
+        ' http://snowflake-ai-stub:3900',
+        'http://snowflake-ai-stub:3900 ',
+        'file://snowflake-ai-stub',
+    ])('rejects an invalid test origin %s', (value) => {
+        process.env.SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN = value;
+        expect(() => parseConfig()).toThrow(ParseError);
+        expect(() => parseConfig()).toThrow(
+            'SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN',
+        );
+    });
+});
+
+describe('underlying data dimension limit', () => {
+    it.each([
+        [undefined, 50],
+        ['100', 100],
+        ['', 50],
+    ])('parses %s as %s dimensions', (value, expected) => {
+        if (value !== undefined) {
+            process.env.LIGHTDASH_UNDERLYING_DATA_MAX_DIMENSIONS = value;
+        }
+        expect(parseConfig().query.underlyingDataMaxDimensions).toBe(expected);
+    });
+    it.each(['0', '-1', 'invalid', '9007199254740992'])(
+        'rejects an invalid dimension limit: %s',
+        (value) => {
+            process.env.LIGHTDASH_UNDERLYING_DATA_MAX_DIMENSIONS = value;
+            expect(() => parseConfig()).toThrow(ParseError);
+        },
+    );
+});
+
+describe('AI decision credentials', () => {
+    it('disables decisions when no key is configured', () => {
+        expect(parseConfig().ai.decisions.apiKey).toBeNull();
+    });
+
+    it.each(['', ' ', '\n\t'])(
+        'treats an empty or whitespace-only key as unconfigured: %j',
+        (value) => {
+            process.env.JEV_API_KEY = value;
+            expect(parseConfig().ai.decisions.apiKey).toBeNull();
+        },
+    );
+
+    it('trims surrounding whitespace without changing the key', () => {
+        process.env.JEV_API_KEY = ' \tdecision-test-key\n';
+        expect(parseConfig().ai.decisions.apiKey).toBe('decision-test-key');
+    });
+});
+
+describe('external connection private hosts', () => {
+    const variable =
+        'APP_RUNTIME_EXTERNAL_CONNECTION_ALLOWED_PRIVATE_HOST_CIDRS';
+
+    it('normalizes hosts, combines ranges, and handles prototype names', () => {
+        process.env[variable] =
+            ' API.Internal.@10.20.0.0/16,api.internal@fd12:3456::/48,api.internal@10.20.0.0/16,constructor@192.168.1.0/24 ';
+        expect(
+            parseConfig().appRuntime.externalConnectionAllowedPrivateHostCidrs,
+        ).toEqual({
+            'api.internal': ['10.20.0.0/16', 'fd12:3456::/48'],
+            constructor: ['192.168.1.0/24'],
+        });
+    });
+
+    it.each(['api.internal', 'api.internal@10.0.0.0/33'])(
+        'rejects malformed configuration: %s',
+        (entry) => {
+            process.env[variable] = entry;
+            expect(() => parseConfig()).toThrow(ParseError);
+        },
+    );
+});
+
+describe('chart registry host access flags', () => {
+    it('defaults to strict: no private hosts, no insecure transport', () => {
+        const { chartRegistry } = parseConfig().appRuntime;
+        expect(chartRegistry.allowPrivateHosts).toBe(false);
+        expect(chartRegistry.allowInsecure).toBe(false);
+    });
+
+    it('LIGHTDASH_CHART_REGISTRY_ALLOW_PRIVATE_HOSTS=true enables private hosts without enabling insecure transport', () => {
+        process.env.LIGHTDASH_CHART_REGISTRY_ALLOW_PRIVATE_HOSTS = 'true';
+        const { chartRegistry } = parseConfig().appRuntime;
+        expect(chartRegistry.allowPrivateHosts).toBe(true);
+        expect(chartRegistry.allowInsecure).toBe(false);
+    });
+
+    it('ignores any value other than "true"', () => {
+        process.env.LIGHTDASH_CHART_REGISTRY_ALLOW_PRIVATE_HOSTS = 'yes';
+        expect(parseConfig().appRuntime.chartRegistry.allowPrivateHosts).toBe(
+            false,
+        );
+    });
+});
+
+describe('explore summary projection threshold', () => {
+    test('defaults to 2048 stored bytes per explore', () => {
+        expect(
+            parseConfig().query
+                .exploreSummaryProjectionMinStoredBytesPerExplore,
+        ).toBe(2048);
+    });
+
+    test('parses an explicit stored bytes threshold', () => {
+        process.env.LIGHTDASH_EXPLORE_SUMMARY_PROJECTION_MIN_STORED_BYTES_PER_EXPLORE =
+            '4096';
+
+        expect(
+            parseConfig().query
+                .exploreSummaryProjectionMinStoredBytesPerExplore,
+        ).toBe(4096);
+    });
+
+    test('preserves zero as the always-project value', () => {
+        process.env.LIGHTDASH_EXPLORE_SUMMARY_PROJECTION_MIN_STORED_BYTES_PER_EXPLORE =
+            '0';
+
+        expect(
+            parseConfig().query
+                .exploreSummaryProjectionMinStoredBytesPerExplore,
+        ).toBe(0);
+    });
+
+    test.each([
+        '-1',
+        '0.5',
+        '2048bytes',
+        '2e3',
+        '9007199254740992',
+        'Infinity',
+    ])('rejects an invalid threshold: %s', (value) => {
+        process.env.LIGHTDASH_EXPLORE_SUMMARY_PROJECTION_MIN_STORED_BYTES_PER_EXPLORE =
+            value;
+
+        expect(() => parseConfig()).toThrow(ParseError);
+    });
+});
+
+describe('managed agent runtime variable', () => {
+    afterEach(() => {
+        delete process.env.MANAGED_AGENT_RUNTIME;
+        delete process.env.MANAGED_AGENT_ANTHROPIC_API_KEY;
+        delete process.env.MANAGED_AGENT_SKILL_IDS;
+    });
+
+    it.each(['MANAGED_AGENT_ANTHROPIC_API_KEY', 'MANAGED_AGENT_SKILL_IDS'])(
+        'warns that the retired %s is no longer used',
+        (name) => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            process.env[name] = 'retired-value';
+            try {
+                parseConfig();
+                expect(warn).toHaveBeenCalledWith(
+                    expect.stringContaining(
+                        `${name} is set but no longer used`,
+                    ),
+                );
+            } finally {
+                warn.mockRestore();
+            }
+        },
+    );
+
+    it.each(['anthropic-managed', 'ai-sdk'])(
+        'warns that MANAGED_AGENT_RUNTIME=%s is ignored',
+        (value) => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            process.env.MANAGED_AGENT_RUNTIME = value;
+            try {
+                parseConfig();
+                expect(warn).toHaveBeenCalledWith(
+                    expect.stringContaining(
+                        'MANAGED_AGENT_RUNTIME is set but no longer selects a runtime',
+                    ),
+                );
+            } finally {
+                warn.mockRestore();
+            }
+        },
+    );
+
+    it('stays quiet when the variable is unset', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            parseConfig();
+            expect(warn).not.toHaveBeenCalledWith(
+                expect.stringContaining('MANAGED_AGENT_'),
+            );
+        } finally {
+            warn.mockRestore();
+        }
+    });
+});
+
+describe('query history retention', () => {
+    it('warns when cleanup can expire charts before their Deep Research reports', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        process.env.QUERY_HISTORY_RETENTION_DAYS = '29';
+
+        try {
+            expect(
+                parseConfig().scheduler.queryHistory.cleanup.retentionDays,
+            ).toBe(29);
+            expect(warn).toHaveBeenCalledWith(
+                'WARNING: QUERY_HISTORY_RETENTION_DAYS is below the 30-day Deep Research report retention. Report charts may become unavailable before their reports expire.',
+            );
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
+    it.each([undefined, '30', '32', '60'])(
+        'does not warn for a sufficient retention window: %s',
+        (retentionDays) => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            if (retentionDays !== undefined) {
+                process.env.QUERY_HISTORY_RETENTION_DAYS = retentionDays;
+            }
+
+            try {
+                expect(
+                    parseConfig().scheduler.queryHistory.cleanup.retentionDays,
+                ).toBe(
+                    retentionDays === undefined ? 32 : Number(retentionDays),
+                );
+                expect(warn).not.toHaveBeenCalledWith(
+                    expect.stringContaining('QUERY_HISTORY_RETENTION_DAYS'),
+                );
+            } finally {
+                warn.mockRestore();
+            }
+        },
+    );
+
+    it('does not warn when query history cleanup is disabled', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        process.env.QUERY_HISTORY_RETENTION_DAYS = '1';
+        process.env.QUERY_HISTORY_CLEANUP_ENABLED = 'false';
+
+        try {
+            expect(parseConfig().scheduler.queryHistory.cleanup).toMatchObject({
+                enabled: false,
+                retentionDays: 1,
+            });
+            expect(warn).not.toHaveBeenCalledWith(
+                expect.stringContaining('QUERY_HISTORY_RETENTION_DAYS'),
+            );
+        } finally {
+            warn.mockRestore();
+        }
+    });
+});
+
+describe('scheduler daily job generation concurrency', () => {
+    it('defaults to 10', () => {
+        expect(parseConfig().scheduler.dailyJobGenerationConcurrency).toBe(10);
+    });
+
+    it('reads the configured concurrency', () => {
+        process.env.SCHEDULER_DAILY_JOB_GENERATION_CONCURRENCY = '7';
+
+        expect(parseConfig().scheduler.dailyJobGenerationConcurrency).toBe(7);
+    });
+
+    it('rejects non-positive concurrency', () => {
+        process.env.SCHEDULER_DAILY_JOB_GENERATION_CONCURRENCY = '0';
+
+        expect(() => parseConfig()).toThrow(ParseError);
+    });
+});
+
+describe('usage events storage endpoint', () => {
+    it('inherits the base endpoint when no override is configured', () => {
+        expect(parseUsageEventsS3Config()?.endpoint).toBe('mock_endpoint');
+    });
+
+    it('supports a separate endpoint without changing base storage', () => {
+        process.env.USAGE_EVENTS_S3_ENDPOINT = 'https://storage.googleapis.com';
+        expect(parseUsageEventsS3Config()?.endpoint).toBe(
+            'https://storage.googleapis.com',
+        );
+        expect(process.env.S3_ENDPOINT).toBe('mock_endpoint');
+    });
+});
+
+describe('mobile login config', () => {
+    it('is available by default', () => {
+        expect(parseConfig().auth.mobileLogin).toEqual({ enabled: true });
+    });
+
+    it('supports the rollback switch', () => {
+        process.env.AUTH_MOBILE_LOGIN_ENABLED = 'false';
+
+        expect(parseConfig().auth.mobileLogin).toEqual({ enabled: false });
+    });
+});
+
+describe('managed sign-in config', () => {
+    it('has no registrations by default', () => {
+        expect(parseConfig().auth.microsoftManagedSignIn).toEqual({
+            iosClientId: undefined,
+            androidClientId: undefined,
+        });
+    });
+
+    it('reads a registration per platform', () => {
+        process.env.AUTH_MICROSOFT_MANAGED_SIGNIN_IOS_CLIENT_ID = 'ios-id';
+        process.env.AUTH_MICROSOFT_MANAGED_SIGNIN_ANDROID_CLIENT_ID =
+            'android-id';
+
+        expect(parseConfig().auth.microsoftManagedSignIn).toEqual({
+            iosClientId: 'ios-id',
+            androidClientId: 'android-id',
+        });
+    });
+
+    it('reads one platform on its own', () => {
+        process.env.AUTH_MICROSOFT_MANAGED_SIGNIN_IOS_CLIENT_ID = 'ios-id';
+
+        expect(parseConfig().auth.microsoftManagedSignIn).toEqual({
+            iosClientId: 'ios-id',
+            androidClientId: undefined,
+        });
+    });
+});
+
+describe('mobile push notification config', () => {
+    it('is disabled when APNs credentials are absent', () => {
+        expect(parseConfig().mobilePushNotifications).toEqual({
+            enabled: false,
+            bundleId: 'com.lightdash.mobile',
+            teamId: undefined,
+            sandbox: undefined,
+            production: undefined,
+        });
+    });
+
+    it('enables a complete sandbox credential on Lightdash Cloud', () => {
+        process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_TEAM_ID = 'TEAMID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_SANDBOX_KEY_ID = 'KEYID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_SANDBOX_PRIVATE_KEY =
+            'private-key';
+
+        expect(parseConfig().mobilePushNotifications).toEqual({
+            enabled: true,
+            bundleId: 'com.lightdash.mobile',
+            teamId: 'TEAMID',
+            sandbox: { keyId: 'KEYID', privateKey: 'private-key' },
+            production: undefined,
+        });
+    });
+
+    it('enables a complete production credential on Lightdash Cloud', () => {
+        process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_TEAM_ID = 'TEAMID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_KEY_ID = 'KEYID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_PRIVATE_KEY =
+            'private-key';
+
+        expect(parseConfig().mobilePushNotifications).toEqual({
+            enabled: true,
+            bundleId: 'com.lightdash.mobile',
+            teamId: 'TEAMID',
+            sandbox: undefined,
+            production: { keyId: 'KEYID', privateKey: 'private-key' },
+        });
+    });
+
+    it('stays disabled outside Lightdash Cloud', () => {
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_TEAM_ID = 'TEAMID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_KEY_ID = 'KEYID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_PRIVATE_KEY =
+            'private-key';
+
+        expect(parseConfig().mobilePushNotifications.enabled).toBe(false);
+    });
+
+    it.each([
+        {
+            key: 'MOBILE_PUSH_NOTIFICATIONS_APNS_SANDBOX_KEY_ID' as const,
+            value: 'KEYID',
+        },
+        {
+            key: 'MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_PRIVATE_KEY' as const,
+            value: 'private-key',
+        },
+    ])('is disabled when only $key is set', ({ key, value }) => {
+        process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_TEAM_ID = 'TEAMID';
+        process.env[key] = value;
+
+        expect(parseConfig().mobilePushNotifications).toEqual({
+            enabled: false,
+            bundleId: 'com.lightdash.mobile',
+            teamId: 'TEAMID',
+            sandbox: undefined,
+            production: undefined,
+        });
+    });
+
+    it('is disabled when an environment credential has no team ID', () => {
+        process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_KEY_ID = 'KEYID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_PRODUCTION_PRIVATE_KEY =
+            'private-key';
+
+        expect(parseConfig().mobilePushNotifications).toEqual({
+            enabled: false,
+            bundleId: 'com.lightdash.mobile',
+            teamId: undefined,
+            sandbox: undefined,
+            production: { keyId: 'KEYID', privateKey: 'private-key' },
+        });
+    });
+
+    it('allows the global config singleton to load with partial credentials', async () => {
+        process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_TEAM_ID = 'TEAMID';
+        process.env.MOBILE_PUSH_NOTIFICATIONS_APNS_SANDBOX_KEY_ID = 'KEYID';
+        vi.resetModules();
+
+        const { lightdashConfig } = await import('./lightdashConfig');
+
+        expect(lightdashConfig.mobilePushNotifications.enabled).toBe(false);
+    });
+
+    describe('FCM credential', () => {
+        afterEach(() => {
+            vi.restoreAllMocks();
+        });
+
+        it('is absent when all FCM variables are blank', () => {
+            process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PROJECT_ID = '';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_CLIENT_EMAIL = '';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PRIVATE_KEY = '';
+
+            expect(parseConfig().mobilePushNotifications).toEqual({
+                enabled: false,
+                bundleId: 'com.lightdash.mobile',
+                teamId: undefined,
+                sandbox: undefined,
+                production: undefined,
+                fcm: undefined,
+            });
+        });
+
+        it('is absent when all FCM variables are whitespace only', () => {
+            process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PROJECT_ID = '   ';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_CLIENT_EMAIL = '\t';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PRIVATE_KEY = '  \n ';
+
+            expect(parseConfig().mobilePushNotifications.fcm).toBeUndefined();
+        });
+
+        it('is present with trimmed values when all FCM variables are set', () => {
+            process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PROJECT_ID =
+                '  project-id  ';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_CLIENT_EMAIL =
+                ' client@example.com\n';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PRIVATE_KEY =
+                '\tprivate-key';
+
+            expect(parseConfig().mobilePushNotifications).toEqual({
+                enabled: true,
+                bundleId: 'com.lightdash.mobile',
+                teamId: undefined,
+                sandbox: undefined,
+                production: undefined,
+                fcm: {
+                    projectId: 'project-id',
+                    clientEmail: 'client@example.com',
+                    privateKey: 'private-key',
+                },
+            });
+        });
+
+        it('warns once and stays absent when only some FCM variables are set', () => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_PROJECT_ID = 'project-id';
+            process.env.MOBILE_PUSH_NOTIFICATIONS_FCM_CLIENT_EMAIL = '   ';
+
+            const config = parseConfig();
+
+            expect(config.mobilePushNotifications.fcm).toBeUndefined();
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(warn).toHaveBeenCalledWith(
+                'Mobile push FCM credential is missing: MOBILE_PUSH_NOTIFICATIONS_FCM_CLIENT_EMAIL, MOBILE_PUSH_NOTIFICATIONS_FCM_PRIVATE_KEY',
+            );
+        });
+
+        it('does not warn when all FCM variables are absent', () => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+
+            parseConfig();
+
+            expect(warn).not.toHaveBeenCalled();
+        });
+    });
+});
+
+describe('license config', () => {
+    it('supports an offline license file with a license key', () => {
+        process.env.LIGHTDASH_LICENSE_KEY = 'license-key';
+        process.env.LIGHTDASH_LICENSE_CERTIFICATE = 'license-certificate';
+
+        expect(parseConfig().license).toEqual({
+            licenseKey: 'license-key',
+            licenseCertificate: 'license-certificate',
+        });
+    });
+
+    it('requires a license key with an offline license file', () => {
+        process.env.LIGHTDASH_LICENSE_CERTIFICATE = 'license-certificate';
+
+        expect(() => parseConfig()).toThrow(
+            'LIGHTDASH_LICENSE_KEY is required when LIGHTDASH_LICENSE_CERTIFICATE is set',
+        );
+    });
+});
+
+describe('AI prompt input request classifier config', () => {
+    it('is disabled by default', () => {
+        expect(parseConfig().ai.promptInputRequestClassifier.enabled).toBe(
+            false,
+        );
+    });
+
+    it('is enabled explicitly', () => {
+        process.env.AI_AGENT_PROMPT_INPUT_REQUEST_CLASSIFIER_ENABLED = 'true';
+
+        expect(parseConfig().ai.promptInputRequestClassifier.enabled).toBe(
+            true,
+        );
+    });
+});
+
+describe('Query phase metrics config', () => {
+    it('defaults to an empty project allowlist', () => {
+        expect(parseConfig().queryPhaseMetrics).toEqual({ projectUuids: [] });
+    });
+
+    it('parses a trimmed project allowlist and drops empty entries', () => {
+        process.env.QUERY_PHASE_METRICS_PROJECT_UUIDS =
+            ' project-a, ,project-b, ';
+
+        expect(parseConfig().queryPhaseMetrics).toEqual({
+            projectUuids: ['project-a', 'project-b'],
+        });
+    });
+});
+
+describe('database probe config', () => {
+    it('uses the readiness TTL default and leaves the Knex timeout unset', () => {
+        expect(parseConfig().database).toMatchObject({
+            acquireConnectionTimeout: undefined,
+            readinessProbeTtlMs: 10_000,
+        });
+    });
+
+    it('parses readiness and connection acquisition overrides', () => {
+        process.env.PGACQUIRECONNECTIONTIMEOUT = '2500';
+        process.env.READINESS_PROBE_TTL_MS = '5000';
+
+        expect(parseConfig().database).toMatchObject({
+            acquireConnectionTimeout: 2500,
+            readinessProbeTtlMs: 5000,
+        });
+    });
+});
+
+describe('HTTP server config', () => {
+    it('defaults the keep-alive timeout to 620 seconds', () => {
+        expect(parseConfig().httpServer.keepAliveTimeoutMs).toBe(620_000);
+    });
+
+    it('parses the keep-alive timeout override', () => {
+        process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS = '300000';
+
+        expect(parseConfig().httpServer.keepAliveTimeoutMs).toBe(300_000);
+    });
+});
+
+describe('mobile minimum supported versions', () => {
+    it('defaults both platforms to null', () => {
+        expect(parseConfig().mobile).toEqual({
+            minimumSupportedVersion: {
+                android: null,
+                ios: null,
+            },
+        });
+    });
+
+    it.each([
+        {
+            environmentVariable: 'LIGHTDASH_MOBILE_MINIMUM_ANDROID_VERSION',
+            platform: 'android' as const,
+            otherPlatform: 'ios' as const,
+        },
+        {
+            environmentVariable: 'LIGHTDASH_MOBILE_MINIMUM_IOS_VERSION',
+            platform: 'ios' as const,
+            otherPlatform: 'android' as const,
+        },
+    ])(
+        'configures $platform independently',
+        ({ environmentVariable, platform, otherPlatform }) => {
+            process.env[environmentVariable] = '2.3.4';
+
+            expect(parseConfig().mobile.minimumSupportedVersion).toMatchObject({
+                [platform]: '2.3.4',
+                [otherPlatform]: null,
+            });
+        },
+    );
+
+    it('keeps 1.10 as a string', () => {
+        process.env.LIGHTDASH_MOBILE_MINIMUM_ANDROID_VERSION = '1.10';
+
+        expect(parseConfig().mobile.minimumSupportedVersion.android).toBe(
+            '1.10',
+        );
+    });
+
+    it.each([
+        '',
+        ' ',
+        '-1',
+        '+1',
+        '.1',
+        '1.',
+        '1..2',
+        '1. 2',
+        '1e2',
+        '1.2-beta',
+    ])('rejects invalid version %j', (value) => {
+        process.env.LIGHTDASH_MOBILE_MINIMUM_ANDROID_VERSION = value;
+
+        expect(() => parseConfig()).toThrowError(ParseError);
+        expect(() => parseConfig()).toThrow(
+            'LIGHTDASH_MOBILE_MINIMUM_ANDROID_VERSION',
+        );
+    });
+});
+
+describe('scoped SSH tunnel release', () => {
+    it.each([
+        [undefined, true],
+        ['true', true],
+        ['false', false],
+    ])('parses %s as %s', (value, expected) => {
+        if (value !== undefined) {
+            process.env.SSH_TUNNEL_SCOPED_RELEASE_ENABLED = value;
+        }
+        expect(parseConfig().warehouseClient.releaseSshTunnelOnScopeExit).toBe(
+            expected,
+        );
+    });
+});
+
+describe('compile credential resolution', () => {
+    const environment = { ...process.env };
+    afterEach(() => {
+        process.env = { ...environment };
+    });
+
+    it.each([
+        [undefined, true],
+        ['true', true],
+        ['false', false],
+        ['FALSE', true],
+        ['0', true],
+        ['', true],
+    ])('parses %s as %s', (value, expected) => {
+        if (value !== undefined) {
+            process.env.COMPILE_CREDENTIAL_RESOLUTION_ENABLED = value;
+        }
+        expect(parseConfig().warehouseClient.resolveCompileCredentials).toBe(
+            expected,
+        );
+        expect(parseConfig().warehouseClient.releaseSshTunnelOnScopeExit).toBe(
+            true,
+        );
+    });
+
+    it('stays enabled when scoped SSH release is disabled', () => {
+        process.env.SSH_TUNNEL_SCOPED_RELEASE_ENABLED = 'false';
+        expect(parseConfig().warehouseClient.resolveCompileCredentials).toBe(
+            true,
+        );
+    });
+});
+
+describe('dbt Cloud preview credential resolution', () => {
+    const environment = { ...process.env };
+    afterEach(() => {
+        process.env = { ...environment };
+    });
+
+    it.each([
+        [undefined, true],
+        ['true', true],
+        ['false', false],
+        ['FALSE', true],
+        ['0', true],
+        ['', true],
+    ])('parses %s as %s', (value, expected) => {
+        if (value !== undefined) {
+            process.env.DBT_CLOUD_PREVIEW_CREDENTIAL_RESOLUTION_ENABLED = value;
+        }
+        expect(
+            parseConfig().warehouseClient.resolveDbtCloudPreviewCredentials,
+        ).toBe(expected);
+        expect(parseConfig().warehouseClient.resolveCompileCredentials).toBe(
+            true,
+        );
+        expect(parseConfig().warehouseClient.releaseSshTunnelOnScopeExit).toBe(
+            true,
+        );
+    });
+
+    it('stays enabled when compile resolution and scoped SSH release are disabled', () => {
+        process.env.COMPILE_CREDENTIAL_RESOLUTION_ENABLED = 'false';
+        process.env.SSH_TUNNEL_SCOPED_RELEASE_ENABLED = 'false';
+        expect(
+            parseConfig().warehouseClient.resolveDbtCloudPreviewCredentials,
+        ).toBe(true);
+    });
+});
+
+describe('timezone preview credential resolution', () => {
+    const environment = { ...process.env };
+    beforeEach(() => {
+        delete process.env.TIMEZONE_PREVIEW_CREDENTIAL_RESOLUTION_ENABLED;
+    });
+    afterEach(() => {
+        process.env = { ...environment };
+    });
+
+    it.each([
+        [undefined, true],
+        ['true', true],
+        ['false', false],
+        ['FALSE', true],
+        ['0', true],
+        ['', true],
+    ])('parses %s as %s', (value, expected) => {
+        if (value !== undefined) {
+            process.env.TIMEZONE_PREVIEW_CREDENTIAL_RESOLUTION_ENABLED = value;
+        }
+        expect(
+            parseConfig().warehouseClient.resolveTimezonePreviewCredentials,
+        ).toBe(expected);
+        expect(parseConfig().warehouseClient.resolveCompileCredentials).toBe(
+            true,
+        );
+        expect(
+            parseConfig().warehouseClient.resolveDbtCloudPreviewCredentials,
+        ).toBe(true);
+        expect(parseConfig().warehouseClient.releaseSshTunnelOnScopeExit).toBe(
+            true,
+        );
+    });
+
+    it('stays enabled when other credential switches and scoped SSH release are disabled', () => {
+        process.env.COMPILE_CREDENTIAL_RESOLUTION_ENABLED = 'false';
+        process.env.DBT_CLOUD_PREVIEW_CREDENTIAL_RESOLUTION_ENABLED = 'false';
+        process.env.SSH_TUNNEL_SCOPED_RELEASE_ENABLED = 'false';
+        expect(
+            parseConfig().warehouseClient.resolveTimezonePreviewCredentials,
+        ).toBe(true);
+    });
+});
+
+describe('test-and-compile credential resolution', () => {
+    const environment = { ...process.env };
+    beforeEach(() => {
+        delete process.env.TEST_AND_COMPILE_CREDENTIAL_RESOLUTION_ENABLED;
+    });
+    afterEach(() => {
+        process.env = { ...environment };
+    });
+    it.each([
+        [undefined, true],
+        ['true', true],
+        ['false', false],
+        ['FALSE', true],
+        ['0', true],
+        ['', true],
+    ])('parses %s as %s', (value, expected) => {
+        if (value !== undefined)
+            process.env.TEST_AND_COMPILE_CREDENTIAL_RESOLUTION_ENABLED = value;
+        const config = parseConfig().warehouseClient;
+        expect(config.resolveTestAndCompileCredentials).toBe(expected);
+        expect(config.resolveCompileCredentials).toBe(true);
+        expect(config.resolveDbtCloudPreviewCredentials).toBe(true);
+        expect(config.resolveTimezonePreviewCredentials).toBe(true);
+        expect(config.releaseSshTunnelOnScopeExit).toBe(true);
+    });
+    it('stays enabled when other credential switches and scoped SSH release are disabled', () => {
+        process.env.COMPILE_CREDENTIAL_RESOLUTION_ENABLED = 'false';
+        process.env.DBT_CLOUD_PREVIEW_CREDENTIAL_RESOLUTION_ENABLED = 'false';
+        process.env.TIMEZONE_PREVIEW_CREDENTIAL_RESOLUTION_ENABLED = 'false';
+        process.env.SSH_TUNNEL_SCOPED_RELEASE_ENABLED = 'false';
+        expect(
+            parseConfig().warehouseClient.resolveTestAndCompileCredentials,
+        ).toBe(true);
+    });
+});
+
+describe('MotherDuck instance cache config', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('defaults to disabled with bounded cache defaults', () => {
+        expect(parseConfig().motherduckInstanceCache).toEqual({
+            enabled: false,
+            projectUuids: [],
+            idleTtlMs: 600000,
+            maxAgeMs: 3600000,
+            maxEntries: 8,
+            maxConsecutiveFailures: 3,
+        });
+    });
+
+    it('parses enablement, project allowlist, and resource bounds', () => {
+        process.env.MOTHERDUCK_INSTANCE_CACHE_ENABLED = 'true';
+        process.env.MOTHERDUCK_INSTANCE_CACHE_PROJECT_UUIDS =
+            'project-a, project-b';
+        process.env.MOTHERDUCK_INSTANCE_CACHE_IDLE_TTL_MS = '1000';
+        process.env.MOTHERDUCK_INSTANCE_CACHE_MAX_AGE_MS = '2000';
+        process.env.MOTHERDUCK_INSTANCE_CACHE_MAX_ENTRIES = '3';
+        process.env.MOTHERDUCK_INSTANCE_CACHE_MAX_CONSECUTIVE_FAILURES = '4';
+
+        expect(parseConfig().motherduckInstanceCache).toEqual({
+            enabled: true,
+            projectUuids: ['project-a', 'project-b'],
+            idleTtlMs: 1000,
+            maxAgeMs: 2000,
+            maxEntries: 3,
+            maxConsecutiveFailures: 4,
+        });
+    });
+
+    it.each([
+        {
+            deployment: 'Lightdash Cloud',
+            lightdashCloudInstance: 'cloud-instance',
+            warning:
+                'WARNING: MotherDuck instance cache is enabled with an empty project allowlist on a Lightdash Cloud deployment. No projects will use the cache.',
+        },
+        {
+            deployment: 'self-hosted',
+            lightdashCloudInstance: undefined,
+            warning:
+                'WARNING: MotherDuck instance cache is enabled with an empty project allowlist on a self-hosted deployment. All projects will use the cache.',
+        },
+    ])(
+        'warns how an empty allowlist resolves on $deployment',
+        ({ lightdashCloudInstance, warning }) => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            process.env.MOTHERDUCK_INSTANCE_CACHE_ENABLED = 'true';
+            if (lightdashCloudInstance === undefined) {
+                delete process.env.LIGHTDASH_CLOUD_INSTANCE;
+            } else {
+                process.env.LIGHTDASH_CLOUD_INSTANCE = lightdashCloudInstance;
+            }
+
+            parseConfig();
+
+            expect(warn).toHaveBeenCalledWith(warning);
+        },
+    );
+});
+
 test('Should default results S3 config to S3 config', () => {
     process.env.S3_ACCESS_KEY = 'mock_access_key';
     process.env.S3_SECRET_KEY = 'mock_secret_key';
+    process.env.S3_FORCE_PATH_STYLE = 'true';
     const config = parseConfig();
     expect(config.results.s3).toEqual({
         endpoint: 'mock_endpoint',
@@ -45,24 +1047,36 @@ test('Should default results S3 config to S3 config', () => {
         region: 'mock_region',
         accessKey: 'mock_access_key',
         secretKey: 'mock_secret_key',
-        forcePathStyle: false,
+        forcePathStyle: true,
+        authMode: 'default',
     });
 });
 
 test('Should use explicit results S3 config when set', () => {
+    process.env.S3_FORCE_PATH_STYLE = 'true';
+    process.env.RESULTS_S3_ENDPOINT = 'new_endpoint';
+    process.env.RESULTS_S3_FORCE_PATH_STYLE = 'false';
     process.env.RESULTS_S3_BUCKET = 'new_bucket';
     process.env.RESULTS_S3_REGION = 'new_region';
     process.env.RESULTS_S3_ACCESS_KEY = 'new_access_key';
     process.env.RESULTS_S3_SECRET_KEY = 'new_secret_key';
     const config = parseConfig();
     expect(config.results.s3).toEqual({
-        endpoint: 'mock_endpoint',
+        endpoint: 'new_endpoint',
         bucket: 'new_bucket',
         region: 'new_region',
         accessKey: 'new_access_key',
         secretKey: 'new_secret_key',
         forcePathStyle: false,
+        authMode: 'default',
     });
+});
+
+test('Should treat an empty results S3 force path style as unset', () => {
+    process.env.S3_FORCE_PATH_STYLE = 'true';
+    process.env.RESULTS_S3_FORCE_PATH_STYLE = '';
+
+    expect(parseConfig().results.s3?.forcePathStyle).toBe(true);
 });
 
 test('Should prioritize new results S3 config over deprecated config when both are set', () => {
@@ -84,6 +1098,7 @@ test('Should prioritize new results S3 config over deprecated config when both a
         accessKey: 'new_access_key',
         secretKey: 'new_secret_key',
         forcePathStyle: false,
+        authMode: 'default',
     });
 });
 
@@ -101,6 +1116,7 @@ test('Should fall back to base S3 credentials for pre-aggregate results S3 confi
         accessKey: 'base_access_key',
         secretKey: 'base_secret_key',
         forcePathStyle: false,
+        authMode: 'default',
     });
 });
 
@@ -120,6 +1136,7 @@ test('Should use explicit pre-aggregate S3 credentials when set', () => {
         accessKey: 'preagg_access_key',
         secretKey: 'preagg_secret_key',
         forcePathStyle: false,
+        authMode: 'default',
     });
 });
 
@@ -134,6 +1151,7 @@ test('Should default apps S3 config to base S3 config', () => {
         accessKey: 'mock_access_key',
         secretKey: 'mock_secret_key',
         forcePathStyle: false,
+        authMode: 'default',
     });
 });
 
@@ -150,16 +1168,131 @@ test('Should use explicit apps S3 config when set', () => {
         accessKey: 'apps_access_key',
         secretKey: 'apps_secret_key',
         forcePathStyle: false,
+        authMode: 'default',
     });
 });
 
-test('Should return null apps S3 config when base S3 is not configured', () => {
+test('Should have no uploads S3 config until a bucket is set', () => {
+    expect(parseConfig().uploads.s3).toBeNull();
+});
+
+test('Should inherit base S3 settings for the uploads bucket', () => {
+    process.env.S3_ACCESS_KEY = 'mock_access_key';
+    process.env.S3_SECRET_KEY = 'mock_secret_key';
+    process.env.S3_FORCE_PATH_STYLE = 'true';
+    process.env.UPLOADS_S3_BUCKET = 'uploads_bucket';
+    const config = parseConfig();
+    expect(config.uploads.s3).toEqual(
+        expect.objectContaining({
+            endpoint: 'mock_endpoint',
+            bucket: 'uploads_bucket',
+            region: 'mock_region',
+            accessKey: 'mock_access_key',
+            secretKey: 'mock_secret_key',
+            forcePathStyle: true,
+        }),
+    );
+    expect(config.s3?.bucket).toEqual('mock_bucket');
+});
+
+describe('S3_AUTH_MODE', () => {
+    it('defaults to the existing SigV4 behaviour', () => {
+        expect(parseConfig().s3?.authMode).toEqual('default');
+    });
+
+    it('applies gcp_oauth to every storage configuration at once', () => {
+        process.env.S3_AUTH_MODE = 'gcp_oauth';
+        process.env.PRE_AGGREGATE_RESULTS_S3_BUCKET = 'preagg_bucket';
+        process.env.PRE_AGGREGATE_RESULTS_S3_REGION = 'preagg_region';
+
+        const config = parseConfig();
+
+        expect(config.s3?.authMode).toEqual('gcp_oauth');
+        expect(config.results.s3?.authMode).toEqual('gcp_oauth');
+        expect(config.preAggregates.s3?.authMode).toEqual('gcp_oauth');
+        expect(config.appRuntime.s3?.authMode).toEqual('gcp_oauth');
+    });
+
+    it('rejects a mode it does not know', () => {
+        process.env.S3_AUTH_MODE = 'aws_oauth';
+
+        expect(() => parseConfig()).toThrow('Invalid S3_AUTH_MODE');
+    });
+
+    it('lets the results bucket keep SigV4 under gcp_oauth', () => {
+        process.env.S3_AUTH_MODE = 'gcp_oauth';
+        process.env.RESULTS_S3_AUTH_MODE = 'default';
+        process.env.RESULTS_S3_ENDPOINT =
+            'https://s3.ap-southeast-2.amazonaws.com';
+        process.env.RESULTS_S3_BUCKET = 'customer_bucket';
+        process.env.RESULTS_S3_REGION = 'ap-southeast-2';
+        process.env.RESULTS_S3_ACCESS_KEY = 'customer_access_key';
+        process.env.RESULTS_S3_SECRET_KEY = 'customer_secret_key';
+
+        const config = parseConfig();
+
+        expect(config.s3?.authMode).toEqual('gcp_oauth');
+        expect(config.results.s3).toEqual({
+            endpoint: 'https://s3.ap-southeast-2.amazonaws.com',
+            bucket: 'customer_bucket',
+            region: 'ap-southeast-2',
+            accessKey: 'customer_access_key',
+            secretKey: 'customer_secret_key',
+            forcePathStyle: false,
+            authMode: 'default',
+        });
+    });
+
+    it('lets the results bucket use gcp_oauth on its own', () => {
+        process.env.RESULTS_S3_AUTH_MODE = 'gcp_oauth';
+
+        const config = parseConfig();
+
+        expect(config.s3?.authMode).toEqual('default');
+        expect(config.results.s3?.authMode).toEqual('gcp_oauth');
+    });
+
+    it('treats an empty results mode as unset', () => {
+        process.env.S3_AUTH_MODE = 'gcp_oauth';
+        process.env.RESULTS_S3_AUTH_MODE = ' ';
+
+        expect(parseConfig().results.s3?.authMode).toEqual('gcp_oauth');
+    });
+
+    it('rejects a results mode it does not know', () => {
+        process.env.RESULTS_S3_AUTH_MODE = 'aws_oauth';
+
+        expect(() => parseConfig()).toThrow('Invalid RESULTS_S3_AUTH_MODE');
+    });
+
+    it('rejects an expiration time GCS would refuse to sign', () => {
+        process.env.S3_AUTH_MODE = 'gcp_oauth';
+        process.env.S3_EXPIRATION_TIME = '604801';
+
+        expect(() => parseConfig()).toThrow(
+            'cannot last longer than 604800 seconds',
+        );
+    });
+
+    it('accepts an expiration time at the GCS maximum', () => {
+        process.env.S3_AUTH_MODE = 'gcp_oauth';
+        process.env.S3_EXPIRATION_TIME = '604800';
+
+        expect(parseConfig().s3?.expirationTime).toEqual(604800);
+    });
+
+    it('leaves long expiration times alone in default mode', () => {
+        process.env.S3_EXPIRATION_TIME = '604801';
+
+        expect(parseConfig().s3?.expirationTime).toEqual(604801);
+    });
+});
+
+test('Should fail fast when base S3 is not configured', () => {
     delete process.env.S3_ENDPOINT;
     delete process.env.S3_BUCKET;
     delete process.env.S3_REGION;
-    process.env.APPS_S3_BUCKET = 'apps_bucket';
-    const config = parseConfig();
-    expect(config.appRuntime.s3).toBeNull();
+    expect(() => parseConfig()).toThrow('S3-compatible storage is required');
 });
 
 test('Should parse rudder config from env', () => {
@@ -236,6 +1369,150 @@ test('Should include secret in output', () => {
     expect(parseConfig().lightdashSecret).toEqual('so very secret');
 });
 
+test('Should use the Lightdash secret as the Slack state secret fallback', () => {
+    process.env.LIGHTDASH_SECRET = 'instance-specific-secret';
+    expect(parseConfig().slack?.stateSecret).toEqual(
+        'instance-specific-secret',
+    );
+});
+
+test('Should prefer an explicit Slack state secret', () => {
+    process.env.LIGHTDASH_SECRET = 'instance-specific-secret';
+    process.env.SLACK_STATE_SECRET = 'slack-specific-secret';
+    expect(parseConfig().slack?.stateSecret).toEqual('slack-specific-secret');
+});
+
+describe('LIGHTDASH_SECRET_FALLBACKS keyring', () => {
+    test('defaults to no fallbacks when the variable is unset', () => {
+        expect(parseConfig().lightdashSecrets).toEqual({
+            active: 'not very secret',
+            fallbacks: [],
+            all: ['not very secret'],
+        });
+    });
+
+    test('keeps lightdashSecret equal to the active secret', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old secret"]';
+        const config = parseConfig();
+        expect(config.lightdashSecret).toEqual(config.lightdashSecrets.active);
+    });
+
+    test('parses ordered fallbacks with active first in all', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old", "older"]';
+        expect(parseConfig().lightdashSecrets).toEqual({
+            active: 'not very secret',
+            fallbacks: ['old', 'older'],
+            all: ['not very secret', 'old', 'older'],
+        });
+    });
+
+    test('preserves secret bytes exactly, including commas and whitespace', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS =
+            '["  old secret, with comma  ", "\\ttabbed\\n"]';
+        expect(parseConfig().lightdashSecrets.fallbacks).toEqual([
+            '  old secret, with comma  ',
+            '\ttabbed\n',
+        ]);
+    });
+
+    test('accepts an empty array', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '[]';
+        expect(parseConfig().lightdashSecrets.fallbacks).toEqual([]);
+    });
+
+    test('rejects malformed JSON', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = 'old,older';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+
+    test('rejects JSON that is not an array', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '{"secret": "old"}';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+
+    test('rejects empty string entries', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old", ""]';
+        expect(() => parseConfig()).toThrowError(
+            /Entry at position 1 must be a non-empty string/,
+        );
+    });
+
+    test('rejects non-string entries', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old", 123]';
+        expect(() => parseConfig()).toThrowError(
+            /Entry at position 1 must be a non-empty string/,
+        );
+    });
+
+    test('rejects more than three fallbacks', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["a", "b", "c", "d"]';
+        expect(() => parseConfig()).toThrowError(
+            /At most 3 fallback secrets are supported, but found 4/,
+        );
+    });
+
+    test('rejects a fallback that duplicates the active secret', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old", "not very secret"]';
+        expect(() => parseConfig()).toThrowError(
+            /Entry at position 1 duplicates LIGHTDASH_SECRET/,
+        );
+    });
+
+    test('rejects duplicate fallback entries', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old", "old"]';
+        expect(() => parseConfig()).toThrowError(
+            /Entry at position 1 duplicates the entry at position 0/,
+        );
+    });
+
+    test('never includes secret material in parsing errors', () => {
+        process.env.LIGHTDASH_SECRET = 'active-secret-value';
+        process.env.LIGHTDASH_SECRET_FALLBACKS =
+            '["fallback-secret-value", "fallback-secret-value"]';
+        try {
+            parseConfig();
+            expect.unreachable('parseConfig should have thrown');
+        } catch (error) {
+            expect((error as Error).message).not.toContain(
+                'active-secret-value',
+            );
+            expect((error as Error).message).not.toContain(
+                'fallback-secret-value',
+            );
+        }
+    });
+
+    test('freezes the keyring object and arrays', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old"]';
+        const { lightdashSecrets } = parseConfig();
+        expect(Object.isFrozen(lightdashSecrets)).toBe(true);
+        expect(Object.isFrozen(lightdashSecrets.fallbacks)).toBe(true);
+        expect(Object.isFrozen(lightdashSecrets.all)).toBe(true);
+    });
+
+    test('requires an explicit Slack state secret when fallbacks and Slack are configured', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old"]';
+        process.env.SLACK_CLIENT_ID = 'slack-client-id';
+        expect(() => parseConfig()).toThrowError(
+            /SLACK_STATE_SECRET must be set explicitly/,
+        );
+    });
+
+    test('accepts fallbacks with Slack when the state secret is explicit', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old"]';
+        process.env.SLACK_CLIENT_ID = 'slack-client-id';
+        process.env.SLACK_STATE_SECRET = 'explicit-state-secret';
+        expect(parseConfig().slack?.stateSecret).toEqual(
+            'explicit-state-secret',
+        );
+    });
+
+    test('accepts fallbacks without Slack configured', () => {
+        process.env.LIGHTDASH_SECRET_FALLBACKS = '["old"]';
+        expect(() => parseConfig()).not.toThrow();
+    });
+});
+
 test('Should parse bedrock inference profile prefix from env', () => {
     process.env.BEDROCK_API_KEY = 'test-bedrock-key';
     process.env.BEDROCK_REGION = 'ap-northeast-1';
@@ -246,6 +1523,103 @@ test('Should parse bedrock inference profile prefix from env', () => {
         region: 'ap-northeast-1',
         inferenceProfilePrefix: 'jp',
     });
+});
+
+test('Should configure Gemini only when an explicit API key is set', () => {
+    process.env.GEMINI_MODEL_NAME = 'gemini-3.5-flash-lite';
+    expect(parseConfig().ai.copilot.providers.google).toBeUndefined();
+
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    process.env.GEMINI_AVAILABLE_MODELS =
+        'gemini-3.8-flash,gemini-3.5-flash-lite';
+
+    expect(parseConfig().ai.copilot.providers.google).toEqual({
+        apiKey: 'test-gemini-key',
+        modelName: 'gemini-3.5-flash-lite',
+        baseUrl: undefined,
+        availableModels: ['gemini-3.8-flash', 'gemini-3.5-flash-lite'],
+        supportsStreaming: true,
+    });
+});
+
+test('Should parse and normalize LLM gateway base URLs', () => {
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    process.env.ANTHROPIC_BASE_URL = ' https://anthropic-gateway.example/v1 ';
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    process.env.GEMINI_BASE_URL = ' https://gemini-gateway.example/v1beta/ ';
+    process.env.BEDROCK_API_KEY = 'test-bedrock-key';
+    process.env.BEDROCK_REGION = 'us-east-1';
+    process.env.BEDROCK_BASE_URL = ' https://bedrock-gateway.example/runtime ';
+
+    expect(parseConfig()).toMatchObject({
+        ai: {
+            copilot: {
+                providers: {
+                    anthropic: {
+                        baseUrl: 'https://anthropic-gateway.example',
+                    },
+                    google: {
+                        baseUrl: 'https://gemini-gateway.example/v1beta',
+                    },
+                    bedrock: {
+                        baseUrl: 'https://bedrock-gateway.example/runtime',
+                    },
+                },
+            },
+        },
+    });
+});
+
+test.each(['1', 'true'])(
+    '%s enables Claude Code Bedrock skip-auth',
+    (value) => {
+        process.env.BEDROCK_API_KEY = 'test-bedrock-key';
+        process.env.BEDROCK_REGION = 'us-east-1';
+        process.env.BEDROCK_BASE_URL =
+            'https://bedrock-gateway.example/runtime';
+        process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH = value;
+
+        expect(
+            parseConfig().ai.copilot.providers.bedrock?.claudeCodeSkipAuth,
+        ).toBe(true);
+    },
+);
+
+test.each([
+    ['ANTHROPIC_BASE_URL', 'gateway.internal'],
+    ['GEMINI_BASE_URL', 'gateway.internal'],
+    ['BEDROCK_BASE_URL', 'ftp://gateway.internal'],
+])('rejects invalid %s values', (environmentVariable, value) => {
+    process.env[environmentVariable] = value;
+    if (environmentVariable === 'GEMINI_BASE_URL') {
+        process.env.GEMINI_API_KEY = 'test-gemini-key';
+    }
+    if (environmentVariable === 'BEDROCK_BASE_URL') {
+        process.env.BEDROCK_API_KEY = 'test-bedrock-key';
+        process.env.BEDROCK_REGION = 'us-east-1';
+    }
+
+    expect(() => parseConfig()).toThrow(environmentVariable);
+});
+
+test('explains that Bedrock skip-auth does not configure backend credentials', () => {
+    process.env.BEDROCK_REGION = 'us-east-1';
+    process.env.BEDROCK_BASE_URL = 'https://bedrock-gateway.example/runtime';
+    process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH = 'true';
+
+    expect(() => parseConfig()).toThrow(
+        'BEDROCK_BASE_URL requires BEDROCK_API_KEY',
+    );
+});
+
+test('Should default AI tool description max chars to 600', () => {
+    expect(parseConfig().ai.copilot.toolDescriptionMaxChars).toEqual(600);
+});
+
+test('Should parse AI tool description max chars from env', () => {
+    process.env.AI_TOOL_DESCRIPTION_MAX_CHARS = '2500';
+
+    expect(parseConfig().ai.copilot.toolDescriptionMaxChars).toEqual(2500);
 });
 
 test('Should parse valid integer', () => {
@@ -413,6 +1787,7 @@ describe('getStringRecordFromEnvironmentVariable', () => {
 test('Should parse AI provider custom headers from env', () => {
     process.env.OPENAI_API_KEY = 'test-openai-key';
     process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
     process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
     process.env.AZURE_AI_API_KEY = 'test-azure-key';
     process.env.AZURE_AI_ENDPOINT = 'https://example.openai.azure.com';
@@ -462,6 +1837,116 @@ test('Should parse AI provider custom headers from env', () => {
                 'x-gateway-route': 'aws-runtime',
             },
         },
+    });
+});
+
+test('Should parse selectable OpenRouter models from env', () => {
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    process.env.OPENROUTER_MODEL_NAME = 'qwen/qwen3.5-9b';
+    process.env.OPENROUTER_AVAILABLE_MODELS =
+        'qwen/qwen3.5-9b,moonshotai/kimi-k3';
+
+    expect(parseConfig().ai.copilot.providers.openrouter).toMatchObject({
+        modelName: 'qwen/qwen3.5-9b',
+        availableModels: ['qwen/qwen3.5-9b', 'moonshotai/kimi-k3'],
+    });
+});
+
+test('Should pass OpenRouter provider routing slugs through from env', () => {
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    process.env.OPENROUTER_ALLOWED_PROVIDERS = 'deepinfra, baseten';
+    process.env.OPENROUTER_PROVIDER_ORDER = 'deepinfra';
+
+    expect(parseConfig().ai.copilot.providers.openrouter).toMatchObject({
+        allowedProviders: ['deepinfra', 'baseten'],
+        providerOrder: ['deepinfra'],
+        // Only set by the schema default, so it proves validation succeeded
+        // rather than falling back to the raw env object
+        sortOrder: 'latency',
+    });
+});
+
+describe('Anthropic context management capability', () => {
+    test.each([
+        [undefined, true],
+        ['true', true],
+        ['', true],
+        ['false', false],
+        ['False', false],
+        ['FALSE', false],
+        [' false ', false],
+        ['0', false],
+    ])('parses %j as supportsContextManagement=%s', (value, expected) => {
+        process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+        process.env.ANTHROPIC_BASE_URL = 'https://gateway.example';
+        if (value !== undefined) {
+            process.env.ANTHROPIC_SUPPORTS_CONTEXT_MANAGEMENT = value;
+        }
+        expect(parseConfig().ai.copilot.providers.anthropic).toMatchObject({
+            supportsContextManagement: expected,
+        });
+    });
+});
+
+describe('AI provider supportsStreaming', () => {
+    beforeEach(() => {
+        process.env.OPENAI_API_KEY = 'test-openai-key';
+        process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+        process.env.GEMINI_API_KEY = 'test-gemini-key';
+        process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+        process.env.AZURE_AI_API_KEY = 'test-azure-key';
+        process.env.AZURE_AI_ENDPOINT = 'https://example.openai.azure.com';
+        process.env.AZURE_AI_API_VERSION = '2026-01-01';
+        process.env.AZURE_AI_DEPLOYMENT_NAME = 'gpt-5';
+        process.env.BEDROCK_API_KEY = 'test-bedrock-key';
+        process.env.BEDROCK_REGION = 'eu-west-1';
+    });
+
+    test('defaults to true when env vars are unset', () => {
+        expect(parseConfig().ai.copilot.providers).toMatchObject({
+            openai: { supportsStreaming: true },
+            anthropic: { supportsStreaming: true },
+            google: { supportsStreaming: true },
+            openrouter: { supportsStreaming: true },
+            azure: { supportsStreaming: true },
+            bedrock: { supportsStreaming: true },
+        });
+    });
+
+    test('stays true when env vars are explicitly "true"', () => {
+        process.env.OPENAI_SUPPORTS_STREAMING = 'true';
+        process.env.ANTHROPIC_SUPPORTS_STREAMING = 'true';
+        process.env.GEMINI_SUPPORTS_STREAMING = 'true';
+        process.env.OPENROUTER_SUPPORTS_STREAMING = 'true';
+        process.env.AZURE_AI_SUPPORTS_STREAMING = 'true';
+        process.env.BEDROCK_SUPPORTS_STREAMING = 'true';
+
+        expect(parseConfig().ai.copilot.providers).toMatchObject({
+            openai: { supportsStreaming: true },
+            anthropic: { supportsStreaming: true },
+            google: { supportsStreaming: true },
+            openrouter: { supportsStreaming: true },
+            azure: { supportsStreaming: true },
+            bedrock: { supportsStreaming: true },
+        });
+    });
+
+    test('is false only when env vars are the literal "false"', () => {
+        process.env.OPENAI_SUPPORTS_STREAMING = 'false';
+        process.env.ANTHROPIC_SUPPORTS_STREAMING = 'false';
+        process.env.GEMINI_SUPPORTS_STREAMING = 'false';
+        process.env.OPENROUTER_SUPPORTS_STREAMING = 'false';
+        process.env.AZURE_AI_SUPPORTS_STREAMING = 'false';
+        process.env.BEDROCK_SUPPORTS_STREAMING = 'false';
+
+        expect(parseConfig().ai.copilot.providers).toMatchObject({
+            openai: { supportsStreaming: false },
+            anthropic: { supportsStreaming: false },
+            google: { supportsStreaming: false },
+            openrouter: { supportsStreaming: false },
+            azure: { supportsStreaming: false },
+            bedrock: { supportsStreaming: false },
+        });
     });
 });
 
@@ -581,12 +2066,23 @@ describe('process.env.LIGHTDASH_IFRAME_EMBEDDING_DOMAINS', () => {
                 config.headlessBrowser.internalLightdashHostIgnoreHttpsErrors,
             ).toBe(false);
         });
+
+        test('screenshotTimeoutMs defaults to 180000', () => {
+            const config = parseConfig();
+            expect(config.headlessBrowser.screenshotTimeoutMs).toBe(180000);
+        });
+
+        test('screenshotTimeoutMs is overridden by HEADLESS_BROWSER_SCREENSHOT_TIMEOUT_MS', () => {
+            process.env.HEADLESS_BROWSER_SCREENSHOT_TIMEOUT_MS = '360000';
+            const config = parseConfig();
+            expect(config.headlessBrowser.screenshotTimeoutMs).toBe(360000);
+        });
     });
 
     describe('environment variables for API tokens', () => {
         beforeEach(() => {
-            jest.useFakeTimers();
-            jest.setSystemTime(new Date('2025-06-19'));
+            vi.useFakeTimers();
+            vi.setSystemTime(new Date('2025-06-19'));
 
             process.env.LD_SETUP_ADMIN_EMAIL = 'admin@example.com';
             process.env.LD_SETUP_SERVICE_ACCOUNT_EXPIRATION = '0';
@@ -594,7 +2090,7 @@ describe('process.env.LIGHTDASH_IFRAME_EMBEDDING_DOMAINS', () => {
         });
 
         afterEach(() => {
-            jest.useRealTimers();
+            vi.useRealTimers();
         });
 
         test('should parse service account token', () => {
@@ -649,17 +2145,300 @@ describe('process.env.LIGHTDASH_IFRAME_EMBEDDING_DOMAINS', () => {
     });
 });
 
+describe('getUserAttributesSetupConfig', () => {
+    beforeEach(() => {
+        delete process.env.LD_SETUP_USER_ATTRIBUTES;
+    });
+
+    test('returns undefined when LD_SETUP_USER_ATTRIBUTES is not set', () => {
+        expect(getUserAttributesSetupConfig()).toBeUndefined();
+    });
+
+    test('returns undefined when LD_SETUP_USER_ATTRIBUTES is an empty array', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = '[]';
+        expect(getUserAttributesSetupConfig()).toBeUndefined();
+    });
+
+    test('parses a single attribute with a group mapping', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            {
+                name: 'is_privileged',
+                description: 'PII access',
+                attributeDefault: null,
+                groups: [{ group: 'Privileged Data Analyst', value: 'true' }],
+            },
+        ]);
+        expect(getUserAttributesSetupConfig()).toEqual([
+            {
+                name: 'is_privileged',
+                description: 'PII access',
+                attributeDefault: null,
+                groups: [
+                    { group: 'Privileged Data Analyst', values: ['true'] },
+                ],
+            },
+        ]);
+    });
+
+    test('accepts array values and array attributeDefault', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            {
+                name: 'region',
+                attributeDefault: ['US', 'CA'],
+                groups: [{ group: 'Analysts', values: ['US', 'UK'] }],
+            },
+        ]);
+        expect(getUserAttributesSetupConfig()).toEqual([
+            {
+                name: 'region',
+                attributeDefault: ['US', 'CA'],
+                groups: [{ group: 'Analysts', values: ['US', 'UK'] }],
+            },
+        ]);
+    });
+
+    test('normalizes a scalar attributeDefault to an array', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            { name: 'region', attributeDefault: 'US' },
+        ]);
+        expect(getUserAttributesSetupConfig()).toEqual([
+            {
+                name: 'region',
+                attributeDefault: ['US'],
+                groups: [],
+            },
+        ]);
+    });
+
+    test('defaults groups to [] and attributeDefault to null when omitted', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            { name: 'region' },
+        ]);
+        expect(getUserAttributesSetupConfig()).toEqual([
+            {
+                name: 'region',
+                attributeDefault: null,
+                groups: [],
+            },
+        ]);
+    });
+
+    test('throws ParseError on malformed JSON', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = '{not json';
+        expect(() => getUserAttributesSetupConfig()).toThrowError(ParseError);
+    });
+
+    test('throws ParseError when an attribute is missing a name', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            { groups: [{ group: 'g', value: 'v' }] },
+        ]);
+        expect(() => getUserAttributesSetupConfig()).toThrowError(ParseError);
+    });
+
+    test('throws ParseError on duplicate attribute names', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            { name: 'dup', groups: [] },
+            { name: 'dup', groups: [] },
+        ]);
+        expect(() => getUserAttributesSetupConfig()).toThrowError(
+            'Duplicate user attribute name "dup"',
+        );
+    });
+});
+
+describe('getUpdateSetupConfig userAttributes', () => {
+    beforeEach(() => {
+        delete process.env.LD_SETUP_USER_ATTRIBUTES;
+    });
+
+    test('includes parsed userAttributes from LD_SETUP_USER_ATTRIBUTES', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            { name: 'is_privileged', groups: [{ group: 'G', value: 'true' }] },
+        ]);
+        expect(getUpdateSetupConfig()?.userAttributes).toEqual([
+            {
+                name: 'is_privileged',
+                attributeDefault: null,
+                groups: [{ group: 'G', values: ['true'] }],
+            },
+        ]);
+    });
+
+    test('userAttributes is undefined when env var not set', () => {
+        expect(getUpdateSetupConfig()?.userAttributes).toBeUndefined();
+    });
+});
+
+describe('getGroupProjectAccessSetupConfig', () => {
+    beforeEach(() => {
+        delete process.env.LD_SETUP_GROUP_PROJECT_ACCESS;
+    });
+
+    test('returns undefined when LD_SETUP_GROUP_PROJECT_ACCESS is not set', () => {
+        expect(getGroupProjectAccessSetupConfig()).toBeUndefined();
+    });
+
+    test('returns undefined when the array is empty', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = '[]';
+        expect(getGroupProjectAccessSetupConfig()).toBeUndefined();
+    });
+
+    test('parses an entry referencing the project by name', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            {
+                groupName: 'Core Data Developer',
+                projectName: 'Production',
+                role: 'developer',
+            },
+        ]);
+        expect(getGroupProjectAccessSetupConfig()).toEqual([
+            {
+                groupName: 'Core Data Developer',
+                projectName: 'Production',
+                role: 'developer',
+            },
+        ]);
+    });
+
+    test('parses an entry referencing the project by uuid with a custom role name', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            {
+                groupName: 'Data Analyst',
+                projectUuid: 'abc-123',
+                role: 'PII Analyst',
+            },
+        ]);
+        expect(getGroupProjectAccessSetupConfig()).toEqual([
+            {
+                groupName: 'Data Analyst',
+                projectUuid: 'abc-123',
+                role: 'PII Analyst',
+            },
+        ]);
+    });
+
+    test('throws ParseError on malformed JSON', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = '{not json';
+        expect(() => getGroupProjectAccessSetupConfig()).toThrowError(
+            ParseError,
+        );
+    });
+
+    test('throws ParseError when groupName is missing', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            { projectName: 'Production', role: 'developer' },
+        ]);
+        expect(() => getGroupProjectAccessSetupConfig()).toThrowError(
+            ParseError,
+        );
+    });
+
+    test('throws ParseError when neither projectName nor projectUuid is given', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            { groupName: 'Core Data Developer', role: 'developer' },
+        ]);
+        expect(() => getGroupProjectAccessSetupConfig()).toThrowError(
+            ParseError,
+        );
+    });
+
+    test('accepts both projectName and projectUuid (uuid wins at reconcile time)', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            {
+                groupName: 'Core Data Developer',
+                projectName: 'Production',
+                projectUuid: 'abc-123',
+                role: 'developer',
+            },
+        ]);
+        expect(getGroupProjectAccessSetupConfig()).toEqual([
+            {
+                groupName: 'Core Data Developer',
+                projectName: 'Production',
+                projectUuid: 'abc-123',
+                role: 'developer',
+            },
+        ]);
+    });
+
+    test('throws ParseError on a duplicate group/project pair', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            {
+                groupName: 'Core Data Developer',
+                projectName: 'Production',
+                role: 'developer',
+            },
+            {
+                groupName: 'Core Data Developer',
+                projectName: 'Production',
+                role: 'editor',
+            },
+        ]);
+        expect(() => getGroupProjectAccessSetupConfig()).toThrowError(
+            'Duplicate group/project pair',
+        );
+    });
+});
+
+describe('getUpdateSetupConfig groupProjectAccess', () => {
+    beforeEach(() => {
+        delete process.env.LD_SETUP_GROUP_PROJECT_ACCESS;
+    });
+
+    test('includes parsed groupProjectAccess from the env var', () => {
+        process.env.LD_SETUP_GROUP_PROJECT_ACCESS = JSON.stringify([
+            { groupName: 'G', projectName: 'P', role: 'developer' },
+        ]);
+        expect(getUpdateSetupConfig()?.groupProjectAccess).toEqual([
+            { groupName: 'G', projectName: 'P', role: 'developer' },
+        ]);
+    });
+
+    test('groupProjectAccess is undefined when env var not set', () => {
+        expect(getUpdateSetupConfig()?.groupProjectAccess).toBeUndefined();
+    });
+});
+
+describe('process.env.LIGHTDASH_CORS_ENABLED', () => {
+    test('defaults CORS to enabled when not set', () => {
+        process.env.LIGHTDASH_CORS_ALLOWED_DOMAINS = 'https://example.com';
+
+        const config = parseConfig();
+
+        expect(config.security.crossOriginResourceSharingPolicy.enabled).toBe(
+            true,
+        );
+        expect(
+            config.security.crossOriginResourceSharingPolicy.allowedDomains,
+        ).toEqual(['https://example.com']);
+    });
+
+    test('disables CORS only when explicitly false', () => {
+        process.env.LIGHTDASH_CORS_ENABLED = 'false';
+        process.env.LIGHTDASH_CORS_ALLOWED_DOMAINS = 'https://example.com';
+
+        const config = parseConfig();
+
+        expect(config.security.crossOriginResourceSharingPolicy.enabled).toBe(
+            false,
+        );
+        expect(
+            config.security.crossOriginResourceSharingPolicy.allowedDomains,
+        ).toEqual([]);
+    });
+});
+
 describe('parseAndSanitizeSchedulerTasks', () => {
     beforeEach(() => {
         // Clear scheduler environment variables before each test
         delete process.env.SCHEDULER_INCLUDE_TASKS;
         delete process.env.SCHEDULER_EXCLUDE_TASKS;
         // Mock console.warn to capture warning messages
-        jest.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
     });
 
     afterEach(() => {
-        jest.restoreAllMocks();
+        vi.restoreAllMocks();
     });
 
     describe('Default behavior', () => {
@@ -786,6 +2565,64 @@ describe('scheduler poll interval', () => {
     });
 });
 
+describe('scheduler shutdown timeout', () => {
+    afterEach(() => {
+        delete process.env.SCHEDULER_SHUTDOWN_TIMEOUT;
+    });
+
+    test('defaults to one minute so the drain fits the pod grace period', () => {
+        expect(parseConfig().scheduler.shutdownTimeout).toBe(60_000);
+    });
+
+    test('parses the drain deadline from the environment', () => {
+        process.env.SCHEDULER_SHUTDOWN_TIMEOUT = '30000';
+
+        expect(parseConfig().scheduler.shutdownTimeout).toBe(30_000);
+    });
+});
+
+describe('scheduler migration quiesce', () => {
+    const environmentVariables = [
+        'SCHEDULER_QUIESCE_POLL_INTERVAL',
+        'SCHEDULER_QUIESCE_GRACE_PERIOD',
+        'SCHEDULER_RESUME_JITTER',
+        'SCHEDULER_RESUME_RAMP_PERIOD',
+    ] as const;
+
+    afterEach(() => {
+        environmentVariables.forEach((name) => {
+            delete process.env[name];
+        });
+    });
+
+    test('uses bounded grace and ramp defaults', () => {
+        const config = parseConfig();
+
+        expect(config.scheduler.quiesce).toEqual({
+            pollInterval: 2_000,
+            gracePeriod: 180_000,
+            resumeJitter: 60_000,
+            resumeRampPeriod: 180_000,
+        });
+    });
+
+    test('parses migration quiesce timings from the environment', () => {
+        process.env.SCHEDULER_QUIESCE_POLL_INTERVAL = '3000';
+        process.env.SCHEDULER_QUIESCE_GRACE_PERIOD = '240000';
+        process.env.SCHEDULER_RESUME_JITTER = '90000';
+        process.env.SCHEDULER_RESUME_RAMP_PERIOD = '300000';
+
+        const config = parseConfig();
+
+        expect(config.scheduler.quiesce).toEqual({
+            pollInterval: 3_000,
+            gracePeriod: 240_000,
+            resumeJitter: 90_000,
+            resumeRampPeriod: 300_000,
+        });
+    });
+});
+
 test('should set groups.enabled only when the environment variable is set', () => {
     const undefinedConfig = parseConfig();
     expect(undefinedConfig.groups.enabled).toBeUndefined();
@@ -797,6 +2634,52 @@ test('should set groups.enabled only when the environment variable is set', () =
     process.env.GROUPS_ENABLED = 'false';
     const falseConfig = parseConfig();
     expect(falseConfig.groups.enabled).toBe(false);
+});
+
+describe('LD_SETUP_START_OF_WEEK', () => {
+    beforeEach(() => {
+        process.env.LD_SETUP_ADMIN_EMAIL = 'admin@example.com';
+        process.env.LD_SETUP_PROJECT_PAT = 'project_personal_access_token';
+    });
+
+    test('should convert day name to its numeric WeekDay value', () => {
+        process.env.LD_SETUP_START_OF_WEEK = 'THURSDAY';
+        const config = parseConfig();
+        expect(
+            config.initialSetup?.projects[0]?.warehouseConnection.startOfWeek,
+        ).toBe(WeekDay.THURSDAY);
+    });
+
+    test('should accept the numeric WeekDay value', () => {
+        process.env.LD_SETUP_START_OF_WEEK = '3';
+        const config = parseConfig();
+        expect(
+            config.initialSetup?.projects[0]?.warehouseConnection.startOfWeek,
+        ).toBe(WeekDay.THURSDAY);
+    });
+
+    test('should be undefined when unset', () => {
+        const config = parseConfig();
+        expect(
+            config.initialSetup?.projects[0]?.warehouseConnection.startOfWeek,
+        ).toBeUndefined();
+    });
+
+    test('should skip initial setup for an invalid value', () => {
+        process.env.LD_SETUP_START_OF_WEEK = 'FUNDAY';
+        const consoleError = vi
+            .spyOn(console, 'error')
+            .mockImplementation(() => {});
+        const config = parseConfig();
+        expect(config.initialSetup).toBeUndefined();
+        expect(consoleError).toHaveBeenCalledWith(
+            'Error parsing initial setup config',
+            expect.objectContaining({
+                message: expect.stringContaining('FUNDAY'),
+            }),
+        );
+        consoleError.mockRestore();
+    });
 });
 
 describe('getMultiProjectSetupConfig', () => {
@@ -837,6 +2720,72 @@ describe('getMultiProjectSetupConfig', () => {
         process.env.LD_SETUP_PROJECTS = JSON.stringify(projects);
         const result = getMultiProjectSetupConfig();
         expect(result).toEqual(projects);
+    });
+
+    test('should convert day-name startOfWeek to its numeric WeekDay value', () => {
+        process.env.LD_SETUP_PROJECTS = JSON.stringify([
+            {
+                name: 'Test',
+                warehouseConnection: {
+                    type: WarehouseTypes.DATABRICKS,
+                    startOfWeek: 'THURSDAY',
+                },
+                dbtConnection: { type: DbtProjectType.NONE },
+            },
+        ]);
+        const result = getMultiProjectSetupConfig();
+        expect(result?.[0]?.warehouseConnection.startOfWeek).toBe(
+            WeekDay.THURSDAY,
+        );
+    });
+
+    test('should keep numeric startOfWeek values', () => {
+        process.env.LD_SETUP_PROJECTS = JSON.stringify([
+            {
+                name: 'Test',
+                warehouseConnection: {
+                    type: WarehouseTypes.DATABRICKS,
+                    startOfWeek: 3,
+                },
+                dbtConnection: { type: DbtProjectType.NONE },
+            },
+        ]);
+        const result = getMultiProjectSetupConfig();
+        expect(result?.[0]?.warehouseConnection.startOfWeek).toBe(
+            WeekDay.THURSDAY,
+        );
+    });
+
+    test('should keep null startOfWeek', () => {
+        process.env.LD_SETUP_PROJECTS = JSON.stringify([
+            {
+                name: 'Test',
+                warehouseConnection: {
+                    type: WarehouseTypes.DATABRICKS,
+                    startOfWeek: null,
+                },
+                dbtConnection: { type: DbtProjectType.NONE },
+            },
+        ]);
+        const result = getMultiProjectSetupConfig();
+        expect(result?.[0]?.warehouseConnection.startOfWeek).toBeNull();
+    });
+
+    test('should throw ParseError for invalid startOfWeek', () => {
+        process.env.LD_SETUP_PROJECTS = JSON.stringify([
+            {
+                name: 'Test',
+                warehouseConnection: {
+                    type: WarehouseTypes.DATABRICKS,
+                    startOfWeek: 'FUNDAY',
+                },
+                dbtConnection: { type: DbtProjectType.NONE },
+            },
+        ]);
+        expect(() => getMultiProjectSetupConfig()).toThrow(ParseError);
+        expect(() => getMultiProjectSetupConfig()).toThrow(
+            'Invalid LD_SETUP_PROJECTS',
+        );
     });
 
     test('should throw ParseError for non-array JSON', () => {
@@ -943,25 +2892,17 @@ describe('getMultiProjectSetupConfig', () => {
 });
 
 describe('legacy feature-flag env vars (compat repair for trivial-batch)', () => {
-    // The change-chart-explore env-var parser was removed when that flag was
-    // migrated to DB-backed resolution. Re-translating it via the legacy
-    // enable list preserves backward compat for self-hosted deployments that
-    // set the var.
     test.each([
-        ['CHANGE_CHART_EXPLORE_ENABLED', 'change-chart-explore'],
-        ['GOOGLE_CHAT_ENABLED', 'google-chat-enabled'],
-        ['USE_SQL_PIVOT_RESULTS', 'use-sql-pivot-results'],
         ['USER_IMPERSONATION_ENABLED', 'user-impersonation'],
         ['GROUPS_ENABLED', 'user-groups-enabled'],
         ['SHOW_EXECUTION_TIME', 'show-execution-time'],
         ['EMBEDDING_ENABLED', 'embedding'],
-        ['SERVICE_ACCOUNT_ENABLED', 'service-accounts'],
         ['SCIM_ENABLED', 'scim-token-management'],
         [
             'ORGANIZATION_WAREHOUSE_CREDENTIALS_ENABLED',
             'organization-warehouse-credentials',
         ],
-        ['METRIC_DASHBOARD_FILTERS_ENABLED', 'metric-dashboard-filters'],
+        ['APPS_RUNTIME_ENABLED', 'enable-data-apps'],
     ])('legacy %s=true translates to enabledFeatureFlags', (envVar, flagId) => {
         process.env[envVar] = 'true';
         const config = parseConfig();
@@ -986,6 +2927,20 @@ describe('feature flag env-var allowlists', () => {
         expect(config.disabledFeatureFlags.has('killed-flag')).toBe(true);
     });
 
+    test('previewFeatureFlags is off by default and on in PR mode', () => {
+        expect(parseConfig().previewFeatureFlags.enabled).toBe(false);
+        process.env.LIGHTDASH_MODE = LightdashMode.PR;
+        expect(parseConfig().previewFeatureFlags.enabled).toBe(true);
+    });
+
+    test('LIGHTDASH_PREVIEW_FEATURE_FLAGS_ENABLED overrides the mode default', () => {
+        process.env.LIGHTDASH_PREVIEW_FEATURE_FLAGS_ENABLED = 'true';
+        expect(parseConfig().previewFeatureFlags.enabled).toBe(true);
+        process.env.LIGHTDASH_MODE = LightdashMode.PR;
+        process.env.LIGHTDASH_PREVIEW_FEATURE_FLAGS_ENABLED = 'false';
+        expect(parseConfig().previewFeatureFlags.enabled).toBe(false);
+    });
+
     test('dashboardComments.enabled defaults to true when DISABLE_DASHBOARD_COMMENTS is unset', () => {
         delete process.env.DISABLE_DASHBOARD_COMMENTS;
         const config = parseConfig();
@@ -996,5 +2951,297 @@ describe('feature flag env-var allowlists', () => {
         process.env.DISABLE_DASHBOARD_COMMENTS = 'true';
         const config = parseConfig();
         expect(config.dashboardComments.enabled).toBe(false);
+    });
+});
+
+describe('persistentDownloadUrls.enabled', () => {
+    test('defaults to false when PERSISTENT_DOWNLOAD_URLS_ENABLED is unset', () => {
+        const config = parseConfig();
+        expect(config.persistentDownloadUrls.enabled).toBe(false);
+    });
+
+    test('is true only when explicitly set to "true"', () => {
+        process.env.PERSISTENT_DOWNLOAD_URLS_ENABLED = 'true';
+        const config = parseConfig();
+        expect(config.persistentDownloadUrls.enabled).toBe(true);
+    });
+
+    test('is false when set to "false"', () => {
+        process.env.PERSISTENT_DOWNLOAD_URLS_ENABLED = 'false';
+        const config = parseConfig();
+        expect(config.persistentDownloadUrls.enabled).toBe(false);
+    });
+});
+
+describe('pgWire TLS configuration', () => {
+    test('defaults to require mode with no cert paths', () => {
+        const config = parseConfig();
+        expect(config.pgWire).toEqual({
+            port: undefined,
+            host: undefined,
+            ssl: { mode: 'require', certPath: undefined, keyPath: undefined },
+        });
+    });
+
+    test('throws when PGWIRE_PORT is set without TLS certs', () => {
+        process.env.PGWIRE_PORT = '5432';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+
+    test('throws when PGWIRE_PORT is set with only a cert (no key)', () => {
+        process.env.PGWIRE_PORT = '5432';
+        process.env.PGWIRE_SSL_CERT_PATH = '/certs/tls.crt';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+
+    test('accepts PGWIRE_PORT with cert and key paths', () => {
+        process.env.PGWIRE_PORT = '5432';
+        process.env.PGWIRE_SSL_CERT_PATH = '/certs/tls.crt';
+        process.env.PGWIRE_SSL_KEY_PATH = '/certs/tls.key';
+        const config = parseConfig();
+        expect(config.pgWire.ssl).toEqual({
+            mode: 'require',
+            certPath: '/certs/tls.crt',
+            keyPath: '/certs/tls.key',
+        });
+    });
+
+    test('accepts PGWIRE_PORT without certs when TLS is explicitly disabled', () => {
+        process.env.PGWIRE_PORT = '5432';
+        process.env.PGWIRE_SSL_MODE = 'disabled';
+        const config = parseConfig();
+        expect(config.pgWire.ssl.mode).toBe('disabled');
+    });
+
+    test('throws on an invalid PGWIRE_SSL_MODE', () => {
+        process.env.PGWIRE_SSL_MODE = 'prefer';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+});
+
+describe('SANDBOX_PROVIDER', () => {
+    test('defaults to e2b when unset', () => {
+        expect(parseConfig().appRuntime.sandboxProvider).toBe('e2b');
+    });
+
+    test('parses gcp-cloud-run', () => {
+        process.env.SANDBOX_PROVIDER = 'gcp-cloud-run';
+        expect(parseConfig().appRuntime.sandboxProvider).toBe('gcp-cloud-run');
+    });
+
+    test('throws on an unknown provider instead of falling back to e2b', () => {
+        process.env.SANDBOX_PROVIDER = 'gcp-cloudrun';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+
+    test('normalizes case and whitespace instead of crashing boot', () => {
+        process.env.SANDBOX_PROVIDER = ' E2B ';
+        expect(parseConfig().appRuntime.sandboxProvider).toBe('e2b');
+    });
+});
+
+describe('APPS_CODING_AGENT', () => {
+    test('defaults to claude when unset', () => {
+        expect(parseConfig().appRuntime.dataAppCodingAgent).toBe('claude');
+    });
+
+    test('parses codex case-insensitively', () => {
+        process.env.APPS_CODING_AGENT = ' Codex ';
+        expect(parseConfig().appRuntime.dataAppCodingAgent).toBe('codex');
+    });
+
+    test('throws on an unknown coding agent', () => {
+        process.env.APPS_CODING_AGENT = 'cursor';
+        expect(() => parseConfig()).toThrowError(ParseError);
+    });
+});
+
+describe('Data Apps gateway URLs', () => {
+    test('normalizes sandbox URLs without changing the shared provider URLs', () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        process.env.ANTHROPIC_BASE_URL = 'https://mesh.example/anthropic';
+        process.env.BEDROCK_API_KEY = 'test-key';
+        process.env.BEDROCK_REGION = 'us-east-1';
+        process.env.BEDROCK_BASE_URL = 'https://mesh.example/bedrock';
+        process.env.OPENAI_API_KEY = 'test-key';
+        process.env.OPENAI_BASE_URL = 'https://mesh.example/openai/v1';
+        process.env.DATA_APPS_ANTHROPIC_BASE_URL =
+            ' https://private.example/anthropic/v1/ ';
+        process.env.DATA_APPS_BEDROCK_BASE_URL =
+            ' https://private.example/bedrock/ ';
+        process.env.DATA_APPS_OPENAI_BASE_URL =
+            ' https://private.example/openai/v1/ ';
+
+        const config = parseConfig();
+        expect(config.appRuntime.dataAppGatewayBaseUrls).toEqual({
+            anthropic: 'https://private.example/anthropic',
+            bedrock: 'https://private.example/bedrock',
+            openai: 'https://private.example/openai/v1',
+        });
+        expect(config.ai.copilot.providers.anthropic?.baseUrl).toBe(
+            process.env.ANTHROPIC_BASE_URL,
+        );
+        expect(config.ai.copilot.providers.bedrock?.baseUrl).toBe(
+            process.env.BEDROCK_BASE_URL,
+        );
+        expect(config.ai.copilot.providers.openai?.baseUrl).toBe(
+            process.env.OPENAI_BASE_URL,
+        );
+    });
+
+    test.each([
+        ['DATA_APPS_ANTHROPIC_BASE_URL', 'gateway.internal'],
+        ['DATA_APPS_BEDROCK_BASE_URL', 'ftp://gateway.internal'],
+        ['DATA_APPS_OPENAI_BASE_URL', 'https://user:secret@gateway.internal'],
+        ['DATA_APPS_OPENAI_BASE_URL', 'https://gateway.internal?token=secret'],
+        ['DATA_APPS_ANTHROPIC_BASE_URL', 'https://gateway.internal#fragment'],
+    ])(
+        'rejects invalid %s even without provider credentials',
+        (name, value) => {
+            process.env[name] = value;
+            expect(() => parseConfig()).toThrow(
+                `environment variable "${name}"`,
+            );
+        },
+    );
+});
+
+describe('ai copilot key management config', () => {
+    it('declares no Lightdash-managed providers by default, on or off Lightdash Cloud', () => {
+        delete process.env.AI_COPILOT_LIGHTDASH_MANAGED_PROVIDERS;
+        delete process.env.LIGHTDASH_CLOUD_INSTANCE;
+        expect(parseConfig().ai.copilot.lightdashManagedProviders).toEqual([]);
+
+        process.env.LIGHTDASH_CLOUD_INSTANCE = 'cloud-instance';
+        expect(parseConfig().ai.copilot.lightdashManagedProviders).toEqual([]);
+    });
+
+    it('reads AI_COPILOT_LIGHTDASH_MANAGED_PROVIDERS and drops unknown names', () => {
+        process.env.AI_COPILOT_LIGHTDASH_MANAGED_PROVIDERS =
+            'anthropic,openai,not-a-provider';
+
+        expect(parseConfig().ai.copilot.lightdashManagedProviders).toEqual([
+            'anthropic',
+            'openai',
+        ]);
+    });
+});
+
+describe('autopilot run limits', () => {
+    afterEach(() => {
+        delete process.env.MANAGED_AGENT_MAX_STEPS;
+        delete process.env.MANAGED_AGENT_SESSION_TIMEOUT_MS;
+    });
+
+    test('defaults to 120 steps and a 10 minute session', () => {
+        expect(parseConfig().managedAgent).toMatchObject({
+            maxSteps: 120,
+            sessionTimeoutMs: 600_000,
+        });
+    });
+
+    test.each([
+        ['MANAGED_AGENT_MAX_STEPS', '0'],
+        ['MANAGED_AGENT_MAX_STEPS', '-5'],
+        ['MANAGED_AGENT_SESSION_TIMEOUT_MS', '0'],
+        ['MANAGED_AGENT_SESSION_TIMEOUT_MS', '2147483648'],
+    ])('rejects %s=%s at boot', (name, value) => {
+        process.env[name] = value;
+        expect(() => parseConfig()).toThrow(name);
+    });
+});
+
+describe('usage capture infrastructure', () => {
+    it.each([undefined, 'false', 'true'])(
+        'does not depend on the removed ENV gate (%s)',
+        (legacy) => {
+            process.env.LIGHTDASH_LICENSE_KEY = 'test-license';
+            if (legacy === undefined) delete process.env.USAGE_EVENTS_ENABLED;
+            else process.env.USAGE_EVENTS_ENABLED = legacy;
+            expect(parseConfig().usageEvents.enabled).toBe(true);
+        },
+    );
+    it('does not create capture infrastructure without a license', () => {
+        delete process.env.LIGHTDASH_LICENSE_KEY;
+        delete process.env.LIGHTDASH_LICENSE_CERTIFICATE;
+        expect(parseConfig().usageEvents.enabled).toBe(false);
+    });
+});
+
+describe('Docker Hub update check', () => {
+    it('is enabled by default', () => {
+        expect(parseConfig().updateCheck.enabled).toBe(true);
+    });
+    it('is disabled with LIGHTDASH_DISABLE_UPDATE_CHECK=true', () => {
+        process.env.LIGHTDASH_DISABLE_UPDATE_CHECK = 'true';
+        expect(parseConfig().updateCheck.enabled).toBe(false);
+    });
+});
+
+describe('database transaction rollback logging', () => {
+    it('is disabled by default', () => {
+        expect(parseConfig().database.logTransactionRollbacks).toBe(false);
+    });
+    it('is enabled with PG_LOG_TRANSACTION_ROLLBACKS=true', () => {
+        process.env.PG_LOG_TRANSACTION_ROLLBACKS = 'true';
+        expect(parseConfig().database.logTransactionRollbacks).toBe(true);
+    });
+    it('treats any other value as disabled', () => {
+        process.env.PG_LOG_TRANSACTION_ROLLBACKS = 'yes';
+        expect(parseConfig().database.logTransactionRollbacks).toBe(false);
+    });
+});
+
+describe('database slow transaction threshold', () => {
+    it('is disabled by default', () => {
+        expect(parseConfig().database.slowTransactionThresholdMs).toBeNull();
+    });
+    it('treats 0 as disabled', () => {
+        process.env.PG_SLOW_TRANSACTION_THRESHOLD_MS = '0';
+        expect(parseConfig().database.slowTransactionThresholdMs).toBeNull();
+    });
+    it('reads a positive threshold in milliseconds', () => {
+        process.env.PG_SLOW_TRANSACTION_THRESHOLD_MS = '60000';
+        expect(parseConfig().database.slowTransactionThresholdMs).toBe(60000);
+    });
+});
+
+describe('cross-source dbt deadlines', () => {
+    it('uses the default deadlines', () => {
+        expect(parseConfig().dbt).toMatchObject({
+            crossSourceMaxPasses: 3,
+            crossSourcePrepareTimeoutMs: 180000,
+            crossSourceLsTimeoutMs: 300000,
+            crossSourceResolutionTimeoutMs: 1200000,
+        });
+    });
+    it('reads each deadline from the environment', () => {
+        process.env.DBT_CROSS_SOURCE_MAX_PASSES = '5';
+        process.env.DBT_SOURCE_PREPARE_TIMEOUT_MS = '120';
+        process.env.DBT_SOURCE_LS_TIMEOUT_MS = '240';
+        process.env.DBT_CROSS_SOURCE_RESOLUTION_TIMEOUT_MS = '480';
+        expect(parseConfig().dbt).toMatchObject({
+            crossSourceMaxPasses: 5,
+            crossSourcePrepareTimeoutMs: 120,
+            crossSourceLsTimeoutMs: 240,
+            crossSourceResolutionTimeoutMs: 480,
+        });
+    });
+});
+
+describe('dbt source disk configuration', () => {
+    it('defaults the estimate and leaves the budget unset', () => {
+        expect(parseConfig().dbt).toMatchObject({
+            sourceFetchDiskBudgetBytes: undefined,
+            sourceFetchDiskPerSourceBytes: 256 * 1024 ** 2,
+        });
+    });
+    it('parses both disk settings', () => {
+        process.env.DBT_SOURCE_FETCH_DISK_BUDGET_BYTES = '1073741824';
+        process.env.DBT_SOURCE_FETCH_DISK_PER_SOURCE_BYTES = '134217728';
+        expect(parseConfig().dbt).toMatchObject({
+            sourceFetchDiskBudgetBytes: 1073741824,
+            sourceFetchDiskPerSourceBytes: 134217728,
+        });
     });
 });

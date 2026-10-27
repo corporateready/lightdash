@@ -1,16 +1,14 @@
 import {
     ActionIcon,
     Group,
-    HoverCard,
-    Popover,
     Stack,
     Text,
-    Tooltip,
     UnstyledButton,
-    useMantineTheme,
+    HoverCard,
+    Popover,
+    Tooltip,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
-import { Editor } from '@monaco-editor/react';
 import {
     IconClock,
     IconCornerDownLeft,
@@ -19,9 +17,12 @@ import {
 import dayjs from 'dayjs';
 import { type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
+import { Editor } from '../../../components/MonacoEditor';
+import { useEditorTheme } from '../../../hooks/useEditorTheme';
 import { useTimeAgo } from '../../../hooks/useTimeAgo';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { setSql } from '../store/sqlRunnerSlice';
+import styles from './SqlQueryHistory.module.css';
 
 type Props = {
     sql: string;
@@ -30,7 +31,7 @@ type Props = {
 };
 
 const SqlQueryHistoryItem: FC<Props> = ({ timestamp, sql }) => {
-    const mantineTheme = useMantineTheme();
+    const { monaco: monacoTheme } = useEditorTheme();
     const dispatch = useAppDispatch();
 
     const { hovered, ref: hoverRef } = useHover<HTMLButtonElement>();
@@ -38,27 +39,19 @@ const SqlQueryHistoryItem: FC<Props> = ({ timestamp, sql }) => {
 
     const formattedDate = dayjs(timestamp).format('YYYY-MM-DD HH:mm:ss');
 
-    const openInQueryEditorLinkColor =
-        mantineTheme.colorScheme === 'dark' ? 'indigo.4' : 'indigo.6';
-
     return (
         <Stack w="100%">
-            <HoverCard withinPortal position="left" shadow="sm">
+            <HoverCard position="left">
                 <HoverCard.Target>
                     <UnstyledButton
                         data-testid="sql-query-history-item"
                         ref={hoverRef}
-                        sx={(theme) => ({
-                            padding: theme.spacing.xs,
-                            '&:hover': {
-                                backgroundColor: theme.colors.ldGray[0],
-                            },
-                        })}
+                        className={styles.historyItem}
                         onClick={() => {
                             dispatch(setSql(sql));
                         }}
                     >
-                        <Group spacing="xs" lh={1} noWrap>
+                        <Group gap="xs" lh={1} wrap="nowrap">
                             <MantineIcon
                                 icon={hovered ? IconCornerDownLeft : IconClock}
                             />
@@ -66,9 +59,9 @@ const SqlQueryHistoryItem: FC<Props> = ({ timestamp, sql }) => {
                                 fz="xs"
                                 fw={500}
                                 w={150}
-                                color={
+                                c={
                                     hovered
-                                        ? openInQueryEditorLinkColor
+                                        ? 'var(--mantine-color-indigo-light-color)'
                                         : 'ldGray.8'
                                 }
                             >
@@ -79,15 +72,19 @@ const SqlQueryHistoryItem: FC<Props> = ({ timestamp, sql }) => {
                         </Group>
                     </UnstyledButton>
                 </HoverCard.Target>
-                <HoverCard.Dropdown maw={600} sx={{ overflow: 'scroll' }}>
-                    <Group position="apart">
+                <HoverCard.Dropdown
+                    maw={600}
+                    className={styles.historyDropdown}
+                >
+                    <Group justify="space-between">
                         <Text
                             fz="xs"
                             fw={500}
                             mb="xs"
-                            sx={(theme) => ({
-                                borderBottom: `1px solid ${theme.colors.ldGray[3]}`,
-                            })}
+                            style={{
+                                borderBottom:
+                                    '1px solid var(--mantine-color-ldGray-3)',
+                            }}
                         >
                             {timeAgo}
                         </Text>
@@ -108,11 +105,7 @@ const SqlQueryHistoryItem: FC<Props> = ({ timestamp, sql }) => {
                             revealHorizontalRightPadding: 0,
                             roundedSelection: false,
                         }}
-                        theme={
-                            mantineTheme.colorScheme === 'dark'
-                                ? 'lightdash-dark'
-                                : 'lightdash-light'
-                        }
+                        theme={monacoTheme}
                     />
                 </HoverCard.Dropdown>
             </HoverCard>
@@ -127,17 +120,15 @@ export const SqlQueryHistory: FC = () => {
         ),
     );
 
-    if (!sqlPastHistory || sqlPastHistory.length === 0) {
-        return null;
-    }
+    const hasHistory = sqlPastHistory.length > 0;
 
     return (
-        <Popover withinPortal>
+        <Popover disabled={!hasHistory}>
             <Popover.Target>
-                <Tooltip variant="xs" label="SQL Query history">
+                <Tooltip label="SQL query history" position="bottom">
                     <ActionIcon
-                        variant="default"
-                        size={32}
+                        aria-label="SQL query history"
+                        disabled={!hasHistory}
                         data-testid="sql-query-history-button"
                     >
                         <MantineIcon icon={IconHistory} />
@@ -145,7 +136,7 @@ export const SqlQueryHistory: FC = () => {
                 </Tooltip>
             </Popover.Target>
             <Popover.Dropdown p={0}>
-                <Stack spacing="one">
+                <Stack gap="one">
                     {sqlPastHistory.map((item) => (
                         <SqlQueryHistoryItem
                             key={item.value}

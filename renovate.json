@@ -87,6 +87,12 @@
       "enabled": false
     },
     {
+      "description": "Maintain the pinned upgrade-automation CLI",
+      "matchPackageNames": ["@lightdash/cli"],
+      "matchFileNames": ["examples/upgrade-automation/cli/package.json"],
+      "enabled": true
+    },
+    {
       "description": "Group AI/LLM packages",
       "groupName": "AI/LLM packages",
       "matchPackageNames": [
@@ -196,13 +202,11 @@
       "matchPackageNames": [
         "eslint-config-prettier",
         "eslint-plugin-import",
-        "eslint-plugin-jest",
         "eslint-plugin-jest-dom",
         "eslint-plugin-jsdoc",
         "eslint-plugin-jsx-a11y",
         "eslint-plugin-perfectionist",
         "eslint-plugin-react-refresh",
-        "eslint-plugin-testing-library",
         "globals"
       ]
     },
@@ -210,13 +214,10 @@
       "description": "Group testing packages",
       "groupName": "testing packages",
       "matchPackageNames": [
-        "jest",
-        "ts-jest",
         "cypress",
         "cypress-split",
         "jsdom",
-        "nock",
-        "@types/jest"
+        "nock"
       ]
     },
     {

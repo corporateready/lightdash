@@ -1,0 +1,457 @@
+/* eslint-disable no-await-in-loop -- One native DuckDB connection. */
+import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
+import { WarehouseTypes } from '@lightdash/common';
+import { warehouseSqlBuilderFromType } from '@lightdash/warehouses';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import path from 'path';
+import { createAnalyticsExplores } from '../../services/ProjectService/analyticsProject/createAnalyticsExplores';
+import { MetricQueryBuilder } from '../../utils/QueryBuilder/MetricQueryBuilder';
+import { contentInventoryColumns } from '../eventStream/contentInventory';
+import {
+    contentViewsProjections,
+    type CapturedContentView,
+} from '../eventStream/contentViewsStream';
+import { compactedStreamSchemas } from '../eventStream/registry';
+import type { CompactedStreamColumn } from '../eventStream/types';
+
+const compile = (dimensions: string[], metrics = ['total_content']) =>
+    new MetricQueryBuilder({
+        explore: createAnalyticsExplores().find(
+            (e) => e.name === 'content_health',
+        )!,
+        compiledMetricQuery: {
+            exploreName: 'content_health',
+            dimensions: dimensions.map((d) => `content_health_${d}`),
+            metrics: metrics.map((m) => `content_health_${m}`),
+            filters: {},
+            sorts: [],
+            limit: 1000,
+            tableCalculations: [],
+            compiledAdditionalMetrics: [],
+            compiledTableCalculations: [],
+            compiledCustomDimensions: [],
+        },
+        warehouseSqlBuilder: warehouseSqlBuilderFromType(WarehouseTypes.DUCKDB),
+        intrinsicUserAttributes: {},
+        parameterDefinitions: {},
+        timezone: 'UTC',
+    }).compileQuery().query;
+
+const schemas: Record<string, CompactedStreamColumn[]> = {
+    lightdash_content: contentInventoryColumns,
+    content_views: compactedStreamSchemas.content_views,
+    query_events: compactedStreamSchemas.query_events,
+    data_app_events: compactedStreamSchemas.data_app_events,
+};
+
+describe('Content health', () => {
+    let instance: DuckDBInstance;
+    let db: DuckDBConnection;
+    const insert = async (table: string, row: Record<string, unknown>) => {
+        const columns = schemas[table];
+        const statement = await db.prepare(
+            `INSERT INTO ${table} VALUES (${columns.map(() => '?').join(',')})`,
+        );
+        statement.bind(
+            columns.map(({ name }) => {
+                const value = row[name] ?? null;
+                if (
+                    value === null ||
+                    typeof value === 'string' ||
+                    typeof value === 'number' ||
+                    typeof value === 'boolean'
+                )
+                    return value;
+                throw new Error(`Unsupported fixture value for ${name}`);
+            }),
+        );
+        await statement.run();
+        statement.destroySync();
+    };
+    beforeEach(async () => {
+        instance = await DuckDBInstance.create(':memory:');
+        db = await instance.connect();
+        for (const [table, columns] of Object.entries(schemas)) {
+            await db.run(
+                `CREATE TABLE ${table} (${columns.map(({ name, type }) => `"${name}" ${type}`).join(',')})`,
+            );
+        }
+        for (const [id, type, deps, deleted] of [
+            ['used', 'dashboard', 0, false],
+            ['never', 'saved_chart', 0, false],
+            ['indirect', 'saved_chart', 2, false],
+            ['removed', 'sql_chart', 0, true],
+            ['app', 'data_app', 0, false],
+        ] as const)
+            await insert('lightdash_content', {
+                org_id: 'org',
+                project_id: 'project',
+                content_id: id,
+                content_type: type,
+                content_name: id,
+                created_at: '2026-01-01',
+                snapshot_at: '2026-09-30',
+                is_deleted: deleted,
+                dashboard_references: deps,
+                enabled_schedules: 0,
+                owner_status: 'Not recorded',
+            });
+    });
+    afterEach(() => {
+        db.closeSync();
+        instance.closeSync();
+    });
+
+    it('retains zero-event and deleted inventory without claiming complete coverage', async () => {
+        const rows = (
+            await db.runAndReadAll(
+                compile([
+                    'content_name',
+                    'is_deleted',
+                    'activity_status',
+                    'capture_coverage',
+                    'dependency_coverage',
+                ]),
+            )
+        ).getRowObjectsJson();
+        expect(rows).toHaveLength(5);
+        expect(
+            rows.find((r) => r.content_health_content_name === 'indirect')
+                ?.content_health_activity_status,
+        ).toBe('No activity observed; known dependency');
+        expect(
+            rows.find((r) => r.content_health_content_name === 'removed')
+                ?.content_health_is_deleted,
+        ).toBe(true);
+        expect(
+            rows.every((r) =>
+                String(r.content_health_capture_coverage).startsWith(
+                    'Incomplete:',
+                ),
+            ),
+        ).toBe(true);
+    });
+
+    it('aggregates before joining, deduplicates stable identities, and isolates organizations and projects', async () => {
+        const view = {
+            org_id: 'org',
+            project_id: 'project',
+            content_id: 'used',
+            content_type: 'dashboard',
+            user_id: 'reader',
+            event_name: 'dashboard.view',
+            event_id: 'one',
+            event_ts: '2026-09-20',
+            ingested_at: '2026-09-20',
+            is_qualifying: true,
+            actor_type: 'user',
+        };
+        await insert('content_views', view);
+        await insert('content_views', view);
+        await insert('content_views', {
+            ...view,
+            event_id: 'two',
+            event_ts: '2026-09-21',
+        });
+        await insert('content_views', {
+            ...view,
+            org_id: 'other',
+            event_id: 'other',
+        });
+        await insert('content_views', {
+            ...view,
+            project_id: 'other',
+            event_id: 'other-project',
+        });
+        const query = {
+            org_id: 'org',
+            project_id: 'project',
+            dashboard_id: 'used',
+            query_id: 'query',
+            event_name: 'query.completed',
+            event_ts: '2026-09-22',
+            warehouse_execution_time_ms: 100,
+        };
+        await insert('query_events', query);
+        await insert('query_events', query);
+        await insert('data_app_events', {
+            org_id: 'org',
+            project_id: 'project',
+            app_id: 'app',
+            event_name: 'data_app.view',
+            event_ts: '2026-09-23',
+        });
+        const metrics = [
+            'total_content',
+            'total_observed_views',
+            'total_observed_queries',
+            'total_observed_app_loads',
+            'total_warehouse_execution_time_ms',
+            'total_queries_with_execution_time',
+        ];
+        for (const dimensions of [
+            [],
+            ['content_type'],
+            ['content_id', 'activity_status'],
+            ['owner_status', 'is_deleted'],
+            ['created_at_month', 'project_id'],
+        ]) {
+            const rows = (
+                await db.runAndReadAll(compile(dimensions, metrics))
+            ).getRowObjectsJson();
+            const sum = (metric: string) =>
+                rows.reduce(
+                    (total, r) =>
+                        total + Number(r[`content_health_${metric}`] ?? 0),
+                    0,
+                );
+            expect(sum('total_content')).toBe(5);
+            expect(sum('total_observed_views')).toBe(2);
+            expect(sum('total_observed_queries')).toBe(1);
+            expect(sum('total_observed_app_loads')).toBe(1);
+            expect(sum('total_warehouse_execution_time_ms')).toBe(100);
+            expect(sum('total_queries_with_execution_time')).toBe(1);
+        }
+        const rows = (
+            await db.runAndReadAll(
+                compile([
+                    'content_id',
+                    'observed_viewers',
+                    'last_observed_activity_at',
+                    'first_observed_event_at',
+                ]),
+            )
+        ).getRowObjectsJson();
+        expect(
+            rows.find((r) => r.content_health_content_id === 'used')
+                ?.content_health_observed_viewers,
+        ).toBe('1');
+    });
+
+    it('handles large retained histories from projects absent from inventory within bounded memory', async () => {
+        const directory = await mkdtemp(path.join(tmpdir(), 'content-health-'));
+        const file = path.join(directory, 'queries.parquet');
+        try {
+            // Bracket the historical project so a Parquet min/max filter alone
+            // cannot remove it before the query deduplication.
+            for (const projectId of ['aaa', 'zzz']) {
+                await insert('lightdash_content', {
+                    org_id: 'org',
+                    project_id: projectId,
+                    content_id: projectId,
+                    content_type: 'dashboard',
+                });
+            }
+            await db.run(`INSERT INTO query_events
+                (org_id, project_id, query_id, dashboard_id, event_ts)
+                SELECT 'org', 'removed-project', md5(i::VARCHAR), 'used',
+                    TIMESTAMP '2026-09-20'
+                FROM range(600000) rows(i)`);
+            await insert('query_events', {
+                org_id: 'org',
+                project_id: 'project',
+                query_id: 'current',
+                dashboard_id: 'used',
+                event_ts: '2026-09-21',
+            });
+            await db.run(`COPY query_events TO '${file}' (FORMAT PARQUET)`);
+            await db.run('DROP TABLE query_events');
+            await db.run(
+                `CREATE VIEW query_events AS SELECT * FROM read_parquet('${file}')`,
+            );
+            await db.run("SET memory_limit = '64MB'");
+            await db.run('SET threads = 4');
+            await db.run("SET temp_directory = ''");
+            const rows = (
+                await db.runAndReadAll(
+                    compile(
+                        ['content_id', 'activity_status'],
+                        ['total_observed_queries'],
+                    ),
+                )
+            ).getRowObjectsJson();
+            expect(
+                rows.find((row) => row.content_health_content_id === 'used'),
+            ).toMatchObject({
+                content_health_activity_status: 'Activity observed',
+                content_health_total_observed_queries: '1',
+            });
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps latest query attribution and separate null identities within inventory projects', async () => {
+        const query = {
+            org_id: 'org',
+            project_id: 'project',
+            dashboard_id: 'used',
+            event_ts: '2026-09-20',
+            warehouse_execution_time_ms: 10,
+        };
+        for (const queryId of ['removed-attribution', 'changed-attribution']) {
+            await insert('query_events', { ...query, query_id: queryId });
+            await insert('query_events', {
+                ...query,
+                query_id: queryId,
+                event_ts: '2026-09-21',
+                dashboard_id:
+                    queryId === 'removed-attribution'
+                        ? null
+                        : 'unknown-content',
+            });
+        }
+        await insert('query_events', { ...query, query_id: null });
+        await insert('query_events', {
+            ...query,
+            query_id: null,
+            warehouse_execution_time_ms: 20,
+        });
+        await insert('query_events', { ...query, query_id: 'retained' });
+        // Same query identity in another scope must neither replace the current
+        // event nor become attributed to its inventory item.
+        await insert('query_events', {
+            ...query,
+            query_id: 'retained',
+            org_id: 'other',
+            event_ts: '2026-09-22',
+            warehouse_execution_time_ms: 1000,
+        });
+        await insert('query_events', {
+            ...query,
+            query_id: 'retained',
+            project_id: 'other',
+            event_ts: '2026-09-22',
+            warehouse_execution_time_ms: 1000,
+        });
+        const rows = (
+            await db.runAndReadAll(
+                compile(
+                    ['content_id'],
+                    [
+                        'total_observed_queries',
+                        'total_warehouse_execution_time_ms',
+                    ],
+                ),
+            )
+        ).getRowObjectsJson();
+        expect(
+            rows.find((row) => row.content_health_content_id === 'used'),
+        ).toMatchObject({
+            content_health_total_observed_queries: '3',
+            content_health_total_warehouse_execution_time_ms: '40',
+        });
+    });
+
+    it.each([
+        ['saved_chart.view', 'chart', 'saved_chart'],
+        ['dashboard.view', 'dashboard', 'dashboard'],
+        ['sql_chart.view', 'sql_chart', 'sql_chart'],
+    ] as const)(
+        'joins projected %s events to inventory without losing views or duplicating items',
+        async (event, capturedType, inventoryType) => {
+            await insert('lightdash_content', {
+                org_id: 'org',
+                project_id: 'project',
+                content_id: 'viewed',
+                content_type: inventoryType,
+                dashboard_references: 0,
+                enabled_schedules: 0,
+            });
+            const payload: CapturedContentView = {
+                event,
+                userId: 'reader',
+                properties: {
+                    organizationId: 'org',
+                    projectId: 'project',
+                    contentView: {
+                        eventId: 'first',
+                        occurredAt: '2026-09-20T12:00:00.000Z',
+                        contentId: 'viewed',
+                        contentType: capturedType,
+                        contentName: 'Viewed content',
+                        projectName: null,
+                        spaceId: null,
+                        spaceName: null,
+                        createdAt: null,
+                        isVerified: null,
+                        context: 'backend',
+                        actorType: 'user',
+                    },
+                },
+            };
+            const view = contentViewsProjections[event](payload)!.row;
+            await insert('content_views', view);
+            await insert('content_views', view);
+            await insert('content_views', {
+                ...view,
+                event_id: 'second',
+                user_id: 'another-reader',
+                event_ts: '2026-09-21T12:00:00.000Z',
+            });
+            for (const excluded of [
+                { org_id: 'other-org' },
+                { project_id: 'other-project' },
+                {
+                    content_type:
+                        capturedType === 'dashboard' ? 'chart' : 'dashboard',
+                },
+                { is_qualifying: false },
+                { actor_type: 'embed' },
+                { user_id: null },
+            ]) {
+                await insert('content_views', {
+                    ...view,
+                    event_id: 'excluded',
+                    event_ts: '2026-09-22T12:00:00.000Z',
+                    ...excluded,
+                });
+            }
+            const rows = (
+                await db.runAndReadAll(
+                    compile(
+                        [
+                            'content_id',
+                            'content_type',
+                            'observed_viewers',
+                            'last_viewed_at',
+                            'last_observed_activity_at',
+                            'activity_status',
+                        ],
+                        ['total_content', 'total_observed_views'],
+                    ),
+                )
+            ).getRowObjectsJson();
+            expect(rows).toHaveLength(6);
+            expect(
+                rows.find((r) => r.content_health_content_id === 'viewed'),
+            ).toMatchObject({
+                content_health_content_type: inventoryType,
+                content_health_total_content: '1',
+                content_health_total_observed_views: '2',
+                content_health_observed_viewers: '2',
+                content_health_last_viewed_at: '2026-09-21 12:00:00',
+                content_health_last_observed_activity_at: '2026-09-21 12:00:00',
+                content_health_activity_status: 'Activity observed',
+            });
+            const totals = (
+                await db.runAndReadAll(
+                    compile([], ['total_content', 'total_observed_views']),
+                )
+            ).getRowObjectsJson();
+            expect(totals).toEqual([
+                {
+                    content_health_total_content: '6',
+                    content_health_total_observed_views: '2',
+                },
+            ]);
+        },
+    );
+
+    it('supports missing inventory during rollout', async () => {
+        await db.run('DELETE FROM lightdash_content');
+        const rows = (await db.runAndReadAll(compile([]))).getRowObjectsJson();
+        expect(rows).toEqual([{ content_health_total_content: '0' }]);
+    });
+});

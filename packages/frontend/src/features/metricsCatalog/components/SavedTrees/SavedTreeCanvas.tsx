@@ -12,8 +12,8 @@ import {
     Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
-import { useDisclosure, useWindowEvent } from '@mantine-8/hooks';
+} from '@mantine/core';
+import { useDisclosure, useWindowEvent } from '@mantine/hooks';
 import {
     IconDotsVertical,
     IconLock,
@@ -35,6 +35,7 @@ import MantineIcon from '../../../../components/common/MantineIcon';
 import MantineModal from '../../../../components/common/MantineModal';
 import { ShareLinkButton } from '../../../../components/common/ShareLinkButton';
 import SuboptimalState from '../../../../components/common/SuboptimalState/SuboptimalState';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 import useApp from '../../../../providers/App/useApp';
 import { useAppDispatch, useAppSelector } from '../../../sqlRunner/store/hooks';
 import { useMetricsCatalog } from '../../hooks/useMetricsCatalog';
@@ -70,6 +71,7 @@ type SavedTreeCanvasProps = {
 };
 
 const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
+    const getUiString = useUiStrings();
     const dispatch = useAppDispatch();
     const navigate = useNavigate();
     const { user } = useApp();
@@ -164,6 +166,7 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
             const term = search.toLowerCase();
             return (
                 node.data.label.toLowerCase().includes(term) ||
+                node.data.metricName.toLowerCase().includes(term) ||
                 node.data.tableName.toLowerCase().includes(term)
             );
         },
@@ -223,10 +226,15 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
         void fetch(url, { method: 'DELETE', keepalive: true });
     });
 
+    // Saving can navigate before React has committed VIEW mode. Allow only
+    // that successfully saved destination through the old editor's blocker.
+    const savedTreePathRef = useRef<string | null>(null);
+
     // Block in-app navigation when there are unsaved changes,
     // but allow query-string-only changes (e.g. filter updates)
     const blocker = useBlocker(({ currentLocation, nextLocation }) => {
         if (!isEditMode || !hasUnsavedChanges) return false;
+        if (nextLocation.pathname === savedTreePathRef.current) return false;
         if (nextLocation.pathname === currentLocation.pathname) return false;
         return true;
     });
@@ -347,10 +355,10 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
                 payload,
             });
 
+            const savedTreePath = `/projects/${projectUuid}/metrics/canvas/${result.slug}`;
+            savedTreePathRef.current = savedTreePath;
             dispatch(setSavedTreeEditMode(SavedTreeEditMode.VIEW));
-            void navigate(
-                `/projects/${projectUuid}/metrics/canvas/${result.slug}`,
-            );
+            void navigate(savedTreePath);
         }
     };
 
@@ -380,7 +388,7 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
     // Empty state: no tree selected and not in edit mode
     if (treeUuid === null && mode === SavedTreeEditMode.VIEW) {
         return (
-            <Center h="100%">
+            <Center h={{ base: 180, md: '100%' }} px="xs">
                 <SuboptimalState
                     title="No tree selected"
                     description="Select a tree from the sidebar or create a new one"
@@ -393,20 +401,23 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
     if (isEditMode) {
         return (
             <Stack h="100%" gap={0}>
-                <Group
-                    className={classes.header}
-                    justify="space-between"
-                    wrap="nowrap"
-                >
-                    <Group gap="sm" wrap="nowrap" style={{ flex: 1 }}>
+                <Group className={classes.header} justify="space-between">
+                    <Group gap="sm" wrap="nowrap" flex={1} miw={0}>
                         <TextInput
                             required
                             variant="subtle"
                             placeholder="Tree name"
+                            aria-label="Tree name"
+                            data-tour-anchor="tree-name"
+                            data-tour-hint="Name your tree"
+                            data-tour-input="true"
+                            data-tour-suggest="Completed orders drivers"
+                            data-tour-docs="explore/metrics-catalog/build-saved-trees.mdx#creating-a-saved-tree:li1"
                             value={treeName}
                             onChange={(e) => setTreeName(e.currentTarget.value)}
                             size="sm"
-                            style={{ flex: 1, maxWidth: 300 }}
+                            flex={1}
+                            maw={300}
                         />
                     </Group>
                     <Group gap="sm" wrap="nowrap">
@@ -420,6 +431,14 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
                         </Button>
                         <Button
                             size="compact-sm"
+                            data-tour-scope="manage:MetricsTree"
+                            data-tour-step="2"
+                            data-tour-title="Build a saved metrics tree"
+                            data-tour-label="Save the tree"
+                            data-tour-route="/projects/:projectUuid/metrics/canvas"
+                            data-tour-docs="explore/metrics-catalog/build-saved-trees.mdx#creating-a-saved-tree:li6"
+                            data-tour-interactive="true"
+                            data-tour-via='[data-tour-nav="metrics"] >> [data-tour-anchor="metrics-canvas"] >> [data-tour-anchor="tree-new"] >> [data-tour-anchor="tree-name"] >> [data-tour-anchor="metrics-search"] >> [data-tour-anchor="tree-add-metric"][data-tour-value="Total completed order amount"] >> [data-tour-anchor="tree-add-drivers"]'
                             onClick={handleSave}
                             disabled={!treeName.trim() || !hasNodes}
                             loading={isCreating || isUpdating}
@@ -495,8 +514,7 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
                 <Group
                     className={classes.header}
                     justify="space-between"
-                    wrap="nowrap"
-                    h="60px"
+                    mih={60}
                 >
                     <Group gap="sm" wrap="nowrap">
                         <Text fz="sm" fw={600} c="ldGray.7">
@@ -505,7 +523,6 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
                         {lockByOther && (
                             <Badge
                                 size="sm"
-                                variant="light"
                                 color="yellow"
                                 leftSection={
                                     <MantineIcon icon={IconLock} size={12} />
@@ -530,17 +547,13 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
                             label="Copy link to tree"
                         />
                         {canManageMetricsTree && (
-                            <Menu
-                                position="bottom-end"
-                                withArrow
-                                withinPortal
-                                shadow="md"
-                            >
+                            <Menu position="bottom-end" withArrow>
                                 <Menu.Target>
                                     <ActionIcon
-                                        variant="subtle"
-                                        color="gray"
                                         loading={isAcquiringLock}
+                                        aria-label={getUiString(
+                                            'metrics.treeActions',
+                                        )}
                                     >
                                         <MantineIcon icon={IconDotsVertical} />
                                     </ActionIcon>
@@ -596,12 +609,32 @@ const SavedTreeCanvas: FC<SavedTreeCanvasProps> = ({ mode, treeUuid }) => {
                         )}
                     </Group>
                 </Group>
-                <Box className={classes.canvasContainer}>
-                    <SavedTreeCanvasFlow
-                        metrics={treeDetails.nodes}
-                        edges={treeDetails.edges}
-                        viewOnly
-                    />
+                <Box
+                    className={classes.canvasContainer}
+                    data-tour-scope="manage:MetricsTree"
+                    data-tour-step="1"
+                    data-tour-label="Build a saved metrics tree"
+                    data-tour-route="/projects/:projectUuid/metrics/canvas/:treeSlug"
+                    data-tour-docs="explore/metrics-catalog/build-saved-trees.mdx#intro:1-2"
+                    data-tour-resultdocs="explore/metrics-catalog/build-saved-trees.mdx#creating-a-saved-tree:1"
+                    data-tour-return="none"
+                >
+                    <Box
+                        h="100%"
+                        data-tour-scope="view:MetricsTree"
+                        data-tour-step="1"
+                        data-tour-label="View a saved metrics tree"
+                        data-tour-route="/projects/:projectUuid/metrics/canvas/:treeSlug"
+                        data-tour-docs="explore/metrics-catalog/build-saved-trees.mdx#intro:1-2"
+                        data-tour-resultdocs="explore/metrics-catalog/drivers.mdx#how-drivers-appear-on-the-canvas:1"
+                        data-tour-return="none"
+                    >
+                        <SavedTreeCanvasFlow
+                            metrics={treeDetails.nodes}
+                            edges={treeDetails.edges}
+                            viewOnly
+                        />
+                    </Box>
                 </Box>
                 <MantineModal
                     opened={isDeleteModalOpen}

@@ -1,3 +1,4 @@
+import { type ConditionalFormattingConfig } from './conditionalFormatting';
 import { type PivotConfig } from './pivot';
 
 export enum DownloadFileType {
@@ -13,6 +14,7 @@ export type DownloadFile = {
     path: string;
     createdAt: Date;
     type: DownloadFileType;
+    projectUuid: string | null;
 };
 
 /**
@@ -28,4 +30,8 @@ export type DownloadOptions = {
     pivotConfig?: PivotConfig;
     exportPivotedData?: boolean;
     attachmentDownloadName?: string;
+    conditionalFormattings?: ConditionalFormattingConfig[];
+    // Table chart "Show column total" — appends a warehouse-computed totals row
+    // to unpivoted exports. Pivoted exports carry it in `pivotConfig`.
+    showColumnTotals?: boolean;
 };

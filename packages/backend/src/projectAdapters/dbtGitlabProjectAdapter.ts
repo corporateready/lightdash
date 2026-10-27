@@ -1,14 +1,13 @@
 import {
-    CreateWarehouseCredentials,
     DbtProjectEnvironmentVariable,
     SupportedDbtVersions,
 } from '@lightdash/common';
 import { WarehouseClient } from '@lightdash/warehouses';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
+import type { DbtTargetResult } from '../services/WarehouseClientFactory/CredentialResolver';
 import { CachedWarehouse } from '../types';
+import { DEFAULT_GITLAB_HOST_DOMAIN } from '../utils/credentialDestination';
 import { DbtGitProjectAdapter } from './dbtGitProjectAdapter';
-
-const DEFAULT_GITLAB_HOST_DOMAIN = 'gitlab.com';
 
 type DbtGitlabProjectAdapterArgs = {
     warehouseClient: WarehouseClient;
@@ -16,14 +15,17 @@ type DbtGitlabProjectAdapterArgs = {
     gitlabRepository: string;
     gitlabBranch: string;
     projectDirectorySubPath: string;
-    warehouseCredentials: CreateWarehouseCredentials;
+    dbtTarget: DbtTargetResult;
+    explicitCredentials: boolean;
     hostDomain?: string;
     targetName: string | undefined;
     environment: DbtProjectEnvironmentVariable[] | undefined;
+    environmentVariableAllowlist: string[];
     cachedWarehouse: CachedWarehouse;
     dbtVersion: SupportedDbtVersions;
     selector?: string;
     analytics?: LightdashAnalytics;
+    partialParseBaselinePath: string | null;
 };
 
 export class DbtGitlabProjectAdapter extends DbtGitProjectAdapter {
@@ -33,14 +35,17 @@ export class DbtGitlabProjectAdapter extends DbtGitProjectAdapter {
         gitlabPersonalAccessToken,
         gitlabRepository,
         projectDirectorySubPath,
-        warehouseCredentials,
+        dbtTarget,
+        explicitCredentials,
         hostDomain,
         targetName,
         environment,
+        environmentVariableAllowlist,
         cachedWarehouse,
         dbtVersion,
         selector,
         analytics,
+        partialParseBaselinePath,
     }: DbtGitlabProjectAdapterArgs) {
         const remoteRepositoryUrl = `https://lightdash:${gitlabPersonalAccessToken}@${
             hostDomain || DEFAULT_GITLAB_HOST_DOMAIN
@@ -51,13 +56,16 @@ export class DbtGitlabProjectAdapter extends DbtGitProjectAdapter {
             remoteRepositoryUrl,
             repository: gitlabRepository,
             projectDirectorySubPath,
-            warehouseCredentials,
+            dbtTarget,
+            explicitCredentials,
             targetName,
             environment,
+            environmentVariableAllowlist,
             cachedWarehouse,
             dbtVersion,
             selector,
             analytics,
+            partialParseBaselinePath,
         });
     }
 }

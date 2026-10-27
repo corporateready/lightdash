@@ -12,11 +12,14 @@ import { AnalyticsModel } from '../../models/AnalyticsModel';
 import { CatalogModel } from '../../models/CatalogModel/CatalogModel';
 import { ContentVerificationModel } from '../../models/ContentVerificationModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import { OrganizationMemberProfileModel } from '../../models/OrganizationMemberProfileModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
 import { PinnedListModel } from '../../models/PinnedListModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { SavedChartModel } from '../../models/SavedChartModel';
+import { SavedSqlModel } from '../../models/SavedSqlModel';
 import { SchedulerModel } from '../../models/SchedulerModel';
+import { SearchModel } from '../../models/SearchModel';
 import { SpaceModel } from '../../models/SpaceModel';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
 import { SavedChartService } from '../SavedChartsService/SavedChartService';
@@ -49,6 +52,8 @@ const adminUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     userId: 1,
@@ -74,19 +79,23 @@ const editorUser = {
 };
 
 const dashboardModel = {
-    getByIdOrSlug: jest.fn(async () => dashboardData),
+    getByIdOrSlug: vi.fn(async () => dashboardData),
 };
 
 const contentVerificationModel = {
-    verify: jest.fn(async () => undefined),
-    unverify: jest.fn(async () => undefined),
-    getByContent: jest.fn(async () => verificationInfo),
+    verify: vi.fn(async () => undefined),
+    unverify: vi.fn(async () => undefined),
+    getByContent: vi.fn(async () => verificationInfo),
 };
 
-jest.spyOn(analyticsMock, 'track');
+vi.spyOn(analyticsMock, 'track');
 
 describe('DashboardService - Content Verification', () => {
     const service = new DashboardService({
+        featureFlagModel: {
+            get: vi.fn().mockResolvedValue({ enabled: false }),
+        },
+        agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
         lightdashConfig: lightdashConfigMock,
         analytics: analyticsMock,
         dashboardModel: dashboardModel as unknown as DashboardModel,
@@ -94,25 +103,32 @@ describe('DashboardService - Content Verification', () => {
         analyticsModel: {} as unknown as AnalyticsModel,
         pinnedListModel: {} as unknown as PinnedListModel,
         schedulerModel: {} as unknown as SchedulerModel,
+        searchModel: {} as unknown as SearchModel,
         schedulerService: {} as unknown as SchedulerService,
         savedChartModel: {
-            getInfoForAvailableFilters: jest.fn(async () => []),
+            getInfoForAvailableFilters: vi.fn(async () => []),
         } as unknown as SavedChartModel,
+        savedSqlModel: {} as unknown as SavedSqlModel,
         savedChartService: {} as unknown as SavedChartService,
         projectModel: {
-            getCachedExploreNames: jest.fn(async () => []),
+            getCachedExploreNames: vi.fn(async () => []),
         } as unknown as ProjectModel,
         slackClient: {} as unknown as SlackClient,
         schedulerClient: {} as unknown as SchedulerClient,
+        contentAsCodeProjectSettingsModel: { get: vi.fn() } as never,
+        contentAsCodeSnapshotModel: { get: vi.fn() } as never,
+        contentDraftModel: { findOpenDraft: vi.fn() } as never,
         catalogModel: {} as unknown as CatalogModel,
         organizationModel: {} as unknown as OrganizationModel,
+        organizationMemberProfileModel:
+            {} as unknown as OrganizationMemberProfileModel,
         spacePermissionService: {} as unknown as SpacePermissionService,
         contentVerificationModel:
             contentVerificationModel as unknown as ContentVerificationModel,
     });
 
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('CASL authorization', () => {

@@ -1,6 +1,8 @@
 import { subject } from '@casl/ability';
 import {
+    Account,
     ApiCatalogSearch,
+    assertRegisteredAccount,
     CatalogAnalytics,
     CatalogField,
     CatalogFilter,
@@ -27,6 +29,7 @@ import {
     hasIntersection,
     InlineErrorType,
     isExploreError,
+    isJwtUser,
     MetricWithAssociatedTimeDimension,
     NotFoundError,
     ParameterError,
@@ -55,6 +58,7 @@ import {
 } from '@lightdash/common';
 import { uniqBy } from 'lodash';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
+import { fromSession } from '../../auth/account/account';
 import { LightdashConfig } from '../../config/parseConfig';
 import type {
     DbCatalogTagsMigrateIn,
@@ -62,24 +66,40 @@ import type {
     DbMetricsTreeNodeIn,
 } from '../../database/entities/catalog';
 import {
+    newExploreCacheReadContext,
+    safeGetCachedExploreStorageBytes,
+    summarizeExploreCacheRead,
+    type ExploreCacheReadContext,
+} from '../../logging/exploreCacheReadMetrics';
+import { measureTime } from '../../logging/measureTime';
+import {
     CatalogModel,
     type CatalogSearchContext,
 } from '../../models/CatalogModel/CatalogModel';
 import { parseFieldsFromCompiledTable } from '../../models/CatalogModel/utils/parser';
-import { ChangesetModel } from '../../models/ChangesetModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { SavedChartModel } from '../../models/SavedChartModel';
 import { SpaceModel } from '../../models/SpaceModel';
 import type { TagsModel } from '../../models/TagsModel';
 import { UserAttributesModel } from '../../models/UserAttributesModel';
 import { wrapSentryTransaction } from '../../utils';
+import {
+    redactCatalogMetricSql,
+    redactFieldSql,
+} from '../../utils/embedCompiledSql';
 import { BaseService } from '../BaseService';
 import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import {
+    auditAndFilterExplore,
+    auditExploreAttributeAccess,
+} from '../UserAttributesService/userAttributeAudit';
 import {
     checkUserAttributesAccess,
     doesExploreMatchRequiredAttributes,
     getFilteredExplore,
 } from '../UserAttributesService/UserAttributeUtils';
+
+type CatalogBrowseTrigger = 'browse' | 'index';
 
 export type CatalogArguments<T extends CatalogModel = CatalogModel> = {
     lightdashConfig: LightdashConfig;
@@ -90,7 +110,6 @@ export type CatalogArguments<T extends CatalogModel = CatalogModel> = {
     savedChartModel: SavedChartModel;
     spaceModel: SpaceModel;
     tagsModel: TagsModel;
-    changesetModel: ChangesetModel;
     spacePermissionService: SpacePermissionService;
 };
 
@@ -113,8 +132,6 @@ export class CatalogService<
 
     tagsModel: TagsModel;
 
-    changesetModel: ChangesetModel;
-
     spacePermissionService: SpacePermissionService;
 
     constructor({
@@ -126,7 +143,6 @@ export class CatalogService<
         savedChartModel,
         spaceModel,
         tagsModel,
-        changesetModel,
         spacePermissionService,
     }: CatalogArguments<T>) {
         super();
@@ -138,8 +154,46 @@ export class CatalogService<
         this.savedChartModel = savedChartModel;
         this.spaceModel = spaceModel;
         this.tagsModel = tagsModel;
-        this.changesetModel = changesetModel;
         this.spacePermissionService = spacePermissionService;
+    }
+
+    private assertJwtCanViewCatalog(
+        account: Account,
+        organizationUuid: string,
+        projectUuid: string,
+    ): void {
+        if (!isJwtUser(account)) return;
+
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('SpotlightTableConfig', {
+                    organizationUuid,
+                    projectUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+    }
+
+    private async getUserAttributesForAccount(
+        account: Account,
+        organizationUuid: string,
+        projectUuid: string,
+    ): Promise<UserAttributeValueMap> {
+        this.assertJwtCanViewCatalog(account, organizationUuid, projectUuid);
+
+        if (isJwtUser(account)) {
+            return account.access.controls?.userAttributes ?? {};
+        }
+
+        assertRegisteredAccount(account);
+        return this.userAttributesModel.getAttributeValuesForOrgMember({
+            organizationUuid,
+            userUuid: account.user.userUuid,
+        });
     }
 
     private static async getCatalogFields(
@@ -280,12 +334,6 @@ export class CatalogService<
         fullTextSearchOperator?: 'OR' | 'AND';
         filteredExplores?: Explore[];
     }): Promise<KnexPaginatedData<CatalogItem[]>> {
-        const changeset = args.filteredExplores
-            ? // Do not pass changeset as we expect `filteredExplores` to have changeset already applied
-              undefined
-            : await this.changesetModel.findActiveChangesetWithChangesByProjectUuid(
-                  args.projectUuid,
-              );
         return wrapSentryTransaction(
             'CatalogService.searchCatalog',
             {
@@ -305,7 +353,6 @@ export class CatalogService<
                     () =>
                         this.catalogModel.search({
                             projectUuid: args.projectUuid,
-                            changeset,
                             catalogSearch: args.catalogSearch,
                             paginateArgs: args.paginateArgs,
                             userAttributes: args.userAttributes,
@@ -325,63 +372,150 @@ export class CatalogService<
         user: SessionUser,
         organizationUuid: string,
         projectUuid: string,
+        requestKind: Extract<CatalogBrowseTrigger, 'browse'>,
     ) {
-        const cachedExplores = await this.projectModel.findExploresFromCache(
-            projectUuid,
-            'name',
-        );
+        const browseReadContext: ExploreCacheReadContext & {
+            trigger: CatalogBrowseTrigger;
+        } = {
+            ...newExploreCacheReadContext('catalog-browse', undefined),
+            trigger: requestKind,
+        };
+        const { result: filteredExplores } = await measureTime(
+            async () => {
+                const dbReadStart = performance.now();
+                const explorePromise = this.projectModel
+                    .findExploresFromCache(projectUuid, 'name')
+                    .then((result) => {
+                        browseReadContext.dbReadMs =
+                            performance.now() - dbReadStart;
+                        return result;
+                    });
+                const [cachedExplores, storedExploreBytes] = await Promise.all([
+                    explorePromise,
+                    safeGetCachedExploreStorageBytes(() =>
+                        this.projectModel.getCachedExploreStorageBytes(
+                            projectUuid,
+                        ),
+                    ),
+                ]);
 
-        if (!cachedExplores) return [];
+                if (!cachedExplores) return [];
 
-        const explores = Object.values(cachedExplores);
+                Object.assign(browseReadContext, {
+                    ...summarizeExploreCacheRead(cachedExplores),
+                    storedExploreBytes,
+                });
 
-        const userAttributes =
-            await this.userAttributesModel.getAttributeValuesForOrgMember({
-                organizationUuid,
-                userUuid: user.userUuid,
-            });
+                const explores = Object.values(cachedExplores);
 
-        // We keep errors in the list of explores
-        const filteredExplores = explores.reduce<(Explore | ExploreError)[]>(
-            (acc, explore) => {
-                if (isExploreError(explore)) {
-                    // If no dimensions found, we don't show the explore error
-                    if (
-                        explore.errors.every(
-                            (error) =>
-                                error.type ===
-                                InlineErrorType.NO_DIMENSIONS_FOUND,
-                        )
-                    )
-                        return acc;
+                const userAttributes =
+                    await this.userAttributesModel.getAttributeValuesForOrgMember(
+                        {
+                            organizationUuid,
+                            userUuid: user.userUuid,
+                        },
+                    );
 
-                    return [...acc, explore];
-                }
-                if (
-                    !doesExploreMatchRequiredAttributes(
-                        explore.tables[explore.baseTable].requiredAttributes,
-                        explore.tables[explore.baseTable].anyAttributes,
-                        userAttributes,
-                    )
-                ) {
-                    return acc;
-                }
-                const filteredExplore = getFilteredExplore(
-                    explore,
-                    userAttributes,
+                const attributeFilterStart = performance.now();
+                // We keep errors in the list of explores
+                const filtered = explores.reduce<(Explore | ExploreError)[]>(
+                    (acc, explore) => {
+                        if (isExploreError(explore)) {
+                            // If no dimensions found, we don't show the explore error
+                            if (
+                                explore.errors.every(
+                                    (error) =>
+                                        error.type ===
+                                        InlineErrorType.NO_DIMENSIONS_FOUND,
+                                )
+                            )
+                                return acc;
+
+                            return [...acc, explore];
+                        }
+                        if (
+                            !doesExploreMatchRequiredAttributes(
+                                explore.tables[explore.baseTable]
+                                    .requiredAttributes,
+                                explore.tables[explore.baseTable].anyAttributes,
+                                userAttributes,
+                            )
+                        ) {
+                            return acc;
+                        }
+                        const filteredExplore = getFilteredExplore(
+                            explore,
+                            userAttributes,
+                        );
+                        return [...acc, filteredExplore];
+                    },
+                    [],
                 );
-                return [...acc, filteredExplore];
+                browseReadContext.attributeFilterMs =
+                    performance.now() - attributeFilterStart;
+
+                return filtered;
             },
-            [],
+            'CatalogService.getFilteredExplores.cachedExploreRead',
+            this.logger,
+            browseReadContext,
         );
 
         return filteredExplores;
     }
 
+    async getIndexCatalogMetadata(projectUuid: string) {
+        const [
+            prevCatalogItemsWithTags,
+            prevCatalogItemsWithIcons,
+            prevMetricTreeEdges,
+            prevMetricsTreeNodes,
+        ] = await Promise.all([
+            this.catalogModel.getCatalogItemsWithTags(projectUuid, {
+                onlyTagged: true,
+                includeYamlTags: false,
+            }),
+            this.catalogModel.getCatalogItemsWithIcons(projectUuid),
+            this.catalogModel.getAllMetricsTreeEdges(projectUuid),
+            this.catalogModel.getAllMetricsTreeNodes(projectUuid),
+        ]);
+        return {
+            prevCatalogItemsWithTags,
+            prevCatalogItemsWithIcons,
+            prevMetricTreeEdges,
+            prevMetricsTreeNodes,
+        };
+    }
+
     async indexCatalog(projectUuid: string, userUuid: string | undefined) {
-        const cachedExploresMap = await this.projectModel.findExploresFromCache(
-            projectUuid,
-            'uuid',
+        const indexReadContext: ExploreCacheReadContext & {
+            trigger: CatalogBrowseTrigger;
+        } = {
+            ...newExploreCacheReadContext('catalog-browse', undefined),
+            trigger: 'index',
+        };
+        const { result: cachedExploresMap } = await measureTime(
+            async () => {
+                const [explores, storedExploreBytes] = await Promise.all([
+                    this.projectModel.findExploresFromCache(
+                        projectUuid,
+                        'uuid',
+                    ),
+                    safeGetCachedExploreStorageBytes(() =>
+                        this.projectModel.getCachedExploreStorageBytes(
+                            projectUuid,
+                        ),
+                    ),
+                ]);
+                Object.assign(indexReadContext, {
+                    ...summarizeExploreCacheRead(explores),
+                    storedExploreBytes,
+                });
+                return explores;
+            },
+            'CatalogService.indexCatalog.cachedExploreRead',
+            this.logger,
+            indexReadContext,
         );
 
         const { organizationUuid } =
@@ -414,41 +548,6 @@ export class CatalogService<
         }
 
         return result;
-    }
-
-    /**
-     * Index catalog updates for a list of explore names
-     * It will use the changeset to find the changes and update the catalog items in the database
-     * @param projectUuid - project uuid
-     * @param exploreNames - list of explore names
-     * @returns - catalog updates
-     */
-    async indexCatalogUpdates(projectUuid: string, exploreNames: string[]) {
-        const cachedExploreMap = await this.projectModel.findExploresFromCache(
-            projectUuid,
-            'name',
-            exploreNames,
-        );
-
-        const changeset =
-            await this.changesetModel.findActiveChangesetWithChangesByProjectUuid(
-                projectUuid,
-                {
-                    tableNames: exploreNames,
-                },
-            );
-
-        if (!changeset) {
-            return {
-                catalogUpdates: [],
-            };
-        }
-
-        return this.catalogModel.indexCatalogUpdates({
-            projectUuid,
-            cachedExploreMap,
-            changeset,
-        });
     }
 
     /**
@@ -709,12 +808,6 @@ export class CatalogService<
             throw new ForbiddenError();
         }
 
-        const filteredExplores = await this.getFilteredExplores(
-            user,
-            organizationUuid,
-            projectUuid,
-        );
-
         const userAttributes =
             await this.userAttributesModel.getAttributeValuesForOrgMember({
                 organizationUuid,
@@ -733,6 +826,13 @@ export class CatalogService<
                 paginateArgs: { page: 1, pageSize: 50 },
             });
         }
+
+        const filteredExplores = await this.getFilteredExplores(
+            user,
+            organizationUuid,
+            projectUuid,
+            'browse',
+        );
 
         if (catalogSearch.type === CatalogType.Field) {
             return {
@@ -753,6 +853,7 @@ export class CatalogService<
         };
     }
 
+    /** @deprecated Only used by the deprecated table metadata endpoint, which will be removed without replacement. */
     async getMetadata(user: SessionUser, projectUuid: string, table: string) {
         // Right now we return the full cached explore based on name
         // We could extract some data to only return what we need instead
@@ -781,11 +882,12 @@ export class CatalogService<
             });
 
         if (
-            !doesExploreMatchRequiredAttributes(
-                explore.tables[explore.baseTable].requiredAttributes,
-                explore.tables[explore.baseTable].anyAttributes,
+            !auditExploreAttributeAccess({
+                account: fromSession(user),
+                projectUuid,
+                explore,
                 userAttributes,
-            )
+            })
         ) {
             throw new ForbiddenError(
                 `You don't have access to the explore ${explore.name}`,
@@ -872,6 +974,7 @@ export class CatalogService<
             (chart) => ({
                 name: chart.name,
                 uuid: chart.uuid,
+                slug: chart.slug,
                 description: chart.description,
                 spaceUuid: chart.spaceUuid,
                 spaceName: chart.spaceName,
@@ -914,6 +1017,7 @@ export class CatalogService<
             chartSummaries.map((chart) => ({
                 name: chart.name,
                 uuid: chart.uuid,
+                slug: chart.slug,
                 description: chart.description,
                 spaceUuid: chart.spaceUuid,
                 spaceName: chart.spaceName,
@@ -927,7 +1031,7 @@ export class CatalogService<
     }
 
     async getMetricsCatalog(
-        user: SessionUser,
+        user: Account,
         projectUuid: string,
         context: CatalogSearchContext,
         paginateArgs?: KnexPaginateArgs,
@@ -957,11 +1061,11 @@ export class CatalogService<
             throw new ForbiddenError();
         }
 
-        const userAttributes =
-            await this.userAttributesModel.getAttributeValuesForOrgMember({
-                organizationUuid,
-                userUuid: user.userUuid,
-            });
+        const userAttributes = await this.getUserAttributesForAccount(
+            user,
+            organizationUuid,
+            projectUuid,
+        );
 
         const paginatedCatalog = await this.searchCatalog({
             projectUuid,
@@ -1139,6 +1243,7 @@ export class CatalogService<
                 subject('Tags', {
                     projectUuid,
                     organizationUuid,
+                    metadata: { catalogSearchUuid, icon },
                 }),
             )
         ) {
@@ -1160,7 +1265,7 @@ export class CatalogService<
         userAttributes,
         addDefaultTimeDimension = true,
     }: {
-        user: SessionUser;
+        user: Account;
         projectUuid: string;
         metrics: {
             tableName: string;
@@ -1188,10 +1293,11 @@ export class CatalogService<
 
         const userAttributesForOrgMember =
             userAttributes ??
-            (await this.userAttributesModel.getAttributeValuesForOrgMember({
+            (await this.getUserAttributesForAccount(
+                user,
                 organizationUuid,
-                userUuid: user.userUuid,
-            }));
+                projectUuid,
+            ));
 
         const explores = await this.projectModel.findExploresFromCache(
             projectUuid,
@@ -1205,10 +1311,12 @@ export class CatalogService<
                     return [tableName, undefined];
                 }
 
-                const filteredExplore = getFilteredExplore(
+                const filteredExplore = auditAndFilterExplore({
+                    account: user,
+                    projectUuid,
                     explore,
-                    userAttributesForOrgMember,
-                );
+                    userAttributes: userAttributesForOrgMember,
+                });
                 return [tableName, filteredExplore];
             }),
         );
@@ -1289,7 +1397,7 @@ export class CatalogService<
     }
 
     async getMetric(
-        user: SessionUser,
+        user: Account,
         projectUuid: string,
         tableName: string,
         metricName: string,
@@ -1306,9 +1414,12 @@ export class CatalogService<
             );
         }
 
-        return metrics[0];
+        return this.cannotViewEmbedCompiledSql(user, projectUuid)
+            ? redactCatalogMetricSql(metrics[0])
+            : metrics[0];
     }
 
+    /** @deprecated Only used by deprecated metrics tree endpoints; use getMetricsTreeDetails instead. */
     async getMetricsTree(
         user: SessionUser,
         projectUuid: string,
@@ -1324,6 +1435,7 @@ export class CatalogService<
                 subject('MetricsTree', {
                     projectUuid,
                     organizationUuid,
+                    metadata: { metricUuids },
                 }),
             )
         ) {
@@ -1399,6 +1511,7 @@ export class CatalogService<
         }
     }
 
+    /** @deprecated Only used by the deprecated create-edge endpoint; use updateMetricsTree instead. */
     async createMetricsTreeEdge(
         user: SessionUser,
         projectUuid: string,
@@ -1414,6 +1527,12 @@ export class CatalogService<
                 subject('MetricsTree', {
                     projectUuid,
                     organizationUuid,
+                    metadata: {
+                        sourceCatalogSearchUuid:
+                            edgePayload.sourceCatalogSearchUuid,
+                        targetCatalogSearchUuid:
+                            edgePayload.targetCatalogSearchUuid,
+                    },
                 }),
             )
         ) {
@@ -1435,7 +1554,7 @@ export class CatalogService<
     }
 
     async getAllCatalogMetricsWithTimeDimensions(
-        user: SessionUser,
+        user: Account,
         projectUuid: string,
         context: CatalogSearchContext,
         tableName?: string,
@@ -1456,11 +1575,11 @@ export class CatalogService<
             throw new ForbiddenError();
         }
 
-        const userAttributes =
-            await this.userAttributesModel.getAttributeValuesForOrgMember({
-                organizationUuid,
-                userUuid: user.userUuid,
-            });
+        const userAttributes = await this.getUserAttributesForAccount(
+            user,
+            organizationUuid,
+            projectUuid,
+        );
 
         const allCatalogMetrics = await this.catalogModel.search({
             projectUuid,
@@ -1494,7 +1613,10 @@ export class CatalogService<
             addDefaultTimeDimension: false,
         });
 
-        return getAvailableCompareMetrics(allMetrics);
+        const compareMetrics = getAvailableCompareMetrics(allMetrics);
+        return this.cannotViewEmbedCompiledSql(user, projectUuid)
+            ? compareMetrics.map(redactCatalogMetricSql)
+            : compareMetrics;
     }
 
     async getPaginatedMetricsWithTimeDimensions(
@@ -1574,7 +1696,7 @@ export class CatalogService<
     }
 
     async getFilterDimensions(
-        user: SessionUser,
+        user: Account,
         projectUuid: string,
         tableName: string,
         context: CatalogSearchContext,
@@ -1601,11 +1723,11 @@ export class CatalogService<
             tableName,
         );
 
-        const userAttributes =
-            await this.userAttributesModel.getAttributeValuesForOrgMember({
-                organizationUuid,
-                userUuid: user.userUuid,
-            });
+        const userAttributes = await this.getUserAttributesForAccount(
+            user,
+            organizationUuid,
+            projectUuid,
+        );
 
         const catalogDimensions = await this.catalogModel.search({
             projectUuid,
@@ -1625,11 +1747,14 @@ export class CatalogService<
             .filter((d): d is CompiledDimension => d !== undefined);
 
         // Return type-valid dimensions only - frontend applies spotlight filtering with metric allowlist
-        return getTypeValidFilterDimensions(allDimensions);
+        const dimensions = getTypeValidFilterDimensions(allDimensions);
+        return this.cannotViewEmbedCompiledSql(user, projectUuid)
+            ? dimensions.map(redactFieldSql)
+            : dimensions;
     }
 
     async getSegmentDimensions(
-        user: SessionUser,
+        user: Account,
         projectUuid: string,
         tableName: string,
         context: CatalogSearchContext,
@@ -1656,11 +1781,11 @@ export class CatalogService<
             tableName,
         );
 
-        const userAttributes =
-            await this.userAttributesModel.getAttributeValuesForOrgMember({
-                organizationUuid,
-                userUuid: user.userUuid,
-            });
+        const userAttributes = await this.getUserAttributesForAccount(
+            user,
+            organizationUuid,
+            projectUuid,
+        );
 
         const catalogDimensions = await this.catalogModel.search({
             projectUuid,
@@ -1680,9 +1805,13 @@ export class CatalogService<
             .filter((d): d is CompiledDimension => d !== undefined);
 
         // Return type-valid dimensions only - frontend applies spotlight filtering with metric allowlist
-        return getTypeValidSegmentDimensions(allDimensions);
+        const dimensions = getTypeValidSegmentDimensions(allDimensions);
+        return this.cannotViewEmbedCompiledSql(user, projectUuid)
+            ? dimensions.map(redactFieldSql)
+            : dimensions;
     }
 
+    /** @deprecated Only used by the deprecated delete-edge endpoint; use updateMetricsTree instead. */
     async deleteMetricsTreeEdge(
         user: SessionUser,
         projectUuid: string,
@@ -1698,6 +1827,12 @@ export class CatalogService<
                 subject('MetricsTree', {
                     projectUuid,
                     organizationUuid,
+                    metadata: {
+                        sourceCatalogSearchUuid:
+                            edgePayload.sourceCatalogSearchUuid,
+                        targetCatalogSearchUuid:
+                            edgePayload.targetCatalogSearchUuid,
+                    },
                 }),
             )
         ) {
@@ -1741,7 +1876,7 @@ export class CatalogService<
     }
 
     async getMetricOwners(
-        user: SessionUser,
+        user: Account,
         projectUuid: string,
     ): Promise<CatalogOwner[]> {
         const { organizationUuid, name: projectName } =
@@ -1760,6 +1895,8 @@ export class CatalogService<
         ) {
             throw new ForbiddenError();
         }
+
+        this.assertJwtCanViewCatalog(user, organizationUuid, projectUuid);
 
         return this.catalogModel.getDistinctOwners(projectUuid);
     }
@@ -1835,6 +1972,11 @@ export class CatalogService<
                 subject('MetricsTree', {
                     projectUuid,
                     organizationUuid,
+                    metadata: {
+                        name: payload.name,
+                        slug: payload.slug,
+                        source: payload.source,
+                    },
                 }),
             )
         ) {

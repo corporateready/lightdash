@@ -2,10 +2,11 @@ import { subject } from '@casl/ability';
 import {
     getItemMap,
     hasCustomBinDimension,
+    isField,
     type ApiExploreResults,
     type EChartsSeries,
 } from '@lightdash/common';
-import { Menu, Portal } from '@mantine-8/core';
+import { Menu, Portal } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconCopy, IconStack } from '@tabler/icons-react';
 import {
@@ -16,14 +17,17 @@ import {
     useState,
     type FC,
 } from 'react';
+import { useMergeSafe } from '../../../features/mergeQuery/context/useMerge';
+import { useMergeSourceCell } from '../../../features/mergeQuery/hooks/useMergeSourceCell';
 import useToaster from '../../../hooks/toaster/useToaster';
 import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { useAccount } from '../../../hooks/user/useAccount';
 import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
 import MantineIcon from '../../common/MantineIcon';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import { useVisualizationInputs } from '../../LightdashVisualization/useVisualizationContext';
 import DrillDownMenuItem from '../../MetricQueryData/DrillDownMenuItem';
 import { useMetricQueryDataContext } from '../../MetricQueryData/useMetricQueryDataContext';
 import { getDataFromChartClick } from '../../MetricQueryData/utils';
@@ -39,19 +43,36 @@ export const SeriesContextMenu: FC<{
     const clipboard = useClipboard({ timeout: 200 });
     const { track } = useTracking();
     const { user } = useApp();
+    const { data: account } = useAccount();
+    const isEmbedded = account?.isJwtUser() === true;
+    const organizationUuid =
+        user.data?.organizationUuid ?? account?.organization.organizationUuid;
+    const projectUuid = useProjectUuid();
 
-    const context = useVisualizationContext();
-    const { resultsData: { metricQuery } = {} } = context;
+    const { resultsData: { metricQuery } = {}, itemsMap } =
+        useVisualizationInputs();
+    const isMerged = !!useMergeSafe()?.mergeResults;
 
     const [contextMenuIsOpen, setContextMenuIsOpen] = useState(false);
-    const { openUnderlyingDataModal } = useMetricQueryDataContext();
+    const { openUnderlyingDataModal, tableName } = useMetricQueryDataContext();
+    const drillDownPermission = subject(
+        'Explore',
+        isEmbedded
+            ? {
+                  organizationUuid,
+                  projectUuid,
+                  exploreNames: [tableName],
+              }
+            : {
+                  organizationUuid: user.data?.organizationUuid,
+                  projectUuid,
+              },
+    );
 
     const [contextMenuTargetOffset, setContextMenuTargetOffset] = useState<{
         left: number;
         top: number;
     }>();
-
-    const projectUuid = useProjectUuid();
 
     useEffect(() => {
         if (echartsSeriesClickEvent !== undefined) {
@@ -67,11 +88,15 @@ export const SeriesContextMenu: FC<{
 
     const underlyingData = useMemo(() => {
         if (explore !== undefined && echartsSeriesClickEvent !== undefined) {
-            const allItemsMap = getItemMap(
-                explore,
-                metricQuery?.additionalMetrics,
-                metricQuery?.tableCalculations,
-            );
+            // Merged columns only exist in the merged result's fields
+            const allItemsMap =
+                isMerged && itemsMap
+                    ? itemsMap
+                    : getItemMap(
+                          explore,
+                          metricQuery?.additionalMetrics,
+                          metricQuery?.tableCalculations,
+                      );
 
             return getDataFromChartClick(
                 echartsSeriesClickEvent,
@@ -79,7 +104,26 @@ export const SeriesContextMenu: FC<{
                 series || [],
             );
         }
-    }, [echartsSeriesClickEvent, explore, metricQuery, series]);
+    }, [
+        echartsSeriesClickEvent,
+        explore,
+        isMerged,
+        itemsMap,
+        metricQuery,
+        series,
+    ]);
+
+    const { resolve: resolveMergeSourceCell } = useMergeSourceCell();
+    // Merged columns no source owns (merge table calculations) have no rows to show
+    const hasSourceActions = useMemo(() => {
+        if (!isMerged) return true;
+        const item = underlyingData?.item;
+        return (
+            !!item &&
+            isField(item) &&
+            resolveMergeSourceCell(item, underlyingData.fieldValues) !== null
+        );
+    }, [isMerged, resolveMergeSourceCell, underlyingData]);
 
     const handleCopyToClipboard = useCallback(() => {
         if (underlyingData === undefined) return;
@@ -95,7 +139,7 @@ export const SeriesContextMenu: FC<{
         track({
             name: EventName.VIEW_UNDERLYING_DATA_CLICKED,
             properties: {
-                organizationId: user?.data?.organizationUuid,
+                organizationId: organizationUuid,
                 userId: user?.data?.userUuid,
                 projectId: projectUuid,
             },
@@ -110,7 +154,7 @@ export const SeriesContextMenu: FC<{
         dimensions,
         openUnderlyingDataModal,
         track,
-        user?.data?.organizationUuid,
+        organizationUuid,
         user?.data?.userUuid,
         projectUuid,
     ]);
@@ -126,10 +170,8 @@ export const SeriesContextMenu: FC<{
         <Menu
             opened={contextMenuIsOpen}
             onClose={onClose}
-            withinPortal
             closeOnItemClick
             closeOnEscape
-            shadow="md"
             radius={0}
             position="right-start"
             offset={{
@@ -162,35 +204,32 @@ export const SeriesContextMenu: FC<{
                 <Can
                     I="view"
                     this={subject('UnderlyingData', {
-                        organizationUuid: user.data?.organizationUuid,
+                        organizationUuid,
                         projectUuid: projectUuid,
                     })}
                 >
-                    {!hasCustomBinDimension(metricQuery) && (
-                        <Menu.Item
-                            leftSection={<MantineIcon icon={IconStack} />}
-                            onClick={handleViewUnderlyingData}
-                        >
-                            View underlying data
-                        </Menu.Item>
-                    )}
+                    {hasSourceActions &&
+                        !hasCustomBinDimension(metricQuery) && (
+                            <Menu.Item
+                                leftSection={<MantineIcon icon={IconStack} />}
+                                onClick={handleViewUnderlyingData}
+                            >
+                                View underlying data
+                            </Menu.Item>
+                        )}
                 </Can>
 
-                <Can
-                    I="view"
-                    this={subject('Explore', {
-                        organizationUuid: user.data?.organizationUuid,
-                        projectUuid: projectUuid,
-                    })}
-                >
-                    <DrillDownMenuItem
-                        {...underlyingData}
-                        trackingData={{
-                            organizationId: user?.data?.organizationUuid,
-                            userId: user?.data?.userUuid,
-                            projectId: projectUuid,
-                        }}
-                    />
+                <Can I="view" this={drillDownPermission}>
+                    {hasSourceActions && (
+                        <DrillDownMenuItem
+                            {...underlyingData}
+                            trackingData={{
+                                organizationId: organizationUuid,
+                                userId: user?.data?.userUuid,
+                                projectId: projectUuid,
+                            }}
+                        />
+                    )}
                 </Can>
             </Menu.Dropdown>
         </Menu>

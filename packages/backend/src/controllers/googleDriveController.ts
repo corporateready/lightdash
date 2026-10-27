@@ -3,6 +3,7 @@ import {
     ApiGdriveAccessTokenResponse,
     ApiJobScheduledResponse,
     assertRegisteredAccount,
+    UploadGsheetFromRows,
     UploadMetricGsheet,
 } from '@lightdash/common';
 import {
@@ -19,6 +20,7 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import { GdriveService } from '../services/GdriveService/GdriveService';
 import { allowApiKeyAuthentication, isAuthenticated } from './authentication';
 import { BaseController } from './baseController';
@@ -32,7 +34,11 @@ export class GoogleDriveController extends BaseController {
      * @summary Get Google Drive access token
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('GoogleDriveController.get'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/get-access-token')
     @OperationId('getAccessToken')
@@ -68,6 +74,29 @@ export class GoogleDriveController extends BaseController {
             results: await req.services
                 .getGdriveService()
                 .scheduleUploadGsheet(req.account!, body),
+        };
+    }
+
+    /**
+     * Upload client-supplied rows to a new Google Sheet (data apps).
+     * @summary Upload rows to Google Sheet
+     * @param req express request
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/upload-gsheet-from-rows')
+    @OperationId('uploadGsheetFromRows')
+    async postFromRows(
+        @Body() body: UploadGsheetFromRows,
+        @Request() req: express.Request,
+    ): Promise<ApiJobScheduledResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await req.services
+                .getGdriveService()
+                .scheduleUploadGsheetFromRows(req.account, body),
         };
     }
 }

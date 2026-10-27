@@ -1,40 +1,63 @@
-import { toolListWarehouseTablesArgsSchema } from '@lightdash/common';
+import {
+    listWarehouseTablesToolDefinition,
+    QueryExecutionContext,
+    type ToolListWarehouseTablesStructuredContent,
+} from '@lightdash/common';
 import { tool } from 'ai';
+import type { AiDecisionClient } from '../decisions/AiDecisionClient';
+import { rankCandidates } from '../decisions/rankCandidates';
 import type { ListWarehouseTablesFn } from '../types/aiAgentDependencies';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
+import type {
+    ExecuteStructuredToolResult,
+    ExecuteToolErrorResult,
+} from '../utils/structuredToolResult';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
+import { compileMatcher, extractKeywords } from './grepFieldsIndex';
 
 type Dependencies = {
     listWarehouseTables: ListWarehouseTablesFn;
+    decisions?: AiDecisionClient;
+    userQuestion?: string;
 };
 
-export const getListWarehouseTables = ({ listWarehouseTables }: Dependencies) =>
+const toolDefinition = listWarehouseTablesToolDefinition.for('agent');
+
+export const getListWarehouseTables = ({
+    listWarehouseTables,
+    decisions,
+    userQuestion,
+}: Dependencies) =>
     tool({
-        description: toolListWarehouseTablesArgsSchema.description,
-        inputSchema: toolListWarehouseTablesArgsSchema,
-        execute: async ({ schema, search, limit }) => {
+        ...toolDefinition,
+        execute: async ({
+            schema,
+            search,
+            limit,
+        }): Promise<
+            | ExecuteStructuredToolResult<ToolListWarehouseTablesStructuredContent>
+            | ExecuteToolErrorResult
+        > => {
             try {
-                const all = await listWarehouseTables();
+                const all = await listWarehouseTables(QueryExecutionContext.AI);
 
                 const searchLower = search?.toLowerCase();
-                const matches: Array<{
-                    database: string;
-                    schema: string;
-                    table: string;
-                }> = [];
+                let matches: ToolListWarehouseTablesStructuredContent['tables'] =
+                    [];
 
                 for (const [database, schemas] of Object.entries(all)) {
-                    if (matches.length >= limit) break;
+                    if (!decisions && matches.length >= limit) break;
                     for (const [schemaName, tables] of Object.entries(
                         schemas,
                     )) {
-                        if (matches.length >= limit) break;
+                        if (!decisions && matches.length >= limit) break;
                         const schemaMatchesFilter =
                             !schema || schemaName === schema;
                         if (!schemaMatchesFilter) {
                             // schema filter excludes this group
                         } else {
                             for (const tableName of Object.keys(tables)) {
-                                if (matches.length >= limit) break;
+                                if (!decisions && matches.length >= limit)
+                                    break;
                                 const matchesSearch =
                                     !searchLower ||
                                     tableName
@@ -45,6 +68,7 @@ export const getListWarehouseTables = ({ listWarehouseTables }: Dependencies) =>
                                         database,
                                         schema: schemaName,
                                         table: tableName,
+                                        qualifiedName: `${database}.${schemaName}.${tableName}`,
                                     });
                                 }
                             }
@@ -52,44 +76,106 @@ export const getListWarehouseTables = ({ listWarehouseTables }: Dependencies) =>
                     }
                 }
 
+                if (decisions && matches.length > 1) {
+                    const query = userQuestion?.trim() || search?.trim() || '';
+                    const matchers = extractKeywords(query).map(compileMatcher);
+                    if (query) {
+                        const shortlist = matches
+                            .map((table, index) => ({
+                                table,
+                                index,
+                                score: matchers.filter((match) =>
+                                    match(
+                                        `${table.database}.${table.schema}.${table.table}`.toLowerCase(),
+                                    ),
+                                ).length,
+                            }))
+                            .sort(
+                                (a, b) =>
+                                    b.score - a.score || a.index - b.index,
+                            )
+                            .slice(0, 30)
+                            .map(({ table }) => table);
+                        const selected = new Set(shortlist);
+                        const lexicalFallback = [
+                            ...shortlist,
+                            ...matches.filter((table) => !selected.has(table)),
+                        ];
+                        matches = lexicalFallback;
+                        const ranked = await rankCandidates({
+                            decisions,
+                            query,
+                            candidates: shortlist,
+                            // qualifiedName is for structuredContent only;
+                            // keep the ranking payload as the model saw it.
+                            describe: ({
+                                database,
+                                schema: tableSchema,
+                                table,
+                            }) => ({
+                                database,
+                                schema: tableSchema,
+                                table,
+                                tableType:
+                                    all[database][tableSchema][table]
+                                        .tableType ?? null,
+                            }),
+                            operation: 'warehouse-table-ranking',
+                            relevanceInstructions:
+                                'The table is a useful source for the requested entity, measure or grain. It need not answer the entire question alone. Judge qualified names and table type; do not invent columns or join relationships. Names alone may be insufficient.',
+                        });
+                        if (ranked.ranked) {
+                            matches = [
+                                ...ranked.candidates,
+                                ...lexicalFallback.filter(
+                                    (table) => !selected.has(table),
+                                ),
+                            ];
+                        }
+                    }
+                }
+                matches = matches.slice(0, limit);
+
                 if (matches.length === 0) {
                     return {
                         result: `No tables matched. Filters: schema=${
                             schema ?? '(none)'
                         }, search=${search ?? '(none)'}. Try a broader search.`,
                         metadata: { status: 'success' },
+                        structuredContent: {
+                            matchCount: 0,
+                            filters: {
+                                schema: schema ?? null,
+                                search: search ?? null,
+                            },
+                            tables: [],
+                        },
                     };
                 }
 
-                // Group by schema for compact, readable output.
-                const grouped = new Map<string, string[]>();
+                // Group only adjacent schemas: regrouping all tables by schema
+                // would move lower-ranked siblings ahead of more relevant tables.
+                const lines: string[] = [`${matches.length} table(s) matched.`];
+                let previousSchema: string | undefined;
                 for (const m of matches) {
                     const key = `${m.database}.${m.schema}`;
-                    const existing = grouped.get(key) ?? [];
-                    existing.push(m.table);
-                    grouped.set(key, existing);
-                }
-
-                const lines: string[] = [`${matches.length} table(s) matched.`];
-                for (const [key, tables] of grouped.entries()) {
-                    lines.push(`\n${key}:`);
-                    for (const t of tables) {
-                        lines.push(`  - ${key}.${t}`);
+                    if (key !== previousSchema) {
+                        lines.push(`\n${key}:`);
+                        previousSchema = key;
                     }
+                    lines.push(`  - ${key}.${m.table}`);
                 }
 
                 return {
                     result: lines.join('\n'),
                     metadata: { status: 'success' },
+                    structuredContent: {
+                        matchCount: matches.length,
+                        tables: matches,
+                    },
                 };
             } catch (e) {
-                return {
-                    result: toolErrorHandler(
-                        e,
-                        'Error listing warehouse tables.',
-                    ),
-                    metadata: { status: 'error' },
-                };
+                return toolErrorOutput(e, 'Error listing warehouse tables.');
             }
         },
     });

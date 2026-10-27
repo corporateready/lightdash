@@ -2,13 +2,24 @@
  * Utility functions for handling SQL parameter references
  */
 
+import betterAjvErrors from '@sidvind/better-ajv-errors';
 import Ajv from 'ajv';
 import AjvErrors from 'ajv-errors';
-import betterAjvErrors from 'better-ajv-errors';
+import {
+    isReservedParameterName,
+    mergeReservedNames,
+} from '../parameters/reservedParameters';
 import lightdashDbtYamlSchema from '../schemas/json/lightdash-dbt-2.0.json';
 import { CompileError } from '../types/errors';
-import type { CompiledTable, Table } from '../types/explore';
-import type { LightdashProjectParameter } from '../types/lightdashProjectConfig';
+import type { CompiledTable, Explore, Table } from '../types/explore';
+import {
+    isLightdashParameterOption,
+    type LightdashProjectParameter,
+} from '../types/lightdashProjectConfig';
+import type {
+    ParameterDefinitions,
+    ParametersValuesMap,
+} from '../types/parameters';
 
 // Regex for SQL parameter substitution - requires the full ${...} syntax.
 // Used by `replaceLightdashValues` to find substitution sites.
@@ -16,12 +27,17 @@ export const parameterRegex =
     /\$\{(?:lightdash|ld)\.parameters\.(\w+(?:\.\w+)?)\}/g;
 
 // Broader regex that also matches bare `ld.parameters.X` references — used to catch
-// references inside Liquid template tags (e.g. `{% if ld.parameters.grain == "day" %}`),
-// format strings, and ternary expressions. The lookbehind requires a non-word,
+// references inside Liquid template tags (e.g. `{% if ld.parameters.grain == "day" %}`).
+// The lookbehind requires a non-word,
 // non-dot boundary before `ld`/`lightdash` so identifiers like `myld.parameters.x`
 // don't false-match.
 const parameterReferencePattern =
     /(?<![\w.])(?:lightdash|ld)\.parameters\.(\w+(?:\.\w+)?)/g;
+
+const formatPlaceholderPattern = /\$\{([^}]+)\}/g;
+const quotedStringPattern = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g;
+const parameterOperandPattern =
+    /^(?:lightdash|ld)\.parameters\.(\w+(?:\.\w+)?)$/;
 
 export enum LightdashParameters {
     PREFIX = 'lightdash.parameters',
@@ -36,9 +52,8 @@ const matchAll = (input: string, regex: RegExp): string[] => {
 
 /**
  * Single source of truth for extracting parameter references from a templated SQL or
- * format string. Detects both `${ld.parameters.X}` substitution sites and bare
- * `ld.parameters.X` references inside Liquid template blocks (only when `{%` is present,
- * to avoid false positives in plain SQL).
+ * format string. Detects `${ld.parameters.X}` substitution sites, conditional format
+ * placeholders, and bare references in Liquid templates (only when `{%` is present).
  *
  * @param sources - One or more strings to scan (e.g. compiled SQL, sql_from, format string).
  * @returns A deduplicated array of parameter names.
@@ -53,6 +68,22 @@ export const getParameterReferences = (
         matchAll(source, parameterRegex).forEach((name) =>
             references.add(name),
         );
+        matchAll(source, formatPlaceholderPattern).forEach((expression) => {
+            // Quoted text and ternary output branches are literals, not parameter reads.
+            const unquoted = expression.replace(quotedStringPattern, ' ');
+            const questionIndex = unquoted.indexOf('?');
+            if (
+                questionIndex === -1 ||
+                unquoted.indexOf(':', questionIndex + 1) === -1
+            ) {
+                return;
+            }
+            const condition = unquoted.slice(0, questionIndex);
+            condition.split(/==|!=/).forEach((operand) => {
+                const match = operand.trim().match(parameterOperandPattern);
+                if (match) references.add(match[1]);
+            });
+        });
         // If the source contains Liquid tags, also match bare references inside them.
         if (source.includes('{%')) {
             matchAll(source, parameterReferencePattern).forEach((name) =>
@@ -112,9 +143,34 @@ export const getAvailableParameterNames = (
     projectParameters: Record<string, LightdashProjectParameter> | undefined,
     exploreParameters: Record<string, LightdashProjectParameter> | undefined,
 ): string[] =>
-    Object.keys(projectParameters || {}).concat(
-        Object.keys(exploreParameters || {}),
+    mergeReservedNames(
+        Object.keys(projectParameters || {}).concat(
+            Object.keys(exploreParameters || {}),
+        ),
     );
+
+/** Whether any reference is a reserved (system-owned) parameter. */
+export const hasReservedParameterReference = (
+    parameterReferences: string[],
+): boolean => parameterReferences.some(isReservedParameterName);
+
+/**
+ * Which referenced parameters still need a value (no value and no default). Both checks
+ * use key presence, so an explicit falsy value or default (`0`, `''`, `[]`) counts as
+ * supplied, matching the backend's `default !== undefined`. Reserved params never count.
+ */
+export const getMissingRequiredParameters = (
+    parameterReferences: string[],
+    parameterValues: ParametersValuesMap | undefined,
+    parameterDefinitions: ParameterDefinitions | undefined,
+): string[] =>
+    parameterReferences.filter((name) => {
+        if (isReservedParameterName(name)) return false;
+        const hasValue = name in (parameterValues ?? {});
+        const definition = parameterDefinitions?.[name];
+        const hasDefault = definition !== undefined && 'default' in definition;
+        return !hasValue && !hasDefault;
+    });
 
 /**
  * Get all available parameter names for a project and explore
@@ -153,21 +209,98 @@ export const getAvailableParametersFromTables = (
         };
     }, {});
 
+/** Table-scoped plus explore-level parameter definitions for an explore (empty when absent). */
+export const getExploreParameterDefinitions = (
+    explore: Explore | undefined,
+): Record<string, LightdashProjectParameter> =>
+    explore
+        ? {
+              ...getAvailableParametersFromTables(
+                  Object.values(explore.tables),
+              ),
+              ...(explore.parameters ?? {}),
+          }
+        : {};
+
 /**
- * Validate parameter names
- * @param parameters - The parameters to validate
- * @returns True if any parameter name doesn't match the valid pattern, false otherwise
+ * Every parameter name referenced anywhere in an explore's compiled SQL —
+ * joins, table sql_where, and each field's SQL. These are the parameters whose
+ * values can change what a query against the explore returns.
+ */
+export const getExploreParameterReferences = (explore: Explore): string[] => {
+    const references = new Set<string>();
+    explore.joinedTables.forEach((join) => {
+        join.parameterReferences?.forEach((name) => references.add(name));
+    });
+    Object.values(explore.tables).forEach((table) => {
+        table.parameterReferences?.forEach((name) => references.add(name));
+        [
+            ...Object.values(table.dimensions),
+            ...Object.values(table.metrics),
+        ].forEach((field) => {
+            field.parameterReferences?.forEach((name) => references.add(name));
+        });
+    });
+    return [...references];
+};
+
+/**
+ * The subset of user parameter definitions that are actually referenced. A referenced
+ * name with no user definition (e.g. a reserved system variable referenced on its own)
+ * is excluded, so callers only surface user-editable parameters.
+ */
+export const getReferencedParameterDefinitions = (
+    definitions: Record<string, LightdashProjectParameter>,
+    references: string[] | undefined,
+): Record<string, LightdashProjectParameter> =>
+    Object.fromEntries(
+        Object.entries(definitions).filter(([key]) =>
+            references?.includes(key),
+        ),
+    );
+
+/** Project- and model-level definitions merged (model wins), filtered to the parameters the explore actually references. */
+export const getReferencedExploreParameterDefinitions = (
+    explore: Explore,
+    projectParameterDefinitions: ParameterDefinitions = {},
+): ParameterDefinitions =>
+    getReferencedParameterDefinitions(
+        {
+            ...projectParameterDefinitions,
+            ...getExploreParameterDefinitions(explore),
+        },
+        getExploreParameterReferences(explore),
+    );
+
+/** A definition's option values as raw values, or null when options aren't statically declared. */
+export const getParameterOptionValues = (
+    definition: LightdashProjectParameter,
+): (string | number)[] | null =>
+    definition.options
+        ? definition.options.map((option) =>
+              isLightdashParameterOption(option) ? option.value : option,
+          )
+        : null;
+
+/**
+ * Validate parameter names. Only bad-pattern names are invalid; names colliding with a
+ * reserved parameter are returned separately so callers can warn (the user param wins).
  */
 export const validateParameterNames = (
     parameters: Record<string, LightdashProjectParameter> | undefined,
 ) => {
     const validNamePattern = /^[a-zA-Z0-9_-]+$/;
-    const invalidParameters = Object.keys(parameters || {}).filter(
+    const parameterNames = Object.keys(parameters || {});
+    const invalidParameters = parameterNames.filter(
         (paramName) => !validNamePattern.test(paramName),
+    );
+    const reservedParameters = parameterNames.filter((paramName) =>
+        isReservedParameterName(paramName),
     );
     return {
         isInvalid: invalidParameters.length > 0,
         invalidParameters,
+        reservedParameters,
     };
 };
 
@@ -184,6 +317,7 @@ const getParametersSchemaAndValidator = ():
         const parametersSchema =
             lightdashDbtYamlSchema.$defs?.modelMeta?.properties?.parameters;
         if (!parametersSchema) {
+            // eslint-disable-next-line no-console
             console.warn(
                 'Parameters schema not found in lightdash-dbt-2.0.json — expected $defs.modelMeta.properties.parameters. Skipping parameter config validation.',
             );

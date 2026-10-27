@@ -1,26 +1,29 @@
 import { OrganizationProject, ProjectType } from '@lightdash/common';
-import inquirer from 'inquirer';
+import type { MockedFunction } from 'vitest';
 import { setProject as setProjectConfig } from '../config';
 import GlobalState from '../globalState';
+import { promptFuzzySearch } from '../prompts/fuzzySearchPrompt';
 import { lightdashApi } from './dbt/apiClient';
 import { setProjectCommand } from './setProject';
 
-jest.mock('inquirer');
-jest.mock('../analytics/analytics');
-jest.mock('./dbt/apiClient', () => ({
-    lightdashApi: jest.fn(),
+vi.mock('../prompts/fuzzySearchPrompt', () => ({
+    promptFuzzySearch: vi.fn(),
 }));
-jest.mock('../config', () => ({
-    getConfig: jest.fn().mockResolvedValue({ context: {} }),
-    setProject: jest.fn().mockResolvedValue(undefined),
-    unsetProject: jest.fn().mockResolvedValue(undefined),
+vi.mock('../analytics/analytics');
+vi.mock('./dbt/apiClient', () => ({
+    lightdashApi: vi.fn(),
+}));
+vi.mock('../config', () => ({
+    getConfig: vi.fn().mockResolvedValue({ context: {} }),
+    setProject: vi.fn().mockResolvedValue(undefined),
+    unsetProject: vi.fn().mockResolvedValue(undefined),
 }));
 
-const mockLightdashApi = lightdashApi as jest.MockedFunction<
-    typeof lightdashApi
+const mockLightdashApi = lightdashApi as MockedFunction<typeof lightdashApi>;
+const mockPromptFuzzySearch = promptFuzzySearch as MockedFunction<
+    typeof promptFuzzySearch
 >;
-const mockInquirer = inquirer as jest.Mocked<typeof inquirer>;
-const mockSetProjectConfig = setProjectConfig as jest.MockedFunction<
+const mockSetProjectConfig = setProjectConfig as MockedFunction<
     typeof setProjectConfig
 >;
 
@@ -45,8 +48,8 @@ describe('setProjectCommand', () => {
     const originalIsNonInteractive = GlobalState.isNonInteractive;
 
     beforeEach(() => {
-        jest.clearAllMocks();
-        GlobalState.isNonInteractive = jest.fn().mockReturnValue(false);
+        vi.clearAllMocks();
+        GlobalState.isNonInteractive = vi.fn().mockReturnValue(false);
     });
 
     afterAll(() => {
@@ -55,17 +58,12 @@ describe('setProjectCommand', () => {
 
     it('does not offer preview projects in the interactive list', async () => {
         mockLightdashApi.mockResolvedValueOnce(buildProjects() as never);
-        const promptMock = jest
-            .fn()
-            .mockResolvedValueOnce({ project: MAIN_UUID });
-        mockInquirer.prompt = promptMock as never;
+        mockPromptFuzzySearch.mockResolvedValueOnce(MAIN_UUID as never);
 
         await setProjectCommand();
 
-        const promptArgs = promptMock.mock.calls[0][0];
-        const choices = promptArgs[0].choices.map(
-            (c: { name: string; value: string }) => c.value,
-        );
+        const promptArgs = mockPromptFuzzySearch.mock.calls[0][0];
+        const choices = promptArgs.choices.map((c) => c.value);
         expect(choices).toContain(MAIN_UUID);
         expect(choices).not.toContain(PREVIEW_UUID);
         expect(mockSetProjectConfig).toHaveBeenCalledWith(

@@ -1,0 +1,1390 @@
+import { subject } from '@casl/ability';
+import { AGENT_IDENTITY_SETTINGS_PATH } from '@lightdash/common';
+import {
+    IconApps,
+    IconAppWindow,
+    IconBolt,
+    IconBook2,
+    IconBrain,
+    IconBrowser,
+    IconBrush,
+    IconBuildingSkyscraper,
+    IconCalendarStats,
+    IconChecklist,
+    IconClock,
+    IconCoins,
+    IconDatabase,
+    IconDatabaseCog,
+    IconDatabaseExport,
+    IconEyeCheck,
+    IconFileExport,
+    IconFolders,
+    IconGauge,
+    IconGitPullRequest,
+    IconIdBadge2,
+    IconKey,
+    IconListCheck,
+    IconLock,
+    IconMailForward,
+    IconMessageCircle,
+    IconNotebook,
+    IconPalette,
+    IconPlug,
+    IconPlugConnected,
+    IconRefresh,
+    IconReportAnalytics,
+    IconRoad,
+    IconRobotFace,
+    IconSend,
+    IconSettings,
+    IconShieldCheck,
+    IconSparkles,
+    IconTableOptions,
+    IconTelescope,
+    IconTrash,
+    IconUserCircle,
+    IconUserCode,
+    IconUserPlus,
+    IconUsers,
+    IconUserShield,
+    IconVariable,
+    IconWorldCheck,
+    IconWorldCog,
+} from '@tabler/icons-react';
+import { useMemo } from 'react';
+import useTracking from '../../providers/Tracking/useTracking';
+import { EventName } from '../../types/Events';
+import { canAccessDeepResearchSettings } from './deepResearchSettingsAccess';
+import { type LimitedProjectSettingsPage } from './projectSettingsAccess';
+import {
+    type SettingsContext,
+    type SettingsNavigationItem,
+    type SettingsNavigationSection,
+} from './types';
+
+/**
+ * Derives the gated settings sidebar nav model from a `SettingsContext` (see
+ * `useSettingsContext`). Only items the user is permitted to see are included,
+ * so the sidebar can render the result as a dumb map; each item carries
+ * `keywords` so a future settings search can match aliases.
+ */
+export const useSettingsNavigation = (
+    context: SettingsContext,
+): SettingsNavigationSection[] => {
+    const { track } = useTracking();
+    const {
+        user,
+        organization,
+        project,
+        health,
+        allowPasswordAuthentication,
+        hasSocialLogin,
+        isGroupManagementEnabled,
+        isProLimitsEnabled,
+        canAccessAnalyticsSettings,
+        isOrganizationRoadmapEnabled,
+        canAccessAiCredits,
+        isCustomRolesEnabled,
+        isSsoOrganizationSettingsEnabled,
+        isEmailWhitelabelEnabled,
+        showMyAgentConnections,
+        isAgentIdentityEnabled,
+        isScimTokenManagementEnabled,
+        isServiceAccountsEnabled,
+        isAiCopilotEnabledOrTrial,
+        shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
+        embeddingEnabled,
+        dataAppsFlag,
+        dataAppAnalysisFlag,
+        dashboardAnalysisFlag,
+        isChartStudioAvailable,
+        externalSourcesFlag,
+        isResultsCacheEnabled,
+        isGitProject,
+        isContentReviewAvailable,
+        projectSettingsAccess,
+    } = context;
+
+    const isEmbeddingEnabled = embeddingEnabled?.enabled ?? false;
+    const isScimEnabled = isScimTokenManagementEnabled?.enabled ?? false;
+    const isDataAppsEnabled = dataAppsFlag?.enabled ?? false;
+    const isDataAppAnalysisEnabled = dataAppAnalysisFlag?.enabled ?? false;
+    const isDashboardAnalysisEnabled = dashboardAnalysisFlag?.enabled ?? false;
+    const isExternalSourcesEnabled =
+        (externalSourcesFlag?.enabled ?? false) &&
+        (health?.externalSources.engineAvailable ?? false);
+
+    return useMemo<SettingsNavigationSection[]>(() => {
+        const ability = user?.ability;
+
+        const yourSettings: SettingsNavigationItem[] = [
+            {
+                label: 'Profile',
+                to: '/generalSettings/profile',
+                icon: IconUserCircle,
+                keywords: ['account', 'avatar', 'name'],
+                children: [],
+                exact: true,
+            },
+        ];
+
+        if (allowPasswordAuthentication) {
+            yourSettings.push({
+                label: hasSocialLogin ? 'Password & Social Logins' : 'Password',
+                to: '/generalSettings/password',
+                icon: IconLock,
+                keywords: ['login', 'security', 'mfa', 'social', 'sso'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        yourSettings.push({
+            label: 'My warehouse connections',
+            to: '/generalSettings/myWarehouseConnections',
+            icon: IconDatabaseCog,
+            keywords: ['database', 'credentials', 'warehouse'],
+            children: [],
+            exact: true,
+        });
+
+        if (showMyAgentConnections) {
+            yourSettings.push({
+                label: 'My agent identity',
+                to: '/generalSettings/myAgentConnections',
+                icon: IconPlugConnected,
+                keywords: [
+                    'agent',
+                    'identity',
+                    'sign-in',
+                    'ai',
+                    'mcp',
+                    'snowflake',
+                    'bigquery',
+                    'connect',
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (ability?.can('create', 'ScheduledDeliveries')) {
+            yourSettings.push({
+                label: 'My scheduled deliveries',
+                to: '/generalSettings/userScheduledDeliveries',
+                icon: IconCalendarStats,
+                keywords: ['email', 'reports', 'schedule'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (isDataAppsEnabled && ability?.can('create', 'DataApp')) {
+            yourSettings.push({
+                label: 'My apps',
+                to: '/generalSettings/myApps',
+                icon: IconAppWindow,
+                keywords: ['data apps'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (ability?.can('manage', 'PersonalAccessToken')) {
+            yourSettings.push({
+                label: 'Personal access tokens',
+                to: '/generalSettings/personalAccessTokens',
+                icon: IconKey,
+                keywords: ['api', 'pat', 'token'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        const organizationItems: SettingsNavigationItem[] = [];
+
+        if (ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'General',
+                to: '/generalSettings/organization',
+                icon: IconBuildingSkyscraper,
+                keywords: [
+                    'organization',
+                    'domains',
+                    'default project',
+                    'danger zone',
+                ],
+                pageSections: [
+                    {
+                        title: 'Allowed email domains',
+                        keywords: ['email', 'domain', 'auto join'],
+                    },
+                    {
+                        title: 'Default project',
+                        keywords: ['landing project', 'home project'],
+                    },
+                    {
+                        title: 'User impersonation',
+                        keywords: ['impersonate', 'impersonation'],
+                    },
+                    {
+                        title: 'Lightdash support access',
+                        keywords: ['support', 'impersonate', 'impersonation'],
+                    },
+                    {
+                        title: 'Danger zone',
+                        keywords: ['delete organization', 'leave organization'],
+                    },
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'Exporting',
+                to: '/generalSettings/exporting',
+                icon: IconFileExport,
+                keywords: ['export', 'csv', 'excel', 'downloads'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (isProLimitsEnabled && ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'Limits',
+                to: '/generalSettings/limits',
+                icon: IconGauge,
+                keywords: ['rows', 'query', 'cells', 'export'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (isCustomRolesEnabled && ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'Custom roles',
+                to: '/generalSettings/customRoles',
+                icon: IconIdBadge2,
+                keywords: ['permissions', 'access', 'scopes'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (ability?.can('update', 'OrganizationMemberProfile')) {
+            organizationItems.push({
+                label: isGroupManagementEnabled
+                    ? 'Users & groups'
+                    : 'User management',
+                to: '/generalSettings/userManagement',
+                icon: IconUserPlus,
+                keywords: ['members', 'invite', 'teams', 'groups'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            ability?.can(
+                'manage',
+                subject('Organization', {
+                    organizationUuid: organization?.organizationUuid,
+                }),
+            )
+        ) {
+            organizationItems.push({
+                label: isGroupManagementEnabled
+                    ? 'User & group attributes'
+                    : 'User attributes',
+                to: '/generalSettings/userAttributes',
+                icon: IconUserShield,
+                keywords: ['attributes', 'access control'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            ability?.can('update', 'Organization') ||
+            ability?.can(
+                'manage',
+                subject('OrganizationColorPalette', {
+                    organizationUuid: organization?.organizationUuid,
+                }),
+            )
+        ) {
+            organizationItems.push({
+                label: 'Appearance',
+                to: '/generalSettings/appearance',
+                icon: IconPalette,
+                keywords: ['theme', 'color', 'branding', 'logo', 'palette'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (isDataAppsEnabled) {
+            const dataAppChildren: SettingsNavigationItem[] = [];
+
+            if (ability?.can('manage', 'Organization')) {
+                dataAppChildren.push({
+                    label: 'General',
+                    to: '/generalSettings/dataApps/general',
+                    icon: IconSettings,
+                    keywords: [
+                        'thumbnail',
+                        'thumbnails',
+                        'automatic capture',
+                        'card image',
+                        'screenshot',
+                        'screenshots',
+                        'attachments',
+                        'captures',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (ability?.can('manage', 'OrganizationDesign')) {
+                dataAppChildren.push({
+                    label: 'Themes',
+                    to: '/generalSettings/dataApps/themes',
+                    icon: IconBrush,
+                    keywords: ['design', 'colors', 'charts'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (ability?.can('manage', 'Organization')) {
+                dataAppChildren.push({
+                    label: 'Activity',
+                    to: '/generalSettings/dataApps/activity',
+                    icon: IconReportAnalytics,
+                    keywords: [
+                        'usage',
+                        'audit',
+                        'log',
+                        'generations',
+                        'who built',
+                        'tokens',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                (isDataAppAnalysisEnabled || isDashboardAnalysisEnabled) &&
+                ability?.can('manage', 'Organization')
+            ) {
+                dataAppChildren.push({
+                    label: 'AI analysis',
+                    to: '/generalSettings/dataApps/aiAnalysis',
+                    icon: IconSparkles,
+                    keywords: [
+                        'ai',
+                        'analysis',
+                        'insights',
+                        'anomalies',
+                        'investigate',
+                        'auto',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (dataAppChildren.length > 0) {
+                organizationItems.push({
+                    label: 'Data apps',
+                    to: '/generalSettings/dataApps',
+                    icon: IconAppWindow,
+                    keywords: ['apps', 'data apps'],
+                    children: dataAppChildren,
+                });
+            }
+        } else {
+            if (
+                isChartStudioAvailable &&
+                ability?.can('manage', 'OrganizationDesign')
+            ) {
+                organizationItems.push({
+                    label: 'Themes',
+                    to: '/generalSettings/dataApps/themes',
+                    icon: IconBrush,
+                    keywords: ['design', 'colors', 'charts', 'chart types'],
+                    children: [],
+                    exact: true,
+                });
+            }
+            // Dashboard analysis shares the consent toggle that lives on the
+            // data-apps AI-analysis page; surface it even without data apps.
+            if (
+                isDashboardAnalysisEnabled &&
+                ability?.can('manage', 'Organization')
+            ) {
+                organizationItems.push({
+                    label: 'AI analysis',
+                    to: '/generalSettings/dataApps/aiAnalysis',
+                    icon: IconSparkles,
+                    keywords: [
+                        'ai',
+                        'analysis',
+                        'insights',
+                        'anomalies',
+                        'investigate',
+                        'dashboards',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+        }
+
+        if (ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'Integrations',
+                to: '/generalSettings/integrations',
+                icon: IconPlug,
+                keywords: ['slack', 'github', 'gitlab', 'linear', 'jira'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'OAuth applications',
+                to: '/generalSettings/oauthClients',
+                icon: IconApps,
+                keywords: ['oauth', 'clients', 'api'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            ability?.can('manage', 'Organization') &&
+            isSsoOrganizationSettingsEnabled
+        ) {
+            organizationItems.push({
+                label: 'Verified domains',
+                to: '/generalSettings/verifiedDomains',
+                icon: IconWorldCheck,
+                keywords: ['email', 'domains', 'sso'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            ability?.can('manage', 'Organization') &&
+            isEmailWhitelabelEnabled
+        ) {
+            organizationItems.push({
+                label: 'Email domain',
+                to: '/generalSettings/emailWhitelabel',
+                icon: IconMailForward,
+                keywords: [
+                    'email',
+                    'whitelabel',
+                    'sending',
+                    'domain',
+                    'dkim',
+                    'reports',
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            ability?.can('manage', 'Organization') &&
+            isSsoOrganizationSettingsEnabled
+        ) {
+            organizationItems.push({
+                label: 'Single Sign-On',
+                to: '/generalSettings/sso',
+                icon: IconLock,
+                keywords: [
+                    'sso',
+                    'saml',
+                    'oidc',
+                    'okta',
+                    'azure',
+                    'onelogin',
+                    'google',
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            organization &&
+            !organization.needsProject &&
+            ability?.can('view', 'Project')
+        ) {
+            organizationItems.push({
+                label: 'All projects',
+                to: '/generalSettings/projectManagement',
+                icon: IconDatabase,
+                keywords: ['projects', 'manage'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (canAccessAnalyticsSettings) {
+            organizationItems.push({
+                label: 'Lightdash analytics',
+                to: '/generalSettings/lightdashAnalytics',
+                icon: IconReportAnalytics,
+                isBeta: true,
+                keywords: ['usage', 'analytics', 'tokens', 'queries'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (ability?.can('manage', 'Organization') && isScimEnabled) {
+            organizationItems.push({
+                label: 'SCIM access tokens',
+                to: '/generalSettings/scimAccessTokens',
+                icon: IconKey,
+                keywords: ['scim', 'provisioning', 'tokens'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (
+            ability?.can('manage', 'Organization') &&
+            isServiceAccountsEnabled
+        ) {
+            organizationItems.push({
+                label: 'Service accounts',
+                to: '/generalSettings/serviceAccounts',
+                icon: IconUserCode,
+                keywords: ['api', 'ci', 'automation', 'tokens'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (canAccessAiCredits) {
+            organizationItems.push({
+                label: 'AI credits',
+                to: '/generalSettings/aiCredits',
+                icon: IconCoins,
+                keywords: ['ai', 'credits', 'usage', 'allowance', 'billing'],
+                children: [],
+                exact: true,
+            });
+        }
+
+        if (isAiCopilotEnabledOrTrial && hasAnyAiAgentAccess) {
+            const aiChildren: SettingsNavigationItem[] = [];
+            // General is org-wide config (router, org settings) — org admins only.
+            if (canManageOrgAiAgent) {
+                aiChildren.push({
+                    label: 'General',
+                    to: '/generalSettings/ai/general',
+                    icon: IconSettings,
+                    keywords: ['ai', 'settings'],
+                    children: [],
+                    exact: true,
+                });
+            }
+            // Threads & Agents are project-filtered for project-scoped users.
+            aiChildren.push(
+                {
+                    label: 'Threads',
+                    to: '/generalSettings/ai/threads',
+                    icon: IconMessageCircle,
+                    keywords: ['conversations'],
+                    children: [],
+                    exact: true,
+                },
+                {
+                    label: 'Agents',
+                    to: '/generalSettings/ai/agents',
+                    icon: IconRobotFace,
+                    keywords: ['bots'],
+                    children: [],
+                    exact: true,
+                },
+                {
+                    label: 'Evals',
+                    to: '/generalSettings/ai/evals',
+                    icon: IconBook2,
+                    keywords: ['evaluations', 'evals', 'runs', 'testing'],
+                    children: [],
+                    exact: true,
+                },
+            );
+
+            if (shouldShowAiAgentReviews) {
+                aiChildren.push({
+                    label: 'Issues',
+                    to: '/generalSettings/ai/issues',
+                    icon: IconListCheck,
+                    keywords: ['classifier', 'reviews'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            aiChildren.push({
+                label: 'Memories',
+                to: '/generalSettings/ai/memories',
+                icon: IconNotebook,
+                keywords: ['memory', 'memories', 'learned', 'knowledge'],
+                children: [],
+                exact: true,
+            });
+
+            if (
+                canAccessDeepResearchSettings({
+                    isAiCopilotEnabledOrTrial,
+                    canManageOrgAiAgent,
+                    hasAnyAiAgentAccess,
+                })
+            ) {
+                aiChildren.push({
+                    label: 'Deep research',
+                    to: '/generalSettings/ai/deep-research',
+                    icon: IconTelescope,
+                    keywords: ['research', 'limits', 'tools', 'queries'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            organizationItems.push({
+                label: 'Ask AI',
+                to: '/generalSettings/ai',
+                icon: IconBrain,
+                aiAgentIcon: true,
+                keywords: ['copilot', 'agents', 'ai'],
+                children: aiChildren,
+            });
+        }
+
+        if (isAgentIdentityEnabled && ability?.can('manage', 'Organization')) {
+            organizationItems.push({
+                label: 'Agents',
+                to: AGENT_IDENTITY_SETTINGS_PATH,
+                icon: IconIdBadge2,
+                keywords: [
+                    'agents',
+                    'identity',
+                    'agent identity',
+                    'permissions',
+                    'shared agent account',
+                    'warehouse',
+                    'snowflake',
+                    'bigquery',
+                ],
+                pageSections: [
+                    {
+                        title: 'Identity',
+                        keywords: [
+                            'who agents run as',
+                            'shared agent account',
+                            'agent sign-in',
+                        ],
+                    },
+                    {
+                        title: 'Permissions',
+                        keywords: [
+                            'limit what agents can do',
+                            'who can use agents',
+                            'agent permissions',
+                            'allowed projects',
+                            'raw sql',
+                        ],
+                    },
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+
+        const mcpChildren: SettingsNavigationItem[] = [
+            {
+                label: 'Connect',
+                to: '/generalSettings/mcp/connect',
+                icon: IconPlugConnected,
+                keywords: ['mcp', 'setup', 'installation', 'connect'],
+                pageSections: [
+                    {
+                        title: 'Client setup',
+                        keywords: [
+                            'setup',
+                            'connect',
+                            'http',
+                            'claude',
+                            'codex',
+                            'cursor',
+                            'vscode',
+                        ],
+                    },
+                ],
+                children: [],
+                exact: true,
+            },
+        ];
+        if (isAiCopilotEnabledOrTrial && hasAnyAiAgentAccess) {
+            if (canManageOrgAiAgent) {
+                mcpChildren.push({
+                    label: 'General',
+                    to: '/generalSettings/mcp/general',
+                    icon: IconSettings,
+                    keywords: [
+                        'mcp',
+                        'settings',
+                        'agents',
+                        'content',
+                        'writes',
+                    ],
+                    pageSections: [
+                        {
+                            title: 'Allow MCP access',
+                            keywords: ['access', 'disable', 'organization'],
+                        },
+                        {
+                            title: 'Enable agents over MCP',
+                            keywords: ['tools', 'context', 'access'],
+                        },
+                        {
+                            title: 'Allow content changes via MCP',
+                            keywords: [
+                                'charts',
+                                'dashboards',
+                                'create',
+                                'edit',
+                            ],
+                        },
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+            mcpChildren.push({
+                label: 'Analytics',
+                to: '/generalSettings/mcp/analytics',
+                icon: IconReportAnalytics,
+                keywords: [
+                    'mcp',
+                    'tools',
+                    'activity',
+                    'usage',
+                    'errors',
+                    'audit',
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+        organizationItems.push({
+            label: 'MCP',
+            to: '/generalSettings/mcp',
+            icon: IconPlugConnected,
+            keywords: ['model context protocol', 'claude', 'cursor'],
+            children: mcpChildren,
+        });
+
+        if (
+            isOrganizationRoadmapEnabled &&
+            ability?.can(
+                'view',
+                subject('Roadmap', {
+                    organizationUuid: organization?.organizationUuid,
+                }),
+            )
+        ) {
+            organizationItems.push({
+                label: 'Roadmap',
+                to: '/generalSettings/roadmap',
+                icon: IconRoad,
+                keywords: [
+                    'feature requests',
+                    'planned',
+                    'building',
+                    'shipped',
+                ],
+                children: [],
+                exact: true,
+            });
+        }
+
+        const sections: SettingsNavigationSection[] = [
+            {
+                id: 'your-settings',
+                title: 'Your settings',
+                subtitle: null,
+                items: yourSettings,
+            },
+            {
+                id: 'organization',
+                title: 'Organization settings',
+                subtitle: null,
+                items: organizationItems,
+            },
+        ];
+
+        const hasProjectSettings =
+            !!organization && !organization.needsProject && !!project;
+        const canUpdateCurrentProject =
+            hasProjectSettings && projectSettingsAccess.type === 'full';
+        const base = `/generalSettings/projectManagement/${project?.projectUuid}`;
+        const limitedItems: Record<
+            LimitedProjectSettingsPage,
+            SettingsNavigationItem
+        > = {
+            validator: {
+                label: 'Validator',
+                to: `${base}/validator`,
+                icon: IconChecklist,
+                keywords: ['validation', 'errors', 'content'],
+                children: [],
+                exact: true,
+                tourNav: 'validator',
+            },
+            recentlyDeleted: {
+                label: 'Recently deleted',
+                to: `${base}/recentlyDeleted`,
+                icon: IconTrash,
+                keywords: ['trash', 'restore', 'deleted'],
+                children: [],
+                exact: true,
+                tourNav: 'recently-deleted',
+            },
+        };
+
+        if (
+            hasProjectSettings &&
+            project &&
+            projectSettingsAccess.type === 'limited'
+        ) {
+            sections.push({
+                id: 'current-project',
+                title: 'Current project',
+                subtitle: project.name,
+                items: projectSettingsAccess.pages.map(
+                    (page) => limitedItems[page],
+                ),
+            });
+        }
+
+        if (canUpdateCurrentProject && project && organization) {
+            const projectItems: SettingsNavigationItem[] = [
+                {
+                    label: 'Connection settings',
+                    to: `${base}/settings`,
+                    icon: IconDatabaseCog,
+                    keywords: ['warehouse', 'dbt', 'database'],
+                    children: [],
+                    exact: true,
+                },
+                {
+                    label: 'Tables configuration',
+                    to: `${base}/tablesConfiguration`,
+                    icon: IconTableOptions,
+                    keywords: ['models', 'explores'],
+                    children: [],
+                    exact: true,
+                },
+                ...(isAgentIdentityEnabled &&
+                ability?.can(
+                    'manage',
+                    subject('Project', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+                    ? [
+                          {
+                              label: 'Agent identity',
+                              to: `${base}/agentIdentity`,
+                              icon: IconIdBadge2,
+                              keywords: ['ai', 'agent', 'credentials'],
+                              children: [],
+                              exact: true,
+                          },
+                      ]
+                    : []),
+                // Only meaningful when the instance has AI agents at all —
+                // same gate as the org-level AI agents section.
+                ...(isAiCopilotEnabledOrTrial
+                    ? [
+                          {
+                              label: 'Agent data scope',
+                              to: `${base}/agentDataScope`,
+                              icon: IconDatabaseCog,
+                              keywords: [
+                                  'ai',
+                                  'agent',
+                                  'sql',
+                                  'schema',
+                                  'catalog',
+                                  'scope',
+                              ],
+                              children: [],
+                              exact: true,
+                          },
+                      ]
+                    : []),
+                // Selecting a region is gated on organization-level AI
+                // administration to match the backend: both the credential
+                // list and the project selection require
+                // manage:OrganizationAiAgent, so a project admin without it
+                // would land on a page whose queries 403.
+                ...(isAiCopilotEnabledOrTrial && canManageOrgAiAgent
+                    ? [
+                          {
+                              label: 'AI region',
+                              to: `${base}/aiRegion`,
+                              icon: IconWorldCog,
+                              keywords: [
+                                  'ai',
+                                  'bedrock',
+                                  'region',
+                                  'residency',
+                                  'locality',
+                                  'credential',
+                              ],
+                              children: [],
+                              exact: true,
+                          },
+                      ]
+                    : []),
+                {
+                    label: 'Compilation history',
+                    to: `${base}/compilationHistory`,
+                    icon: IconRefresh,
+                    keywords: ['dbt', 'refresh', 'logs'],
+                    children: [],
+                    exact: true,
+                },
+            ];
+
+            if (health?.preAggregates.enabled) {
+                projectItems.push({
+                    label: 'Pre-aggregates',
+                    to: `${base}/preAggregates`,
+                    icon: IconBolt,
+                    keywords: ['cache', 'materialization', 'performance'],
+                    children: [
+                        {
+                            label: 'Materializations',
+                            to: `${base}/preAggregates/materializations`,
+                            icon: IconDatabase,
+                            keywords: ['cache'],
+                            children: [],
+                            exact: true,
+                        },
+                        {
+                            label: 'Analytics',
+                            to: `${base}/preAggregates/audit`,
+                            icon: IconReportAnalytics,
+                            keywords: ['usage', 'audit'],
+                            children: [],
+                            exact: true,
+                        },
+                    ],
+                });
+            }
+
+            if (isResultsCacheEnabled) {
+                projectItems.push({
+                    label: 'Results caching',
+                    to: `${base}/caching`,
+                    icon: IconDatabaseExport,
+                    keywords: [
+                        'cache',
+                        'results',
+                        'duration',
+                        'expire',
+                        'refresh',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            projectItems.push({
+                label: 'Parameters',
+                to: `${base}/parameters`,
+                icon: IconVariable,
+                keywords: ['variables'],
+                children: [],
+                exact: true,
+            });
+
+            projectItems.push(
+                {
+                    label: 'Project time zone',
+                    to: `${base}/queryTimezone`,
+                    icon: IconClock,
+                    keywords: ['timezone', 'time', 'query'],
+                    children: [],
+                    exact: true,
+                },
+                {
+                    label: 'Preview settings',
+                    to: `${base}/previewsConfig`,
+                    icon: IconUserCode,
+                    keywords: ['preview', 'developer', 'expiration'],
+                    children: [],
+                    exact: true,
+                },
+                {
+                    label: 'Appearance',
+                    to: `${base}/appearance`,
+                    icon: IconPalette,
+                    keywords: ['theme', 'color', 'branding'],
+                    children: [],
+                    exact: true,
+                },
+            );
+
+            if (
+                ability?.can(
+                    'manage',
+                    subject('Project', {
+                        organizationUuid: organization.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push(
+                    {
+                        label: 'Project access',
+                        to: `${base}/projectAccess`,
+                        icon: IconUsers,
+                        keywords: ['members', 'permissions', 'sharing'],
+                        children: [],
+                        exact: true,
+                    },
+                    {
+                        label: 'Default user spaces',
+                        to: `${base}/defaultUserSpaces`,
+                        icon: IconFolders,
+                        keywords: ['spaces', 'folders'],
+                        children: [],
+                        exact: true,
+                    },
+                );
+            }
+
+            if (
+                isExternalSourcesEnabled &&
+                ability?.can(
+                    'manage',
+                    subject('ExternalSource', {
+                        organizationUuid: organization.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'External sources',
+                    to: `${base}/externalSources`,
+                    icon: IconDatabaseExport,
+                    keywords: ['csv', 'upload', 'files', 'google sheets'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                ability?.can(
+                    'view',
+                    subject('Analytics', {
+                        organizationUuid: organization.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Usage analytics',
+                    to: `${base}/usageAnalytics`,
+                    icon: IconReportAnalytics,
+                    keywords: ['stats', 'metrics', 'dashboards'],
+                    children: [],
+                    exact: true,
+                    onClick: () => {
+                        track({ name: EventName.USAGE_ANALYTICS_CLICKED });
+                    },
+                });
+            }
+
+            projectItems.push({
+                label: 'Syncs & Scheduled deliveries',
+                to: `${base}/scheduledDeliveries`,
+                icon: IconCalendarStats,
+                keywords: ['email', 'reports', 'sync', 'dbt'],
+                children: [],
+                exact: true,
+            });
+
+            if (
+                isDataAppsEnabled &&
+                ability?.can(
+                    'manage',
+                    subject('ExternalConnection', {
+                        organizationUuid: organization.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Data app connections',
+                    to: `${base}/dataAppConnections`,
+                    icon: IconPlugConnected,
+                    keywords: ['external', 'api', 'http', 'fetch', 'apps'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (organization?.pgWire?.enabled) {
+                projectItems.push({
+                    label: 'Metric SQL API',
+                    to: `${base}/semanticLayer`,
+                    icon: IconPlug,
+                    keywords: [
+                        'postgres',
+                        'pgwire',
+                        'connection',
+                        'sql',
+                        'bi',
+                        'metric',
+                        'semantic layer',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                ability?.can(
+                    'update',
+                    subject('Project', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                ) &&
+                isEmbeddingEnabled
+            ) {
+                const embedChildren: SettingsNavigationItem[] = [
+                    {
+                        label: 'General',
+                        to: `${base}/embed`,
+                        icon: IconBrowser,
+                        keywords: ['embed', 'iframe', 'public'],
+                        children: [],
+                        exact: true,
+                    },
+                ];
+
+                if (ability?.can('manage', 'Organization')) {
+                    embedChildren.push({
+                        label: 'CORS',
+                        to: `${base}/embed/cors`,
+                        icon: IconWorldCog,
+                        keywords: ['cors', 'origins', 'domains', 'embed'],
+                        children: [],
+                        exact: true,
+                    });
+                }
+
+                projectItems.push({
+                    label: 'Embed configuration',
+                    to: `${base}/embed`,
+                    icon: IconBrowser,
+                    keywords: ['embed', 'iframe', 'public'],
+                    children: embedChildren,
+                });
+            }
+
+            if (
+                ability?.can(
+                    'manage',
+                    subject('Validation', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push(limitedItems.validator);
+            }
+
+            if (
+                ability?.can(
+                    'manage',
+                    subject('ContentVerification', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Verified content',
+                    to: `${base}/verifiedContent`,
+                    icon: IconShieldCheck,
+                    keywords: ['certified', 'trusted'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                isContentReviewAvailable &&
+                ability?.can(
+                    'manage',
+                    subject('Project', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Review requests',
+                    to: `${base}/reviewRequests`,
+                    icon: IconSend,
+                    keywords: [
+                        'review',
+                        'personal space',
+                        'approve',
+                        'reviewers',
+                    ],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                ability?.can(
+                    'promote',
+                    subject('SavedChart', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Data ops',
+                    to: `${base}/dataOps`,
+                    icon: IconDatabaseExport,
+                    keywords: ['promote', 'deploy', 'content as code'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                isGitProject &&
+                ability?.can(
+                    'view',
+                    subject('SourceCode', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Pull requests',
+                    to: `${base}/pullRequests`,
+                    icon: IconGitPullRequest,
+                    keywords: ['git', 'github', 'write back'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (
+                isGitProject &&
+                ability?.can(
+                    'view',
+                    subject('SourceCode', {
+                        organizationUuid: project.organizationUuid,
+                        projectUuid: project.projectUuid,
+                    }),
+                )
+            ) {
+                projectItems.push({
+                    label: 'Content review',
+                    to: `${base}/contentReview`,
+                    icon: IconEyeCheck,
+                    keywords: ['drafts', 'unpublished', 'review', 'write back'],
+                    children: [],
+                    exact: true,
+                });
+            }
+
+            if (health?.softDelete?.enabled) {
+                projectItems.push(limitedItems.recentlyDeleted);
+            }
+
+            sections.push({
+                id: 'current-project',
+                title: 'Current project',
+                subtitle: project.name,
+                items:
+                    project.provisioningSource === 'analytics'
+                        ? projectItems.filter(
+                              ({ to }) =>
+                                  to === `${base}/projectAccess` ||
+                                  to === `${base}/recentlyDeleted`,
+                          )
+                        : projectItems,
+            });
+        }
+
+        return sections;
+    }, [
+        user?.ability,
+        organization,
+        project,
+        health,
+        allowPasswordAuthentication,
+        hasSocialLogin,
+        isGroupManagementEnabled,
+        isProLimitsEnabled,
+        canAccessAnalyticsSettings,
+        isOrganizationRoadmapEnabled,
+        canAccessAiCredits,
+        isCustomRolesEnabled,
+        isSsoOrganizationSettingsEnabled,
+        isEmailWhitelabelEnabled,
+        showMyAgentConnections,
+        isAgentIdentityEnabled,
+        isScimEnabled,
+        isServiceAccountsEnabled,
+        isAiCopilotEnabledOrTrial,
+        shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
+        isEmbeddingEnabled,
+        isDataAppsEnabled,
+        isDataAppAnalysisEnabled,
+        isDashboardAnalysisEnabled,
+        isChartStudioAvailable,
+        isExternalSourcesEnabled,
+        isResultsCacheEnabled,
+        isGitProject,
+        isContentReviewAvailable,
+        projectSettingsAccess,
+        track,
+    ]);
+};

@@ -1,20 +1,22 @@
 import {
     assertUnreachable,
     FilterInteractivityValues,
+    getEmbedWriteSpaceUuids,
     getFilterInteractivityValue,
+    isAiAgentContent,
     isChartContent,
     isDashboardContent,
     isDashboardUuidContent,
     type CreateEmbedJwt,
 } from '@lightdash/common';
-import { Anchor, Stack, Tabs, Text, Title } from '@mantine-8/core';
-import { Prism } from '@mantine/prism';
+import { Anchor, Stack, Tabs, Text, Title } from '@mantine/core';
 import {
     IconBrandGolang,
     IconBrandNodejs,
     IconBrandPython,
 } from '@tabler/icons-react';
 import { useCallback, type FC } from 'react';
+import CodeBlock from '../../../../components/common/CodeBlock/CodeBlock';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import useToaster from '../../../../hooks/toaster/useToaster';
 
@@ -23,7 +25,7 @@ export type EmbedMethod = 'iframe' | 'sdk';
 // Not sure why lint-staged is removing the value of this enum.
 // prettier-ignore
 // eslint-disable-next-line
-export enum SnippetLanguage {
+enum SnippetLanguage {
     NODE = 'node',
     PYTHON = 'python',
     GO = 'go',
@@ -115,6 +117,58 @@ const languageStringArray = (
     }
 };
 
+const languageWriteActionsSnippet = (
+    language: SnippetLanguage,
+    value?: CreateEmbedJwt['writeActions'],
+): string => {
+    if (!value) {
+        return '';
+    }
+
+    switch (language) {
+        case SnippetLanguage.NODE:
+            return `    // serviceAccountUserUuid is the selected service account's user UUID.
+    // To run actions as a user instead, replace it with userUuid: '<USER_UUID>'.
+    writeActions: ${JSON.stringify(value)},`;
+        case SnippetLanguage.PYTHON:
+            return `    # serviceAccountUserUuid is the selected service account's user UUID.
+    # To run actions as a user instead, replace it with "userUuid": "<USER_UUID>".
+    "writeActions": ${JSON.stringify(value)},`;
+        case SnippetLanguage.GO:
+            return '';
+        default:
+            return assertUnreachable(language, `Unknown language ${language}`);
+    }
+};
+
+const GO_SOURCE_SPACES_FIELD =
+    '\n            SourceSpaceUuids       []string `json:"sourceSpaceUuids,omitempty"`';
+
+const goWriteActions = (
+    writeActions: CreateEmbedJwt['writeActions'],
+    withSourceSpaces: boolean,
+): string => {
+    if (!writeActions) {
+        return 'nil';
+    }
+
+    const sourceSpaceUuids = writeActions.sourceSpaceUuids ?? [];
+    const sourceSpacesValue =
+        withSourceSpaces && sourceSpaceUuids.length > 0
+            ? `\n            SourceSpaceUuids:       []string{"${sourceSpaceUuids.join('", "')}"},`
+            : '';
+
+    return `&struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`${withSourceSpaces ? GO_SOURCE_SPACES_FIELD : ''}
+        }{
+            ServiceAccountUserUuid: "${writeActions.serviceAccountUserUuid ?? ''}",
+            UserUuid:               "${writeActions.userUuid ?? ''}",
+            WriteSpaceUuids:        []string{"${getEmbedWriteSpaceUuids(writeActions).join('", "')}"},${sourceSpacesValue}
+        }`;
+};
+
 const chartIframeCodeTemplates: Record<SnippetLanguage, string> = {
     [SnippetLanguage.NODE]: `import jwt from 'jsonwebtoken';
 const LIGHTDASH_EMBED_SECRET = 'secret'; // replace with your secret
@@ -133,6 +187,7 @@ const data = {
         email: {{email}}
     },
     userAttributes: {{userAttributes}},
+{{writeActionsSnippet}}
 };
 const token = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
 const url = \`{{siteUrl}}/embed/\${projectUuid}#\${token}\`;
@@ -159,6 +214,7 @@ data = {
         "email": {{email}}
     },
     "userAttributes": {{userAttributes}},
+{{writeActionsSnippet}}
 };
 token = jwt.encode(data, key, algorithm="HS256")
 url = f"{{siteUrl}}/embed/{projectUuid}#{token}"
@@ -191,6 +247,11 @@ func main() {
             CanViewUnderlyingData bool \`json:"canViewUnderlyingData"\`
         } \`json:"content"\`
         UserAttributes map[string]string \`json:"userAttributes"\`
+        WriteActions *struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`
+        } \`json:"writeActions,omitempty"\`
         jwt.StandardClaims
         User *struct {
             ExternalId *string \`json:"externalId,omitempty"\`
@@ -223,6 +284,9 @@ func main() {
             Email:      {{emailUsage}},
         },
         UserAttributes: map[string]string{{userAttributes}},
+        // ServiceAccountUserUuid is the selected service account's user UUID.
+        // To run actions as a user instead, set UserUuid and leave ServiceAccountUserUuid empty.
+        WriteActions: {{writeActionsGo}},
         StandardClaims: jwt.StandardClaims{
             ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
         },
@@ -245,6 +309,396 @@ func main() {
 `,
 };
 
+const dataAppIframeCodeTemplates: Record<SnippetLanguage, string> = {
+    [SnippetLanguage.NODE]: `import jwt from 'jsonwebtoken';
+const LIGHTDASH_EMBED_SECRET = 'secret'; // replace with your secret
+const projectUuid = '{{projectUuid}}';
+const appUuid = '{{appUuid}}';
+const data = {
+    content: {
+        type: 'dataApp',
+        projectUuid: projectUuid,
+        appUuid: appUuid,
+    },
+    user: {
+        externalId: {{externalId}},
+        email: {{email}}
+    },
+    userAttributes: {{userAttributes}},
+};
+const token = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
+const url = \`{{siteUrl}}/embed/\${projectUuid}/app/\${appUuid}#\${token}\`;
+`,
+    [SnippetLanguage.PYTHON]: `import datetime
+import jwt # pip install pyjwt
+
+key = "secret" # replace with your secret
+projectUuid = '{{projectUuid}}'
+appUuid = '{{appUuid}}'
+
+data = {
+    "exp": datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(hours=1), # replace with your expiration time,
+    "iat": datetime.datetime.now(tz=datetime.timezone.utc),
+    "content": {
+        "type": "dataApp",
+        "projectUuid": projectUuid,
+        "appUuid": appUuid,
+    },
+    "user": {
+        "externalId": {{externalId}},
+        "email": {{email}}
+    },
+    "userAttributes": {{userAttributes}},
+};
+token = jwt.encode(data, key, algorithm="HS256")
+url = f"{{siteUrl}}/embed/{projectUuid}/app/{appUuid}#{token}"
+`,
+    [SnippetLanguage.GO]: `
+package main
+
+import (
+    "fmt"
+    "time"
+
+    jwt "github.com/dgrijalva/jwt-go"
+)
+
+const LIGHTDASH_EMBED_SECRET = "secret" // replace with your secret
+const projectUuid = "{{projectUuid}}"
+const appUuid = "{{appUuid}}"
+
+func main() {
+    {{externalIdDef}}
+    {{emailDef}}
+
+    // Define the custom claims structure
+    type CustomClaims struct {
+        Content struct {
+            Type        string \`json:"type"\`
+            ProjectUuid string \`json:"projectUuid"\`
+            AppUuid     string \`json:"appUuid"\`
+        } \`json:"content"\`
+        UserAttributes map[string]string \`json:"userAttributes"\`
+        jwt.StandardClaims
+        User *struct {
+            ExternalId *string \`json:"externalId,omitempty"\`
+            Email      *string \`json:"email,omitempty"\`
+        } \`json:"user,omitempty"\`
+    }
+
+    // Create the claims
+    claims := CustomClaims{
+        Content: struct {
+            Type        string \`json:"type"\`
+            ProjectUuid string \`json:"projectUuid"\`
+            AppUuid     string \`json:"appUuid"\`
+        }{
+            Type:        "dataApp",
+            ProjectUuid: projectUuid,
+            AppUuid:     appUuid,
+        },
+        User: &struct {
+            ExternalId *string \`json:"externalId,omitempty"\`
+            Email      *string \`json:"email,omitempty"\`
+        }{
+            ExternalId: {{externalIdUsage}},
+            Email:      {{emailUsage}},
+        },
+        UserAttributes: map[string]string{{userAttributes}},
+        StandardClaims: jwt.StandardClaims{
+            ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
+        },
+    }
+
+    // Create the token
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+    // Sign the token with the secret
+    signedToken, err := token.SignedString([]byte(LIGHTDASH_EMBED_SECRET))
+    if err != nil {
+        panic(err)
+    }
+
+    // Construct the URL
+    url := fmt.Sprintf("{{siteUrl}}/embed/%s/app/%s#%s", projectUuid, appUuid, signedToken)
+    fmt.Println("URL:", url)
+
+}
+`,
+};
+
+const aiAgentIframeCodeTemplates: Record<SnippetLanguage, string> = {
+    [SnippetLanguage.NODE]: `import jwt from 'jsonwebtoken';
+const LIGHTDASH_EMBED_SECRET = 'secret'; // replace with your secret
+const projectUuid = '{{projectUuid}}';
+const agentUuid = '{{agentUuid}}';
+const data = {
+    content: {
+        type: 'aiAgent',
+        projectUuid: projectUuid,
+        agentUuid: agentUuid,
+        canExplore: {{canExplore}},
+        canViewDebugInfo: {{canViewDebugInfo}},
+    },
+    user: {
+        externalId: {{externalId}},
+        email: {{email}}
+    },
+    userAttributes: {{userAttributes}},
+{{writeActionsSnippet}}
+};
+const embedJwt = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
+const threadUuid = undefined; // Set this to resume an existing conversation.
+const url = threadUuid
+    ? \`{{siteUrl}}/embed/\${projectUuid}/ai-agents/\${agentUuid}/threads/\${threadUuid}#\${embedJwt}\`
+    : \`{{siteUrl}}/embed/\${projectUuid}/ai-agents/\${agentUuid}/threads#\${embedJwt}\`;
+`,
+    [SnippetLanguage.PYTHON]: `import datetime
+import jwt # pip install pyjwt
+
+key = "secret" # replace with your secret
+projectUuid = '{{projectUuid}}'
+agentUuid = '{{agentUuid}}'
+
+data = {
+    "exp": datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(hours=1), # replace with your expiration time,
+    "iat": datetime.datetime.now(tz=datetime.timezone.utc),
+    "content": {
+        "type": "aiAgent",
+        "projectUuid": projectUuid,
+        "agentUuid": agentUuid,
+        "canExplore": {{canExplore}},
+        "canViewDebugInfo": {{canViewDebugInfo}},
+    },
+    "user": {
+        "externalId": {{externalId}},
+        "email": {{email}}
+    },
+    "userAttributes": {{userAttributes}},
+{{writeActionsSnippet}}
+};
+embedJwt = jwt.encode(data, key, algorithm="HS256")
+threadUuid = None # Set this to resume an existing conversation.
+url = (
+    f"{{siteUrl}}/embed/{projectUuid}/ai-agents/{agentUuid}/threads/{threadUuid}#{embedJwt}"
+    if threadUuid
+    else f"{{siteUrl}}/embed/{projectUuid}/ai-agents/{agentUuid}/threads#{embedJwt}"
+)
+`,
+    [SnippetLanguage.GO]: `
+package main
+
+import (
+    "fmt"
+    "time"
+
+    jwt "github.com/dgrijalva/jwt-go"
+)
+
+const LIGHTDASH_EMBED_SECRET = "secret" // replace with your secret
+const projectUuid = "{{projectUuid}}"
+const agentUuid = "{{agentUuid}}"
+
+func main() {
+    {{externalIdDef}}
+    {{emailDef}}
+
+    type CustomClaims struct {
+        Content struct {
+            Type             string \`json:"type"\`
+            ProjectUuid      string \`json:"projectUuid"\`
+            AgentUuid        string \`json:"agentUuid"\`
+            CanExplore       bool   \`json:"canExplore"\`
+            CanViewDebugInfo bool   \`json:"canViewDebugInfo"\`
+        } \`json:"content"\`
+        UserAttributes map[string]string \`json:"userAttributes"\`
+        WriteActions *struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`
+        } \`json:"writeActions,omitempty"\`
+        jwt.StandardClaims
+        User *struct {
+            ExternalId *string \`json:"externalId,omitempty"\`
+            Email      *string \`json:"email,omitempty"\`
+        } \`json:"user,omitempty"\`
+    }
+
+    claims := CustomClaims{
+        Content: struct {
+            Type             string \`json:"type"\`
+            ProjectUuid      string \`json:"projectUuid"\`
+            AgentUuid        string \`json:"agentUuid"\`
+            CanExplore       bool   \`json:"canExplore"\`
+            CanViewDebugInfo bool   \`json:"canViewDebugInfo"\`
+        }{
+            Type:             "aiAgent",
+            ProjectUuid:      projectUuid,
+            AgentUuid:        agentUuid,
+            CanExplore:       {{canExplore}},
+            CanViewDebugInfo: {{canViewDebugInfo}},
+        },
+        User: &struct {
+            ExternalId *string \`json:"externalId,omitempty"\`
+            Email      *string \`json:"email,omitempty"\`
+        }{
+            ExternalId: {{externalIdUsage}},
+            Email:      {{emailUsage}},
+        },
+        UserAttributes: map[string]string{{userAttributes}},
+        // ServiceAccountUserUuid is the selected service account's user UUID.
+        // To run actions as a user instead, set UserUuid and leave ServiceAccountUserUuid empty.
+        WriteActions: {{writeActionsGo}},
+        StandardClaims: jwt.StandardClaims{
+            ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
+        },
+    }
+
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    embedJwt, err := token.SignedString([]byte(LIGHTDASH_EMBED_SECRET))
+    if err != nil {
+        panic(err)
+    }
+
+    threadUuid := "" // Set this to resume an existing conversation.
+    path := fmt.Sprintf("{{siteUrl}}/embed/%s/ai-agents/%s/threads", projectUuid, agentUuid)
+    if threadUuid != "" {
+        path = fmt.Sprintf("%s/%s", path, threadUuid)
+    }
+    url := fmt.Sprintf("%s#%s", path, embedJwt)
+    fmt.Println("URL:", url)
+}
+`,
+};
+
+const aiAgentSdkCodeTemplates: Record<SnippetLanguage, string> = {
+    [SnippetLanguage.NODE]: `import jwt from 'jsonwebtoken';
+const LIGHTDASH_EMBED_SECRET = 'secret'; // replace with your secret
+const projectUuid = '{{projectUuid}}';
+const agentUuid = '{{agentUuid}}';
+const data = {
+    content: {
+        type: 'aiAgent',
+        projectUuid: projectUuid,
+        agentUuid: agentUuid,
+        canExplore: {{canExplore}},
+        canViewDebugInfo: {{canViewDebugInfo}},
+    },
+    user: {
+        externalId: {{externalId}},
+        email: {{email}}
+    },
+    userAttributes: {{userAttributes}},
+{{writeActionsSnippet}}
+};
+const embedJwt = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
+`,
+    [SnippetLanguage.PYTHON]: `import datetime
+import jwt # pip install pyjwt
+
+key = "secret" # replace with your secret
+projectUuid = '{{projectUuid}}'
+agentUuid = '{{agentUuid}}'
+
+data = {
+    "exp": datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(hours=1), # replace with your expiration time,
+    "iat": datetime.datetime.now(tz=datetime.timezone.utc),
+    "content": {
+        "type": "aiAgent",
+        "projectUuid": projectUuid,
+        "agentUuid": agentUuid,
+        "canExplore": {{canExplore}},
+        "canViewDebugInfo": {{canViewDebugInfo}},
+    },
+    "user": {
+        "externalId": {{externalId}},
+        "email": {{email}}
+    },
+    "userAttributes": {{userAttributes}},
+{{writeActionsSnippet}}
+};
+embedJwt = jwt.encode(data, key, algorithm="HS256")
+`,
+    [SnippetLanguage.GO]: `
+package main
+
+import (
+    "fmt"
+    "time"
+
+    jwt "github.com/dgrijalva/jwt-go"
+)
+
+const LIGHTDASH_EMBED_SECRET = "secret" // replace with your secret
+const projectUuid = "{{projectUuid}}"
+const agentUuid = "{{agentUuid}}"
+
+func main() {
+    {{externalIdDef}}
+    {{emailDef}}
+
+    type CustomClaims struct {
+        Content struct {
+            Type             string \`json:"type"\`
+            ProjectUuid      string \`json:"projectUuid"\`
+            AgentUuid        string \`json:"agentUuid"\`
+            CanExplore       bool   \`json:"canExplore"\`
+            CanViewDebugInfo bool   \`json:"canViewDebugInfo"\`
+        } \`json:"content"\`
+        UserAttributes map[string]string \`json:"userAttributes"\`
+        WriteActions *struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`
+        } \`json:"writeActions,omitempty"\`
+        jwt.StandardClaims
+        User *struct {
+            ExternalId *string \`json:"externalId,omitempty"\`
+            Email      *string \`json:"email,omitempty"\`
+        } \`json:"user,omitempty"\`
+    }
+
+    claims := CustomClaims{
+        Content: struct {
+            Type             string \`json:"type"\`
+            ProjectUuid      string \`json:"projectUuid"\`
+            AgentUuid        string \`json:"agentUuid"\`
+            CanExplore       bool   \`json:"canExplore"\`
+            CanViewDebugInfo bool   \`json:"canViewDebugInfo"\`
+        }{
+            Type:             "aiAgent",
+            ProjectUuid:      projectUuid,
+            AgentUuid:        agentUuid,
+            CanExplore:       {{canExplore}},
+            CanViewDebugInfo: {{canViewDebugInfo}},
+        },
+        User: &struct {
+            ExternalId *string \`json:"externalId,omitempty"\`
+            Email      *string \`json:"email,omitempty"\`
+        }{
+            ExternalId: {{externalIdUsage}},
+            Email:      {{emailUsage}},
+        },
+        UserAttributes: map[string]string{{userAttributes}},
+        // ServiceAccountUserUuid is the selected service account's user UUID.
+        // To run actions as a user instead, set UserUuid and leave ServiceAccountUserUuid empty.
+        WriteActions: {{writeActionsGo}},
+        StandardClaims: jwt.StandardClaims{
+            ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
+        },
+    }
+
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    embedJwt, err := token.SignedString([]byte(LIGHTDASH_EMBED_SECRET))
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Println("JWT:", embedJwt)
+}
+`,
+};
+
 const dashboardIframeCodeTemplates: Record<SnippetLanguage, string> = {
     [SnippetLanguage.NODE]: `import jwt from 'jsonwebtoken';
 const LIGHTDASH_EMBED_SECRET = 'secret'; // replace with your secret
@@ -258,6 +712,7 @@ const data = {
             enabled: "{{dashboardFiltersInteractivityEnabled}}",
             allowedFilters: {{dashboardFiltersInteractivityAllowedFilters}},
             hidden: {{dashboardFiltersInteractivityHidden}},
+            canAddFilters: {{dashboardFiltersInteractivityCanAddFilters}},
         },
         parameterInteractivity: {
             enabled: {{canChangeParameters}},
@@ -266,6 +721,7 @@ const data = {
         canExportImages: {{canExportImages}},
         canExportPagePdf: {{canExportPagePdf}},
         canDateZoom: {{canDateZoom}},
+        stickyHeader: {{stickyHeader}},
         canExplore: {{canExplore}},
         canViewUnderlyingData: {{canViewUnderlyingData}},
         canViewDataApps: {{canViewDataApps}},
@@ -275,6 +731,7 @@ const data = {
         email: {{email}}
     },
     userAttributes: {{userAttributes}},
+{{writeActionsSnippet}}
 };
 const token = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
 const url = \`{{siteUrl}}/embed/\${projectUuid}#\${token}\`;
@@ -296,6 +753,7 @@ data = {
             "enabled": "{{dashboardFiltersInteractivityEnabled}}",
             "allowedFilters": {{dashboardFiltersInteractivityAllowedFilters}},
             "hidden": {{dashboardFiltersInteractivityHidden}},
+            "canAddFilters": {{dashboardFiltersInteractivityCanAddFilters}},
         },
         "parameterInteractivity": {
             "enabled": {{canChangeParameters}},
@@ -304,6 +762,7 @@ data = {
         "canExportImages": {{canExportImages}},
         "canExportPagePdf": {{canExportPagePdf}},
         "canDateZoom": {{canDateZoom}},
+        "stickyHeader": {{stickyHeader}},
         "canExplore": {{canExplore}},
         "canViewUnderlyingData": {{canViewUnderlyingData}},
         "canViewDataApps": {{canViewDataApps}},
@@ -313,6 +772,7 @@ data = {
         "email": {{email}}
     },
     "userAttributes": {{userAttributes}},
+{{writeActionsSnippet}}
 };
 token = jwt.encode(data, key, algorithm="HS256")
 url = f"{{siteUrl}}/embed/{projectUuid}#{token}"
@@ -344,6 +804,7 @@ func main() {
                 Enabled string \`json:"enabled"\`
                 AllowedFilters []string \`json:"allowedFilters,omitempty"\`
                 Hidden bool \`json:"hidden"\`
+                CanAddFilters bool \`json:"canAddFilters"\`
             } \`json:"dashboardFiltersInteractivity"\`
             ParameterInteractivity struct {
                 Enabled bool \`json:"enabled"\`
@@ -352,11 +813,18 @@ func main() {
             CanExportImages bool \`json:"canExportImages"\`
             CanExportPagePdf bool \`json:"canExportPagePdf"\`
             CanDateZoom bool \`json:"canDateZoom"\`
+            StickyHeader bool \`json:"stickyHeader"\`
             CanExplore bool \`json:"canExplore"\`
             CanViewUnderlyingData bool \`json:"canViewUnderlyingData"\`
             CanViewDataApps bool \`json:"canViewDataApps"\`
         } \`json:"content"\`
         UserAttributes map[string]string \`json:"userAttributes"\`
+        WriteActions *struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`
+            SourceSpaceUuids       []string \`json:"sourceSpaceUuids,omitempty"\`
+        } \`json:"writeActions,omitempty"\`
         jwt.StandardClaims
         User *struct {
             ExternalId *string \`json:"externalId,omitempty"\`
@@ -374,6 +842,7 @@ func main() {
                 Enabled string \`json:"enabled"\`
                 AllowedFilters []string \`json:"allowedFilters,omitempty"\`
                 Hidden bool \`json:"hidden"\`
+                CanAddFilters bool \`json:"canAddFilters"\`
             } \`json:"dashboardFiltersInteractivity"\`
             ParameterInteractivity struct {
                 Enabled bool \`json:"enabled"\`
@@ -382,6 +851,7 @@ func main() {
             CanExportImages bool \`json:"canExportImages"\`
             CanExportPagePdf bool \`json:"canExportPagePdf"\`
             CanDateZoom bool \`json:"canDateZoom"\`
+            StickyHeader bool \`json:"stickyHeader"\`
             CanExplore bool \`json:"canExplore"\`
             CanViewUnderlyingData bool \`json:"canViewUnderlyingData"\`
             CanViewDataApps bool \`json:"canViewDataApps"\`
@@ -393,10 +863,12 @@ func main() {
                 Enabled string \`json:"enabled"\`
                 AllowedFilters []string \`json:"allowedFilters,omitempty"\`
                 Hidden bool \`json:"hidden"\`
+                CanAddFilters bool \`json:"canAddFilters"\`
             }{
                 Enabled: "{{dashboardFiltersInteractivityEnabled}}",
                 AllowedFilters: []string{{{dashboardFiltersInteractivityAllowedFilters}}},
                 Hidden: {{dashboardFiltersInteractivityHidden}},
+                CanAddFilters: {{dashboardFiltersInteractivityCanAddFilters}},
             },
             ParameterInteractivity: struct {
                 Enabled bool \`json:"enabled"\`
@@ -407,6 +879,7 @@ func main() {
             CanExportImages: {{canExportImages}},
             CanExportPagePdf: {{canExportPagePdf}},
             CanDateZoom: {{canDateZoom}},
+            StickyHeader: {{stickyHeader}},
             CanExplore: {{canExplore}},
             CanViewUnderlyingData: {{canViewUnderlyingData}},
             CanViewDataApps: {{canViewDataApps}},
@@ -419,6 +892,9 @@ func main() {
             Email:      {{emailUsage}},
         },
         UserAttributes: map[string]string{{userAttributes}},
+        // ServiceAccountUserUuid is the selected service account's user UUID.
+        // To run actions as a user instead, set UserUuid and leave ServiceAccountUserUuid empty.
+        WriteActions: {{writeActionsGo}},
         StandardClaims: jwt.StandardClaims{
             ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
         },
@@ -459,6 +935,7 @@ const data = {
         email: {{email}}
     },
     userAttributes: {{userAttributes}},
+{{writeActionsSnippet}}
 };
 const embedJwt = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
 `,
@@ -484,6 +961,7 @@ data = {
         "email": {{email}}
     },
     "userAttributes": {{userAttributes}},
+{{writeActionsSnippet}}
 };
 embedJwt = jwt.encode(data, key, algorithm="HS256")
 `,
@@ -514,6 +992,11 @@ func main() {
             CanViewUnderlyingData bool \`json:"canViewUnderlyingData"\`
         } \`json:"content"\`
         UserAttributes map[string]string \`json:"userAttributes"\`
+        WriteActions *struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`
+        } \`json:"writeActions,omitempty"\`
         jwt.StandardClaims
         User *struct {
             ExternalId *string \`json:"externalId,omitempty"\`
@@ -545,6 +1028,9 @@ func main() {
             Email:      {{emailUsage}},
         },
         UserAttributes: map[string]string{{userAttributes}},
+        // ServiceAccountUserUuid is the selected service account's user UUID.
+        // To run actions as a user instead, set UserUuid and leave ServiceAccountUserUuid empty.
+        WriteActions: {{writeActionsGo}},
         StandardClaims: jwt.StandardClaims{
             ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
         },
@@ -574,6 +1060,7 @@ const data = {
             enabled: "{{dashboardFiltersInteractivityEnabled}}",
             allowedFilters: {{dashboardFiltersInteractivityAllowedFilters}},
             hidden: {{dashboardFiltersInteractivityHidden}},
+            canAddFilters: {{dashboardFiltersInteractivityCanAddFilters}},
         },
         parameterInteractivity: {
             enabled: {{canChangeParameters}},
@@ -582,6 +1069,7 @@ const data = {
         canExportImages: {{canExportImages}},
         canExportPagePdf: {{canExportPagePdf}},
         canDateZoom: {{canDateZoom}},
+        stickyHeader: {{stickyHeader}},
         canExplore: {{canExplore}},
         canViewUnderlyingData: {{canViewUnderlyingData}},
         canViewDataApps: {{canViewDataApps}},
@@ -591,6 +1079,7 @@ const data = {
         email: {{email}}
     },
     userAttributes: {{userAttributes}},
+{{writeActionsSnippet}}
 };
 const embedJwt = jwt.sign(data, LIGHTDASH_EMBED_SECRET, { expiresIn: '{{expiresIn}}' });
 `,
@@ -611,6 +1100,7 @@ data = {
             "enabled": "{{dashboardFiltersInteractivityEnabled}}",
             "allowedFilters": {{dashboardFiltersInteractivityAllowedFilters}},
             "hidden": {{dashboardFiltersInteractivityHidden}},
+            "canAddFilters": {{dashboardFiltersInteractivityCanAddFilters}},
         },
         "parameterInteractivity": {
             "enabled": {{canChangeParameters}},
@@ -619,6 +1109,7 @@ data = {
         "canExportImages": {{canExportImages}},
         "canExportPagePdf": {{canExportPagePdf}},
         "canDateZoom": {{canDateZoom}},
+        "stickyHeader": {{stickyHeader}},
         "canExplore": {{canExplore}},
         "canViewUnderlyingData": {{canViewUnderlyingData}},
         "canViewDataApps": {{canViewDataApps}},
@@ -628,6 +1119,7 @@ data = {
         "email": {{email}}
     },
     "userAttributes": {{userAttributes}},
+{{writeActionsSnippet}}
 };
 embedJwt = jwt.encode(data, key, algorithm="HS256")
 `,
@@ -657,6 +1149,7 @@ func main() {
                 Enabled string \`json:"enabled"\`
                 AllowedFilters []string \`json:"allowedFilters,omitempty"\`
                 Hidden bool \`json:"hidden"\`
+                CanAddFilters bool \`json:"canAddFilters"\`
             } \`json:"dashboardFiltersInteractivity"\`
             ParameterInteractivity struct {
                 Enabled bool \`json:"enabled"\`
@@ -665,11 +1158,18 @@ func main() {
             CanExportImages bool \`json:"canExportImages"\`
             CanExportPagePdf bool \`json:"canExportPagePdf"\`
             CanDateZoom bool \`json:"canDateZoom"\`
+            StickyHeader bool \`json:"stickyHeader"\`
             CanExplore bool \`json:"canExplore"\`
             CanViewUnderlyingData bool \`json:"canViewUnderlyingData"\`
             CanViewDataApps bool \`json:"canViewDataApps"\`
         } \`json:"content"\`
         UserAttributes map[string]string \`json:"userAttributes"\`
+        WriteActions *struct {
+            ServiceAccountUserUuid string \`json:"serviceAccountUserUuid,omitempty"\`
+            UserUuid               string \`json:"userUuid,omitempty"\`
+            WriteSpaceUuids        []string \`json:"writeSpaceUuids"\`
+            SourceSpaceUuids       []string \`json:"sourceSpaceUuids,omitempty"\`
+        } \`json:"writeActions,omitempty"\`
         jwt.StandardClaims
         User *struct {
             ExternalId *string \`json:"externalId,omitempty"\`
@@ -686,6 +1186,7 @@ func main() {
                 Enabled string \`json:"enabled"\`
                 AllowedFilters []string \`json:"allowedFilters,omitempty"\`
                 Hidden bool \`json:"hidden"\`
+                CanAddFilters bool \`json:"canAddFilters"\`
             } \`json:"dashboardFiltersInteractivity"\`
             ParameterInteractivity struct {
                 Enabled bool \`json:"enabled"\`
@@ -694,6 +1195,7 @@ func main() {
             CanExportImages bool \`json:"canExportImages"\`
             CanExportPagePdf bool \`json:"canExportPagePdf"\`
             CanDateZoom bool \`json:"canDateZoom"\`
+            StickyHeader bool \`json:"stickyHeader"\`
             CanExplore bool \`json:"canExplore"\`
             CanViewUnderlyingData bool \`json:"canViewUnderlyingData"\`
             CanViewDataApps bool \`json:"canViewDataApps"\`
@@ -705,10 +1207,12 @@ func main() {
                 Enabled string \`json:"enabled"\`
                 AllowedFilters []string \`json:"allowedFilters,omitempty"\`
                 Hidden bool \`json:"hidden"\`
+                CanAddFilters bool \`json:"canAddFilters"\`
             }{
                 Enabled: "{{dashboardFiltersInteractivityEnabled}}",
                 AllowedFilters: []string{{{dashboardFiltersInteractivityAllowedFilters}}},
                 Hidden: {{dashboardFiltersInteractivityHidden}},
+                CanAddFilters: {{dashboardFiltersInteractivityCanAddFilters}},
             },
             ParameterInteractivity: struct {
                 Enabled bool \`json:"enabled"\`
@@ -719,6 +1223,7 @@ func main() {
             CanExportImages: {{canExportImages}},
             CanExportPagePdf: {{canExportPagePdf}},
             CanDateZoom: {{canDateZoom}},
+            StickyHeader: {{stickyHeader}},
             CanExplore: {{canExplore}},
             CanViewUnderlyingData: {{canViewUnderlyingData}},
             CanViewDataApps: {{canViewDataApps}},
@@ -731,6 +1236,9 @@ func main() {
             Email:      {{emailUsage}},
         },
         UserAttributes: map[string]string{{userAttributes}},
+        // ServiceAccountUserUuid is the selected service account's user UUID.
+        // To run actions as a user instead, set UserUuid and leave ServiceAccountUserUuid empty.
+        WriteActions: {{writeActionsGo}},
         StandardClaims: jwt.StandardClaims{
             ExpiresAt: time.Now().Add(time.Hour).Unix(), // replace with your expiration
         },
@@ -766,6 +1274,17 @@ const getBackendCodeSnippet = (
             mode === 'iframe'
                 ? dashboardIframeCodeTemplates[language]
                 : dashboardSdkCodeTemplates[language];
+    } else if (data.content.type === 'dataApp') {
+        // Standalone data apps are iframe-only — there is no React SDK
+        // component for them yet.
+        codeTemplate = dataAppIframeCodeTemplates[language];
+    } else if (data.content.type === 'aiAgent') {
+        codeTemplate =
+            mode === 'iframe'
+                ? aiAgentIframeCodeTemplates[language]
+                : aiAgentSdkCodeTemplates[language];
+    } else if (data.content.type === 'metricsCatalog') {
+        return '';
     } else {
         codeTemplate =
             mode === 'iframe'
@@ -790,6 +1309,18 @@ const getBackendCodeSnippet = (
             JSON.stringify(data.userAttributes || {}),
         )
         .replace(
+            '{{writeActionsSnippet}}',
+            languageWriteActionsSnippet(language, data.writeActions),
+        )
+        .replace(
+            '{{writeActionsGo}}',
+            goWriteActions(
+                data.writeActions,
+                isDashboardContent(data.content) ||
+                    isAiAgentContent(data.content),
+            ),
+        )
+        .replace(
             '{{externalId}}',
             languageString(language, data.user?.externalId),
         )
@@ -800,15 +1331,30 @@ const getBackendCodeSnippet = (
         .replace('{{emailUsage}}', emailForGo.usage)
         .replace(
             '{{canViewUnderlyingData}}',
-            languageBoolean(language, data.content.canViewUnderlyingData),
+            languageBoolean(
+                language,
+                'canViewUnderlyingData' in data.content
+                    ? data.content.canViewUnderlyingData
+                    : undefined,
+            ),
         )
         .replace(
             '{{canExportCsv}}',
-            languageBoolean(language, data.content.canExportCsv),
+            languageBoolean(
+                language,
+                'canExportCsv' in data.content
+                    ? data.content.canExportCsv
+                    : undefined,
+            ),
         )
         .replace(
             '{{canExportImages}}',
-            languageBoolean(language, data.content.canExportImages),
+            languageBoolean(
+                language,
+                'canExportImages' in data.content
+                    ? data.content.canExportImages
+                    : undefined,
+            ),
         );
 
     const contentType = data.content.type;
@@ -848,6 +1394,14 @@ const getBackendCodeSnippet = (
                     ),
                 )
                 .replace(
+                    '{{dashboardFiltersInteractivityCanAddFilters}}',
+                    languageBoolean(
+                        language,
+                        data.content.dashboardFiltersInteractivity
+                            ?.canAddFilters ?? false,
+                    ),
+                )
+                .replace(
                     '{{canChangeParameters}}',
                     languageBoolean(
                         language,
@@ -857,6 +1411,10 @@ const getBackendCodeSnippet = (
                 .replace(
                     '{{canExportPagePdf}}',
                     languageBoolean(language, data.content.canExportPagePdf),
+                )
+                .replace(
+                    '{{stickyHeader}}',
+                    languageBoolean(language, data.content.stickyHeader),
                 )
                 .replace(
                     '{{canDateZoom}}',
@@ -879,6 +1437,38 @@ const getBackendCodeSnippet = (
                     data.content.contentId || '<CHART_UUID>',
                 );
             }
+            break;
+        case 'dataApp':
+            // Replace data app specific variables
+            codeTemplate = codeTemplate.replace(
+                '{{appUuid}}',
+                'appUuid' in data.content
+                    ? data.content.appUuid || '<APP_UUID>'
+                    : '<APP_UUID>',
+            );
+            break;
+        case 'aiAgent':
+            codeTemplate = codeTemplate
+                .replace(
+                    '{{agentUuid}}',
+                    'agentUuid' in data.content
+                        ? data.content.agentUuid || '<AGENT_UUID>'
+                        : '<AGENT_UUID>',
+                )
+                .replace(
+                    '{{canExplore}}',
+                    languageBoolean(language, data.content.canExplore ?? false),
+                )
+                .replace(
+                    '{{canViewDebugInfo}}',
+                    languageBoolean(
+                        language,
+                        isAiAgentContent(data.content) &&
+                            data.content.canViewDebugInfo === true,
+                    ),
+                );
+            break;
+        case 'apiAccess':
             break;
         default:
             assertUnreachable(
@@ -965,7 +1555,7 @@ export const EmbeddedChart = ({ embedJwt }: EmbeddedChartProps) => (
         instanceUrl="${siteUrl}"
         token={embedJwt}
         id="${data.content.contentId || '<CHART_UUID>'}"
-        styles={{
+${data.writeActions ? '        isEditMode\n' : ''}        styles={{
             // Optional: customize supported SDK styles here:
             // backgroundColor: '#fff',
             // fontFamily: 'Inter, sans-serif',
@@ -973,6 +1563,45 @@ export const EmbeddedChart = ({ embedJwt }: EmbeddedChartProps) => (
     />
 );
 `;
+        case 'aiAgent':
+            return `import '@lightdash/sdk/sdk.css';
+import Lightdash from '@lightdash/sdk';
+import { useState } from 'react';
+
+type EmbeddedAiAgentProps = {
+    embedJwt: string;
+};
+
+export const EmbeddedAiAgent = ({ embedJwt }: EmbeddedAiAgentProps) => {
+    const [threadUuid, setThreadUuid] = useState<string | undefined>();
+
+    return (
+        <Lightdash.AiAgent
+            instanceUrl="${siteUrl}"
+            token={embedJwt}
+            agentUuid="${
+                'agentUuid' in data.content
+                    ? data.content.agentUuid || '<AGENT_UUID>'
+                    : '<AGENT_UUID>'
+            }"
+            threadUuid={threadUuid}
+            onThreadChange={({ threadUuid: nextThreadUuid }) => {
+                // Persist this value in your app if users should resume later.
+                setThreadUuid(nextThreadUuid);
+            }}
+            styles={{
+                // Optional: customize supported SDK styles here:
+                // backgroundColor: '#fff',
+                // fontFamily: 'Inter, sans-serif',
+            }}
+        />
+    );
+};
+`;
+        case 'metricsCatalog':
+        case 'dataApp':
+        case 'apiAccess':
+            return '';
         default:
             return assertUnreachable(
                 contentType,
@@ -1017,8 +1646,8 @@ const CodeSnippetTabs: FC<{
                 </Tabs.Tab>
             </Tabs.List>
             <Tabs.Panel value="node" pt="xs">
-                <Prism language="javascript" onCopy={onCopySnippet}>
-                    {getBackendCodeSnippet(
+                <CodeBlock
+                    code={getBackendCodeSnippet(
                         SnippetLanguage.NODE,
                         {
                             projectUuid,
@@ -1027,12 +1656,14 @@ const CodeSnippetTabs: FC<{
                         },
                         mode,
                     )}
-                </Prism>
+                    language="javascript"
+                    onCopy={onCopySnippet}
+                />
             </Tabs.Panel>
 
             <Tabs.Panel value="python" pt="xs">
-                <Prism language="python" onCopy={onCopySnippet}>
-                    {getBackendCodeSnippet(
+                <CodeBlock
+                    code={getBackendCodeSnippet(
                         SnippetLanguage.PYTHON,
                         {
                             projectUuid,
@@ -1041,12 +1672,14 @@ const CodeSnippetTabs: FC<{
                         },
                         mode,
                     )}
-                </Prism>
+                    language="python"
+                    onCopy={onCopySnippet}
+                />
             </Tabs.Panel>
 
             <Tabs.Panel value="go" pt="xs">
-                <Prism language="go" onCopy={onCopySnippet}>
-                    {getBackendCodeSnippet(
+                <CodeBlock
+                    code={getBackendCodeSnippet(
                         SnippetLanguage.GO,
                         {
                             projectUuid,
@@ -1055,7 +1688,9 @@ const CodeSnippetTabs: FC<{
                         },
                         mode,
                     )}
-                </Prism>
+                    language="go"
+                    onCopy={onCopySnippet}
+                />
             </Tabs.Panel>
         </Tabs>
     );
@@ -1122,12 +1757,14 @@ const EmbedCodeSnippet: FC<{
                             backend.
                         </Text>
                     </Stack>
-                    <Prism language="tsx" onCopy={handleCopySnippet}>
-                        {getReactSdkFrontendSnippet({
+                    <CodeBlock
+                        code={getReactSdkFrontendSnippet({
                             data,
                             siteUrl,
                         })}
-                    </Prism>
+                        language="tsx"
+                        onCopy={handleCopySnippet}
+                    />
                 </Stack>
             )}
         </Stack>

@@ -4,6 +4,8 @@ import { LightdashUiEvent } from './LightdashUiEvent';
 import {
     LightdashEventType,
     type AllTilesLoadedPayload,
+    type ChartSavedPayload,
+    type DashboardSavedPayload,
     type FilterChangedPayload,
     type TabChangedPayload,
 } from './types';
@@ -350,6 +352,42 @@ describe('LightdashUiEvent', () => {
                         loadTimeMs: 1500,
                     },
                 }),
+            );
+        });
+
+        it('should dispatch ChartSaved event after a successful chart save', () => {
+            const payload: ChartSavedPayload = {
+                chartUuid: 'chart-uuid',
+                action: 'updated',
+            };
+
+            eventSystem.dispatch(LightdashEventType.ChartSaved, payload);
+
+            expect(postMessageSpy).toHaveBeenCalledWith(
+                {
+                    type: 'lightdash:chartSaved',
+                    payload,
+                    timestamp: expect.any(Number),
+                },
+                'https://example.com',
+            );
+        });
+
+        it('should dispatch DashboardSaved event after a successful dashboard save', () => {
+            const payload: DashboardSavedPayload = {
+                dashboardUuid: 'dashboard-uuid',
+                action: 'updated',
+            };
+
+            eventSystem.dispatch(LightdashEventType.DashboardSaved, payload);
+
+            expect(postMessageSpy).toHaveBeenCalledWith(
+                {
+                    type: 'lightdash:dashboardSaved',
+                    payload,
+                    timestamp: expect.any(Number),
+                },
+                'https://example.com',
             );
         });
     });

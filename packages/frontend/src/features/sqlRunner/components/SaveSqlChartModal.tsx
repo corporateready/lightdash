@@ -1,7 +1,13 @@
-import { ChartKind } from '@lightdash/common';
-import { Button, Stack, Textarea, TextInput } from '@mantine-8/core';
-import { useForm, zodResolver } from '@mantine/form';
+import { subject } from '@casl/ability';
+import {
+    ChartKind,
+    type AllVizChartConfig,
+    type ApiCreateSqlChart,
+} from '@lightdash/common';
+import { Button, Stack, Textarea, TextInput } from '@mantine/core';
+import { useForm } from '@mantine/form';
 import { IconChartBar, IconPlus } from '@tabler/icons-react';
+import { zod4Resolver as zodResolver } from 'mantine-form-zod-resolver';
 import { useCallback, useEffect, useMemo, type FC } from 'react';
 import { z } from 'zod';
 import MantineIcon from '../../../components/common/MantineIcon';
@@ -11,24 +17,29 @@ import MantineModal, {
 import SaveToSpaceForm from '../../../components/common/modal/ChartCreateModal/SaveToSpaceForm';
 import { saveToSpaceSchema } from '../../../components/common/modal/ChartCreateModal/types';
 import { selectCompleteConfigByKind } from '../../../components/DataViz/store/selectors';
+import useToaster from '../../../hooks/toaster/useToaster';
 import { useModalSteps } from '../../../hooks/useModalSteps';
 import { useSpaceManagement } from '../../../hooks/useSpaceManagement';
 import { useSpaceSummaries } from '../../../hooks/useSpaces';
+import useApp from '../../../providers/App/useApp';
 import { DEFAULT_SQL_LIMIT } from '../constants';
 import { useCreateSqlChartMutation } from '../hooks/useSavedSqlCharts';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
-import { EditorTabs, updateName } from '../store/sqlRunnerSlice';
-import { SqlQueryBeforeSaveAlert } from './SqlQueryBeforeSaveAlert';
+import {
+    EditorTabs,
+    selectConnectionRequest,
+    updateName,
+    type SqlRunnerConnectionRequest,
+} from '../store/sqlRunnerSlice';
 
 enum ModalStep {
-    Warning = 'warning',
     InitialInfo = 'initialInfo',
     SelectDestination = 'selectDestination',
 }
 
 const saveChartFormSchema = z
     .object({
-        name: z.string().min(1),
+        name: z.string().min(1, 'Name is required'),
         description: z.string().nullable(),
     })
     .merge(saveToSpaceSchema);
@@ -39,39 +50,54 @@ type Props = Pick<MantineModalProps, 'opened' | 'onClose'>;
 
 const SAVE_CHART_FORM_ID = 'save-sql-chart-form';
 
-export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
-    const dispatch = useAppDispatch();
-    const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
-    const hasUnrunChanges = useAppSelector(
-        (state) => state.sqlRunner.hasUnrunChanges,
-    );
+type SaveSqlChartModalContentProps = Props & {
+    projectUuid: string;
+    name: string;
+    description: string | null;
+    sql: string;
+    limit: number;
+    currentVizConfig: AllVizChartConfig;
+    connectionRequest: SqlRunnerConnectionRequest;
+    redirectOnSuccess?: boolean;
+    onSaved?: (
+        data: ApiCreateSqlChart['results'],
+        name: string,
+    ) => void | Promise<void>;
+};
 
-    const name = useAppSelector((state) => state.sqlRunner.name);
-    const description = useAppSelector((state) => state.sqlRunner.description);
+/**
+ * Walkthrough action for manage:SqlRunner (with manage:CustomSql): saving a
+ * chart built in the SQL runner.
+ */
+const saveTourAction = {
+    'data-tour-scope': 'manage:SqlRunner',
+    'data-tour-covers': 'manage:CustomSql',
+    'data-tour-step': '2',
+    'data-tour-route': '/projects/:projectUuid/sql-runner',
+    'data-tour-label': 'Save the chart',
+    'data-tour-title': 'Run SQL and save a chart',
+    'data-tour-interactive': 'true',
+    'data-tour-via':
+        '[data-tour-nav="new"] >> [data-tour-nav="new-sql-runner"] >> [data-tour-anchor="sql-runner-editor"] >> [data-tour-anchor="sql-runner-run"] >> [data-tour-anchor="sql-save-chart"] >> [data-tour-anchor="sql-chart-name"] >> [data-tour-anchor="sql-chart-save-next"] >> [data-tour-anchor="space-option"][data-tour-value="Shared"]',
+    'data-tour-docs':
+        'explore/sql-runner.mdx#saved-charts-in-the-sql-runner:p3:1',
+};
 
-    const sql = useAppSelector((state) => state.sqlRunner.sql);
-    const limit = useAppSelector((state) => state.sqlRunner.limit);
-
-    const selectedChartType = useAppSelector(
-        (state) => state.sqlRunner.selectedChartType,
-    );
-
-    const activeEditorTab = useAppSelector(
-        (state) => state.sqlRunner.activeEditorTab,
-    );
-
-    const currentVizConfig = useAppSelector((state) =>
-        selectCompleteConfigByKind(
-            state,
-            activeEditorTab === EditorTabs.SQL
-                ? ChartKind.TABLE
-                : selectedChartType,
-        ),
-    );
-
-    const initialStep = hasUnrunChanges
-        ? ModalStep.Warning
-        : ModalStep.InitialInfo;
+export const SaveSqlChartModalContent: FC<SaveSqlChartModalContentProps> = ({
+    opened,
+    onClose,
+    projectUuid,
+    name,
+    description,
+    sql,
+    limit,
+    currentVizConfig,
+    connectionRequest,
+    redirectOnSuccess,
+    onSaved,
+}) => {
+    const { user } = useApp();
+    const { showToastError } = useToaster();
 
     const form = useForm<FormValues>({
         initialValues: {
@@ -83,7 +109,7 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
         validate: zodResolver(saveChartFormSchema),
     });
 
-    const modalSteps = useModalSteps<ModalStep>(initialStep, {
+    const modalSteps = useModalSteps<ModalStep>(ModalStep.InitialInfo, {
         validators: {
             [ModalStep.InitialInfo]: () => !!form.values.name,
         },
@@ -96,7 +122,19 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
         data: spaces = [],
         isLoading: isLoadingSpace,
         isSuccess: isSuccessSpace,
-    } = useSpaceSummaries(projectUuid, true);
+    } = useSpaceSummaries(projectUuid, true, {
+        select: (data) =>
+            data.filter((space) =>
+                // Only show spaces the user can create SQL charts in
+                user.data?.ability.can(
+                    'create',
+                    subject('SavedChart', {
+                        ...space,
+                        access: space.userAccess ? [space.userAccess] : [],
+                    }),
+                ),
+            ),
+    });
 
     const spaceManagement = useSpaceManagement({
         projectUuid,
@@ -123,7 +161,10 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
     const {
         mutateAsync: createSavedSqlChart,
         isLoading: isCreatingSavedSqlChart,
-    } = useCreateSqlChartMutation(projectUuid);
+    } = useCreateSqlChartMutation(projectUuid, {
+        redirectOnSuccess,
+        onSuccess: (data) => onSaved?.(data, form.values.name),
+    });
 
     const handleOnSubmit = useCallback(async () => {
         if (spaces.length === 0) {
@@ -137,6 +178,12 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
         const spaceUuid =
             newSpace?.uuid || form.values.spaceUuid || spaces[0].uuid;
 
+        if (!connectionRequest.ready) {
+            showToastError({
+                title: 'Choose a connection before you save this chart',
+            });
+            return;
+        }
         if (currentVizConfig && sql) {
             try {
                 await createSavedSqlChart({
@@ -146,9 +193,9 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
                     limit: limit ?? DEFAULT_SQL_LIMIT,
                     config: currentVizConfig,
                     spaceUuid: spaceUuid,
+                    ...connectionRequest.field,
                 });
 
-                dispatch(updateName(form.values.name));
                 onClose();
             } catch (_) {
                 // Error is handled in useCreateSqlChartMutation
@@ -165,8 +212,9 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
         sql,
         createSavedSqlChart,
         limit,
-        dispatch,
         onClose,
+        connectionRequest,
+        showToastError,
     ]);
 
     const handleNextStep = () => {
@@ -205,19 +253,15 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
         spaceManagement.createSpaceMutation.isLoading;
 
     const renderActions = () => {
-        if (modalSteps.currentStep === ModalStep.Warning) {
-            return (
-                <Button
-                    onClick={() => modalSteps.goToStep(ModalStep.InitialInfo)}
-                >
-                    Next
-                </Button>
-            );
-        }
-
         if (modalSteps.currentStep === ModalStep.InitialInfo) {
             return (
-                <Button onClick={handleNextStep} disabled={!form.values.name}>
+                <Button
+                    onClick={handleNextStep}
+                    disabled={!form.values.name}
+                    // Anchor for scope walkthroughs (data-tour-via)
+                    data-tour-anchor="sql-chart-save-next"
+                    data-tour-hint="Click Next"
+                >
                     Next
                 </Button>
             );
@@ -231,6 +275,7 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
                 <Button
                     type="submit"
                     form={SAVE_CHART_FORM_ID}
+                    {...saveTourAction}
                     disabled={!isFormReadyToSave}
                     loading={isLoading}
                 >
@@ -262,17 +307,10 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
             onClose={onClose}
             title="Save Chart"
             icon={IconChartBar}
-            cancelLabel={
-                modalSteps.currentStep === ModalStep.Warning ? false : undefined
-            }
             leftActions={renderLeftActions()}
             actions={renderActions()}
         >
-            {modalSteps.currentStep === ModalStep.Warning && (
-                <SqlQueryBeforeSaveAlert />
-            )}
-
-            {modalSteps.currentStep !== ModalStep.Warning && (
+            {
                 <form
                     id={SAVE_CHART_FORM_ID}
                     onSubmit={form.onSubmit(handleOnSubmit)}
@@ -283,6 +321,13 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
                                 label="Chart name"
                                 placeholder="eg. How many weekly active users do we have?"
                                 required
+                                autoFocus
+                                data-autofocus
+                                // Typed anchor for scope walkthroughs (data-tour-via)
+                                data-tour-anchor="sql-chart-name"
+                                data-tour-hint="Name the chart"
+                                data-tour-input="true"
+                                data-tour-suggest="Orders by status"
                                 {...form.getInputProps('name')}
                             />
                             <Textarea
@@ -311,7 +356,49 @@ export const SaveSqlChartModal: FC<Props> = ({ opened, onClose }) => {
                         />
                     )}
                 </form>
-            )}
+            }
         </MantineModal>
+    );
+};
+
+export const SaveSqlChartModal: FC<Props> = (props) => {
+    const dispatch = useAppDispatch();
+    const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
+    const name = useAppSelector((state) => state.sqlRunner.name);
+    const description = useAppSelector((state) => state.sqlRunner.description);
+    const sql = useAppSelector((state) => state.sqlRunner.sql);
+    const limit = useAppSelector((state) => state.sqlRunner.limit);
+    const connectionRequest = useAppSelector(selectConnectionRequest);
+    const selectedChartType = useAppSelector(
+        (state) => state.sqlRunner.selectedChartType,
+    );
+    const activeEditorTab = useAppSelector(
+        (state) => state.sqlRunner.activeEditorTab,
+    );
+    const currentVizConfig = useAppSelector((state) =>
+        selectCompleteConfigByKind(
+            state,
+            activeEditorTab === EditorTabs.SQL
+                ? ChartKind.TABLE
+                : selectedChartType,
+        ),
+    );
+
+    if (!currentVizConfig) return null;
+
+    return (
+        <SaveSqlChartModalContent
+            {...props}
+            projectUuid={projectUuid}
+            name={name}
+            description={description}
+            sql={sql}
+            limit={limit ?? DEFAULT_SQL_LIMIT}
+            currentVizConfig={currentVizConfig}
+            connectionRequest={connectionRequest}
+            onSaved={(_, savedName) => {
+                dispatch(updateName(savedName));
+            }}
+        />
     );
 };

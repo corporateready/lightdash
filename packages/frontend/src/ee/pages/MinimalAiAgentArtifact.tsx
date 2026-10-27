@@ -1,0 +1,308 @@
+import {
+    FeatureFlags,
+    isAiAgentComposerArtifactVizQuery,
+    isAiAgentSemanticArtifactVizQuery,
+    type AiComposerChartArtifactConfigV2,
+} from '@lightdash/common';
+import { Box, Center, Text } from '@mantine/core';
+import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
+import { useParams, useSearchParams } from 'react-router';
+import { validate as isUuid } from 'uuid';
+import ScreenshotProgressIndicator from '../../components/common/ScreenshotProgressIndicator';
+import ScreenshotReadyIndicator from '../../components/common/ScreenshotReadyIndicator';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
+import { useInfiniteQueryResults } from '../../hooks/useQueryResults';
+import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
+import { AiComposerRunQueryVisualization } from '../features/aiCopilot/components/ChatElements/AiComposerRunQueryVisualization';
+import { AiVisualizationRenderer } from '../features/aiCopilot/components/ChatElements/AiVisualizationRenderer';
+import { getAiAgentArtifactResultsUrl } from '../features/aiCopilot/hooks/aiAgentRouting';
+import { useAiAgentArtifact } from '../features/aiCopilot/hooks/useAiAgentArtifacts';
+import { getAiArtifactChartSource } from '../features/aiCopilot/hooks/useAiArtifactChart';
+import { useAiAgentArtifactVizQuery } from '../features/aiCopilot/hooks/useProjectAiAgents';
+
+// Minimal render of a custom chart type artifact version for headless
+// capture: web-thread derivation/renderer, interactions structurally off.
+const MinimalCustomChartTypeArtifact: FC = () => {
+    const { agentUuid, artifactUuid, versionUuid } = useParams<{
+        agentUuid: string;
+        artifactUuid: string;
+        versionUuid: string;
+    }>();
+    const projectUuid = useProjectUuid();
+    const identityFlag = useServerFeatureFlag(FeatureFlags.AgentIdentity);
+    const identityEnabled = identityFlag.data?.enabled === true;
+    const [searchParams] = useSearchParams();
+    const requestedQueryUuid = searchParams.get('cachedQueryUuid');
+    const hasInvalidCachedQuery =
+        requestedQueryUuid !== null && !isUuid(requestedQueryUuid);
+    const cachedQueryUuid = hasInvalidCachedQuery
+        ? undefined
+        : (requestedQueryUuid ?? undefined);
+    const artifactRef = {
+        projectUuid: projectUuid!,
+        agentUuid: agentUuid!,
+        artifactUuid: artifactUuid!,
+        versionUuid: versionUuid!,
+    };
+
+    // White page background for screenshot exports, regardless of theme
+    useEffect(() => {
+        document.documentElement.style.backgroundColor = 'white';
+        document.body.style.backgroundColor = 'white';
+    }, []);
+
+    const {
+        data: artifactData,
+        isLoading: isArtifactLoading,
+        error: artifactError,
+    } = useAiAgentArtifact(artifactRef);
+
+    const { semanticChartConfig, customChartType } = getAiArtifactChartSource(
+        artifactData?.chartConfig,
+    );
+
+    const vizQueryHandle = useAiAgentArtifactVizQuery(
+        { ...artifactRef, cachedQueryUuid },
+        {
+            enabled: customChartType !== null && !hasInvalidCachedQuery,
+        },
+    );
+    const vizQueryData =
+        vizQueryHandle.data &&
+        isAiAgentSemanticArtifactVizQuery(vizQueryHandle.data)
+            ? vizQueryHandle.data
+            : undefined;
+
+    const queryResults = useInfiniteQueryResults(
+        projectUuid,
+        hasInvalidCachedQuery ||
+            (cachedQueryUuid === undefined && identityFlag.isLoading)
+            ? undefined
+            : vizQueryData?.query.queryUuid,
+        undefined,
+        !hasInvalidCachedQuery &&
+            (cachedQueryUuid !== undefined || identityEnabled) &&
+            vizQueryData?.query.queryUuid
+            ? getAiAgentArtifactResultsUrl({
+                  ...artifactRef,
+                  queryUuid: cachedQueryUuid ?? vizQueryData.query.queryUuid,
+                  cached: cachedQueryUuid !== undefined,
+              })
+            : null,
+    );
+
+    const [isScreenshotReady, setIsScreenshotReady] = useState(false);
+    const [hasRendererError, setHasRendererError] = useState(false);
+    const handleScreenshotReady = useCallback(
+        () => setIsScreenshotReady(true),
+        [],
+    );
+    const handleScreenshotError = useCallback(() => {
+        setHasRendererError(true);
+        setIsScreenshotReady(true);
+    }, []);
+
+    if (!projectUuid || !agentUuid || !artifactUuid || !versionUuid) {
+        return null;
+    }
+
+    const isUnsupportedArtifact =
+        !isArtifactLoading && !artifactError && artifactData
+            ? customChartType === null
+            : false;
+    const hasLoadError =
+        hasInvalidCachedQuery ||
+        !!artifactError ||
+        isUnsupportedArtifact ||
+        !!vizQueryHandle.error ||
+        !!queryResults.error;
+    // Renderer errors keep the (terminal) frame mounted but mark it errored.
+    const hasError = hasLoadError || hasRendererError;
+    const readyTileUuids = isScreenshotReady && !hasError ? [versionUuid] : [];
+    const erroredTileUuids = hasError ? [versionUuid] : [];
+
+    // Same gate as the web thread's artifact panel: mount the renderer only
+    // once the viz query and all result rows are in.
+    const isReadyToRender =
+        !hasLoadError &&
+        !!vizQueryData &&
+        !!semanticChartConfig &&
+        !!customChartType &&
+        !queryResults.isFetchingRows;
+
+    return (
+        <>
+            <ScreenshotProgressIndicator
+                expectedTileUuids={[versionUuid]}
+                readyTileUuids={readyTileUuids}
+                erroredTileUuids={erroredTileUuids}
+            />
+
+            {isReadyToRender ? (
+                <AiVisualizationRenderer
+                    vizQueryData={vizQueryData}
+                    results={queryResults}
+                    chartConfig={semanticChartConfig}
+                    customChartType={customChartType}
+                    selectedChartType={null}
+                    displayFields={false}
+                    displayFilters={false}
+                    loadExplore={false}
+                    interactionMode="read-only"
+                    minimal
+                    onScreenshotReady={handleScreenshotReady}
+                    onScreenshotError={handleScreenshotError}
+                />
+            ) : hasLoadError ? (
+                <Center h="100%">
+                    <Text size="sm" c="dimmed" ta="center">
+                        {isUnsupportedArtifact
+                            ? 'This artifact is not a custom chart type answer.'
+                            : 'Failed to load artifact visualization.'}
+                    </Text>
+                </Center>
+            ) : null}
+
+            {(isScreenshotReady || hasError) && (
+                <ScreenshotReadyIndicator
+                    tilesTotal={1}
+                    tilesReady={readyTileUuids.length}
+                    tilesErrored={erroredTileUuids.length}
+                />
+            )}
+        </>
+    );
+};
+
+type ArtifactRef = {
+    projectUuid: string;
+    agentUuid: string;
+    artifactUuid: string;
+    versionUuid: string;
+};
+
+// Minimal render of a composer v2 artifact version: the presented node through
+// the runQuery chart builders.
+const MinimalComposerArtifact: FC<{
+    artifactRef: ArtifactRef;
+    config: AiComposerChartArtifactConfigV2;
+    title: string;
+    description: string;
+}> = ({ artifactRef, config, title, description }) => {
+    const { projectUuid, versionUuid } = artifactRef;
+    const identityFlag = useServerFeatureFlag(FeatureFlags.AgentIdentity);
+    const identityEnabled = identityFlag.data?.enabled === true;
+    const metadata = useMemo(
+        () => ({ title, description }),
+        [title, description],
+    );
+    useEffect(() => {
+        document.documentElement.style.backgroundColor = 'white';
+        document.body.style.backgroundColor = 'white';
+    }, []);
+
+    const vizQuery = useAiAgentArtifactVizQuery(artifactRef);
+    const run =
+        vizQuery.data && isAiAgentComposerArtifactVizQuery(vizQuery.data)
+            ? vizQuery.data
+            : undefined;
+    const queryUuid = run?.nodeQueryUuids[run.terminalNodeId];
+    const nodeResults = useInfiniteQueryResults(
+        projectUuid,
+        identityFlag.isLoading ? undefined : queryUuid,
+        undefined,
+        identityEnabled && queryUuid
+            ? getAiAgentArtifactResultsUrl({
+                  ...artifactRef,
+                  queryUuid,
+                  cached: false,
+              })
+            : null,
+    );
+    const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(
+        'loading',
+    );
+    const handleReady = useCallback(() => setStatus('ready'), []);
+    const handleError = useCallback(() => setStatus('error'), []);
+    const hasError =
+        status === 'error' ||
+        !!vizQuery.error ||
+        !!nodeResults.error ||
+        config.vizConfig === null;
+    const readyTileUuids = status === 'ready' && !hasError ? [versionUuid] : [];
+    const erroredTileUuids = hasError ? [versionUuid] : [];
+
+    return (
+        <>
+            <ScreenshotProgressIndicator
+                expectedTileUuids={[versionUuid]}
+                readyTileUuids={readyTileUuids}
+                erroredTileUuids={erroredTileUuids}
+            />
+            <Box h="100vh" p="md">
+                {hasError ? (
+                    <Center h="100%">
+                        <Text size="sm" c="dimmed" ta="center">
+                            Failed to load artifact visualization.
+                        </Text>
+                    </Center>
+                ) : queryUuid && config.vizConfig ? (
+                    <AiComposerRunQueryVisualization
+                        {...artifactRef}
+                        nodeResults={nodeResults}
+                        chartStage={run?.chartStage ?? null}
+                        vizConfig={config.vizConfig}
+                        metadata={metadata}
+                        onScreenshotReady={handleReady}
+                        onScreenshotError={handleError}
+                    />
+                ) : null}
+            </Box>
+            {(status !== 'loading' || hasError) && (
+                <ScreenshotReadyIndicator
+                    tilesTotal={1}
+                    tilesReady={readyTileUuids.length}
+                    tilesErrored={erroredTileUuids.length}
+                />
+            )}
+        </>
+    );
+};
+
+const MinimalAiAgentArtifact: FC = () => {
+    const { agentUuid, artifactUuid, versionUuid } = useParams<{
+        agentUuid: string;
+        artifactUuid: string;
+        versionUuid: string;
+    }>();
+    const projectUuid = useProjectUuid();
+    const { data: artifact, isLoading } = useAiAgentArtifact({
+        projectUuid: projectUuid!,
+        agentUuid: agentUuid!,
+        artifactUuid: artifactUuid!,
+        versionUuid: versionUuid!,
+    });
+    if (!projectUuid || !agentUuid || !artifactUuid || !versionUuid) {
+        return null;
+    }
+    if (isLoading) return null;
+    const config = artifact?.chartConfig;
+    if (config?.source === 'composer' && config.schemaVersion === 2) {
+        return (
+            <MinimalComposerArtifact
+                artifactRef={{
+                    projectUuid,
+                    agentUuid,
+                    artifactUuid,
+                    versionUuid,
+                }}
+                config={config}
+                title={artifact?.title ?? ''}
+                description={artifact?.description ?? ''}
+            />
+        );
+    }
+    return <MinimalCustomChartTypeArtifact />;
+};
+
+export default MinimalAiAgentArtifact;

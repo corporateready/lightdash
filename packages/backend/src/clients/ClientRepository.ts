@@ -1,9 +1,11 @@
 import { ModelRepository } from '../models/ModelRepository';
 import { SchedulerClient } from '../scheduler/SchedulerClient';
 import { type OperationContext } from '../services/ServiceRepository';
+import { ApnsClient } from './Apns/ApnsClient';
 import { S3CacheClient } from './Aws/S3CacheClient';
 import { S3Client } from './Aws/S3Client';
 import EmailClient from './EmailClient/EmailClient';
+import { FcmClient } from './Fcm/FcmClient';
 import { type FileStorageClient } from './FileStorage/FileStorageClient';
 import { GoogleDriveClient } from './Google/GoogleDriveClient';
 import { GoogleChatClient } from './GoogleChat/GoogleChatClient';
@@ -18,6 +20,8 @@ import { SlackClient } from './Slack/SlackClient';
  */
 
 export interface ClientManifest {
+    apnsClient: ApnsClient;
+    fcmClient: FcmClient;
     natsClient: NatsClient;
     emailClient: EmailClient;
     googleDriveClient: GoogleDriveClient;
@@ -29,6 +33,7 @@ export interface ClientManifest {
     msTeamsClient: MicrosoftTeamsClient;
     preAggregateResultsFileStorageClient: S3ResultsFileStorageClient;
     resultsFileStorageClient: S3ResultsFileStorageClient;
+    uploadsFileStorageClient: FileStorageClient;
 }
 
 /**
@@ -119,6 +124,28 @@ export class ClientRepository
      */
     protected clientInstances: Partial<ClientManifest> = {};
 
+    public getApnsClient(): ApnsClient {
+        return this.getClient(
+            'apnsClient',
+            () =>
+                new ApnsClient({
+                    config: this.context.lightdashConfig
+                        .mobilePushNotifications,
+                }),
+        );
+    }
+
+    public getFcmClient(): FcmClient {
+        return this.getClient(
+            'fcmClient',
+            () =>
+                new FcmClient({
+                    config: this.context.lightdashConfig
+                        .mobilePushNotifications,
+                }),
+        );
+    }
+
     public getNatsClient(): NatsClient {
         return this.getClient(
             'natsClient',
@@ -165,6 +192,18 @@ export class ClientRepository
             () =>
                 new S3Client({
                     lightdashConfig: this.context.lightdashConfig,
+                }),
+        );
+    }
+
+    public getUploadsFileStorageClient(): FileStorageClient {
+        return this.getClient(
+            'uploadsFileStorageClient',
+            () =>
+                new S3Client({
+                    lightdashConfig: this.context.lightdashConfig,
+                    s3Config:
+                        this.context.lightdashConfig.uploads.s3 ?? undefined,
                 }),
         );
     }

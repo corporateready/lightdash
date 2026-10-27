@@ -6,7 +6,6 @@ import {
 import {
     ActionIcon,
     Button,
-    CopyButton,
     Group,
     Menu,
     Paper,
@@ -16,10 +15,9 @@ import {
     Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import {
-    IconCheck,
     IconCopy,
     IconDots,
     IconInfoCircle,
@@ -34,13 +32,14 @@ import {
     type FC,
     type SetStateAction,
 } from 'react';
-import { useTableStyles } from '../../../hooks/styles/useTableStyles';
+import tableStyles from '../../../hooks/styles/tableStyles.module.css';
 import {
     useAccessToken,
     useDeleteAccessToken,
     useRotateAccessToken,
 } from '../../../hooks/useAccessToken';
 import Callout from '../../common/Callout';
+import { CopyActionIcon } from '../../common/CopyActionIcon';
 import MantineIcon from '../../common/MantineIcon';
 import MantineModal from '../../common/MantineModal';
 import DocumentationHelpButton from '../../DocumentationHelpButton';
@@ -55,100 +54,89 @@ const TokenItem: FC<{
     const { description, expiresAt, rotatedAt, lastUsedAt } = token;
 
     return (
-        <>
-            <Table.Tr>
-                <Table.Td>
-                    <Text fw={500} size="sm">
-                        {description}
-                    </Text>
-                </Table.Td>
-                <Table.Td>
-                    <Group align="center" justify="flex-start" gap="xs">
-                        <span>
-                            {expiresAt ? (
-                                <Tooltip
-                                    withinPortal
-                                    position="top"
-                                    maw={350}
-                                    label={formatTimestamp(expiresAt)}
-                                >
-                                    <span>{formatDate(expiresAt)}</span>
-                                </Tooltip>
-                            ) : (
-                                'No expiration date'
-                            )}
-                        </span>
-
-                        {rotatedAt && (
+        <Table.Tr>
+            <Table.Td>
+                <Text fw={500} fz="sm">
+                    {description}
+                </Text>
+            </Table.Td>
+            <Table.Td>
+                <Group gap="xs">
+                    <span>
+                        {expiresAt ? (
                             <Tooltip
-                                withinPortal
                                 position="top"
                                 maw={350}
-                                label={`Last rotated at ${formatTimestamp(
-                                    rotatedAt,
-                                )}`}
+                                label={formatTimestamp(expiresAt)}
                             >
-                                <MantineIcon
-                                    icon={IconInfoCircle}
-                                    color="ldGray.6"
-                                    size="md"
-                                />
+                                <span>{formatDate(expiresAt)}</span>
                             </Tooltip>
+                        ) : (
+                            'No expiration date'
                         )}
-                    </Group>
-                </Table.Td>
-                <Table.Td>
-                    {lastUsedAt && (
+                    </span>
+
+                    {rotatedAt && (
                         <Tooltip
-                            withinPortal
                             position="top"
                             maw={350}
-                            label={formatTimestamp(lastUsedAt)}
+                            label={`Last rotated at ${formatTimestamp(
+                                rotatedAt,
+                            )}`}
                         >
-                            <Text>{formatDate(lastUsedAt)}</Text>
+                            <MantineIcon
+                                icon={IconInfoCircle}
+                                color="dimmed"
+                                size="md"
+                            />
                         </Tooltip>
                     )}
-                </Table.Td>
-                <Table.Td w="1%">
-                    <Menu withinPortal position="bottom-end">
-                        <Menu.Target>
-                            <ActionIcon
-                                variant="transparent"
-                                size="sm"
-                                color="ldGray.6"
-                            >
-                                <MantineIcon icon={IconDots} />
-                            </ActionIcon>
-                        </Menu.Target>
-                        <Menu.Dropdown>
+                </Group>
+            </Table.Td>
+            <Table.Td>
+                {lastUsedAt && (
+                    <Tooltip
+                        position="top"
+                        maw={350}
+                        label={formatTimestamp(lastUsedAt)}
+                    >
+                        <span>{formatDate(lastUsedAt)}</span>
+                    </Tooltip>
+                )}
+            </Table.Td>
+            <Table.Td w="1%">
+                <Menu position="bottom-end">
+                    <Menu.Target>
+                        <ActionIcon variant="transparent" size="sm">
+                            <MantineIcon icon={IconDots} />
+                        </ActionIcon>
+                    </Menu.Target>
+                    <Menu.Dropdown>
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconCopy} />}
+                            onClick={() => setTokenToCopy(token)}
+                        >
+                            Copy token UUID
+                        </Menu.Item>
+                        {token.expiresAt && (
                             <Menu.Item
-                                leftSection={<MantineIcon icon={IconCopy} />}
-                                onClick={() => setTokenToCopy(token)}
+                                leftSection={<MantineIcon icon={IconRefresh} />}
+                                onClick={() => setTokenToRotate(token)}
                             >
-                                Copy token UUID
+                                Rotate token
                             </Menu.Item>
-                            {token.expiresAt && (
-                                <Menu.Item
-                                    leftSection={
-                                        <MantineIcon icon={IconRefresh} />
-                                    }
-                                    onClick={() => setTokenToRotate(token)}
-                                >
-                                    Rotate token
-                                </Menu.Item>
-                            )}
-                            <Menu.Item
-                                leftSection={<MantineIcon icon={IconTrash} />}
-                                color="red"
-                                onClick={() => setTokenToDelete(token)}
-                            >
-                                Delete
-                            </Menu.Item>
-                        </Menu.Dropdown>
-                    </Menu>
-                </Table.Td>
-            </Table.Tr>
-        </>
+                        )}
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconTrash} />}
+                            color="red"
+                            onClick={() => setTokenToDelete(token)}
+                        >
+                            Delete
+                        </Menu.Item>
+                    </Menu.Dropdown>
+                </Menu>
+            </Table.Td>
+        </Table.Tr>
     );
 };
 
@@ -216,24 +204,10 @@ const RotateTokenForm: FC<{
                     className="sentry-block ph-no-capture"
                     value={rotatedTokenData.token}
                     rightSection={
-                        <CopyButton value={rotatedTokenData.token}>
-                            {({ copied, copy }) => (
-                                <Tooltip
-                                    label={copied ? 'Copied' : 'Copy'}
-                                    withArrow
-                                    position="right"
-                                >
-                                    <ActionIcon
-                                        color={copied ? 'teal' : 'gray'}
-                                        onClick={copy}
-                                    >
-                                        <MantineIcon
-                                            icon={copied ? IconCheck : IconCopy}
-                                        />
-                                    </ActionIcon>
-                                </Tooltip>
-                            )}
-                        </CopyButton>
+                        <CopyActionIcon
+                            value={rotatedTokenData.token}
+                            tooltipPosition="right"
+                        />
                     }
                 />
 
@@ -274,8 +248,6 @@ const RotateTokenForm: FC<{
 export const TokensTable = () => {
     const { data } = useAccessToken();
 
-    const { cx, classes } = useTableStyles();
-
     const [tokenToDelete, setTokenToDelete] = useState<
         PersonalAccessToken | undefined
     >();
@@ -305,8 +277,10 @@ export const TokensTable = () => {
 
     return (
         <>
-            <Paper withBorder style={{ overflow: 'hidden' }}>
-                <Table className={cx(classes.root, classes.alignLastTdRight)}>
+            <Paper className={tableStyles.paper}>
+                <Table
+                    className={`${tableStyles.root} ${tableStyles.alignLastTdRight}`}
+                >
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th>Description</Table.Th>
@@ -378,31 +352,19 @@ export const TokensTable = () => {
                     </Callout>
 
                     <Group gap="sm">
-                        <Paper p="xs" withBorder bg="ldGray.0">
+                        <Paper p="xs" bg="ldGray.0">
                             <Text ff="monospace" size="sm">
                                 {tokenToCopy?.uuid}
                             </Text>
                         </Paper>
-                        <CopyButton value={tokenToCopy?.uuid ?? ''}>
-                            {({ copied, copy }) => (
-                                <Tooltip
-                                    label={copied ? 'Copied!' : 'Copy UUID'}
-                                    withArrow
-                                    position="top"
-                                >
-                                    <ActionIcon
-                                        size="sm"
-                                        onClick={copy}
-                                        variant={copied ? 'filled' : 'light'}
-                                        color={copied ? 'teal' : 'blue'}
-                                    >
-                                        <MantineIcon
-                                            icon={copied ? IconCheck : IconCopy}
-                                        />
-                                    </ActionIcon>
-                                </Tooltip>
-                            )}
-                        </CopyButton>
+                        <CopyActionIcon
+                            value={tokenToCopy?.uuid ?? ''}
+                            copyLabel="Copy UUID"
+                            copiedLabel="Copied!"
+                            tooltipPosition="top"
+                            size="sm"
+                            variant="light"
+                        />
                     </Group>
                 </Stack>
             </MantineModal>

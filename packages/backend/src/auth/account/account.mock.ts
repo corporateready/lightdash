@@ -30,6 +30,8 @@ export const defaultSessionUser: SessionUser = {
     isActive: true,
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     createdAt: new Date('2024-01-01'),
@@ -97,6 +99,8 @@ export function buildAccount({
         allowAllDashboards: false,
         chartUuids: [],
         allowAllCharts: false,
+        allowAllApps: false,
+        appUuids: [],
         createdAt: '2021-01-01',
         user: {
             userUuid: 'test-user-uuid',
@@ -114,6 +118,8 @@ export function buildAccount({
             allowAllDashboards: false,
             chartUuids: [],
             allowAllCharts: false,
+            allowAllApps: false,
+            appUuids: [],
             createdAt: '2024-01-01',
             encodedSecret: 'test-encoded-secret',
             user: {

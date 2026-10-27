@@ -1,25 +1,29 @@
 import {
     Box,
     Flex,
-    getDefaultZIndex,
     Paper,
     Transition,
     type FlexProps,
     type MantineTransition,
 } from '@mantine/core';
-import { type FC } from 'react';
+import { useLayoutEffect, useRef, type FC } from 'react';
 import useSidebarResize from '../../../hooks/useSidebarResize';
 import { TrackSection } from '../../../providers/Tracking/TrackingProvider';
 import { SectionName } from '../../../types/Events';
 import {
+    SIDEBAR_ANIMATION_DURATION,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MIN_WIDTH,
-    SIDEBAR_RESIZE_HANDLE_WIDTH,
 } from './constants';
+import classes from './Sidebar.module.css';
 import { SidebarPosition, type SidebarWidthProps } from './types';
 
 type Props = {
     isOpen?: boolean;
+    keepMounted?: boolean;
+    isCollapsed?: boolean;
+    collapsible?: boolean;
+    collapsedContent?: React.ReactNode;
     containerProps?: FlexProps;
     position?: SidebarPosition;
     widthProps?: SidebarWidthProps;
@@ -29,8 +33,25 @@ type Props = {
     onResizeEnd?: () => void;
 };
 
+const ResizeHandle: FC<{
+    position: SidebarPosition;
+    isResizing: boolean;
+    onMouseDown: (event: React.MouseEvent) => void;
+}> = ({ position, isResizing, onMouseDown }) => (
+    <Box
+        className={classes.resizeHandle}
+        data-position={position}
+        data-resizing={isResizing}
+        onMouseDown={onMouseDown}
+    />
+);
+
 const Sidebar: FC<React.PropsWithChildren<Props>> = ({
     isOpen = true,
+    keepMounted = false,
+    isCollapsed = false,
+    collapsible = false,
+    collapsedContent,
     containerProps,
     position = SidebarPosition.LEFT,
     widthProps = {},
@@ -54,98 +75,119 @@ const Sidebar: FC<React.PropsWithChildren<Props>> = ({
             onResizeEnd,
         });
 
+    // The row may flex the open sidebar below sidebarWidth. Closing slides the
+    // paper out from the width it actually rendered at (and must not animate
+    // width, or it eases in from sidebarWidth), so it never snaps back to the
+    // full width mid-animation.
+    const renderedWidthRef = useRef(sidebarWidth);
+    useLayoutEffect(() => {
+        if (isOpen && sidebarRef.current) {
+            renderedWidthRef.current =
+                sidebarRef.current.getBoundingClientRect().width;
+        }
+    });
+    const paperWidth = isOpen ? sidebarWidth : renderedWidthRef.current;
+
+    // Collapsible sidebars drop out of the page flow when collapsed and
+    // reveal as a floating overlay when the edge trigger (or panel) is hovered.
+    if (collapsible) {
+        return (
+            <TrackSection name={SectionName.SIDEBAR}>
+                <Flex
+                    ref={sidebarRef}
+                    direction="column"
+                    className={classes.floatContainer}
+                    style={{
+                        '--sidebar-width': `${sidebarWidth}px`,
+                    }}
+                    {...containerProps}
+                >
+                    <Paper
+                        withBorder={false}
+                        radius={0}
+                        className={classes.floatingPanel}
+                        data-collapsed={isCollapsed}
+                        data-testid={
+                            isCollapsed
+                                ? 'common-sidebar-collapsed'
+                                : 'common-sidebar'
+                        }
+                    >
+                        <Box className={classes.floatingPanelInner}>
+                            {children}
+                        </Box>
+                    </Paper>
+
+                    {isCollapsed ? (
+                        <>
+                            <Box className={classes.edgeTrigger} />
+                            <Box className={classes.trigger}>
+                                {collapsedContent}
+                            </Box>
+                        </>
+                    ) : (
+                        <ResizeHandle
+                            position={position}
+                            isResizing={isResizing}
+                            onMouseDown={startResizing}
+                        />
+                    )}
+                </Flex>
+            </TrackSection>
+        );
+    }
+
+    // Both positions collapse with a negative inline-start margin. A right
+    // sidebar closed with a negative margin-right keeps its box hanging past
+    // the page edge for the length of the animation, which shows a horizontal
+    // scrollbar on every toggle.
     const transition: MantineTransition = {
-        in: {
-            opacity: 1,
-            ...(position === SidebarPosition.LEFT
-                ? { marginLeft: 0 }
-                : { marginRight: 0 }),
-        },
-        out: {
-            opacity: 0,
-            ...(position === SidebarPosition.LEFT
-                ? { marginLeft: -sidebarWidth }
-                : { marginRight: -sidebarWidth }),
-        },
-        transitionProperty: 'opacity, margin',
+        in: { opacity: 1, marginLeft: 0 },
+        out: { opacity: 0, marginLeft: -paperWidth },
+        transitionProperty:
+            isResizing || !isOpen
+                ? 'opacity, margin'
+                : 'opacity, margin, width',
     };
+
     return (
         <TrackSection name={SectionName.SIDEBAR}>
             <Flex
                 ref={sidebarRef}
                 direction="column"
-                pos="relative"
-                h="100%"
-                mah="100%"
-                sx={{ zIndex: 1 }}
+                className={classes.sidebarContainer}
+                style={{
+                    '--sidebar-width': `${paperWidth}px`,
+                    '--sidebar-min-width': `${minWidth}px`,
+                }}
                 {...containerProps}
             >
                 <Transition
                     mounted={isOpen}
-                    duration={500}
+                    keepMounted={keepMounted}
+                    duration={SIDEBAR_ANIMATION_DURATION}
                     transition={transition}
                 >
                     {(style) => (
                         <>
                             <Paper
-                                shadow="lg"
-                                p={noSidebarPadding ? undefined : 'lg'}
-                                pb={0}
-                                w={sidebarWidth}
-                                style={style}
+                                withBorder={false}
                                 radius={0}
-                                sx={{
-                                    display: 'flex',
-                                    flexGrow: 1,
-                                    flexDirection: 'column',
-                                    overflowY: 'auto',
-                                }}
+                                className={classes.sidebarPaper}
+                                style={style}
+                                data-position={position}
+                                data-no-padding={noSidebarPadding}
                                 data-testid="common-sidebar"
                             >
-                                {children}
+                                <Box className={classes.sidebarContent}>
+                                    {children}
+                                </Box>
                             </Paper>
 
-                            <Box
-                                h="100%"
-                                w={SIDEBAR_RESIZE_HANDLE_WIDTH}
-                                pos="absolute"
-                                top={0}
-                                {...(position === SidebarPosition.LEFT
-                                    ? { right: -SIDEBAR_RESIZE_HANDLE_WIDTH }
-                                    : { left: -SIDEBAR_RESIZE_HANDLE_WIDTH })}
+                            <ResizeHandle
+                                position={position}
+                                isResizing={isResizing}
                                 onMouseDown={startResizing}
-                                sx={(theme) => ({
-                                    cursor: 'col-resize',
-                                    zIndex: getDefaultZIndex('app') + 1,
-                                    ...(isResizing
-                                        ? {
-                                              background:
-                                                  theme.fn.linearGradient(
-                                                      90,
-                                                      theme.colorScheme ===
-                                                          'dark'
-                                                          ? theme.colors.blue[5]
-                                                          : theme.colors
-                                                                .blue[3],
-                                                      'transparent',
-                                                  ),
-                                          }
-                                        : {
-                                              ...theme.fn.hover({
-                                                  background:
-                                                      theme.fn.linearGradient(
-                                                          90,
-                                                          theme.colorScheme ===
-                                                              'dark'
-                                                              ? theme.colors
-                                                                    .blue[7]
-                                                              : theme.colors
-                                                                    .blue[1],
-                                                          'transparent',
-                                                      ),
-                                              }),
-                                          }),
-                                })}
                             />
                         </>
                     )}

@@ -1,12 +1,16 @@
-import { Anchor, Text } from '@mantine-8/core';
+import { Anchor, Text } from '@mantine/core';
 import { type FC } from 'react';
 import { SlackStates } from '../types';
 
 type Props = {
     slackState: SlackStates;
+    missingScopes: string[];
 };
 
-export const SchedulerFormSlackError: FC<Props> = ({ slackState }) => {
+export const SchedulerFormSlackError: FC<Props> = ({
+    slackState,
+    missingScopes,
+}) => {
     if (slackState === SlackStates.NO_SLACK) {
         return (
             <>
@@ -20,21 +24,26 @@ export const SchedulerFormSlackError: FC<Props> = ({ slackState }) => {
                         {' '}
                         setup Slack{' '}
                     </Anchor>
-                    for your Lightdash instance
+                    for your instance
                 </Text>
             </>
         );
     } else if (slackState === SlackStates.MISSING_SCOPES) {
         return (
             <>
-                <Text pb="sm">Slack integration needs to be reinstalled</Text>
+                <Text pb="sm">Slack integration is missing permissions</Text>
+                <Text pb="sm">
+                    Scheduled deliveries need the Slack scopes{' '}
+                    <Text span fw={600}>
+                        {missingScopes.join(', ')}
+                    </Text>
+                    .
+                </Text>
                 <Text>
-                    To create a slack scheduled delivery, you need to
                     <Anchor href="/generalSettings/integrations">
-                        {' '}
-                        reinstall the Slack integration{' '}
-                    </Anchor>
-                    for your organization
+                        Reinstall the Slack integration
+                    </Anchor>{' '}
+                    for your organization to grant them.
                 </Text>
             </>
         );

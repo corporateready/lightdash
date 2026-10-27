@@ -1,5 +1,18 @@
-import { type LanguageMap, type SavedChart } from '@lightdash/common';
+import {
+    type AnonymousAccount,
+    type CreateEmbedJwt,
+    type CreateSavedChartVersion,
+    type LanguageMap,
+    type SavedChart,
+    type UiStringKey,
+    type UUID,
+} from '@lightdash/common';
 import { type SdkFilter } from '../../features/embed/EmbedDashboard/types';
+import {
+    type ChartSavedAction,
+    type DispatchEmbedEvent,
+} from '../../features/embed/events/types';
+import { type EmbedAiAgentThreadSetup } from './embedAiAgentThreadSetup';
 
 export const EMBED_KEY = 'lightdash-embed';
 
@@ -8,9 +21,29 @@ export type EmbedTheme = 'light' | 'dark';
 export type InMemoryEmbed = {
     projectUuid?: string;
     token?: string;
+    // Dashboard an AI-agent embed is viewing; sent as a request header so the
+    // server can scope the token to it.
+    dashboardUuid?: string;
 };
 
 export type EmbedMode = 'sdk' | 'direct';
+
+export type EmbedExploreChart = SavedChart | CreateSavedChartVersion;
+
+// Where the embedded Explore's back button returns the viewer to
+export type EmbedBackDestination =
+    | 'dashboard'
+    | 'chart'
+    | 'aiAgent'
+    | 'metricsCatalog'
+    | 'explore';
+
+export type EmbedExploreOptions = {
+    chart: EmbedExploreChart;
+    customSqlProvenanceChartUuid?: UUID;
+    // The unsaved query of the Explore the chart was opened from, if any
+    sourceChart?: CreateSavedChartVersion;
+};
 
 export interface EmbedContext {
     // The JWT token used to authenticate the user
@@ -19,24 +52,59 @@ export interface EmbedContext {
     filters?: SdkFilter[];
     // The project UUID of the project the JWT user is embedded in
     projectUuid?: string;
+    // The content claim decoded from the JWT
+    content?: CreateEmbedJwt['content'];
+    // Write-action configuration decoded from the JWT
+    writeActions?: CreateEmbedJwt['writeActions'];
+    // Server-computed permissions for the write-action actor
+    embedWriteContext?: AnonymousAccount['embedWriteContext'];
     // An optional org palette override for SDK dashboards
     paletteUuid?: string;
     // Powers localization of the dashboard
     languageMap?: LanguageMap;
     // The function to call when the user clicks "Explore from here"
-    onExplore?: (options: { chart: SavedChart }) => void;
-    // Localization function
-    t: (input: string) => string | undefined;
+    onExplore?: (options: EmbedExploreOptions) => void;
+    // Returns the SDK uiOverrides value for a UI-string key, if any
+    t: (input: UiStringKey) => string | undefined;
     // The function to call when the user clicks "Back to dashboard" from an Explore
     onBackToDashboard?: () => void;
+    // Where onBackToDashboard returns to; drives the back button label
+    backDestination: EmbedBackDestination;
+    // Called after a chart is created or updated from an embedded Explore. The
+    // dashboard builder uses this to update its chart editor state.
+    onChartSaved?: (chart: SavedChart, action: ChartSavedAction) => void;
+    // Sends an embed event to the SDK host's onEvent, or as a DOM/postMessage event
+    dispatchEmbedEvent: DispatchEmbedEvent;
+    isEmbedEventReady: boolean;
     // The chart that the user is exploring
-    savedChart?: SavedChart;
+    savedChart?: EmbedExploreChart;
+    // The saved chart whose persisted custom SQL seeded this Explore. This is
+    // carried separately because derived drill-down charts have no UUID.
+    customSqlProvenanceChartUuid?: UUID;
     // The UUID of the saved query being viewed in an embedded Chart
     savedQueryUuid?: string;
+    // The UUID of the data app being viewed in a standalone embedded App
+    appUuid?: string;
+    // The UUID of the saved dashboard an AI-agent embed is viewing
+    dashboardUuid?: string;
     // The mode of the embed: 'sdk' when embedded via SDK (no URL sync), 'direct' when navigating directly to /embed (sync URL)
     mode: EmbedMode;
     // Theme color scheme for the embed, set via ?theme=light|dark URL param
     theme: EmbedTheme;
     // Custom background color for the embed, set via ?backgroundColor=<css-color> URL param
     backgroundColor: string | null;
+    // Session query timezone (IANA), set via ?timezone=<IANA> URL param; overrides the chart pin
+    timezone: string | null;
+    // SDK-rendered AI agents report thread changes here instead of postMessage
+    onAiAgentThreadChange?: (change: EmbedAiAgentThreadChange) => void;
+    // Binding and context for threads the embedded agent starts
+    aiAgentThreadSetup: EmbedAiAgentThreadSetup | null;
+    // Keeps the embedded agent on its thread: content links render static
+    aiAgentNavigationDisabled: boolean;
 }
+
+export type EmbedAiAgentThreadChange = {
+    agentUuid: string;
+    projectUuid: string;
+    threadUuid: string;
+};

@@ -5,6 +5,7 @@ import {
     getItemLabelWithoutTableName,
     getTotalFilterRules,
     metricQueryTableViz,
+    runMetricQueryToolDefinition,
     toolRunMetricQueryArgsSchema,
     toolRunMetricQueryArgsSchemaTransformed,
     ToolRunMetricQueryArgsTransformed,
@@ -13,13 +14,17 @@ import {
 import { tool } from 'ai';
 import { stringify } from 'csv-stringify/sync';
 import { CsvService } from '../../../../services/CsvService/CsvService';
+import { getAgentQuestion } from '../decisions/agentQuestion';
+import type { AiDecisionClient } from '../decisions/AiDecisionClient';
+import { diagnoseEmptyResult } from '../decisions/emptyResults';
+import { createQueryReviewer } from '../decisions/queryReview';
 import { NO_RESULTS_RETRY_PROMPT } from '../prompts/noResultsRetry';
 import type { RunAsyncQueryFn } from '../types/aiAgentDependencies';
 import { AgentContext } from '../utils/AgentContext';
 import { populateCustomMetricsSQL } from '../utils/populateCustomMetricsSQL';
 import { serializeData } from '../utils/serializeData';
 import { toModelOutput } from '../utils/toModelOutput';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
 import {
     validateCustomMetricsDefinition,
     validateFieldEntityType,
@@ -29,13 +34,19 @@ import {
     validateSortFieldsAreSelected,
 } from '../utils/validators';
 
+const toolDefinition = runMetricQueryToolDefinition.for('agent');
+
 type Dependencies = {
+    decisions?: AiDecisionClient;
     runAsyncQuery: RunAsyncQueryFn;
+    agentContext: AgentContext;
     maxLimit: number;
 };
 
 export const getRunMetricQuery = ({
+    decisions,
     runAsyncQuery,
+    agentContext: ctx,
     maxLimit,
 }: Dependencies) => {
     const validateVizTool = (
@@ -86,12 +97,10 @@ export const getRunMetricQuery = ({
     };
 
     return tool({
-        description: toolRunMetricQueryArgsSchema.description,
-        inputSchema: toolRunMetricQueryArgsSchema,
-        outputSchema: toolRunMetricQueryOutputSchema,
-        execute: async (toolArgs, { experimental_context: context }) => {
+        ...toolDefinition,
+        execute: async (toolArgs, { abortSignal, messages }) => {
             try {
-                const ctx = AgentContext.from(context);
+                abortSignal?.throwIfAborted();
                 const vizTool =
                     toolRunMetricQueryArgsSchemaTransformed.parse(toolArgs);
 
@@ -109,19 +118,59 @@ export const getRunMetricQuery = ({
                     ),
                 });
 
-                const results = await runAsyncQuery(
-                    query,
-                    populateCustomMetricsSQL(
-                        filterAggregationCustomMetrics(vizTool.customMetrics),
-                        explore,
-                    ),
+                const additionalMetrics = populateCustomMetricsSQL(
+                    filterAggregationCustomMetrics(vizTool.customMetrics),
+                    explore,
                 );
+                const reviewedQuery = { ...query, additionalMetrics };
+                const [results, review] = await Promise.all([
+                    runAsyncQuery(
+                        query,
+                        additionalMetrics,
+                        undefined,
+                        abortSignal,
+                    ),
+                    decisions
+                        ? createQueryReviewer({
+                              decisions,
+                              question: getAgentQuestion({
+                                  messageHistory: messages,
+                              }),
+                              explores: ctx.getAvailableExplores(),
+                          })({
+                              kind: 'semantic',
+                              query: reviewedQuery,
+                          })
+                        : '',
+                ]);
 
                 if (results.rows.length === 0) {
+                    const result = decisions
+                        ? await diagnoseEmptyResult({
+                              decisions,
+                              question: getAgentQuestion({
+                                  messageHistory: messages,
+                              }),
+                              explores: ctx.getAvailableExplores(),
+                              plan: {
+                                  kind: 'semantic',
+                                  query: reviewedQuery,
+                              },
+                              review,
+                          })
+                        : NO_RESULTS_RETRY_PROMPT;
                     return {
-                        result: NO_RESULTS_RETRY_PROMPT,
+                        result,
                         metadata: {
                             status: 'success',
+                            queryCacheHit:
+                                results.cacheMetadata?.cacheHit === true,
+                        },
+                        structuredContent: {
+                            columns: [],
+                            rows: [],
+                            rowCount: 0,
+                            review: decisions ? result : null,
                         },
                     };
                 }
@@ -130,15 +179,16 @@ export const getRunMetricQuery = ({
                     ? Object.keys(results.rows[0])
                     : [];
 
-                const csvHeaders = fieldIds.map((fieldId) => {
+                const columns = fieldIds.map((fieldId) => {
                     const item = results.fields[fieldId];
-                    if (!item) {
-                        return fieldId;
-                    }
-                    return getItemLabelWithoutTableName(item);
+                    return {
+                        label: item
+                            ? getItemLabelWithoutTableName(item)
+                            : fieldId,
+                    };
                 });
 
-                const rows = results.rows.map((row) =>
+                const csvRows = results.rows.map((row) =>
                     CsvService.convertRowToCsv(
                         row,
                         results.fields,
@@ -147,24 +197,26 @@ export const getRunMetricQuery = ({
                     ),
                 );
 
-                const csv = stringify(rows, {
+                const csv = stringify(csvRows, {
                     header: true,
-                    columns: csvHeaders,
+                    columns: columns.map((column) => column.label),
                 });
 
                 return {
-                    result: serializeData(csv, 'csv'),
+                    result: `${serializeData(csv, 'csv')}${review}`,
                     metadata: {
                         status: 'success',
+                        queryCacheHit: results.cacheMetadata?.cacheHit === true,
+                    },
+                    structuredContent: {
+                        columns,
+                        rows: csvRows,
+                        rowCount: csvRows.length,
+                        review: review === '' ? null : review,
                     },
                 };
             } catch (e) {
-                return {
-                    result: toolErrorHandler(e, 'Error running metric query.'),
-                    metadata: {
-                        status: 'error',
-                    },
-                };
+                return toolErrorOutput(e, 'Error running metric query.');
             }
         },
         toModelOutput: ({ output }) => toModelOutput(output),

@@ -2,6 +2,21 @@ import { z } from 'zod';
 import { type ApiSuccess } from '../../../types/api/success';
 import { AGENT_SUGGESTION_TOOLS, type AgentSuggestion } from '../types';
 
+export const aiAgentSuggestionContextSchema = z.discriminatedUnion('type', [
+    z.object({
+        type: z.literal('chart'),
+        chartUuid: z.string().min(1),
+    }),
+    z.object({
+        type: z.literal('dashboard'),
+        dashboardUuid: z.string().min(1),
+    }),
+]);
+
+export type AiAgentSuggestionContext = z.infer<
+    typeof aiAgentSuggestionContextSchema
+>;
+
 const promptChipModelSchema = z.object({
     kind: z.literal('prompt'),
     label: z
@@ -67,14 +82,22 @@ const navigateChipModelSchema = z.object({
         ),
 });
 
+// z.union, not z.discriminatedUnion: this schema is sent as an OpenAI
+// structured output, and zod renders a discriminated union as JSON Schema
+// `oneOf`, which strict structured outputs reject. Both branches are objects
+// with distinct `kind` literals, so z.union parses the same inputs.
+export const agentSuggestionModelChipSchema = z.union([
+    promptChipModelSchema,
+    navigateChipModelSchema,
+]);
+
+export type AgentSuggestionModelChip = z.infer<
+    typeof agentSuggestionModelChipSchema
+>;
+
 export const agentSuggestionsModelSchema = z.object({
     chips: z
-        .array(
-            z.discriminatedUnion('kind', [
-                promptChipModelSchema,
-                navigateChipModelSchema,
-            ]),
-        )
+        .array(agentSuggestionModelChipSchema)
         .min(2)
         .max(6)
         .describe('Between 2 and 6 suggestion chips.'),
@@ -84,6 +107,12 @@ export type AgentSuggestionsModelObject = z.infer<
     typeof agentSuggestionsModelSchema
 >;
 
+export type AgentSuggestionsSource = 'generated' | 'cached' | 'default';
+
+// 'none' means the response carries no chips.
+export type AgentSuggestionsResponseSource = AgentSuggestionsSource | 'none';
+
 export type ApiAgentSuggestionsResponse = ApiSuccess<{
     chips: AgentSuggestion[];
+    source: AgentSuggestionsResponseSource;
 }>;

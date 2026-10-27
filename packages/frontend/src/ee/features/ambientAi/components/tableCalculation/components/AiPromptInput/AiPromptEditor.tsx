@@ -1,10 +1,12 @@
 import {
     getItemMap,
+    getDimensions,
+    getItemId,
     isField,
     type Explore,
     type MetricQuery,
 } from '@lightdash/common';
-import { Box } from '@mantine-8/core';
+import { Box } from '@mantine/core';
 import { RichTextEditor } from '@mantine/tiptap';
 import Mention from '@tiptap/extension-mention';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -41,6 +43,8 @@ type Props = {
     shouldClear?: boolean;
     onCleared?: () => void;
     disabled?: boolean;
+    fieldSuggestionScope?: 'selected' | 'allDimensions';
+    placeholder?: string;
 };
 
 export const AiPromptEditor: FC<Props> = ({
@@ -51,6 +55,8 @@ export const AiPromptEditor: FC<Props> = ({
     shouldClear,
     onCleared,
     disabled,
+    fieldSuggestionScope = 'selected',
+    placeholder = 'Describe your calculation (type @ to reference fields)...',
 }) => {
     // Refs so handleKeyDown (configured once at editor mount) always reaches the live values.
     const onSubmitRef = useRef(onSubmit);
@@ -60,6 +66,14 @@ export const AiPromptEditor: FC<Props> = ({
     // Build field suggestions from itemsMap
     const fieldSuggestions: FieldSuggestionItem[] = useMemo(() => {
         if (!explore) return [];
+
+        if (fieldSuggestionScope === 'allDimensions') {
+            return getDimensions(explore).map((field) => ({
+                id: getItemId(field),
+                label: field.label,
+                item: field,
+            }));
+        }
 
         const itemsMap = getItemMap(
             explore,
@@ -85,7 +99,7 @@ export const AiPromptEditor: FC<Props> = ({
                       : fieldItem.name,
                 item: fieldItem,
             }));
-    }, [explore, metricQuery]);
+    }, [explore, metricQuery, fieldSuggestionScope]);
 
     const editor = useEditor({
         extensions: [
@@ -97,6 +111,9 @@ export const AiPromptEditor: FC<Props> = ({
                 blockquote: false,
                 codeBlock: false,
                 horizontalRule: false,
+                link: false,
+                underline: false,
+                trailingNode: false,
             }),
             MentionWithLabel.configure({
                 suggestion: generateFieldSuggestion(fieldSuggestions),
@@ -111,8 +128,7 @@ export const AiPromptEditor: FC<Props> = ({
                 ],
             }),
             Placeholder.configure({
-                placeholder:
-                    'Describe your calculation (type @ to reference fields)...',
+                placeholder,
             }),
         ],
         editable: !disabled,
@@ -139,7 +155,7 @@ export const AiPromptEditor: FC<Props> = ({
 
     // Clear editor when shouldClear changes to true
     useEffect(() => {
-        if (shouldClear && editor) {
+        if (shouldClear && editor && !editor.isDestroyed) {
             editor.commands.clearContent();
             onCleared?.();
         }
@@ -147,7 +163,7 @@ export const AiPromptEditor: FC<Props> = ({
 
     // Update suggestions when fields change
     useEffect(() => {
-        if (editor && fieldSuggestions.length > 0) {
+        if (editor && !editor.isDestroyed && fieldSuggestions.length > 0) {
             // Update the mention extension's suggestion config
             editor.extensionManager.extensions.forEach((ext) => {
                 if (ext.name === 'mention') {

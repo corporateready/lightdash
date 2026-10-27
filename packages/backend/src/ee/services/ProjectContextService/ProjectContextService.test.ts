@@ -1,0 +1,714 @@
+import { Ability, AbilityBuilder } from '@casl/ability';
+import {
+    AgentActorSurface,
+    DbtProjectType,
+    ForbiddenError,
+    NotFoundError,
+    ParseError,
+    type MemberAbility,
+    type ProjectContextEntry,
+    type SessionUser,
+} from '@lightdash/common';
+import {
+    createBranch,
+    createPullRequest,
+    createSignedCommitOnBranch,
+    getFileContent,
+    getInstallationToken,
+    getLastCommit,
+} from '../../../clients/github/Github';
+import type { AgentActionLogModel } from '../../../models/AgentActionLogModel';
+import type { GithubAppInstallationsModel } from '../../../models/GithubAppInstallations/GithubAppInstallationsModel';
+import type { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
+import {
+    agentActionTestCases,
+    withAgentActionScope,
+} from '../../../services/AiAccessService/agentActionTestUtils.mock';
+import type { ProjectContextModel } from '../../models/ProjectContextModel';
+import {
+    projectContextFilePath,
+    ProjectContextService,
+} from './ProjectContextService';
+
+vi.mock('../../../clients/github/Github', () => ({
+    getFileContent: vi.fn(),
+    getInstallationToken: vi.fn(),
+    getLastCommit: vi.fn(),
+    createBranch: vi.fn(),
+    createSignedCommitOnBranch: vi.fn(),
+    createPullRequest: vi.fn(),
+}));
+
+const mockGetFileContent = getFileContent as import('vitest').Mock;
+const mockGetInstallationToken = getInstallationToken as import('vitest').Mock;
+const mockGetLastCommit = getLastCommit as import('vitest').Mock;
+const mockCreateBranch = createBranch as import('vitest').Mock;
+const mockCreateSignedCommitOnBranch =
+    createSignedCommitOnBranch as import('vitest').Mock;
+const mockCreatePullRequest = createPullRequest as import('vitest').Mock;
+
+const PROJECT_UUID = '00000000-0000-0000-0000-000000000001';
+const ORG_UUID = '00000000-0000-0000-0000-000000000002';
+const USER_UUID = '00000000-0000-0000-0000-000000000003';
+
+const githubProject = {
+    organizationUuid: ORG_UUID,
+    dbtConnection: {
+        type: DbtProjectType.GITHUB,
+        repository: 'acme/analytics',
+        branch: 'main',
+        project_sub_path: '/',
+    },
+};
+
+const existingEntries = (): ProjectContextEntry[] => [
+    {
+        id: 'existing',
+        kind: 'context',
+        content: 'Existing cached context.',
+        terms: [],
+        objects: [],
+    },
+];
+
+const userWithProjectContextAccess = ({
+    canCompile = true,
+    canViewSourceCode = true,
+    canManageSourceCode = true,
+}: {
+    canCompile?: boolean;
+    canViewSourceCode?: boolean;
+    canManageSourceCode?: boolean;
+} = {}): SessionUser => {
+    const { build, can, rules } = new AbilityBuilder<MemberAbility>(Ability);
+    if (canCompile) {
+        can('manage', 'CompileProject', {
+            organizationUuid: ORG_UUID,
+            projectUuid: PROJECT_UUID,
+        });
+    }
+    if (canViewSourceCode) {
+        can('view', 'SourceCode', {
+            organizationUuid: ORG_UUID,
+            projectUuid: PROJECT_UUID,
+        });
+    }
+    if (canManageSourceCode) {
+        can('manage', 'SourceCode', {
+            organizationUuid: ORG_UUID,
+            projectUuid: PROJECT_UUID,
+            isProtectedBranch: false,
+        });
+    }
+
+    return {
+        userUuid: USER_UUID,
+        organizationUuid: ORG_UUID,
+        organizationName: 'Acme',
+        organizationCreatedAt: new Date(),
+        role: 'admin',
+        ability: build(),
+        abilityRules: rules,
+    } as SessionUser;
+};
+
+const makeService = (overrides: {
+    project?: unknown;
+    projectSummary?: unknown;
+    installationId?: string | undefined;
+    initialEntries?: ProjectContextEntry[];
+}) => {
+    let cachedEntries = overrides.initialEntries ?? existingEntries();
+    const projectModel = {
+        get: vi.fn().mockResolvedValue(overrides.project ?? githubProject),
+        getDbtSourceIdentity: vi.fn().mockResolvedValue({
+            dbtSourceUuid: PROJECT_UUID,
+            dbtSourceName: 'primary',
+        }),
+        getSummary: vi.fn().mockResolvedValue(
+            overrides.projectSummary ?? {
+                organizationUuid: ORG_UUID,
+                projectUuid: PROJECT_UUID,
+                type: undefined,
+            },
+        ),
+    } as unknown as ProjectModel;
+    const githubAppInstallationsModel = {
+        findInstallationId: vi
+            .fn()
+            .mockResolvedValue(
+                'installationId' in overrides
+                    ? overrides.installationId
+                    : 'install-1',
+            ),
+    } as unknown as GithubAppInstallationsModel;
+    const projectContextModel = {
+        replaceEntriesForProject: vi.fn(
+            async (_projectUuid: string, entries: ProjectContextEntry[]) => {
+                cachedEntries = entries;
+            },
+        ),
+    } as unknown as ProjectContextModel;
+    const agentActionLogModel = {
+        insert: vi.fn().mockResolvedValue(undefined),
+    };
+    const service = new ProjectContextService({
+        agentActionLogModel:
+            agentActionLogModel as unknown as AgentActionLogModel,
+        projectModel,
+        githubAppInstallationsModel,
+        projectContextModel,
+    });
+    return {
+        service,
+        agentActionLogModel,
+        getCachedEntries: () => cachedEntries,
+    };
+};
+
+beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetInstallationToken.mockResolvedValue('token-1');
+});
+
+describe('projectContextFilePath', () => {
+    test.each([
+        ['/', 'lightdash.project_context.yml'],
+        ['./', 'lightdash.project_context.yml'],
+        ['/transform/dbt', 'transform/dbt/lightdash.project_context.yml'],
+        ['transform/dbt/', 'transform/dbt/lightdash.project_context.yml'],
+    ])('resolves %s', (projectSubPath, filePath) => {
+        expect(projectContextFilePath(projectSubPath)).toBe(filePath);
+    });
+});
+
+describe('ProjectContextService.ingestProjectContext', () => {
+    test('requires compile-project access', async () => {
+        const { service, getCachedEntries } = makeService({});
+
+        await expect(
+            service.ingestProjectContext(
+                userWithProjectContextAccess({ canCompile: false }),
+                PROJECT_UUID,
+            ),
+        ).rejects.toThrow(ForbiddenError);
+        expect(getCachedEntries()).toEqual(existingEntries());
+    });
+
+    test('requires view source-code access', async () => {
+        const { service, getCachedEntries } = makeService({});
+
+        await expect(
+            service.ingestProjectContext(
+                userWithProjectContextAccess({
+                    canViewSourceCode: false,
+                    canManageSourceCode: false,
+                }),
+                PROJECT_UUID,
+            ),
+        ).rejects.toThrow(ForbiddenError);
+        expect(mockGetInstallationToken).not.toHaveBeenCalled();
+        expect(getCachedEntries()).toEqual(existingEntries());
+    });
+
+    test('no-op when the project is not GitHub-backed', async () => {
+        const { service, getCachedEntries } = makeService({
+            project: {
+                organizationUuid: ORG_UUID,
+                dbtConnection: { type: DbtProjectType.DBT },
+            },
+        });
+        const result = await service.ingestProjectContext(
+            userWithProjectContextAccess(),
+            PROJECT_UUID,
+        );
+        expect(result).toEqual({
+            ingested: false,
+            reason: 'no_github_access',
+        });
+        expect(getCachedEntries()).toEqual(existingEntries());
+    });
+
+    test('no-op when the org has no GitHub App installation', async () => {
+        const { service, getCachedEntries } = makeService({
+            installationId: undefined,
+        });
+        const result = await service.ingestProjectContext(
+            userWithProjectContextAccess(),
+            PROJECT_UUID,
+        );
+        expect(result).toEqual({
+            ingested: false,
+            reason: 'no_github_access',
+        });
+        expect(getCachedEntries()).toEqual(existingEntries());
+    });
+
+    test('clears entries when the file is not found', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service, getCachedEntries } = makeService({});
+        const result = await service.ingestProjectContext(
+            userWithProjectContextAccess(),
+            PROJECT_UUID,
+        );
+        expect(result).toEqual({ ingested: true, entryCount: 0 });
+        expect(getCachedEntries()).toEqual([]);
+    });
+
+    test('parses and replaces entries when the file is present', async () => {
+        mockGetFileContent.mockResolvedValue({
+            content: `
+- id: hr
+  kind: definition
+  content: '"HR" = high-risk cohort.'
+  terms: [HR]
+`,
+            sha: 'abc',
+        });
+        const { service, getCachedEntries } = makeService({});
+        const result = await service.ingestProjectContext(
+            userWithProjectContextAccess(),
+            PROJECT_UUID,
+        );
+        expect(result).toEqual({ ingested: true, entryCount: 1 });
+        expect(getCachedEntries()).toEqual([
+            {
+                id: 'hr',
+                kind: 'definition',
+                content: '"HR" = high-risk cohort.',
+                terms: ['HR'],
+                objects: [],
+            },
+        ]);
+    });
+
+    test('does not wipe entries on a transient GitHub error', async () => {
+        mockGetFileContent.mockRejectedValue(new Error('500 from GitHub'));
+        const { service, getCachedEntries } = makeService({});
+        await expect(
+            service.ingestProjectContext(
+                userWithProjectContextAccess(),
+                PROJECT_UUID,
+            ),
+        ).rejects.toThrow('500 from GitHub');
+        expect(getCachedEntries()).toEqual(existingEntries());
+    });
+});
+
+describe('ProjectContextService.previewWriteback', () => {
+    const judgeEntry = {
+        op: 'create' as const,
+        id: null,
+        kind: 'definition' as const,
+        content: '"HR" = high-risk cohort.',
+        terms: ['HR'],
+        objects: [],
+    };
+
+    test('requires view source-code access before reading the file', async () => {
+        const { service } = makeService({});
+
+        await expect(
+            service.previewWriteback({
+                user: userWithProjectContextAccess({
+                    canViewSourceCode: false,
+                    canManageSourceCode: false,
+                }),
+                projectUuid: PROJECT_UUID,
+                entry: judgeEntry,
+            }),
+        ).rejects.toThrow(ForbiddenError);
+        expect(mockGetInstallationToken).not.toHaveBeenCalled();
+        expect(mockGetFileContent).not.toHaveBeenCalled();
+    });
+});
+
+describe('ProjectContextService.writebackEntry', () => {
+    const judgeEntry = {
+        op: 'create' as const,
+        id: null,
+        kind: 'definition' as const,
+        content: '"HR" = high-risk cohort.',
+        terms: ['HR'],
+        objects: [],
+    };
+
+    beforeEach(() => {
+        mockGetLastCommit.mockResolvedValue({ sha: 'base-sha' });
+        mockCreateBranch.mockResolvedValue({});
+        mockCreateSignedCommitOnBranch.mockResolvedValue({
+            oid: 'commit-sha',
+            url: 'https://github.com/acme/analytics/commit/commit-sha',
+        });
+        mockCreatePullRequest.mockResolvedValue({
+            html_url: 'https://github.com/acme/analytics/pull/7',
+            number: 7,
+        });
+    });
+
+    test.each([1, 2, 3])(
+        'checks access immediately before remote effect %s',
+        async (refuseAt) => {
+            mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+            const { service } = makeService({});
+            const error = new Error('access stopped');
+            let calls = 0;
+            const assertPublishAllowed = vi.fn(async () => {
+                calls += 1;
+                if (calls === refuseAt) throw error;
+            });
+            await expect(
+                service.writebackEntry({
+                    user: userWithProjectContextAccess(),
+                    projectUuid: PROJECT_UUID,
+                    entry: judgeEntry,
+                    branchTimestamp: 1000,
+                    sourceThread: null,
+                    assertPublishAllowed,
+                }),
+            ).rejects.toBe(error);
+            expect(mockCreateBranch).toHaveBeenCalledTimes(
+                refuseAt > 1 ? 1 : 0,
+            );
+            expect(mockCreateSignedCommitOnBranch).toHaveBeenCalledTimes(
+                refuseAt > 2 ? 1 : 0,
+            );
+            expect(mockCreatePullRequest).not.toHaveBeenCalled();
+        },
+    );
+
+    test('checks each of the three allowed remote effects', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service } = makeService({});
+        const assertPublishAllowed = vi.fn();
+        await service.writebackEntry({
+            user: userWithProjectContextAccess(),
+            projectUuid: PROJECT_UUID,
+            entry: judgeEntry,
+            branchTimestamp: 1000,
+            sourceThread: null,
+            assertPublishAllowed,
+        });
+        expect(assertPublishAllowed).toHaveBeenCalledTimes(3);
+        expect(mockCreatePullRequest).toHaveBeenCalledTimes(1);
+    });
+
+    describe.each([
+        ...agentActionTestCases,
+        ['in-app flag off', AgentActorSurface.IN_APP_AGENT, false, 0],
+        ['Slack flag off', AgentActorSurface.SLACK_AGENT, false, 0],
+    ] as const)('agent ledger: %s', (_, surface, enabled, count) => {
+        test.each([
+            'allowed',
+            'denied',
+            'provider_failure',
+            'commit_failure',
+        ] as const)('%s', async (outcome) => {
+            mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+            if (outcome === 'provider_failure')
+                mockCreatePullRequest.mockRejectedValueOnce(
+                    new Error('provider unavailable'),
+                );
+            if (outcome === 'commit_failure')
+                mockCreateSignedCommitOnBranch.mockRejectedValueOnce(
+                    new Error('provider unavailable'),
+                );
+            const { service, agentActionLogModel } = makeService({});
+            const user = userWithProjectContextAccess({
+                canManageSourceCode: outcome !== 'denied',
+            });
+            const write = withAgentActionScope(user, surface, enabled, () =>
+                service.writebackEntry({
+                    user,
+                    projectUuid: PROJECT_UUID,
+                    entry: judgeEntry,
+                    branchTimestamp: 1000,
+                    sourceThread: null,
+                }),
+            );
+            if (outcome === 'allowed') await write;
+            else
+                await expect(write).rejects.toThrow(
+                    outcome === 'denied'
+                        ? ForbiddenError
+                        : 'provider unavailable',
+                );
+            const expectedCount = outcome === 'commit_failure' ? 0 : count;
+            expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                expectedCount,
+            );
+            if (expectedCount)
+                expect(agentActionLogModel.insert).toHaveBeenCalledWith(
+                    expect.objectContaining({
+                        object_type: 'project_context',
+                        object_uuid: PROJECT_UUID,
+                        action: 'update',
+                        outcome: outcome === 'denied' ? 'denied' : 'allowed',
+                        policy_layer:
+                            outcome === 'denied' ? 'writeback_policy' : null,
+                        reason_code:
+                            outcome === 'denied'
+                                ? 'source_code_manage_forbidden'
+                                : null,
+                        agent_identity: expect.objectContaining({
+                            act: expect.objectContaining({ surface }),
+                        }),
+                    }),
+                );
+            const rows = JSON.stringify(agentActionLogModel.insert.mock.calls);
+            expect(rows).not.toContain('analytics');
+            expect(rows).not.toContain('high-risk');
+            expect(rows).not.toContain('github.com');
+        });
+    });
+
+    test('drops persisted legacy string refs instead of failing', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service } = makeService({});
+
+        const result = await service.writebackEntry({
+            user: userWithProjectContextAccess(),
+            projectUuid: PROJECT_UUID,
+            entry: { ...judgeEntry, objects: ['orders'] },
+            branchTimestamp: 1000,
+            sourceThread: null,
+        });
+
+        expect(result).toMatchObject({ op: 'create', entryId: 'hr' });
+        const commitArgs = mockCreateSignedCommitOnBranch.mock.calls[0][0];
+        const written = Buffer.from(
+            commitArgs.fileChanges.additions[0].contents,
+            'base64',
+        ).toString('utf8');
+        expect(written).toContain('objects: []');
+        expect(written).not.toContain('orders');
+    });
+
+    test('rejects an entry that is invalid beyond legacy refs', async () => {
+        const { service } = makeService({});
+
+        const error = await service
+            .writebackEntry({
+                user: userWithProjectContextAccess(),
+                projectUuid: PROJECT_UUID,
+                entry: { ...judgeEntry, op: 'update' as const, id: null },
+                branchTimestamp: 1000,
+                sourceThread: null,
+            })
+            .catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(ParseError);
+        expect(mockGetFileContent).not.toHaveBeenCalled();
+    });
+
+    test('creates the file and opens a PR when it does not yet exist', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service } = makeService({});
+
+        const result = await service.writebackEntry({
+            user: userWithProjectContextAccess(),
+            projectUuid: PROJECT_UUID,
+            entry: judgeEntry,
+            branchTimestamp: 1000,
+            sourceThread: null,
+        });
+
+        expect(result).toEqual({
+            prUrl: 'https://github.com/acme/analytics/pull/7',
+            prNumber: 7,
+            owner: 'acme',
+            repo: 'analytics',
+            op: 'create',
+            entryId: 'hr',
+        });
+        expect(mockCreateSignedCommitOnBranch).toHaveBeenCalledTimes(1);
+        const commitArgs = mockCreateSignedCommitOnBranch.mock.calls[0][0];
+        expect(commitArgs).toMatchObject({
+            branch: 'lightdash-project-context/hr-1000',
+            expectedHeadOid: 'base-sha',
+        });
+        expect(commitArgs.fileChanges.additions[0].path).toBe(
+            'lightdash.project_context.yml',
+        );
+        expect(mockCreateBranch).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sha: 'base-sha',
+                branch: 'lightdash-project-context/hr-1000',
+            }),
+        );
+    });
+
+    test('updates the existing file when present and reports op=update', async () => {
+        mockGetFileContent.mockResolvedValue({
+            content: `
+- id: hr
+  kind: definition
+  content: old
+  terms: [HR]
+`,
+            sha: 'file-sha',
+        });
+        const { service } = makeService({});
+
+        const result = await service.writebackEntry({
+            user: userWithProjectContextAccess(),
+            projectUuid: PROJECT_UUID,
+            entry: { ...judgeEntry, op: 'update', id: 'hr' },
+            branchTimestamp: 2000,
+            sourceThread: null,
+        });
+
+        expect(result.op).toBe('update');
+        // op=update is decided by merging into the existing entry, not by a
+        // file SHA — the signed commit overwrites the file either way.
+        const commitArgs = mockCreateSignedCommitOnBranch.mock.calls[0][0];
+        const updated = Buffer.from(
+            commitArgs.fileChanges.additions[0].contents,
+            'base64',
+        ).toString('utf-8');
+        expect(updated).toContain('"HR" = high-risk cohort.');
+        expect(updated).not.toContain('content: old');
+    });
+
+    test('bounds long context branch names without changing entry IDs or colliding on shared prefixes', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service } = makeService({});
+        const entries = ['first', 'second'].map((suffix) => ({
+            ...judgeEntry,
+            content: `${'Native context definition '.repeat(16)}${suffix}`,
+            terms: [],
+        }));
+        for await (const entry of entries) {
+            const result = await service.writebackEntry({
+                user: userWithProjectContextAccess(),
+                projectUuid: PROJECT_UUID,
+                entry,
+                branchTimestamp: 1000,
+                sourceThread: null,
+            });
+            expect(result.entryId.length).toBeGreaterThan(255);
+            const commit = mockCreateSignedCommitOnBranch.mock.lastCall![0];
+            const written = Buffer.from(
+                commit.fileChanges.additions[0].contents,
+                'base64',
+            ).toString('utf8');
+            expect(written).toContain(`id: ${result.entryId}`);
+            expect(
+                Buffer.byteLength(`refs/heads/${commit.branch}`, 'utf8'),
+            ).toBeLessThanOrEqual(255);
+        }
+        expect(
+            new Set(mockCreateBranch.mock.calls.map(([args]) => args.branch))
+                .size,
+        ).toBe(2);
+    });
+
+    test('writes native project context beside config on the configured branch', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service } = makeService({
+            project: {
+                ...githubProject,
+                dbtConnection: {
+                    ...githubProject.dbtConnection,
+                    semanticLayer: 'lightdash',
+                    branch: 'release',
+                    project_sub_path: '/native',
+                },
+            },
+        });
+        await service.writebackEntry({
+            user: userWithProjectContextAccess(),
+            projectUuid: PROJECT_UUID,
+            entry: judgeEntry,
+            branchTimestamp: 1000,
+            sourceThread: null,
+        });
+        expect(mockGetFileContent).toHaveBeenCalledWith(
+            expect.objectContaining({
+                fileName: 'native/lightdash.project_context.yml',
+                branch: 'release',
+            }),
+        );
+        expect(
+            mockCreateSignedCommitOnBranch.mock.calls[0][0].fileChanges
+                .additions[0].path,
+        ).toBe('native/lightdash.project_context.yml');
+        expect(mockCreatePullRequest).toHaveBeenCalledWith(
+            expect.objectContaining({ base: 'release' }),
+        );
+    });
+
+    test('throws when the project has no GitHub access', async () => {
+        const { service } = makeService({ installationId: undefined });
+        await expect(
+            service.writebackEntry({
+                user: userWithProjectContextAccess(),
+                projectUuid: PROJECT_UUID,
+                entry: judgeEntry,
+                branchTimestamp: 1,
+                sourceThread: null,
+            }),
+        ).rejects.toThrow(NotFoundError);
+    });
+
+    test('returns a clear limitation for an explicitly selected additional dbt source', async () => {
+        const { service } = makeService({});
+
+        await expect(
+            service.writebackEntry({
+                user: userWithProjectContextAccess(),
+                projectUuid: PROJECT_UUID,
+                dbtSourceUuid: '00000000-0000-0000-0000-000000000099',
+                entry: judgeEntry,
+                branchTimestamp: 1,
+                sourceThread: null,
+            }),
+        ).rejects.toThrow(
+            'Project context writeback currently supports only the primary dbt source',
+        );
+        expect(mockGetInstallationToken).not.toHaveBeenCalled();
+        expect(mockCreateBranch).not.toHaveBeenCalled();
+    });
+
+    test('links the originating agent thread in the PR body', async () => {
+        mockGetFileContent.mockRejectedValue(new NotFoundError('missing'));
+        const { service } = makeService({});
+
+        await service.writebackEntry({
+            user: userWithProjectContextAccess(),
+            projectUuid: PROJECT_UUID,
+            entry: judgeEntry,
+            branchTimestamp: 1000,
+            sourceThread: {
+                threadUrl:
+                    'https://app.lightdash.com/projects/p/ai-agents/a/threads/t',
+                promptUuid: 'prompt-123',
+                threadUuid: 't',
+            },
+        });
+
+        const body = mockCreatePullRequest.mock.calls[0][0].body as string;
+        expect(body).toContain(
+            'https://app.lightdash.com/projects/p/ai-agents/a/threads/t',
+        );
+        expect(body).toContain('prompt-123');
+    });
+
+    test('requires manage source-code access before creating a branch', async () => {
+        const { service } = makeService({});
+
+        await expect(
+            service.writebackEntry({
+                user: userWithProjectContextAccess({
+                    canManageSourceCode: false,
+                }),
+                projectUuid: PROJECT_UUID,
+                entry: judgeEntry,
+                branchTimestamp: 1000,
+                sourceThread: null,
+            }),
+        ).rejects.toThrow(ForbiddenError);
+        expect(mockGetInstallationToken).not.toHaveBeenCalled();
+        expect(mockCreateBranch).not.toHaveBeenCalled();
+    });
+});

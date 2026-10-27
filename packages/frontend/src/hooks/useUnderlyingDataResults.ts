@@ -15,9 +15,11 @@ import {
     type SortField,
 } from '@lightdash/common';
 import { useQuery } from '@tanstack/react-query';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import { convertDateFilters } from '../utils/dateFilter';
 import { useProjectUuid } from './useProjectUuid';
+import { getAsyncQueryError } from './useQueryResults';
 
 type UnderlyingDataResults = ApiQueryResults & {
     queryUuid: string;
@@ -29,6 +31,7 @@ type UnderlyingDataResults = ApiQueryResults & {
  * Aggregates pagination results for a query
  */
 export const getUnderlyingDataResults = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     data: ExecuteAsyncUnderlyingDataRequestParams,
     pageSize?: number, // pageSize is used when getting the results but not when creating the query
@@ -95,15 +98,7 @@ export const getUnderlyingDataResults = async (
                 };
             case QueryHistoryStatus.ERROR:
             case QueryHistoryStatus.EXPIRED:
-                throw <ApiError>{
-                    status: 'error',
-                    error: {
-                        name: 'Error',
-                        statusCode: 500,
-                        message: currentPage.error ?? 'Query failed',
-                        data: {},
-                    },
-                };
+                throw getAsyncQueryError(currentPage.error);
             case QueryHistoryStatus.READY:
                 allRows = allRows.concat(currentPage.rows);
                 break;
@@ -147,6 +142,7 @@ export const useUnderlyingDataResults = (
     parameters?: ParametersValuesMap,
     sorts?: SortField[],
 ) => {
+    const lightdashApi = useLightdashApi();
     const projectUuid = useProjectUuid();
 
     return useQuery<UnderlyingDataResults, ApiError>({
@@ -163,6 +159,7 @@ export const useUnderlyingDataResults = (
         enabled: Boolean(projectUuid) && Boolean(underlyingDataSourceQueryUuid),
         queryFn: () => {
             return getUnderlyingDataResults(
+                lightdashApi,
                 projectUuid!,
                 {
                     context: QueryExecutionContext.VIEW_UNDERLYING_DATA,

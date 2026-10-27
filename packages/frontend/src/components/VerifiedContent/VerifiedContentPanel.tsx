@@ -1,22 +1,26 @@
-import { ContentType, type VerifiedContentListItem } from '@lightdash/common';
+import {
+    assertUnreachable,
+    ContentType,
+    getDocumentUrl,
+    type VerifiedContentListItem,
+} from '@lightdash/common';
 import {
     ActionIcon,
     Anchor,
-    Badge,
     Button,
     Group,
     Menu,
-    Paper,
     Stack,
     Text,
-    Title,
+    Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
-import { useDisclosure } from '@mantine-8/hooks';
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import {
-    IconChartBar,
+    IconAppWindow,
     IconCircleX,
     IconDots,
+    IconFileText,
     IconLayoutDashboard,
 } from '@tabler/icons-react';
 import { useCallback, useMemo, useState, type FC } from 'react';
@@ -24,19 +28,58 @@ import { Link } from 'react-router';
 import {
     useUnverifyChartMutation,
     useUnverifyDashboardMutation,
+    useUnverifyDataAppMutation,
+    useUnverifyDocumentMutation,
 } from '../../hooks/useContentVerification';
 import { useVerifiedContentList } from '../../hooks/useVerifiedContentList';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
+    type ContentTableColumnDef,
 } from '../common/ContentTable';
 import MantineIcon from '../common/MantineIcon';
 import MantineModal from '../common/MantineModal';
-import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
+import { getChartIcon } from '../common/ResourceIcon/utils';
+import { SettingsEmptyState } from '../common/Settings/SettingsEmptyState';
+import TruncatedText from '../common/TruncatedText';
+import classes from './VerifiedContentPanel.module.css';
 
 type Props = {
     projectUuid: string;
+};
+
+const getItemPresentation = (
+    projectUuid: string,
+    item: VerifiedContentListItem,
+) => {
+    switch (item.contentType) {
+        case ContentType.CHART:
+            return {
+                href: `/projects/${projectUuid}/saved/${item.slug}`,
+                typeLabel: 'Chart',
+                typeIcon: getChartIcon(item.chartKind),
+            };
+        case ContentType.DASHBOARD:
+            return {
+                href: `/projects/${projectUuid}/dashboards/${item.slug}`,
+                typeLabel: 'Dashboard',
+                typeIcon: IconLayoutDashboard,
+            };
+        case ContentType.DATA_APP:
+            return {
+                href: `/projects/${projectUuid}/apps/${item.contentUuid}/view`,
+                typeLabel: 'Data app',
+                typeIcon: IconAppWindow,
+            };
+        case ContentType.DOCUMENT:
+            return {
+                href: getDocumentUrl(projectUuid, item.contentUuid, item.slug),
+                typeLabel: 'Document',
+                typeIcon: IconFileText,
+            };
+        default:
+            return assertUnreachable(item, 'Unknown verified content type');
+    }
 };
 
 const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
@@ -54,6 +97,8 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
 
     const { mutate: unverifyChart } = useUnverifyChartMutation();
     const { mutate: unverifyDashboard } = useUnverifyDashboardMutation();
+    const { mutate: unverifyDataApp } = useUnverifyDataAppMutation();
+    const { mutate: unverifyDocument } = useUnverifyDocumentMutation();
 
     const handleUnverify = useCallback(
         (item: VerifiedContentListItem) => {
@@ -65,68 +110,85 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
 
     const handleConfirmUnverify = useCallback(() => {
         if (!itemToUnverify) return;
-        if (itemToUnverify.contentType === ContentType.CHART) {
-            unverifyChart(itemToUnverify.contentUuid);
-        } else {
-            unverifyDashboard(itemToUnverify.contentUuid);
+        switch (itemToUnverify.contentType) {
+            case ContentType.CHART:
+                unverifyChart(itemToUnverify.contentUuid);
+                break;
+            case ContentType.DASHBOARD:
+                unverifyDashboard(itemToUnverify.contentUuid);
+                break;
+            case ContentType.DATA_APP:
+                unverifyDataApp({
+                    projectUuid,
+                    appUuid: itemToUnverify.contentUuid,
+                });
+                break;
+            case ContentType.DOCUMENT:
+                unverifyDocument({
+                    projectUuid,
+                    documentUuid: itemToUnverify.contentUuid,
+                });
+                break;
+            default:
+                assertUnreachable(itemToUnverify, 'Unknown verified content');
         }
         closeUnverifyModal();
         setItemToUnverify(null);
-    }, [itemToUnverify, closeUnverifyModal, unverifyChart, unverifyDashboard]);
+    }, [
+        itemToUnverify,
+        closeUnverifyModal,
+        unverifyChart,
+        unverifyDashboard,
+        unverifyDataApp,
+        unverifyDocument,
+        projectUuid,
+    ]);
 
     const items = useMemo(() => verifiedContent ?? [], [verifiedContent]);
 
-    const columns: MRT_ColumnDef<VerifiedContentListItem>[] = useMemo(
+    const columns: ContentTableColumnDef<VerifiedContentListItem>[] = useMemo(
         () => [
             {
                 accessorKey: 'name',
                 header: 'Name',
                 enableSorting: false,
-                size: 250,
+                size: 320,
+                minSize: 160,
                 Cell: ({ row }) => {
-                    const { contentType, contentUuid, name } = row.original;
-                    const href =
-                        contentType === ContentType.CHART
-                            ? `/projects/${projectUuid}/saved/${contentUuid}`
-                            : `/projects/${projectUuid}/dashboards/${contentUuid}`;
-                    return (
-                        <Anchor
-                            component={Link}
-                            to={href}
-                            fz="sm"
-                            fw={500}
-                            truncate="end"
-                        >
-                            {name}
-                        </Anchor>
+                    const item = row.original;
+                    const { href, typeLabel, typeIcon } = getItemPresentation(
+                        projectUuid,
+                        item,
                     );
-                },
-            },
-            {
-                accessorKey: 'contentType',
-                header: 'Type',
-                enableSorting: false,
-                size: 120,
-                Cell: ({ row }) => {
-                    const isChart =
-                        row.original.contentType === ContentType.CHART;
+
                     return (
-                        <Badge
-                            variant="light"
-                            color={isChart ? 'blue' : 'violet'}
-                            leftSection={
-                                <MantineIcon
-                                    icon={
-                                        isChart
-                                            ? IconChartBar
-                                            : IconLayoutDashboard
-                                    }
-                                    size="sm"
-                                />
-                            }
+                        <Group
+                            gap="xs"
+                            wrap="nowrap"
+                            className={classes.nameCell}
                         >
-                            {isChart ? 'Chart' : 'Dashboard'}
-                        </Badge>
+                            <Tooltip label={typeLabel}>
+                                <MantineIcon
+                                    icon={typeIcon}
+                                    color="dimmed"
+                                    className={classes.typeIcon}
+                                />
+                            </Tooltip>
+                            <Anchor
+                                component={Link}
+                                to={href}
+                                className={classes.nameLink}
+                                underline="hover"
+                            >
+                                <TruncatedText
+                                    maxWidth="100%"
+                                    fw={500}
+                                    display="block"
+                                >
+                                    {item.name}
+                                </TruncatedText>
+                            </Anchor>
+                        </Group>
                     );
                 },
             },
@@ -134,24 +196,26 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
                 accessorKey: 'spaceName',
                 header: 'Space',
                 enableSorting: false,
-                size: 150,
+                size: 140,
+                minSize: 80,
                 Cell: ({ row }) => (
-                    <Text fz="sm" c="ldGray.7">
+                    <TruncatedText maxWidth="100%" c="ldGray.7">
                         {row.original.spaceName}
-                    </Text>
+                    </TruncatedText>
                 ),
             },
             {
                 accessorKey: 'verifiedBy',
                 header: 'Verified By',
                 enableSorting: false,
-                size: 150,
+                size: 140,
+                minSize: 80,
                 Cell: ({ row }) => {
                     const { firstName, lastName } = row.original.verifiedBy;
                     return (
-                        <Text fz="sm" c="ldGray.7">
-                            {firstName} {lastName}
-                        </Text>
+                        <TruncatedText maxWidth="100%" c="ldGray.7">
+                            {`${firstName} ${lastName}`}
+                        </TruncatedText>
                     );
                 },
             },
@@ -159,7 +223,8 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
                 accessorKey: 'verifiedAt',
                 header: 'Verified At',
                 enableSorting: false,
-                size: 150,
+                size: 110,
+                minSize: 90,
                 Cell: ({ row }) => {
                     const date = new Date(row.original.verifiedAt);
                     return (
@@ -171,15 +236,15 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
             },
             {
                 id: 'actions',
-                header: 'Actions',
+                header: '',
                 enableSorting: false,
-                size: 80,
+                size: 56,
+                minSize: 48,
                 Cell: ({ row }) => (
-                    <Menu withinPortal position="bottom-end">
+                    <Menu position="bottom-end">
                         <Menu.Target>
                             <ActionIcon
-                                variant="subtle"
-                                color="gray"
+                                aria-label="Open actions"
                                 onClick={(e) => {
                                     e.stopPropagation();
                                 }}
@@ -209,7 +274,6 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
         columns,
         data: items,
         enableSorting: false,
-        enableColumnActions: false,
         enablePagination: false,
         enableBottomToolbar: false,
         enableTopToolbar: false,
@@ -217,16 +281,6 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
         enableStickyHeader: true,
         state: {
             isLoading,
-        },
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
         },
         mantineTableContainerProps: {
             style: { maxHeight: 'calc(100vh - 300px)' },
@@ -262,11 +316,6 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
                 },
             };
         },
-        mantineTableHeadRowProps: {
-            style: {
-                boxShadow: 'none',
-            },
-        },
         mantineTableBodyCellProps: () => ({
             h: 48,
             style: {
@@ -281,26 +330,22 @@ const VerifiedContentPanel: FC<Props> = ({ projectUuid }) => {
 
     if (!isLoading && items.length === 0) {
         return (
-            <Paper p="xl">
-                <SuboptimalState
-                    icon={IconCircleX}
-                    title="No verified content"
-                    description="Charts and dashboards that are verified will appear here."
-                />
-            </Paper>
+            <SettingsEmptyState
+                icon={IconCircleX}
+                title="No verified content"
+                description="Charts, dashboards, data apps, and Documents that are verified will appear here."
+            />
         );
     }
 
     return (
         <Stack gap="md">
-            <Group justify="space-between">
-                <Title order={4}>Verified content</Title>
-            </Group>
             <ContentTable table={table} />
 
             <MantineModal
                 opened={unverifyModalOpened}
                 onClose={closeUnverifyModal}
+                role="alertdialog"
                 title="Remove verification?"
                 description="This will remove the verified badge from this content. You can verify it again later."
                 actions={

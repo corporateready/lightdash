@@ -1,0 +1,292 @@
+import {
+    type AiAgentReviewClassifierJudgeOutput,
+    type AiAgentReviewClassifierTurnCandidate,
+} from '@lightdash/common';
+import { generateText } from 'ai';
+import { getModel } from './ai/models';
+import {
+    AiAgentReviewClassifierService,
+    type AiAgentReviewJudgeReplayInput,
+} from './AiAgentReviewClassifierService';
+
+vi.mock('ai', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('ai')>()),
+    generateText: vi.fn(),
+}));
+vi.mock('./ai/models', () => ({ getModel: vi.fn() }));
+vi.mock('./ai/agents/agentV2', () => ({ defaultAgentOptions: {} }));
+vi.mock('./ai/utils/aiCallTelemetry', () => ({
+    // Must mirror the real return shape, or the usage path this exercises
+    // silently no-ops: emitAiUsage reads telemetry.runtimeContext and needs a
+    // real feature.
+    getAiCallTelemetry: () => ({
+        runtimeContext: { feature: 'review-classifier' },
+        telemetry: { functionId: 'test' },
+    }),
+    getLanguageModelAttribution: () => ({}),
+}));
+
+const generateTextMock = vi.mocked(generateText);
+const getModelMock = vi.mocked(getModel);
+
+const JUDGE_MODEL = {
+    model: { modelId: 'claude-haiku-4-5' },
+    callOptions: {},
+    providerOptions: {},
+};
+
+const candidate = {
+    subject: {
+        type: 'turn_review',
+        assistantPromptUuid: 'prompt-1',
+        threadUuid: 'thread-1',
+        agentUuid: 'agent-1',
+        projectUuid: 'project-1',
+        organizationUuid: 'org-1',
+    },
+    interactionSource: 'app',
+    sourceRef: {
+        source: 'app',
+        threadUuid: 'thread-1',
+        promptUuid: 'prompt-1',
+        appUrl: null,
+    },
+    targetTurn: {
+        promptUuid: 'prompt-1',
+        userPrompt: 'question',
+        assistantResponse: 'answer',
+        errorMessage: null,
+        createdAt: new Date('2026-06-01T10:00:00.000Z'),
+        respondedAt: new Date('2026-06-01T10:00:05.000Z'),
+    },
+    contextTurns: [],
+    userPrompt: 'question',
+    assistantResponse: 'answer',
+    errorMessage: null,
+    humanScore: null,
+    humanFeedback: null,
+    createdAt: new Date('2026-06-01T10:00:00.000Z'),
+    respondedAt: new Date('2026-06-01T10:00:05.000Z'),
+    nextUserPromptUuid: null,
+    nextUserPrompt: null,
+    modelMetadata: { provider: 'anthropic', model: 'claude' },
+    tokenUsageTotal: null,
+    queryHistory: [],
+    supportingEvidence: [],
+    toolOutcomes: [],
+    pendingApprovalTimeout: false,
+} satisfies AiAgentReviewClassifierTurnCandidate;
+
+const replayInput: AiAgentReviewJudgeReplayInput = {
+    candidate,
+    evidencePacket: {
+        subject: candidate.subject,
+        interactionSource: candidate.interactionSource,
+        targetTurn: candidate.targetTurn,
+        humanFeedback: { score: null, comment: null },
+        agentConfig: {
+            snapshotHash: null,
+            settings: [],
+            availableCapabilities: [],
+            dataAccessEnabled: null,
+            selfImprovementEnabled: null,
+            contentToolsEnabled: null,
+            instructionSummary: null,
+            knowledgeDocumentCount: 0,
+            knowledgeDocuments: [],
+            mcpServers: [],
+            skills: [],
+        },
+        semanticContext: {
+            queriedExploreNames: [],
+            queriedFieldNames: [],
+            catalogMatches: [],
+        },
+        nextUserPrompt: null,
+        previousTurns: [],
+        queryHistory: [],
+        supportingEvidence: [],
+        suggestedEvidenceExcerpts: [],
+        threadWritebackPullRequests: [],
+        toolOutcomes: [],
+        pendingApprovalTimeout: false,
+        existingReviewItems: [],
+        recentSimilarPrompts: {
+            windowDays: 30,
+            threadCount: 0,
+            userCount: 0,
+            prompts: [],
+        },
+    },
+};
+
+const judgeOutput = (
+    overrides: Partial<AiAgentReviewClassifierJudgeOutput> = {},
+): AiAgentReviewClassifierJudgeOutput => ({
+    signal: 'implicit_correction',
+    implicitSignalSources: ['tool_error'],
+    confidence: 'high',
+    promotedToFinding: true,
+    promotionReason: 'Tool errored.',
+    primaryRootCause: 'runtime_reliability',
+    secondaryRootCauses: [],
+    subcategories: [],
+    fixTargets: [],
+    targetRefs: [],
+    agentConfigurationSettings: [],
+    ownerType: 'unknown',
+    evidenceExcerpts: [],
+    recommendation: null,
+    projectContextEntry: null,
+    skillProposal: null,
+    matchedExistingItemKey: null,
+    reviewItem: { title: 'Fix it', description: 'why' },
+    ...overrides,
+});
+
+const makeService = () =>
+    new AiAgentReviewClassifierService({
+        aiAgentReviewClassifierModel: {} as never,
+        aiAgentModel: {
+            findProviderCredentialUuid: vi.fn(async () => null),
+        } as never,
+        aiAgentDocumentModel: { findAllForAgent: vi.fn() },
+        aiOrganizationSettingsModel: {} as never,
+        orgAiCopilotConfigResolver: {
+            getReviewJudgeAvailability: vi.fn().mockResolvedValue({
+                hasActiveByoKey: false,
+                canJudgeOnByoKey: false,
+            }),
+        } as never,
+        catalogModel: { getCatalogItemsSummary: vi.fn() },
+        projectModel: {
+            getSummary: vi.fn(),
+            findExploresFromCache: vi.fn(),
+        } as never,
+        projectContextModel: { getDocument: vi.fn().mockResolvedValue([]) },
+        aiAgentSkillModel: {
+            findBoundToAgent: vi.fn().mockResolvedValue([]),
+        },
+        lightdashConfig: {
+            ai: { copilot: { providers: {}, defaultProvider: 'openai' } },
+        } as never,
+        aiAgentReviewNotificationService: {} as never,
+    });
+
+describe('single-tier judge', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        getModelMock.mockReturnValue(JUDGE_MODEL as never);
+    });
+
+    it('judges with the fast model in a single call when not promoted', async () => {
+        const output = judgeOutput({
+            promotedToFinding: false,
+            promotionReason: null,
+            primaryRootCause: 'not_a_failure',
+            signal: 'acceptance_or_continuation',
+            implicitSignalSources: [],
+        });
+        generateTextMock.mockResolvedValueOnce({ output } as never);
+
+        const result = await makeService().replayJudge(replayInput);
+
+        expect(generateTextMock).toHaveBeenCalledTimes(1);
+        expect(getModelMock).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ useFastModel: true }),
+        );
+        expect(generateTextMock).toHaveBeenCalledWith(
+            expect.objectContaining({ model: JUDGE_MODEL.model }),
+        );
+        expect(result.judgeOutput).toEqual(output);
+    });
+
+    it('judges promoted turns with the same single fast-model call', async () => {
+        const output = judgeOutput();
+        generateTextMock.mockResolvedValueOnce({ output } as never);
+
+        const result = await makeService().replayJudge(replayInput);
+
+        expect(generateTextMock).toHaveBeenCalledTimes(1);
+        expect(result.judgeOutput).toEqual(output);
+    });
+
+    it('routes project-context findings through the authoring call', async () => {
+        const output = judgeOutput({ primaryRootCause: 'project_context' });
+        const projectContextEntry = {
+            op: 'create' as const,
+            id: null,
+            kind: 'context' as const,
+            content: 'Use the payments explore for transaction questions.',
+            terms: ['transaction'],
+            objects: [{ type: 'explore' as const, name: 'payments' }],
+        };
+        generateTextMock
+            .mockResolvedValueOnce({ output } as never)
+            .mockResolvedValueOnce({
+                output: { projectContextEntry },
+            } as never);
+
+        const result = await makeService().replayJudge(replayInput);
+
+        expect(generateTextMock).toHaveBeenLastCalledWith(
+            expect.objectContaining({ model: JUDGE_MODEL.model }),
+        );
+        expect(result.judgeOutput?.projectContextEntry).toEqual(
+            projectContextEntry,
+        );
+    });
+
+    it('drafts a skill for promoted create_skill recommendations', async () => {
+        const output = judgeOutput({
+            signal: 'standing_instruction',
+            implicitSignalSources: ['standing_instruction'],
+            primaryRootCause: 'agent_configuration',
+            agentConfigurationSettings: ['skills'],
+            fixTargets: ['agent_configuration_change'],
+            recommendation: {
+                actionType: 'create_skill',
+                title: 'Create a weekly revenue skill',
+                rationale: 'The same steer recurs.',
+                targetRefs: [],
+            },
+        });
+        const skillProposal = {
+            name: 'weekly-revenue-table',
+            description: 'Use when the user asks for weekly revenue in GBP.',
+            instructions:
+                '## When to use\nWeekly revenue.\n\n## Steps\n1. Query.',
+            arguments: [],
+            argumentHint: null,
+        };
+        generateTextMock
+            .mockResolvedValueOnce({ output } as never)
+            .mockResolvedValueOnce({ output: { skillProposal } } as never);
+
+        const result = await makeService().replayJudge(replayInput);
+
+        expect(result.judgeOutput?.skillProposal).toEqual(skillProposal);
+    });
+
+    it('keeps the finding when the skill draft call fails', async () => {
+        const output = judgeOutput({
+            signal: 'standing_instruction',
+            primaryRootCause: 'agent_configuration',
+            recommendation: {
+                actionType: 'create_skill',
+                title: 'Create a weekly revenue skill',
+                rationale: 'The same steer recurs.',
+                targetRefs: [],
+            },
+        });
+        generateTextMock
+            .mockResolvedValueOnce({ output } as never)
+            .mockRejectedValueOnce(new Error('provider down'));
+
+        const result = await makeService().replayJudge(replayInput);
+
+        expect(result.judgeOutput?.promotedToFinding).toBe(true);
+        expect(result.judgeOutput?.skillProposal).toBeNull();
+    });
+});

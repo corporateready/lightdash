@@ -1,53 +1,78 @@
 import type { S3ClientConfig } from '@aws-sdk/client-s3';
-import { S3BaseConfiguration } from './S3BaseClient';
+import Logger from '../../logging/logger';
+import { GcsUrlSigner, S3PresignerUrlSigner } from './ObjectUrlSigner';
+import {
+    buildS3ClientConfig,
+    S3BaseClient,
+    S3BaseConfiguration,
+} from './S3BaseClient';
 
 // Mocks
-jest.mock('../../logging/logger', () => ({
-    debug: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
+vi.mock('../../logging/logger', () => ({
+    __esModule: true,
+    default: {
+        debug: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+    },
 }));
 
 type CredentialProviderMock = { __type: string };
 // createCredentialChain will capture providers into the returned object for assertions
-let capturedProviders: CredentialProviderMock[] | undefined;
-const mockFromEnv = jest.fn(() => ({ __type: 'env' }));
-const mockFromTokenFile = jest.fn(() => ({ __type: 'token_file' }));
-const mockFromIni = jest.fn(() => ({ __type: 'ini' }));
-const mockFromContainerMetadata = jest.fn(() => ({
-    __type: 'container_metadata',
-}));
-const mockFromInstanceMetadata = jest.fn(() => ({
-    __type: 'instance_metadata',
-}));
+const s3Mocks = vi.hoisted(() => {
+    const state: {
+        capturedProviders: CredentialProviderMock[] | undefined;
+    } = {
+        capturedProviders: undefined,
+    };
+    const mockS3Constructor = vi.fn();
+    const mockMiddlewareAdd = vi.fn();
+    class FakeS3 {
+        // applyGcpOAuth adds the bearer token as a middleware, so this fake
+        // client needs a middleware stack to receive it
+        middlewareStack = { add: mockMiddlewareAdd };
 
-jest.mock('@aws-sdk/credential-providers', () => ({
+        constructor(config: S3ClientConfig) {
+            mockS3Constructor(config);
+        }
+    }
+
+    return {
+        state,
+        mockFromEnv: vi.fn(() => ({ __type: 'env' })),
+        mockFromTokenFile: vi.fn(() => ({ __type: 'token_file' })),
+        mockFromIni: vi.fn(() => ({ __type: 'ini' })),
+        mockFromContainerMetadata: vi.fn(() => ({
+            __type: 'container_metadata',
+        })),
+        mockFromHttp: vi.fn(() => ({ __type: 'container_http' })),
+        mockFromInstanceMetadata: vi.fn(() => ({
+            __type: 'instance_metadata',
+        })),
+        mockS3Constructor,
+        mockMiddlewareAdd,
+        FakeS3,
+    };
+});
+
+vi.mock('@aws-sdk/credential-providers', () => ({
     createCredentialChain: (...args: CredentialProviderMock[]) => {
-        capturedProviders = args;
+        s3Mocks.state.capturedProviders = args;
         return { __type: 'chain', __providers: args };
     },
-    fromEnv: () => mockFromEnv(),
-    fromTokenFile: () => mockFromTokenFile(),
-    fromIni: () => mockFromIni(),
-    fromContainerMetadata: () => mockFromContainerMetadata(),
-    fromInstanceMetadata: () => mockFromInstanceMetadata(),
+    fromEnv: () => s3Mocks.mockFromEnv(),
+    fromTokenFile: () => s3Mocks.mockFromTokenFile(),
+    fromIni: () => s3Mocks.mockFromIni(),
+    fromContainerMetadata: () => s3Mocks.mockFromContainerMetadata(),
+    fromInstanceMetadata: () => s3Mocks.mockFromInstanceMetadata(),
+    fromHttp: () => s3Mocks.mockFromHttp(),
 }));
 
-const mockS3Constructor = jest.fn();
-
-class FakeS3 {
-    constructor(config: S3ClientConfig) {
-        mockS3Constructor(config);
-    }
-}
-
-jest.mock('@aws-sdk/client-s3', () => ({
-    S3: FakeS3,
+vi.mock('@aws-sdk/client-s3', () => ({
+    S3: s3Mocks.FakeS3,
+    S3Client: s3Mocks.FakeS3,
+    GetObjectCommand: class {},
 }));
-
-// Load the class under test after setting up mocks
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { S3BaseClient } = require('./S3BaseClient');
 
 // Helper to access protected s3 instance
 class TestableS3Client extends S3BaseClient {
@@ -62,12 +87,20 @@ class TestableS3Client extends S3BaseClient {
         // @ts-ignore
         return this.s3;
     }
+
+    public getUrlSigner() {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        return this.urlSigner;
+    }
 }
 
 describe('S3BaseClient', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
-        capturedProviders = undefined;
+        vi.clearAllMocks();
+        s3Mocks.state.capturedProviders = undefined;
+        delete process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
+        delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
     });
 
     const baseConfig: S3BaseConfiguration = {
@@ -87,13 +120,11 @@ describe('S3BaseClient', () => {
         const clientNoRegion = new TestableS3Client({ endpoint: 'http://x' });
         expect(clientNoRegion.getS3()).toBeUndefined();
 
-        // eslint-disable-next-line
-        const logger = require('../../logging/logger');
-        expect(logger.debug).toHaveBeenCalledWith(
+        expect(Logger.debug).toHaveBeenCalledWith(
             'Missing S3 bucket configuration',
         );
         // Ensure S3 constructor was never called
-        expect(mockS3Constructor).not.toHaveBeenCalled();
+        expect(s3Mocks.mockS3Constructor).not.toHaveBeenCalled();
     });
 
     it('creates S3 client with explicit access/secret key credentials', () => {
@@ -102,9 +133,9 @@ describe('S3BaseClient', () => {
             accessKey: 'AKIA',
             secretKey: 'SECRET',
         });
-        expect(client.getS3()).toBeInstanceOf(FakeS3);
-        expect(mockS3Constructor).toHaveBeenCalledTimes(1);
-        const passedConfig = mockS3Constructor.mock.calls[0][0];
+        expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+        expect(s3Mocks.mockS3Constructor).toHaveBeenCalledTimes(1);
+        const passedConfig = s3Mocks.mockS3Constructor.mock.calls[0][0];
         expect(passedConfig).toMatchObject({
             region: 'us-east-1',
             apiVersion: '2006-03-01',
@@ -115,9 +146,7 @@ describe('S3BaseClient', () => {
             accessKeyId: 'AKIA',
             secretAccessKey: 'SECRET',
         });
-        // eslint-disable-next-line
-        const logger = require('../../logging/logger');
-        expect(logger.debug).toHaveBeenCalledWith(
+        expect(Logger.debug).toHaveBeenCalledWith(
             'Using S3 storage with access key credentials',
         );
     });
@@ -133,12 +162,12 @@ describe('S3BaseClient', () => {
                 'ec2',
             ] as const,
         });
-        expect(client.getS3()).toBeInstanceOf(FakeS3);
-        expect(mockS3Constructor).toHaveBeenCalledTimes(1);
+        expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+        expect(s3Mocks.mockS3Constructor).toHaveBeenCalledTimes(1);
 
         // Providers captured in order by our mocked createCredentialChain
-        expect(capturedProviders).toBeDefined();
-        expect(capturedProviders?.map((p) => p.__type)).toEqual([
+        expect(s3Mocks.state.capturedProviders).toBeDefined();
+        expect(s3Mocks.state.capturedProviders?.map((p) => p.__type)).toEqual([
             'env',
             'token_file',
             'ini',
@@ -146,17 +175,43 @@ describe('S3BaseClient', () => {
             'instance_metadata', // ec2 alias
         ]);
 
-        const passedConfig = mockS3Constructor.mock.calls[0][0];
+        const passedConfig = s3Mocks.mockS3Constructor.mock.calls[0][0];
         expect(passedConfig.credentials).toEqual({
             __type: 'chain',
-            __providers: capturedProviders,
+            __providers: s3Mocks.state.capturedProviders,
         });
-        // eslint-disable-next-line
-        const logger = require('../../logging/logger');
         // Should log chain debug
-        expect(logger.debug).toHaveBeenCalledWith(
+        expect(Logger.debug).toHaveBeenCalledWith(
             expect.stringContaining('credential chain'),
         );
+    });
+
+    it('chains fromHttp before fromContainerMetadata for ecs when container credentials env vars are set', () => {
+        process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI =
+            'http://169.254.170.23/v1/credentials';
+        const client = new TestableS3Client({
+            ...baseConfig,
+            useCredentialsFrom: ['ecs'],
+        });
+        expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+        expect(s3Mocks.state.capturedProviders?.map((p) => p.__type)).toEqual([
+            'container_http',
+            'container_metadata',
+        ]);
+    });
+
+    it('omits fromHttp for ecs when container credentials env vars are not set', () => {
+        // fromHttp throws at construction without these env vars, so including it
+        // unconditionally would crash client creation
+        const client = new TestableS3Client({
+            ...baseConfig,
+            useCredentialsFrom: ['ecs'],
+        });
+        expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+        expect(s3Mocks.mockFromHttp).not.toHaveBeenCalled();
+        expect(s3Mocks.state.capturedProviders?.map((p) => p.__type)).toEqual([
+            'container_metadata',
+        ]);
     });
 
     it('ignores unknown providers and falls back to default credential resolution when none are valid', () => {
@@ -164,39 +219,134 @@ describe('S3BaseClient', () => {
             ...baseConfig,
             useCredentialsFrom: ['unknown1', 'unknown2'],
         });
-        expect(client.getS3()).toBeInstanceOf(FakeS3);
-        // eslint-disable-next-line
-        const logger = require('../../logging/logger');
+        expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
         // Two warnings for the two unknown entries
-        expect(logger.warn).toHaveBeenCalledTimes(2);
+        expect(Logger.warn).toHaveBeenCalledTimes(2);
         // And a debug indicating default resolution
-        expect(logger.debug).toHaveBeenCalledWith(
+        expect(Logger.debug).toHaveBeenCalledWith(
             expect.stringContaining('default AWS SDK credential resolution'),
         );
 
-        const passedConfig = mockS3Constructor.mock.calls[0][0];
+        const passedConfig = s3Mocks.mockS3Constructor.mock.calls[0][0];
         expect(passedConfig.credentials).toBeUndefined();
         // No providers should have been captured since none were valid
-        expect(capturedProviders).toBeUndefined();
+        expect(s3Mocks.state.capturedProviders).toBeUndefined();
+    });
+
+    it('skips response checksum validation so GetObject bodies are not wrapped', () => {
+        // With the SDK default (WHEN_SUPPORTED) AWS S3 returns a checksum
+        // header and the SDK wraps the body in a ChecksumStream. Destroying
+        // that wrapper leaves the HTTP socket open, which leaks keep-alive
+        // sockets on every early-terminated read
+        const clientConfig = buildS3ClientConfig(baseConfig);
+
+        expect(clientConfig.responseChecksumValidation).toEqual(
+            'WHEN_REQUIRED',
+        );
+    });
+
+    describe('gcp_oauth auth mode', () => {
+        const gcpConfig = {
+            ...baseConfig,
+            endpoint: 'https://storage.googleapis.com',
+            region: 'auto',
+            authMode: 'gcp_oauth',
+        } as const;
+
+        it('replaces SigV4 signing with placeholder credentials and a no-op signer', async () => {
+            const clientConfig = buildS3ClientConfig(gcpConfig);
+
+            // The SDK resolves an identity even though it never signs, and
+            // throws while searching for AWS credentials if none is set
+            expect(clientConfig.credentials).toEqual({
+                accessKeyId: 'gcp-oauth',
+                secretAccessKey: 'gcp-oauth',
+            });
+            // A signer that returns the request unchanged stops SigV4
+            expect(clientConfig.signer).toBeDefined();
+            const request = { headers: {} };
+            await expect(
+                (
+                    clientConfig.signer as {
+                        sign: (r: unknown) => Promise<unknown>;
+                    }
+                ).sign(request),
+            ).resolves.toBe(request);
+            // GCS accepts the SDK's checksum headers and then ignores them
+            expect(clientConfig.requestChecksumCalculation).toEqual(
+                'WHEN_REQUIRED',
+            );
+            expect(clientConfig.responseChecksumValidation).toEqual(
+                'WHEN_REQUIRED',
+            );
+        });
+
+        it('adds the bearer token middleware to the client it builds', () => {
+            const client = new TestableS3Client(gcpConfig);
+
+            expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+            expect(s3Mocks.mockMiddlewareAdd).toHaveBeenCalledTimes(2);
+            expect(s3Mocks.mockMiddlewareAdd.mock.calls[1][1]).toEqual({
+                step: 'finalizeRequest',
+                name: 'gcpOAuthBearer',
+                priority: 'low',
+            });
+        });
+
+        it('does not add the bearer token middleware in default mode', () => {
+            const client = new TestableS3Client(baseConfig);
+
+            expect(client.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+            expect(s3Mocks.mockMiddlewareAdd).not.toHaveBeenCalled();
+        });
+
+        it('warns but keeps the mode when access key credentials are also set', () => {
+            const clientConfig = buildS3ClientConfig({
+                ...gcpConfig,
+                accessKey: 'AKIA',
+                secretKey: 'SECRET',
+            });
+
+            expect(clientConfig.credentials).toEqual({
+                accessKeyId: 'gcp-oauth',
+                secretAccessKey: 'gcp-oauth',
+            });
+            expect(Logger.warn).toHaveBeenCalledWith(
+                expect.stringContaining('S3_AUTH_MODE is gcp_oauth'),
+            );
+        });
+
+        it('selects the url signer that matches the auth mode', () => {
+            expect(
+                new TestableS3Client(gcpConfig).getUrlSigner(),
+            ).toBeInstanceOf(GcsUrlSigner);
+            expect(
+                new TestableS3Client(baseConfig).getUrlSigner(),
+            ).toBeInstanceOf(S3PresignerUrlSigner);
+            expect(
+                new TestableS3Client({
+                    ...baseConfig,
+                    authMode: 'default',
+                }).getUrlSigner(),
+            ).toBeInstanceOf(S3PresignerUrlSigner);
+        });
     });
 
     it('does not set credentials when useCredentialsFrom is undefined or empty', () => {
         const client1 = new TestableS3Client({ ...baseConfig });
-        const cfg1 = mockS3Constructor.mock.calls[0][0];
+        const cfg1 = s3Mocks.mockS3Constructor.mock.calls[0][0];
         expect(cfg1.credentials).toBeUndefined();
 
         const client2 = new TestableS3Client({
             ...baseConfig,
             useCredentialsFrom: [],
         });
-        const cfg2 = mockS3Constructor.mock.calls[1][0];
+        const cfg2 = s3Mocks.mockS3Constructor.mock.calls[1][0];
         expect(cfg2.credentials).toBeUndefined();
-        // eslint-disable-next-line
-        const logger = require('../../logging/logger');
-        expect(logger.debug).toHaveBeenCalledWith(
+        expect(Logger.debug).toHaveBeenCalledWith(
             expect.stringContaining('default AWS SDK credential resolution'),
         );
-        expect(client1.getS3()).toBeInstanceOf(FakeS3);
-        expect(client2.getS3()).toBeInstanceOf(FakeS3);
+        expect(client1.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
+        expect(client2.getS3()).toBeInstanceOf(s3Mocks.FakeS3);
     });
 });

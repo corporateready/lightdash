@@ -5,14 +5,17 @@ import {
     isExploreError,
     ItemsMap,
     MetricQuery,
+    MissingConfigError,
     ParameterDefinitions,
     ParametersValuesMap,
     PivotConfiguration,
     SupportedDbtAdapter,
     UserAccessControls,
     WarehouseClient,
+    type ActiveMaterializationDetails,
     type CreateWarehouseCredentials,
     type DateZoom,
+    type Explore,
     type RunQueryTags,
 } from '@lightdash/common';
 import {
@@ -27,32 +30,47 @@ import Logger from '../../../logging/logger';
 import { type ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import type PrometheusMetrics from '../../../prometheus/PrometheusMetrics';
 import { type PreAggregationRoute } from '../../../services/AsyncQueryService/types';
-import { ProjectService } from '../../../services/ProjectService/ProjectService';
+import { traceSpan } from '../../../tracing/tracing';
 import { wrapSentryTransaction } from '../../../utils';
-import { PivotQueryBuilder } from '../../../utils/QueryBuilder/PivotQueryBuilder';
-import { type PreAggregateModel } from '../../models/PreAggregateModel';
 import {
     getDuckdbPreAggregateSqlTable,
     getPreAggregateDuckdbLocator,
-} from '../PreAggregateMaterializationService/getDuckdbPreAggregateSqlTable';
-import { getDuckdbRuntimeConfig } from './getDuckdbRuntimeConfig';
+} from '../../../utils/duckdb/duckdbSqlTables';
+import { getDuckdbRuntimeConfig } from '../../../utils/duckdb/getDuckdbRuntimeConfig';
+import { QueryComposer } from '../../../utils/QueryBuilder/QueryComposer';
+import { type PreAggregateModel } from '../../models/PreAggregateModel';
 
-const PRE_AGGREGATE_QUERY_INSTANCE_CACHE_KEY = 'pre-aggregate-query-instance';
+/**
+ * A serve instance is never shared across projects: the warm instance holds
+ * the storage credentials every query on it can use, and user-authored SQL
+ * reaches it, so its credentials must stay within one project's files.
+ */
+export const getPreAggregateQueryInstanceCacheKey = (
+    projectUuid: string,
+): string => `pre-aggregate-query-instance:${projectUuid}`;
+
+type PreAggregateModelDependency = Pick<
+    PreAggregateModel,
+    'getActiveMaterialization' | 'findMaterializationUrisForProject'
+>;
 
 type PreAggregationDuckDbClientArgs = {
     lightdashConfig: LightdashConfig;
-    preAggregateModel: Pick<PreAggregateModel, 'getActiveMaterialization'>;
+    preAggregateModel: PreAggregateModelDependency;
     projectModel: Pick<ProjectModel, 'getExploreFromCache'>;
     prometheusMetrics?: PrometheusMetrics;
     sharedResourceLimits?: DuckdbResourceLimits;
     createDuckdbWarehouseClient?: (args: {
         s3Config: DuckdbS3SessionConfig;
         sharedResourceLimits?: DuckdbResourceLimits;
+        resourceLimits?: DuckdbResourceLimits;
         instanceCacheKey?: string;
+        organizationConcurrencyLimit?: number;
     }) => WarehouseClient;
 };
 
 export type ResolvePreAggregationDuckDbArgs = {
+    executionExplore?: (name: string) => Promise<Explore>;
     projectUuid: string;
     queryUuid?: string;
     queryTags?: RunQueryTags;
@@ -67,11 +85,14 @@ export type ResolvePreAggregationDuckDbArgs = {
     userAccessControls: UserAccessControls;
     availableParameterDefinitions: ParameterDefinitions;
     useTimezoneAwareDateTrunc?: boolean;
+    authorizeMaterialization?: (
+        materialization: ActiveMaterializationDetails,
+    ) => Promise<boolean>;
 };
 
 export type PreAggregationDuckDbResolution =
     | { resolved: false; reason: PreAggregationDuckDbResolveReason }
-    | { resolved: true; query: string; warehouseClient: WarehouseClient };
+    | { resolved: true; query: string };
 
 export enum PreAggregationDuckDbResolveReason {
     PRE_AGGREGATES_DISABLED = 'pre_aggregates_disabled',
@@ -79,15 +100,18 @@ export enum PreAggregationDuckDbResolveReason {
     MISSING_DUCKDB_RUNTIME_CONFIG = 'missing_duckdb_runtime_config',
     NO_ACTIVE_MATERIALIZATION = 'no_active_materialization',
     RESOLVE_ERROR = 'resolve_error',
+    INCOMPATIBLE_PRODUCER = 'incompatible_producer',
 }
+
+type ProjectWarehouseClient = {
+    scope: string[];
+    warehouseClient: WarehouseClient;
+};
 
 export class PreAggregationDuckDbClient {
     private readonly lightdashConfig: LightdashConfig;
 
-    private readonly preAggregateModel: Pick<
-        PreAggregateModel,
-        'getActiveMaterialization'
-    >;
+    private readonly preAggregateModel: PreAggregateModelDependency;
 
     private readonly projectModel: Pick<ProjectModel, 'getExploreFromCache'>;
 
@@ -96,12 +120,17 @@ export class PreAggregationDuckDbClient {
     private readonly createDuckdbWarehouseClient: (args: {
         s3Config: DuckdbS3SessionConfig;
         sharedResourceLimits?: DuckdbResourceLimits;
+        resourceLimits?: DuckdbResourceLimits;
         instanceCacheKey?: string;
+        organizationConcurrencyLimit?: number;
     }) => WarehouseClient;
 
     private readonly prometheusMetrics?: PrometheusMetrics;
 
-    private cachedWarehouseClient: WarehouseClient | null = null;
+    private readonly warehouseClientsByProject = new Map<
+        string,
+        ProjectWarehouseClient
+    >();
 
     constructor(args: PreAggregationDuckDbClientArgs) {
         this.lightdashConfig = args.lightdashConfig;
@@ -112,38 +141,78 @@ export class PreAggregationDuckDbClient {
         this.createDuckdbWarehouseClient =
             args.createDuckdbWarehouseClient ??
             ((warehouseArgs) =>
-                new DuckdbWarehouseClient(
+                DuckdbWarehouseClient.createForPreAggregate(
                     { type: 'duckdb_s3', s3Config: warehouseArgs.s3Config },
                     {
                         sharedResourceLimits:
                             warehouseArgs.sharedResourceLimits,
+                        resourceLimits: warehouseArgs.resourceLimits,
                         instanceCacheKey: warehouseArgs.instanceCacheKey,
+                        organizationConcurrencyLimit:
+                            warehouseArgs.organizationConcurrencyLimit,
+                        objectStorageOnly: true,
                         logger: Logger,
+                        enableQueryProfiling: true,
                         onQueryProfile:
                             this.prometheusMetrics?.observeDuckdbQueryProfile,
                     },
                 ));
     }
 
-    private getOrCreateWarehouseClient(): WarehouseClient {
-        if (!this.cachedWarehouseClient) {
-            const duckdbRuntimeConfig = getDuckdbRuntimeConfig(
-                this.lightdashConfig.preAggregates.s3,
+    /**
+     * The project's warm serve instance, with storage credentials scoped to
+     * exactly the materialization files the project owns. The scope is read
+     * from the database on every call because the query may execute in a
+     * different process from the one that resolved it; the client object is
+     * only rebuilt when that set of files changes, and the warm instance
+     * then widens its secret in place.
+     */
+    async createPreAggregateWarehouseClient(
+        projectUuid: string,
+    ): Promise<WarehouseClient> {
+        const duckdbRuntimeConfig = getDuckdbRuntimeConfig(
+            this.lightdashConfig.preAggregates.s3,
+        );
+
+        if (!duckdbRuntimeConfig) {
+            throw new MissingConfigError(
+                'Pre-aggregate DuckDB execution is unavailable: missing pre-aggregate S3 configuration',
             );
-
-            if (!duckdbRuntimeConfig) {
-                throw new Error('Missing DuckDB runtime config');
-            }
-
-            this.cachedWarehouseClient = this.createDuckdbWarehouseClient({
-                s3Config: duckdbRuntimeConfig,
-                sharedResourceLimits: this.sharedResourceLimits,
-                instanceCacheKey: PRE_AGGREGATE_QUERY_INSTANCE_CACHE_KEY,
-            });
-
-            Logger.info('DuckDB warehouse client created and cached for reuse');
         }
-        return this.cachedWarehouseClient;
+
+        const scope =
+            await this.preAggregateModel.findMaterializationUrisForProject(
+                projectUuid,
+            );
+        if (scope.length === 0) {
+            throw new MissingConfigError(
+                'Pre-aggregate DuckDB execution is unavailable: the project has no materialization files to serve',
+            );
+        }
+
+        const cached = this.warehouseClientsByProject.get(projectUuid);
+        if (
+            cached &&
+            cached.scope.length === scope.length &&
+            cached.scope.every((uri, index) => uri === scope[index])
+        ) {
+            return cached.warehouseClient;
+        }
+
+        const warehouseClient = this.createDuckdbWarehouseClient({
+            s3Config: { ...duckdbRuntimeConfig, scope },
+            sharedResourceLimits: this.sharedResourceLimits,
+            instanceCacheKey: getPreAggregateQueryInstanceCacheKey(projectUuid),
+        });
+        this.warehouseClientsByProject.set(projectUuid, {
+            scope,
+            warehouseClient,
+        });
+        Logger.info('DuckDB pre-aggregate warehouse client created', {
+            projectUuid,
+            scopedFileCount: scope.length,
+        });
+        return warehouseClient;
     }
 
     static getPreAggregationResolutionErrorMessage({
@@ -167,6 +236,8 @@ export class PreAggregationDuckDbClient {
                 return 'Pre-aggregate DuckDB routing is unavailable: missing DuckDB runtime configuration';
             case PreAggregationDuckDbResolveReason.PRE_AGGREGATES_DISABLED:
                 return 'Pre-aggregate DuckDB routing is unavailable: pre-aggregates are disabled';
+            case PreAggregationDuckDbResolveReason.INCOMPATIBLE_PRODUCER:
+                return 'This pre-aggregate has no compatible producer provenance. Run a warehouse query instead.';
             case PreAggregationDuckDbResolveReason.RESOLVE_ERROR:
                 return `Failed to resolve pre-aggregate explore "${preAggregateExploreName}" in DuckDB`;
             default:
@@ -175,10 +246,6 @@ export class PreAggregationDuckDbClient {
                     'Unknown pre-aggregate resolution reason',
                 );
         }
-    }
-
-    createExecutionWarehouseClient(): WarehouseClient {
-        return this.getOrCreateWarehouseClient();
     }
 
     async resolve(
@@ -254,7 +321,7 @@ export class PreAggregationDuckDbClient {
             args.preAggregationRoute.preAggregateName,
         );
 
-        const activeMaterialization = await Sentry.startSpan(
+        const activeMaterialization = await traceSpan(
             {
                 op: 'db.query',
                 name: 'preagg.getActiveMaterialization',
@@ -274,6 +341,16 @@ export class PreAggregationDuckDbClient {
             return {
                 resolved: false,
                 reason: PreAggregationDuckDbResolveReason.NO_ACTIVE_MATERIALIZATION,
+            };
+        }
+
+        if (
+            args.authorizeMaterialization &&
+            !(await args.authorizeMaterialization(activeMaterialization))
+        ) {
+            return {
+                resolved: false,
+                reason: PreAggregationDuckDbResolveReason.INCOMPATIBLE_PRODUCER,
             };
         }
 
@@ -305,7 +382,7 @@ export class PreAggregationDuckDbClient {
             activeMaterialization.columns,
         );
 
-        const preAggExplore = await Sentry.startSpan(
+        const preAggExplore = await traceSpan(
             {
                 op: 'cache.read',
                 name: 'preagg.getExploreFromCache',
@@ -315,10 +392,12 @@ export class PreAggregationDuckDbClient {
                 },
             },
             () =>
-                this.projectModel.getExploreFromCache(
-                    args.projectUuid,
-                    preAggExploreName,
-                ),
+                args.executionExplore
+                    ? args.executionExplore(preAggExploreName)
+                    : this.projectModel.getExploreFromCache(
+                          args.projectUuid,
+                          preAggExploreName,
+                      ),
         );
 
         if (isExploreError(preAggExplore)) {
@@ -347,50 +426,47 @@ export class PreAggregationDuckDbClient {
             args.startOfWeek,
         );
 
-        const fullQuery = await Sentry.startSpan(
+        const queryComposer = new QueryComposer(
+            {
+                metricQuery: args.metricQuery,
+                pivotConfiguration: args.pivotConfiguration,
+            },
+            {
+                explore: patchedPreAggExplore,
+                warehouseSqlBuilder,
+                intrinsicUserAttributes:
+                    args.userAccessControls.intrinsicUserAttributes,
+                userAttributes: args.userAccessControls.userAttributes,
+                timezone: args.timezone,
+                availableParameterDefinitions:
+                    args.availableParameterDefinitions,
+                parameters: args.parameters,
+                dateZoom: args.dateZoom,
+                pivotDimensions: undefined,
+                // Pre-agg pivots against the source query's persisted fields,
+                // not the pre-agg explore's freshly compiled ones.
+                pivotItemsMap: args.fieldsMap,
+                continueOnError: undefined,
+                useTimezoneAwareDateTrunc: args.useTimezoneAwareDateTrunc,
+                columnTimezone: undefined,
+                applyDateZoomToFilters: undefined,
+            },
+        );
+
+        const query = traceSpan(
             {
                 op: 'function',
                 name: 'preagg.compileQuery',
             },
             () =>
-                ProjectService._compileQuery({
-                    metricQuery: args.metricQuery,
-                    explore: patchedPreAggExplore,
-                    warehouseSqlBuilder,
-                    intrinsicUserAttributes:
-                        args.userAccessControls.intrinsicUserAttributes,
-                    userAttributes: args.userAccessControls.userAttributes,
-                    timezone: args.timezone,
-                    dateZoom: args.dateZoom,
-                    parameters: args.parameters,
-                    availableParameterDefinitions:
-                        args.availableParameterDefinitions,
-                    pivotConfiguration: args.pivotConfiguration,
-                    useTimezoneAwareDateTrunc: args.useTimezoneAwareDateTrunc,
+                queryComposer.getSql({
+                    columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
                 }),
         );
-
-        let { query } = fullQuery;
-        if (args.pivotConfiguration) {
-            const pivotQueryBuilder = new PivotQueryBuilder(
-                fullQuery.query,
-                args.pivotConfiguration,
-                warehouseSqlBuilder,
-                args.metricQuery.limit,
-                args.fieldsMap,
-            );
-
-            query = pivotQueryBuilder.toSql({
-                columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
-            });
-        }
-
-        const warehouseClient = this.getOrCreateWarehouseClient();
 
         return {
             resolved: true,
             query,
-            warehouseClient,
         };
     }
 }

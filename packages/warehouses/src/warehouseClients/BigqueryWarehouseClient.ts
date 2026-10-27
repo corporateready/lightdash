@@ -5,6 +5,8 @@ import {
     BigQueryTime,
     BigQueryTimestamp,
     Dataset,
+    DatasetsResponse,
+    GetDatasetsOptions,
     Job,
     QueryResultsOptions,
     QueryRowsResponse,
@@ -12,22 +14,39 @@ import {
 import bigquery from '@google-cloud/bigquery/build/src/types';
 import {
     AnyType,
+    BIGQUERY_TOKEN_ERROR_MESSAGE_MARKER,
     BigqueryAuthenticationType,
     BigqueryDataset,
     BigqueryProject,
+    BigqueryProjectRecommendation,
+    BigqueryTokenError,
     CreateBigqueryCredentials,
     DimensionType,
+    getBigqueryKeyfileCredentials,
+    getBigqueryUnnestSql,
     getErrorMessage,
+    getWarehouseTableType,
     Metric,
     MetricType,
     PartitionColumn,
     PartitionType,
+    sanitizeQueryTagKey,
+    sanitizeQueryTagValue,
+    setCatalogNestedColumnShape,
+    setCatalogTimestampDomain,
     SupportedDbtAdapter,
     TimeIntervalUnit,
+    UnnestSql,
+    UnnestSqlArgs,
     WarehouseConnectionError,
     WarehouseQueryError,
     WarehouseResults,
     WarehouseTypes,
+    type ResultNumericKind,
+    type TimestampDomain,
+    type WarehouseExecutionStats,
+    type WarehouseNestedColumnShape,
+    type WarehouseQueryEstimate,
 } from '@lightdash/common';
 import { pipeline, Transform } from 'stream';
 import {
@@ -36,6 +55,7 @@ import {
     WarehouseExecuteAsyncQueryArgs,
     WarehouseTableSchema,
 } from '../types';
+import { coerceTagToString } from '../utils/coerceTagToString';
 import {
     DEFAULT_BATCH_SIZE,
     processPromisesInBatches,
@@ -43,6 +63,9 @@ import {
 import { normalizeUnicode } from '../utils/sql';
 import WarehouseBaseClient from './WarehouseBaseClient';
 import WarehouseBaseSqlBuilder from './WarehouseBaseSqlBuilder';
+
+const MAX_RECOMMENDATION_PROJECTS = 8;
+const MAX_RECOMMENDATION_REGIONS_PER_PROJECT = 3;
 
 export enum BigqueryFieldType {
     STRING = 'STRING',
@@ -65,6 +88,64 @@ export enum BigqueryFieldType {
     ARRAY = 'ARRAY',
 }
 
+type BigqueryDecimal = {
+    c: number[];
+    e: number;
+    s: number;
+    toFixed: () => string;
+};
+
+const isBigqueryDecimal = (value: unknown): value is BigqueryDecimal =>
+    typeof value === 'object' &&
+    value !== null &&
+    'e' in value &&
+    Number.isInteger(value.e) &&
+    's' in value &&
+    (value.s === 1 || value.s === -1) &&
+    'toFixed' in value &&
+    typeof value.toFixed === 'function' &&
+    'c' in value &&
+    Array.isArray(value.c) &&
+    value.c.length > 0 &&
+    value.c.every((digit) => typeof digit === 'number');
+
+const isBigqueryTemporal = (
+    cell: unknown,
+): cell is BigQueryDate | BigQueryTimestamp | BigQueryDatetime | BigQueryTime =>
+    cell instanceof BigQueryDate ||
+    cell instanceof BigQueryTimestamp ||
+    cell instanceof BigQueryDatetime ||
+    cell instanceof BigQueryTime;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' &&
+    value !== null &&
+    Object.getPrototypeOf(value) === Object.prototype;
+
+// STRUCT and ARRAY values arrive as plain objects/arrays whose leaves are the
+// same SDK wrappers as top-level cells, so leaves are normalised before the
+// whole value is serialised.
+const normaliseNestedValue = (value: AnyType): AnyType => {
+    if (Array.isArray(value)) {
+        return value.map(normaliseNestedValue);
+    }
+    if (isBigqueryTemporal(value)) {
+        return value.value;
+    }
+    if (isBigqueryDecimal(value)) {
+        return Number(value.toFixed());
+    }
+    if (isPlainObject(value)) {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, nested]) => [
+                key,
+                normaliseNestedValue(nested),
+            ]),
+        );
+    }
+    return value;
+};
+
 const parseCell = (cell: AnyType) => {
     if (
         cell === undefined ||
@@ -75,16 +156,32 @@ const parseCell = (cell: AnyType) => {
         return cell;
     }
 
-    if (
-        cell instanceof BigQueryDate ||
-        cell instanceof BigQueryTimestamp ||
-        cell instanceof BigQueryDatetime ||
-        cell instanceof BigQueryTime
-    ) {
+    if (isBigqueryTemporal(cell)) {
         return new Date(cell.value);
     }
 
+    if (isBigqueryDecimal(cell)) {
+        return Number(cell.toFixed());
+    }
+
+    if (Array.isArray(cell) || isPlainObject(cell)) {
+        return JSON.stringify(normaliseNestedValue(cell));
+    }
+
     return `${cell}`;
+};
+
+export const getBigqueryTimestampDomain = (
+    type: string | undefined,
+): TimestampDomain | undefined => {
+    switch (type) {
+        case BigqueryFieldType.DATETIME:
+            return 'naive';
+        case BigqueryFieldType.TIMESTAMP:
+            return 'aware';
+        default:
+            return undefined;
+    }
 };
 
 const mapFieldType = (type: string | undefined): DimensionType => {
@@ -111,11 +208,44 @@ const mapFieldType = (type: string | undefined): DimensionType => {
     }
 };
 
+// NUMERIC is (38, 9) unless declared; BIGNUMERIC fits a DuckDB decimal only when its declared precision does
+export const getBigqueryNumericKind = (field: {
+    type?: string;
+    precision?: string;
+    scale?: string;
+}): ResultNumericKind | null => {
+    const declared = (value: string | undefined): number | null =>
+        value !== undefined && value !== '' ? Number(value) : null;
+    const declaredScale = declared(field.scale);
+    const declaredPrecision = declared(field.precision);
+    switch (field.type) {
+        case BigqueryFieldType.INTEGER:
+        case BigqueryFieldType.INT64:
+            return { kind: 'integer' };
+        case BigqueryFieldType.FLOAT:
+        case BigqueryFieldType.FLOAT64:
+            return { kind: 'float' };
+        case BigqueryFieldType.NUMERIC:
+            return { kind: 'decimal', scale: declaredScale ?? 9 };
+        case BigqueryFieldType.BIGNUMERIC:
+            return declaredScale !== null &&
+                declaredPrecision !== null &&
+                declaredPrecision <= 38
+                ? { kind: 'decimal', scale: declaredScale }
+                : null;
+        default:
+            return null;
+    }
+};
+
 type TableSchema = {
     fields: SchemaFields[];
 };
 
-type SchemaFields = Required<Pick<bigquery.ITableFieldSchema, 'name' | 'type'>>;
+type SchemaFields = Required<
+    Pick<bigquery.ITableFieldSchema, 'name' | 'type'>
+> &
+    Pick<bigquery.ITableFieldSchema, 'mode' | 'fields'>;
 
 const isSchemaFields = (
     rawSchemaFields: bigquery.ITableFieldSchema[],
@@ -124,6 +254,41 @@ const isSchemaFields = (
 
 const isTableSchema = (schema: bigquery.ITableSchema): schema is TableSchema =>
     !!schema && !!schema.fields && isSchemaFields(schema.fields);
+
+const BIGQUERY_REPEATED_MODE = 'REPEATED';
+
+const isRecordType = (type: string) =>
+    type === BigqueryFieldType.RECORD || type === BigqueryFieldType.STRUCT;
+
+type FlattenedSchemaField = {
+    path: string;
+    type: string;
+    shape: WarehouseNestedColumnShape | undefined;
+};
+
+/**
+ * Walks nested RECORD fields depth-first, emitting every node under its dotted
+ * path. A record node is kept alongside its children so the container column
+ * still resolves; the shape says whether it is a struct, an array, or both.
+ */
+const flattenSchemaFields = (
+    fields: bigquery.ITableFieldSchema[],
+    prefix = '',
+): FlattenedSchemaField[] =>
+    fields.flatMap((field) => {
+        if (!field.name || !field.type) return [];
+        const path = prefix ? `${prefix}.${field.name}` : field.name;
+        const repeated = field.mode === BIGQUERY_REPEATED_MODE;
+        const record = isRecordType(field.type);
+        const node: FlattenedSchemaField = {
+            path,
+            type: field.type,
+            shape: repeated || record ? { repeated, record } : undefined,
+        };
+        return record
+            ? [node, ...flattenSchemaFields(field.fields ?? [], path)]
+            : [node];
+    });
 
 const parseRow = (row: Record<string, AnyType>[]) =>
     Object.fromEntries(
@@ -186,6 +351,16 @@ export class BigquerySqlBuilder extends WarehouseBaseSqlBuilder {
         return `TIMESTAMP('${date.toISOString()}')`;
     }
 
+    castToDate(date: Date): string {
+        // BigQuery does not coerce between DATE and TIMESTAMP
+        return `DATE '${date.toISOString().slice(0, 10)}'`;
+    }
+
+    castToNaiveTimestamp(date: Date): string {
+        // DATETIME is BigQuery's zoneless timestamp type
+        return `DATETIME '${date.toISOString().slice(0, 19).replace('T', ' ')}'`;
+    }
+
     getIntervalSql(value: number, unit: TimeIntervalUnit): string {
         // BigQuery uses INTERVAL with value and keyword unit (no quotes)
         const unitStr = BigquerySqlBuilder.intervalUnitsSingular[unit];
@@ -217,13 +392,77 @@ export class BigquerySqlBuilder extends WarehouseBaseSqlBuilder {
         }
         return `ARRAY_AGG(${expression})`;
     }
+
+    getUnnestSql(args: UnnestSqlArgs): UnnestSql {
+        return getBigqueryUnnestSql(args);
+    }
 }
 
+type UnknownRecord = { [key: string]: unknown };
+
+type GoogleOauthTokenError = {
+    error: string;
+    errorDescription: string | undefined;
+    errorSubtype: string | undefined;
+};
+
+const isRecord = (value: unknown): value is UnknownRecord =>
+    typeof value === 'object' && value !== null;
+
+const readString = (record: UnknownRecord, key: string): string | undefined => {
+    const value = record[key];
+    return typeof value === 'string' ? value : undefined;
+};
+
+export const getGoogleOauthTokenError = (
+    error: unknown,
+): GoogleOauthTokenError | undefined => {
+    if (!isRecord(error)) return undefined;
+    const response = isRecord(error.response) ? error.response : undefined;
+    const status = response?.status ?? error.status;
+    if (status !== 400) return undefined;
+    const data =
+        response && isRecord(response.data) ? response.data : undefined;
+    if (!data) return undefined;
+    const code = readString(data, 'error');
+    if (code === undefined) return undefined;
+    return {
+        error: code,
+        errorDescription: readString(data, 'error_description'),
+        errorSubtype: readString(data, 'error_subtype'),
+    };
+};
+
 export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryCredentials> {
+    private static readonly MAX_LABELS = 64;
+
+    private static readonly AGENT_IDENTITY_LABEL_KEYS = [
+        'agent_surface',
+        'agent_client',
+        'agent_uuid',
+        'user_uuid',
+    ];
+
+    // Kept ahead of other labels so attribution survives the label limit.
+    private static readonly PRIORITY_LABEL_KEYS = [
+        'agent',
+        ...BigqueryWarehouseClient.AGENT_IDENTITY_LABEL_KEYS,
+    ];
+
     client: BigQuery;
 
-    constructor(credentials: CreateBigqueryCredentials) {
-        super(credentials, new BigquerySqlBuilder(credentials.startOfWeek));
+    private readonly agentJobControls: boolean;
+
+    constructor(
+        credentials: CreateBigqueryCredentials,
+        options?: { agentSession?: boolean; agentJobControls?: boolean },
+    ) {
+        super(
+            credentials,
+            new BigquerySqlBuilder(credentials.startOfWeek),
+            options,
+        );
+        this.agentJobControls = options?.agentJobControls ?? false;
         try {
             this.client = new BigQuery({
                 projectId: credentials.executionProject || credentials.project,
@@ -238,7 +477,11 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                           // Support ADC via workforce identity federation / external_account configuration.
                           // In this case we should rely on ADC at runtime and not pass explicit credentials.
                       }
-                    : { credentials: credentials.keyfileContents }),
+                    : {
+                          credentials: getBigqueryKeyfileCredentials(
+                              credentials.keyfileContents,
+                          ),
+                      }),
             });
         } catch (e: unknown) {
             throw new WarehouseConnectionError(
@@ -251,6 +494,43 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
 
     static isBigqueryError(error: unknown): error is BigqueryError {
         return error !== null && typeof error === 'object' && 'errors' in error;
+    }
+
+    private usesUserRefreshToken(): boolean {
+        return (
+            this.credentials.authenticationType !==
+                BigqueryAuthenticationType.ADC &&
+            this.credentials.keyfileContents?.type === 'authorized_user'
+        );
+    }
+
+    private translateGoogleOauthTokenError(error: unknown): Error | undefined {
+        const tokenError = getGoogleOauthTokenError(error);
+        if (tokenError?.error !== 'invalid_grant') {
+            return undefined;
+        }
+        const details = [
+            tokenError.errorDescription
+                ? `invalid_grant: ${tokenError.errorDescription}`
+                : 'invalid_grant',
+            ...(tokenError.errorSubtype ? [tokenError.errorSubtype] : []),
+        ].join('; ');
+
+        if (this.usesUserRefreshToken()) {
+            return new BigqueryTokenError(
+                `${BIGQUERY_TOKEN_ERROR_MESSAGE_MARKER} (${details}). Reconnect your BigQuery account in personal settings.`,
+            );
+        }
+        return new WarehouseConnectionError(
+            `Google rejected the BigQuery credentials (${details}).`,
+        );
+    }
+
+    private throwIfGoogleOauthTokenError(error: unknown): void {
+        const translated = this.translateGoogleOauthTokenError(error);
+        if (translated) {
+            throw translated;
+        }
     }
 
     /**
@@ -268,43 +548,44 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
         labels?: Record<string, string>,
     ): Record<string, string> | undefined {
         if (!labels) return undefined;
+        const entries = Object.entries(labels);
+        const isPriority = (key: string) =>
+            BigqueryWarehouseClient.PRIORITY_LABEL_KEYS.includes(key);
+        const orderedEntries = [
+            ...entries.filter(([key]) => isPriority(key)),
+            ...entries.filter(
+                ([key]) =>
+                    !isPriority(key) && !key.startsWith('user_attribute_'),
+            ),
+            ...entries.filter(([key]) => key.startsWith('user_attribute_')),
+        ];
         return Object.fromEntries(
-            Object.entries(labels).map(([key, value]) => {
-                const safeKey = typeof key === 'string' ? key : String(key);
-                let safeValue: string;
-                if (typeof value === 'string') {
-                    safeValue = value;
-                } else if (value === null || value === undefined) {
-                    safeValue = '';
-                } else {
-                    console.warn(
-                        'BigqueryWarehouseClient.sanitizeLabelsWithValues: coerced non-string label value',
-                        { key: safeKey, valueType: typeof value },
-                    );
-                    safeValue = String(value);
-                }
-                return [
-                    safeKey
-                        .toLowerCase()
-                        .replace(/[^a-z0-9_-]/g, '_')
-                        .substring(0, 60) || 'empty_key',
-                    safeValue
-                        .toLowerCase()
-                        .replace(/[^a-z0-9_-]/g, '_')
-                        .substring(0, 60) || 'empty_value',
-                ];
-            }),
+            orderedEntries
+                .slice(0, BigqueryWarehouseClient.MAX_LABELS)
+                .map(([key, value]) => [
+                    sanitizeQueryTagKey(key),
+                    sanitizeQueryTagValue(
+                        coerceTagToString(value, {
+                            caller: 'BigqueryWarehouseClient.sanitizeLabelsWithValues',
+                            key,
+                        }),
+                    ),
+                ]),
         );
     }
 
     static getFieldsFromResponse(response: QueryRowsResponse[2] | undefined) {
         return (response?.schema?.fields || []).reduce<
-            Record<string, { type: DimensionType }>
+            WarehouseResults['fields']
         >((acc, field) => {
             if (field.name) {
+                const numericKind = getBigqueryNumericKind(field);
                 return {
                     ...acc,
-                    [field.name]: { type: mapFieldType(field.type) },
+                    [field.name]: {
+                        type: mapFieldType(field.type),
+                        ...(numericKind ? { numericKind } : {}),
+                    },
                 };
             }
             return acc;
@@ -316,22 +597,66 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
         options: {
             values?: AnyType[];
             tags?: Record<string, string>;
+            timezone?: string;
+            maximumBytesBilled?: number;
+            dryRun?: boolean;
         },
     ) {
+        const maximumBytesBilled =
+            options.maximumBytesBilled ?? this.credentials.maximumBytesBilled;
+        const tags = options?.tags;
+        const labels = BigqueryWarehouseClient.sanitizeLabelsWithValues(tags);
+        const identityLabels =
+            this.agentJobControls && tags
+                ? (BigqueryWarehouseClient.sanitizeLabelsWithValues(
+                      Object.fromEntries(
+                          BigqueryWarehouseClient.AGENT_IDENTITY_LABEL_KEYS.filter(
+                              (key) => tags[key] !== undefined,
+                          ).map((key) => [key, tags[key]]),
+                      ),
+                  ) ?? {})
+                : {};
         return this.client.createQueryJob({
             query,
             params: options?.values,
             useLegacySql: false,
-            maximumBytesBilled: this.credentials.maximumBytesBilled
-                ? `${this.credentials.maximumBytesBilled}`
+            ...(this.agentJobControls || options.dryRun
+                ? { useQueryCache: false }
+                : {}),
+            ...(options.dryRun ? { dryRun: true } : {}),
+            // BigQuery has no session timezone; the `time_zone` connection
+            // property is the per-job equivalent — naive DATETIME coercions
+            // and offset-less literals are read in this zone.
+            connectionProperties: options?.timezone
+                ? [{ key: 'time_zone', value: options.timezone }]
+                : undefined,
+            maximumBytesBilled: maximumBytesBilled
+                ? `${maximumBytesBilled}`
                 : undefined,
             priority: this.credentials.priority,
             jobTimeoutMs:
                 this.credentials.timeoutSeconds &&
                 this.credentials.timeoutSeconds * 1000,
-            labels: BigqueryWarehouseClient.sanitizeLabelsWithValues(
-                options?.tags,
-            ),
+            labels: this.agentJobControls
+                ? {
+                      agent: 'true',
+                      ...identityLabels,
+                      ...Object.fromEntries(
+                          Object.entries(labels ?? {})
+                              .filter(
+                                  ([key]) =>
+                                      key !== 'agent' &&
+                                      !Object.hasOwn(identityLabels, key),
+                              )
+                              .slice(
+                                  0,
+                                  BigqueryWarehouseClient.MAX_LABELS -
+                                      1 -
+                                      Object.keys(identityLabels).length,
+                              ),
+                      ),
+                  }
+                : labels,
         });
     }
 
@@ -344,6 +669,32 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 autoCreate: false,
             });
         return job;
+    }
+
+    static getExecutionStats(
+        jobId: string | null,
+        statistics: bigquery.IJobStatistics | undefined,
+    ): WarehouseExecutionStats {
+        const toNumber = (value: string | undefined): number | null => {
+            if (value === undefined) return null;
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+        };
+        const startTime = toNumber(statistics?.startTime);
+        const endTime = toNumber(statistics?.endTime);
+        return {
+            jobId,
+            bytesProcessed: toNumber(
+                statistics?.query?.totalBytesProcessed ??
+                    statistics?.totalBytesProcessed,
+            ),
+            bytesBilled: toNumber(statistics?.query?.totalBytesBilled),
+            executionTimeMs:
+                startTime !== null && endTime !== null
+                    ? endTime - startTime
+                    : null,
+            cacheHit: statistics?.query?.cacheHit ?? null,
+        };
     }
 
     private async getJobResultsMetadata(job: Job) {
@@ -399,6 +750,7 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
             values?: AnyType[];
             tags?: Record<string, string>;
             timezone?: string;
+            maximumBytesBilled?: number;
         },
     ): Promise<void> {
         try {
@@ -413,6 +765,7 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 streamCallback({ fields, rows: [chunk] }),
             );
         } catch (e: unknown) {
+            this.throwIfGoogleOauthTokenError(e);
             if (BigqueryWarehouseClient.isBigqueryError(e)) {
                 const responseError: bigquery.IErrorProto | undefined =
                     e?.errors[0];
@@ -457,7 +810,25 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                     dataset,
                     table,
                 ).catch((e) => {
+                    this.throwIfGoogleOauthTokenError(e);
+                    // BigQuery reports a table the credentials can't read as
+                    // "denied (or it may not exist)", so treat it like 404:
+                    // the model compiles without warehouse types instead of
+                    // failing the whole project. Other 403s (rate limit,
+                    // quota, API disabled) still fail the refresh.
                     if (e?.code === 404) {
+                        return undefined;
+                    }
+                    if (
+                        e?.code === 403 &&
+                        BigqueryWarehouseClient.isBigqueryError(e) &&
+                        e.errors.some(({ reason }) => reason === 'accessDenied')
+                    ) {
+                        console.warn(
+                            `Skipping table metadata for '${database}.${schema}.${table}': ${getErrorMessage(
+                                e,
+                            )}`,
+                        );
                         return undefined;
                     }
                     throw new WarehouseConnectionError(
@@ -474,14 +845,28 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 const [database, schema, table, tableSchema] = result;
                 acc[database] = acc[database] || {};
                 acc[database][schema] = acc[database][schema] || {};
-                acc[database][schema][table] =
-                    tableSchema.fields.reduce<WarehouseTableSchema>(
-                        (sum, { name, type }) => ({
-                            ...sum,
-                            [name]: mapFieldType(type),
-                        }),
-                        {},
-                    );
+                acc[database][schema][table] = {};
+                flattenSchemaFields(tableSchema.fields).forEach(
+                    ({ path, type, shape }) => {
+                        acc[database][schema][table][path] = mapFieldType(type);
+                        setCatalogTimestampDomain(
+                            acc,
+                            database,
+                            schema,
+                            table,
+                            path,
+                            getBigqueryTimestampDomain(type),
+                        );
+                        setCatalogNestedColumnShape(
+                            acc,
+                            database,
+                            schema,
+                            table,
+                            path,
+                            shape,
+                        );
+                    },
+                );
             }
 
             return acc;
@@ -489,6 +874,15 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
     }
 
     async getAllTables() {
+        try {
+            return await this.getAllTablesFromClient();
+        } catch (e: unknown) {
+            this.throwIfGoogleOauthTokenError(e);
+            throw e;
+        }
+    }
+
+    private async getAllTablesFromClient() {
         const [datasets] = await this.client.getDatasets();
         const datasetTablesResponses = await Promise.all(
             datasets.map((d) => d.getTables()),
@@ -545,6 +939,7 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                     database: t.bigQuery.projectId,
                     schema: t.dataset.id!,
                     table: t.id!,
+                    tableType: getWarehouseTableType(t.metadata?.type),
                     partitionColumn,
                 };
             }),
@@ -559,20 +954,37 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
         const dataset: Dataset = new Dataset(this.client, schema, {
             projectId: database,
         });
-        const schemas = await BigqueryWarehouseClient.getTableMetadata(
-            dataset,
-            tableName,
-        );
-        return this.parseWarehouseCatalog(
-            schemas[3].fields.map((column) => ({
-                table_catalog: schemas[0],
-                table_schema: schemas[1],
-                table_name: schemas[2],
-                column_name: column.name,
-                data_type: column.type,
+        const [tableCatalog, tableSchema, table, metadataSchema] =
+            await BigqueryWarehouseClient.getTableMetadata(
+                dataset,
+                tableName,
+            ).catch((e: unknown) => {
+                this.throwIfGoogleOauthTokenError(e);
+                throw e;
+            });
+        const flattenedFields = flattenSchemaFields(metadataSchema.fields);
+        const catalog = this.parseWarehouseCatalog(
+            flattenedFields.map(({ path, type }) => ({
+                table_catalog: tableCatalog,
+                table_schema: tableSchema,
+                table_name: table,
+                column_name: path,
+                data_type: type,
             })),
             mapFieldType,
+            getBigqueryTimestampDomain,
         );
+        flattenedFields.forEach(({ path, shape }) =>
+            setCatalogNestedColumnShape(
+                catalog,
+                tableCatalog,
+                tableSchema,
+                table,
+                path,
+                shape,
+            ),
+        );
+        return catalog;
     }
 
     parseError(error: bigquery.IErrorProto, query: string = '') {
@@ -672,16 +1084,59 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
         );
     }
 
+    async estimateQuery({
+        sql,
+        values,
+        tags,
+        timezone,
+    }: WarehouseExecuteAsyncQueryArgs): Promise<WarehouseQueryEstimate> {
+        try {
+            const [job] = await this.createJob(sql, {
+                values,
+                tags,
+                timezone,
+                dryRun: true,
+            });
+            const totalBytesProcessed = Number(
+                job.metadata?.statistics?.totalBytesProcessed ?? 0,
+            );
+            return {
+                totalBytesProcessed: Number.isFinite(totalBytesProcessed)
+                    ? totalBytesProcessed
+                    : 0,
+            };
+        } catch (e: unknown) {
+            this.throwIfGoogleOauthTokenError(e);
+            if (BigqueryWarehouseClient.isBigqueryError(e)) {
+                const responseError: bigquery.IErrorProto | undefined =
+                    e?.errors[0];
+                if (responseError) {
+                    throw this.parseError(responseError, sql);
+                }
+            }
+            throw e;
+        }
+    }
+
     async executeAsyncQuery(
-        { sql, tags }: WarehouseExecuteAsyncQueryArgs,
+        {
+            sql,
+            values,
+            tags,
+            timezone,
+            maximumBytesBilled,
+        }: WarehouseExecuteAsyncQueryArgs,
         resultsStreamCallback?: (
             rows: WarehouseResults['rows'],
             fields: WarehouseResults['fields'],
         ) => void,
     ): Promise<WarehouseExecuteAsyncQuery> {
         try {
+            const queryPhaseStart = performance.now();
             const [job] = await this.createJob(sql, {
                 tags,
+                timezone,
+                maximumBytesBilled,
             });
 
             if (!job.id) {
@@ -699,6 +1154,7 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
             await this.awaitJobCompletion(job);
 
             const resultsMetadata = await this.getJobResultsMetadata(job);
+            const queryMs = performance.now() - queryPhaseStart;
             const startTime = job.metadata?.statistics?.startTime;
             const endTime = job.metadata?.statistics?.endTime;
             const totalRows: number = resultsMetadata?.totalRows
@@ -708,10 +1164,13 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 BigqueryWarehouseClient.getFieldsFromResponse(resultsMetadata);
 
             // If a callback is provided, stream the results to the callback
+            let fetchMs = 0;
             if (resultsStreamCallback) {
+                const fetchPhaseStart = performance.now();
                 await this.streamResults(job, (row) =>
                     resultsStreamCallback([row], fields),
                 );
+                fetchMs = performance.now() - fetchPhaseStart;
             }
 
             return {
@@ -722,8 +1181,14 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 },
                 totalRows,
                 durationMs: startTime && endTime ? endTime - startTime : 0,
+                phaseTimings: { query: queryMs, fetch: fetchMs },
+                executionStats: BigqueryWarehouseClient.getExecutionStats(
+                    job.id,
+                    job.metadata?.statistics,
+                ),
             };
         } catch (e: unknown) {
+            this.throwIfGoogleOauthTokenError(e);
             if (BigqueryWarehouseClient.isBigqueryError(e)) {
                 const responseError: bigquery.IErrorProto | undefined =
                     e?.errors[0];
@@ -749,8 +1214,10 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
     static async getDatabases(
         projectId: string,
         refresh_token: string,
-    ): Promise<BigqueryDataset[]> {
-        const bigqueryClient = new BigQuery({
+        bigqueryClient: {
+            getDatasets: () => Promise<DatasetsResponse>;
+            query: (query: string) => Promise<QueryRowsResponse>;
+        } = new BigQuery({
             projectId,
             credentials: {
                 type: 'authorized_user',
@@ -758,15 +1225,149 @@ export class BigqueryWarehouseClient extends WarehouseBaseClient<CreateBigqueryC
                 client_secret: process.env.AUTH_GOOGLE_OAUTH2_CLIENT_SECRET,
                 refresh_token,
             },
-        });
-
+        }),
+    ): Promise<BigqueryDataset[]> {
         const datasets = await bigqueryClient.getDatasets();
-        const databases = datasets[0].map((d) => ({
-            projectId: d.projectId,
-            location: d.location,
-            datasetId: d.id!,
-        }));
+        const databases = await Promise.all(
+            datasets[0].map(async (dataset, index) => {
+                let sizeBytes: number | null = null;
+                if (index < 25) {
+                    try {
+                        const [rows] = await bigqueryClient.query(
+                            `SELECT SUM(size_bytes) AS sizeBytes FROM \`${dataset.projectId}.${dataset.id}.__TABLES__\``,
+                        );
+                        const size = Number(rows[0]?.sizeBytes);
+                        sizeBytes = Number.isFinite(size) ? size : null;
+                    } catch {
+                        sizeBytes = null;
+                    }
+                }
+
+                return {
+                    projectId: dataset.projectId,
+                    location: dataset.location,
+                    datasetId: dataset.id!,
+                    sizeBytes,
+                };
+            }),
+        );
         return databases;
+    }
+
+    static async getProjectRecommendation(
+        projects: BigqueryProject[],
+        refreshToken: string,
+        bigqueryClientFactory: (projectId: string) => {
+            getDatasets: (
+                options: GetDatasetsOptions,
+            ) => Promise<DatasetsResponse>;
+            query: (options: {
+                query: string;
+                location: string;
+            }) => Promise<QueryRowsResponse>;
+        } = (projectId) => {
+            const client = new BigQuery({
+                projectId,
+                credentials: {
+                    type: 'authorized_user',
+                    client_id: process.env.AUTH_GOOGLE_OAUTH2_CLIENT_ID,
+                    client_secret: process.env.AUTH_GOOGLE_OAUTH2_CLIENT_SECRET,
+                    refresh_token: refreshToken,
+                },
+            });
+            return {
+                getDatasets: (options) => client.getDatasets(options),
+                query: (options) =>
+                    client.query(options.query, { location: options.location }),
+            };
+        },
+    ): Promise<BigqueryProjectRecommendation> {
+        const projectScores = await Promise.all(
+            projects
+                .slice(0, MAX_RECOMMENDATION_PROJECTS)
+                .map(async ({ projectId }) => {
+                    try {
+                        const client = bigqueryClientFactory(projectId);
+                        const [datasets] = await client.getDatasets({
+                            autoPaginate: false,
+                            maxResults: 1000,
+                        });
+                        const locationsByQualifier = new Map<string, string>();
+                        datasets.forEach((dataset) => {
+                            if (dataset.location) {
+                                locationsByQualifier.set(
+                                    dataset.location.toLowerCase(),
+                                    dataset.location,
+                                );
+                            }
+                        });
+                        const locations = Array.from(
+                            locationsByQualifier.entries(),
+                        ).slice(0, MAX_RECOMMENDATION_REGIONS_PER_PROJECT);
+
+                        const regionScores = await Promise.all(
+                            locations.map(async ([qualifier, location]) => {
+                                try {
+                                    const [rows] = await client.query({
+                                        query: `SELECT table_schema, SUM(total_logical_bytes) AS total_bytes FROM \`${projectId}\`.\`region-${qualifier}\`.INFORMATION_SCHEMA.TABLE_STORAGE GROUP BY table_schema`,
+                                        location,
+                                    });
+                                    let largestDatasetSize: number | null =
+                                        null;
+                                    rows.forEach((row) => {
+                                        const size = Number(row.total_bytes);
+                                        if (
+                                            Number.isFinite(size) &&
+                                            (largestDatasetSize === null ||
+                                                size > largestDatasetSize)
+                                        ) {
+                                            largestDatasetSize = size;
+                                        }
+                                    });
+                                    return {
+                                        error: false,
+                                        sizeBytes: largestDatasetSize,
+                                    };
+                                } catch {
+                                    return { error: true, sizeBytes: null };
+                                }
+                            }),
+                        );
+
+                        if (regionScores.some(({ error }) => error)) {
+                            return { projectId, sizeBytes: null };
+                        }
+
+                        const sizeBytes = regionScores.reduce<number | null>(
+                            (largestSize, regionScore) =>
+                                regionScore.sizeBytes !== null &&
+                                (largestSize === null ||
+                                    regionScore.sizeBytes > largestSize)
+                                    ? regionScore.sizeBytes
+                                    : largestSize,
+                            null,
+                        );
+                        return { projectId, sizeBytes };
+                    } catch {
+                        return { projectId, sizeBytes: null };
+                    }
+                }),
+        );
+
+        const recommendation = projectScores.reduce<{
+            projectId: string | null;
+            sizeBytes: number | null;
+        }>(
+            (largestProject, projectScore) =>
+                projectScore.sizeBytes !== null &&
+                (largestProject.sizeBytes === null ||
+                    projectScore.sizeBytes > largestProject.sizeBytes)
+                    ? projectScore
+                    : largestProject,
+            { projectId: null, sizeBytes: null },
+        );
+
+        return { projectId: recommendation.projectId };
     }
 
     static async getProjects(accessToken: string): Promise<BigqueryProject[]> {

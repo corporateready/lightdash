@@ -1,75 +1,53 @@
+import { CartesianSeriesType, type ItemsMap } from '@lightdash/common';
+import { Button, Checkbox, Group, Stack } from '@mantine/core';
+import { type FC } from 'react';
 import {
-    CartesianSeriesType,
-    getAxisName,
-    getDateGroupLabel,
-    getItemLabelWithoutTableName,
-    getXAxisSort,
-    isNumericItem,
-    XAxisSort,
-    type ItemsMap,
-} from '@lightdash/common';
-import {
-    Button,
-    Checkbox,
-    Group,
-    NumberInput,
-    Select,
-    Stack,
-    Switch,
-    Text,
-    TextInput,
-} from '@mantine/core';
-import {
-    IconChartBar,
-    IconMinus,
-    IconSortAscending,
-    IconSortDescending,
-    IconSwitchHorizontal,
-    type Icon,
-} from '@tabler/icons-react';
-import { forwardRef, type FC } from 'react';
-import { getAxisTypeFromField } from '../../../../hooks/echarts/useEchartsCartesianConfig';
-import MantineIcon from '../../../common/MantineIcon';
-import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+    selectCartesianDirtyChartType,
+    selectCartesianEchartsConfig,
+    selectCartesianLayout,
+    selectCartesianSeries,
+    useVisualizationSelector,
+    type VisualizationStoreState,
+} from '../../../../features/visualization/store';
+import { useCartesianEditorActions } from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
+import { NumberInput } from '../../../common/NumberInput';
 import { Config } from '../../common/Config';
-import { AxisMinMax } from './AxisMinMax';
-
-const XAxisSortSelectItem = forwardRef<
-    HTMLDivElement,
-    { icon: Icon; label: string; mirrorIcon: boolean }
->(({ icon, label, mirrorIcon, ...others }, ref) => (
-    <Group ref={ref} spacing="xs" {...others} noWrap>
-        <MantineIcon
-            style={mirrorIcon ? { transform: 'rotateY(180deg)' } : undefined}
-            icon={icon}
-        />
-        <Text fz="xs">{label}</Text>
-    </Group>
-));
+import { AxesLabelSections } from './AxesLabelSections';
 
 type Props = {
     itemsMap: ItemsMap | undefined;
 };
 
-const DEFAULT_OFFSET_VALUE_FOR_MANUAL_RANGE_PERCENTAGE = '5';
+const selectShowAxisTicks = (state: VisualizationStoreState) =>
+    selectCartesianEchartsConfig(state)?.showAxisTicks;
+const selectAxisLabelFontSize = (state: VisualizationStoreState) =>
+    selectCartesianEchartsConfig(state)?.axisLabelFontSize;
+const selectAxisTitleFontSize = (state: VisualizationStoreState) =>
+    selectCartesianEchartsConfig(state)?.axisTitleFontSize;
+const selectHasSeriesOnLeftAxis = (state: VisualizationStoreState) =>
+    (selectCartesianSeries(state) || []).some(
+        (series) => (series.yAxisIndex || 0) === 0,
+    );
+const selectHasSeriesOnRightAxis = (state: VisualizationStoreState) =>
+    (selectCartesianSeries(state) || []).some(
+        (series) => series.yAxisIndex === 1,
+    );
 
 export const Axes: FC<Props> = ({ itemsMap }) => {
-    const { visualizationConfig } = useVisualizationContext();
-
-    if (!isCartesianVisualizationConfig(visualizationConfig)) return null;
-
+    const dirtyLayout = useVisualizationSelector(selectCartesianLayout);
+    const dirtyChartType = useVisualizationSelector(
+        selectCartesianDirtyChartType,
+    );
+    const showAxisTicks = useVisualizationSelector(selectShowAxisTicks);
+    const axisLabelFontSize = useVisualizationSelector(selectAxisLabelFontSize);
+    const axisTitleFontSize = useVisualizationSelector(selectAxisTitleFontSize);
+    const hasSeriesOnLeftAxis = useVisualizationSelector(
+        selectHasSeriesOnLeftAxis,
+    );
+    const hasSeriesOnRightAxis = useVisualizationSelector(
+        selectHasSeriesOnRightAxis,
+    );
     const {
-        dirtyLayout,
-        dirtyEchartsConfig,
-        setXAxisName,
-        setYAxisName,
-        setYMinValue,
-        setYMaxValue,
-        setXMinValue,
-        setXMinOffsetValue,
-        setXMaxValue,
-        setXMaxOffsetValue,
         setShowGridX,
         setShowGridY,
         setShowXAxis,
@@ -79,43 +57,7 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
         setConnectNulls,
         setAxisLabelFontSize,
         setAxisTitleFontSize,
-        setXAxisSort,
-        setXAxisLabelRotation,
-        setScrollableChart,
-        dirtyChartType,
-    } = visualizationConfig.chartConfig;
-
-    const xAxisField =
-        itemsMap && dirtyLayout?.xField
-            ? itemsMap[dirtyLayout?.xField]
-            : undefined;
-
-    const selectedAxisInSeries = Array.from(
-        new Set(
-            dirtyEchartsConfig?.series?.map(({ yAxisIndex }) => yAxisIndex),
-        ),
-    );
-    const isAxisTheSameForAllSeries: boolean =
-        selectedAxisInSeries.length === 1;
-    const selectedAxisIndex = selectedAxisInSeries[0] || 0;
-
-    const [showFirstAxisRange, showSecondAxisRange] = (
-        dirtyEchartsConfig?.series || []
-    ).reduce<[boolean, boolean]>(
-        (acc, series) => {
-            if (!itemsMap) return acc;
-            const seriesField = itemsMap[series.encode.yRef.field];
-            if (isNumericItem(seriesField)) {
-                acc[series.yAxisIndex || 0] = true;
-            }
-            return acc;
-        },
-        [false, false],
-    );
-
-    const canSortByBarTotals =
-        dirtyChartType === CartesianSeriesType.BAR &&
-        getAxisTypeFromField(xAxisField) === 'category';
+    } = useCartesianEditorActions();
 
     const showXAxis =
         dirtyLayout?.showXAxis !== undefined ? dirtyLayout?.showXAxis : true;
@@ -130,239 +72,21 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
         dirtyLayout?.showRightYAxis !== undefined
             ? dirtyLayout?.showRightYAxis
             : legacyShowYAxis;
-    // Determine if there are series on each Y-axis
-    const hasSeriesOnLeftAxis = (dirtyEchartsConfig?.series || []).some(
-        (series) => (series.yAxisIndex || 0) === 0,
-    );
-    const hasSeriesOnRightAxis = (dirtyEchartsConfig?.series || []).some(
-        (series) => series.yAxisIndex === 1,
-    );
     // Only show axis controls when not flipped and there are series on that axis
     const hasPrimaryYAxis = !dirtyLayout?.flipAxes && hasSeriesOnLeftAxis;
     const hasSecondaryYAxis = !dirtyLayout?.flipAxes && hasSeriesOnRightAxis;
 
     return (
         <Stack>
-            <Config>
-                <Config.Section>
-                    <Config.Heading>{`${
-                        dirtyLayout?.flipAxes ? 'Y' : 'X'
-                    }-axis label`}</Config.Heading>
-                    <TextInput
-                        placeholder="Enter axis label"
-                        defaultValue={
-                            dirtyEchartsConfig?.xAxis?.[0]?.name ||
-                            (xAxisField &&
-                                (getDateGroupLabel(xAxisField) ||
-                                    getItemLabelWithoutTableName(xAxisField)))
-                        }
-                        onBlur={(e) => setXAxisName(e.currentTarget.value)}
-                    />
-
-                    {isNumericItem(xAxisField) && (
-                        <AxisMinMax
-                            label={`Auto ${
-                                dirtyLayout?.flipAxes ? 'y' : 'x'
-                            }-axis range`}
-                            min={dirtyEchartsConfig?.xAxis?.[0]?.min}
-                            max={dirtyEchartsConfig?.xAxis?.[0]?.max}
-                            setMin={(newValue) => setXMinValue(0, newValue)}
-                            setMax={(newValue) => setXMaxValue(0, newValue)}
-                        />
-                    )}
-
-                    {isNumericItem(xAxisField) && !dirtyLayout?.flipAxes && (
-                        <>
-                            <Switch
-                                label="Truncate x-axis"
-                                checked={
-                                    dirtyEchartsConfig?.xAxis?.[0]
-                                        ?.minOffset !== undefined ||
-                                    dirtyEchartsConfig?.xAxis?.[0]
-                                        ?.maxOffset !== undefined
-                                }
-                                onChange={(e) => {
-                                    if (e.target.checked) {
-                                        setXMaxOffsetValue(
-                                            0,
-                                            DEFAULT_OFFSET_VALUE_FOR_MANUAL_RANGE_PERCENTAGE,
-                                        );
-                                        setXMinOffsetValue(
-                                            0,
-                                            DEFAULT_OFFSET_VALUE_FOR_MANUAL_RANGE_PERCENTAGE,
-                                        );
-                                    } else {
-                                        setXMaxOffsetValue(0, undefined);
-                                        setXMinOffsetValue(0, undefined);
-                                    }
-                                }}
-                            />
-                        </>
-                    )}
-                    <Group spacing="xs">
-                        <Group spacing="xs">
-                            <Config.Label>Sort</Config.Label>
-                            <Select
-                                value={getXAxisSort(
-                                    dirtyEchartsConfig?.xAxis?.[0],
-                                )}
-                                onChange={setXAxisSort}
-                                itemComponent={XAxisSortSelectItem}
-                                data={[
-                                    {
-                                        value: XAxisSort.DEFAULT,
-                                        label: 'Default',
-                                        icon: IconMinus,
-                                    },
-                                    {
-                                        value: XAxisSort.DEFAULT_REVERSED,
-                                        label: 'Default (reversed)',
-                                        icon: IconSwitchHorizontal,
-                                    },
-                                    {
-                                        value: XAxisSort.ASCENDING,
-                                        label: 'Ascending',
-                                        icon: IconSortAscending,
-                                    },
-                                    {
-                                        value: XAxisSort.DESCENDING,
-                                        label: 'Descending',
-                                        icon: IconSortDescending,
-                                    },
-                                    {
-                                        value: XAxisSort.BAR_TOTALS_ASCENDING,
-                                        label: 'Bars ascending',
-                                        icon: IconChartBar,
-                                        disabled: !canSortByBarTotals,
-                                    },
-                                    {
-                                        value: XAxisSort.BAR_TOTALS_DESCENDING,
-                                        label: 'Bars descending',
-                                        icon: IconChartBar,
-                                        mirrorIcon: true,
-                                        disabled: !canSortByBarTotals,
-                                    },
-                                ]}
-                            />
-                        </Group>
-                        {!dirtyLayout?.flipAxes && (
-                            <Group noWrap spacing="xs" align="baseline">
-                                <Config.Label>Rotation</Config.Label>
-                                <NumberInput
-                                    type="number"
-                                    defaultValue={
-                                        dirtyEchartsConfig?.xAxis?.[0].rotate ||
-                                        0
-                                    }
-                                    min={0}
-                                    max={90}
-                                    step={15}
-                                    maw={54}
-                                    rightSection="°"
-                                    onChange={(value) => {
-                                        setXAxisLabelRotation(Number(value));
-                                    }}
-                                />
-                            </Group>
-                        )}
-                    </Group>
-
-                    {getAxisTypeFromField(xAxisField) === 'category' && (
-                        <Checkbox
-                            label="Enable scrollable chart"
-                            checked={
-                                dirtyEchartsConfig?.xAxis?.[0]
-                                    ?.enableDataZoom || false
-                            }
-                            onChange={(e) =>
-                                setScrollableChart(e.currentTarget.checked)
-                            }
-                        />
-                    )}
-                </Config.Section>
-            </Config>
-
-            <Config>
-                <Config.Section>
-                    <Config.Heading>{`${
-                        dirtyLayout?.flipAxes ? 'X' : 'Y'
-                    }-axis label (${
-                        dirtyLayout?.flipAxes ? 'bottom' : 'left'
-                    })`}</Config.Heading>
-
-                    <TextInput
-                        placeholder="Enter axis label"
-                        defaultValue={
-                            dirtyEchartsConfig?.yAxis?.[0]?.name ||
-                            getAxisName({
-                                isAxisTheSameForAllSeries,
-                                selectedAxisIndex,
-                                axisReference: 'yRef',
-                                axisIndex: 0,
-                                series: dirtyEchartsConfig?.series,
-                                itemsMap,
-                            })
-                        }
-                        onBlur={(e) => setYAxisName(0, e.currentTarget.value)}
-                    />
-                    {showFirstAxisRange && (
-                        <AxisMinMax
-                            label={`Auto ${
-                                dirtyLayout?.flipAxes ? 'x' : 'y'
-                            }-axis range`}
-                            min={dirtyEchartsConfig?.yAxis?.[0]?.min}
-                            max={dirtyEchartsConfig?.yAxis?.[0]?.max}
-                            setMin={(newValue) => setYMinValue(0, newValue)}
-                            setMax={(newValue) => setYMaxValue(0, newValue)}
-                        />
-                    )}
-                </Config.Section>
-            </Config>
-
-            <Config>
-                <Config.Section>
-                    <Config.Heading>{`${
-                        dirtyLayout?.flipAxes ? 'X' : 'Y'
-                    }-axis label (${
-                        dirtyLayout?.flipAxes ? 'top' : 'right'
-                    })`}</Config.Heading>
-
-                    <TextInput
-                        placeholder="Enter axis label"
-                        defaultValue={
-                            dirtyEchartsConfig?.yAxis?.[1]?.name ||
-                            getAxisName({
-                                isAxisTheSameForAllSeries,
-                                selectedAxisIndex,
-                                axisReference: 'yRef',
-                                axisIndex: 1,
-                                series: dirtyEchartsConfig?.series,
-                                itemsMap,
-                            })
-                        }
-                        onBlur={(e) => setYAxisName(1, e.currentTarget.value)}
-                    />
-
-                    {showSecondAxisRange && (
-                        <AxisMinMax
-                            label={`Auto ${
-                                dirtyLayout?.flipAxes ? 'x' : 'y'
-                            }-axis range`}
-                            min={dirtyEchartsConfig?.yAxis?.[1]?.min}
-                            max={dirtyEchartsConfig?.yAxis?.[1]?.max}
-                            setMin={(newValue) => setYMinValue(1, newValue)}
-                            setMax={(newValue) => setYMaxValue(1, newValue)}
-                        />
-                    )}
-                </Config.Section>
-            </Config>
+            <AxesLabelSections itemsMap={itemsMap} />
 
             <Config>
                 <Config.Section>
                     <Config.Heading>Show grid</Config.Heading>
 
-                    <Stack spacing="xs">
+                    <Stack gap="xs">
                         <Checkbox
+                            size="xs"
                             label={`${dirtyLayout?.flipAxes ? 'Y' : 'X'}-axis`}
                             checked={!!dirtyLayout?.showGridX}
                             onChange={() => {
@@ -371,6 +95,7 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
                         />
 
                         <Checkbox
+                            size="xs"
                             label={`${dirtyLayout?.flipAxes ? 'X' : 'Y'}-axis`}
                             checked={
                                 dirtyLayout?.showGridY !== undefined
@@ -392,8 +117,9 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
                 <Config.Section>
                     <Config.Heading>Show axis</Config.Heading>
 
-                    <Stack spacing="xs">
+                    <Stack gap="xs">
                         <Checkbox
+                            size="xs"
                             label={`${dirtyLayout?.flipAxes ? 'Y' : 'X'}-axis`}
                             checked={
                                 dirtyLayout?.flipAxes
@@ -410,6 +136,7 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
                         />
                         {(dirtyLayout?.flipAxes || hasPrimaryYAxis) && (
                             <Checkbox
+                                size="xs"
                                 label={
                                     dirtyLayout?.flipAxes
                                         ? 'X-axis'
@@ -431,6 +158,7 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
                         )}
                         {hasSecondaryYAxis && (
                             <Checkbox
+                                size="xs"
                                 label="Right Y-axis"
                                 checked={showRightYAxis}
                                 onChange={() => {
@@ -445,8 +173,9 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
                 <Config.Section>
                     <Config.Heading>Show tick lines</Config.Heading>
                     <Checkbox
+                        size="xs"
                         label="Show tick lines on axes"
-                        checked={!!dirtyEchartsConfig?.showAxisTicks}
+                        checked={!!showAxisTicks}
                         onChange={(e) => {
                             setShowAxisTicks(e.currentTarget.checked);
                         }}
@@ -459,6 +188,7 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
                     <Config.Section>
                         <Config.Heading>Connect nulls</Config.Heading>
                         <Checkbox
+                            size="xs"
                             label="Connect null values in line series"
                             checked={
                                 dirtyLayout?.connectNulls !== undefined
@@ -475,26 +205,19 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
             <Config>
                 <Config.Section>
                     <Config.Heading>Tick label size (px)</Config.Heading>
-                    <Group spacing="xs">
+                    <Group gap="xs">
                         <NumberInput
-                            value={
-                                dirtyEchartsConfig?.axisLabelFontSize ?? 11.5
-                            }
+                            size="xs"
+                            value={axisLabelFontSize ?? 11.5}
                             min={8}
                             max={24}
                             step={0.5}
-                            precision={1}
+                            decimalScale={1}
+                            fixedDecimalScale
                             maw={60}
-                            onChange={(value) => {
-                                setAxisLabelFontSize(
-                                    typeof value === 'number'
-                                        ? value
-                                        : undefined,
-                                );
-                            }}
+                            onNumberChange={setAxisLabelFontSize}
                         />
-                        {dirtyEchartsConfig?.axisLabelFontSize !==
-                            undefined && (
+                        {axisLabelFontSize !== undefined && (
                             <Button
                                 variant="subtle"
                                 size="xs"
@@ -509,24 +232,19 @@ export const Axes: FC<Props> = ({ itemsMap }) => {
             <Config>
                 <Config.Section>
                     <Config.Heading>Axis title size (px)</Config.Heading>
-                    <Group spacing="xs">
+                    <Group gap="xs">
                         <NumberInput
-                            value={dirtyEchartsConfig?.axisTitleFontSize ?? 12}
+                            size="xs"
+                            value={axisTitleFontSize ?? 12}
                             min={8}
                             max={24}
                             step={0.5}
-                            precision={1}
+                            decimalScale={1}
+                            fixedDecimalScale
                             maw={60}
-                            onChange={(value) => {
-                                setAxisTitleFontSize(
-                                    typeof value === 'number'
-                                        ? value
-                                        : undefined,
-                                );
-                            }}
+                            onNumberChange={setAxisTitleFontSize}
                         />
-                        {dirtyEchartsConfig?.axisTitleFontSize !==
-                            undefined && (
+                        {axisTitleFontSize !== undefined && (
                             <Button
                                 variant="subtle"
                                 size="xs"

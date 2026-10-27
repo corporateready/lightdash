@@ -1,24 +1,51 @@
 import { FeatureFlags } from '@lightdash/common';
 import {
-    Button,
-    Flex,
     Group,
     Loader,
+    Stack,
     Text,
-    useMantineTheme,
+    Button,
+    useComputedColorScheme,
 } from '@mantine/core';
-import { useDebouncedValue } from '@mantine/hooks';
-import Editor, { type EditorProps, type Monaco } from '@monaco-editor/react';
+import { useDebouncedCallback } from '@mantine/hooks';
 import { type IDisposable, type languages } from 'monaco-editor';
-import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { useDeepCompareEffect } from 'react-use';
+import { useCanCreateDataApp } from '../../../../features/apps/hooks/useCanCreateDataApp';
+import { useChartStudioAvailable } from '../../../../features/chartTypes/hooks/useChartStudioAvailable';
+import { useChartTypesEnabled } from '../../../../features/chartTypes/hooks/useChartTypesEnabled';
+import { chartTypeBuilderPath } from '../../../../features/chartTypes/utils/chartTypeBuilderPath';
+import {
+    selectCustomEditor,
+    selectCustomVisualizationData,
+    useVisualizationStore,
+} from '../../../../features/visualization/store';
+import { useSetCustomVisSpec } from '../../../../hooks/useCustomVisualizationConfig';
+import { useOptionalProjectRoute } from '../../../../hooks/useProjectRoute';
+import { useProjectUuid } from '../../../../hooks/useProjectUuid';
 import { useServerFeatureFlag } from '../../../../hooks/useServerOrClientFeatureFlag';
+import useTracking from '../../../../providers/Tracking/useTracking';
+import { EventName } from '../../../../types/Events';
+import { useIsInsideChartGallery } from '../../../common/ChartGallery/ChartGalleryContext';
 import DocumentationHelpButton from '../../../DocumentationHelpButton';
-import { isCustomVisualizationConfig } from '../../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationInputs,
+    useVisualizationInputSelector,
+} from '../../../LightdashVisualization/useVisualizationContext';
+import Editor, { type EditorProps, type Monaco } from '../../../MonacoEditor';
 import { Config } from '../../common/Config';
+import CustomChartTypeSection from '../../CustomChartType/CustomChartTypeSection';
+import {
+    useCreateProjectChartType,
+    useSelectProjectChartType,
+} from '../../CustomChartType/useSelectProjectChartType';
+import { ChartStudioInfoCallout } from './components/ChartStudioInfoCallout';
+import { ChartStudioNudgeCard } from './components/ChartStudioNudgeCard';
 import { GenerateVizWithAi } from './components/CustomVisAi';
 import { SelectTemplate } from './components/CustomVisTemplate';
+import classes from './CustomVisConfig.module.css';
+import { useChartStudioVegaNudge } from './hooks/useChartStudioVegaNudge';
 import { type Schema } from './types/types';
 
 const MONACO_DEFAULT_OPTIONS: EditorProps['options'] = {
@@ -115,36 +142,34 @@ const registerCustomCompletionProvider = (
 };
 
 export const ConfigTabs: React.FC = memo(() => {
-    const { visualizationConfig } = useVisualizationContext();
-    const theme = useMantineTheme();
-
-    const isCustomConfig = isCustomVisualizationConfig(visualizationConfig);
+    const { itemsMap } = useVisualizationInputs();
+    const { series, fields } = useVisualizationInputSelector(
+        selectCustomVisualizationData,
+    );
+    const store = useVisualizationStore();
+    const setVisSpec = useSetCustomVisSpec();
+    const colorScheme = useComputedColorScheme();
+    const projectUuid = useProjectUuid();
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
+    const location = useLocation();
+    const navigate = useNavigate();
 
     const [isLoading, setIsLoading] = useState(true);
     const schemas = useRef<Schema[] | null>(null);
 
-    const chartConfig = useMemo(
-        () => (isCustomConfig ? visualizationConfig.chartConfig : undefined),
-        [isCustomConfig, visualizationConfig.chartConfig],
-    );
     const completionProviderRef = useRef<IDisposable | null>(null);
     const monacoInstanceRef = useRef<Monaco | null>(null);
 
-    const { fields } = useMemo(() => {
-        return {
-            fields: chartConfig?.fields,
-        };
-    }, [chartConfig]);
-    useDeepCompareEffect(() => {
-        if (!chartConfig || !isLoading) return;
-
+    useEffect(() => {
         async function initVegaAsync() {
             schemas.current = await initVegaLazySchema();
             setIsLoading(false);
         }
 
         void initVegaAsync();
-    }, [isLoading, chartConfig]);
+    }, []);
 
     useEffect(() => {
         return () => {
@@ -176,16 +201,21 @@ export const ConfigTabs: React.FC = memo(() => {
             );
     }, [fields]);
 
-    const [editorConfig, setEditorConfig] = useState<string>(
-        isCustomConfig ? visualizationConfig.chartConfig.visSpec || '' : '',
+    // The editor keeps a draft; the store sees it debounced, and on blur
+    const [editorConfig, setEditorConfigDraft] = useState<string>(
+        () => selectCustomEditor(store.getState()).visSpec ?? '',
     );
-    const [debouncedTooltipValue] = useDebouncedValue(editorConfig, 1000);
-
-    useEffect(() => {
-        if (isLoading || !chartConfig) return;
-        if (debouncedTooltipValue)
-            chartConfig.setVisSpec(debouncedTooltipValue);
-    }, [isLoading, debouncedTooltipValue, chartConfig]);
+    const commitVisSpec = useDebouncedCallback(
+        (spec: string) => setVisSpec(spec),
+        { delay: 1000, flushOnUnmount: true },
+    );
+    const setEditorConfig = useCallback(
+        (spec: string) => {
+            setEditorConfigDraft(spec);
+            commitVisSpec(spec);
+        },
+        [commitVisSpec],
+    );
 
     const [monacoOptions, setMonacoOptions] = useState<
         EditorProps['options'] | undefined
@@ -195,6 +225,71 @@ export const ConfigTabs: React.FC = memo(() => {
         FeatureFlags.AiCustomViz,
     );
     const isAiEnabled = aiCustomVizFlag?.enabled ?? false;
+
+    // Without chart types there is nothing to switch to, so Vega is the only
+    // custom chart type there is and a picker would offer a choice of one.
+    const { enabled: chartTypesEnabled } = useChartTypesEnabled();
+    // Creating a chart type is authoring, so those affordances need Chart Studio.
+    const chartStudioAvailable = useChartStudioAvailable();
+    // With the chart gallery, the user already picked a chart type there.
+    const isInsideChartGallery = useIsInsideChartGallery();
+    const canCreateApp = useCanCreateDataApp(projectUuid);
+    const selectProjectChartType = useSelectProjectChartType();
+    const createProjectChartType = useCreateProjectChartType();
+
+    const { track } = useTracking();
+    const { isVisible: isNudgeVisible, dismiss: forgetNudge } =
+        useChartStudioVegaNudge();
+    // Once per mount: seeing the card is the top of the Chart Studio funnel.
+    const hasTrackedNudgeView = useRef(false);
+    useEffect(() => {
+        if (!isNudgeVisible || hasTrackedNudgeView.current || !projectUuid)
+            return;
+        hasTrackedNudgeView.current = true;
+        track({
+            name: EventName.CHART_STUDIO_VEGA_NUDGE_VIEWED,
+            properties: { projectUuid },
+        });
+    }, [isNudgeVisible, projectUuid, track]);
+    const openChartStudioFromNudge = useCallback(() => {
+        if (projectUuid) {
+            track({
+                name: EventName.CHART_STUDIO_VEGA_NUDGE_OPENED,
+                properties: { projectUuid },
+            });
+        }
+        // The builder keeps the Explorer query via the search string; without
+        // authoring rights the gallery is the most the user can do.
+        if (chartStudioAvailable && canCreateApp) {
+            void navigate({
+                pathname: chartTypeBuilderPath(projectUrlIdentifier ?? ''),
+                search: location.search,
+            });
+        } else {
+            void navigate(`/projects/${projectUrlIdentifier}/chart-studio`);
+        }
+    }, [
+        canCreateApp,
+        chartStudioAvailable,
+        location.search,
+        navigate,
+        projectUrlIdentifier,
+        projectUuid,
+        track,
+    ]);
+    const openChartStudioGallery = useCallback(
+        () => void navigate(`/projects/${projectUrlIdentifier}/chart-studio`),
+        [navigate, projectUrlIdentifier],
+    );
+    const dismissNudge = useCallback(() => {
+        forgetNudge();
+        if (projectUuid) {
+            track({
+                name: EventName.CHART_STUDIO_VEGA_NUDGE_DISMISSED,
+                properties: { projectUuid },
+            });
+        }
+    }, [forgetNudge, projectUuid, track]);
     useDeepCompareEffect(() => {
         /** Creates a container that belongs to body, outside of the sidebar
          * so we can place the autocomplete tooltip and it doesn't overflow
@@ -215,77 +310,115 @@ export const ConfigTabs: React.FC = memo(() => {
             overflowWidgetsDomNode: container,
         });
     }, [monacoOptions]);
-    const { itemsMap } = useVisualizationContext();
-
-    if (!isCustomConfig) return null;
 
     if (!monacoOptions || isLoading) {
         return <Loader color="gray" size="xs" />;
     }
 
-    const { series } = visualizationConfig.chartConfig;
-
     const isEditorEmpty = (editorConfig || '')?.length === 0;
 
     return (
         <>
-            <Config>
-                <Config.Section>
-                    <Config.Group>
-                        <Config.Heading>
-                            <Flex justify="space-between" gap="xs">
-                                <Text>Vega-Lite JSON</Text>
+            <Stack>
+                {isNudgeVisible && (
+                    <ChartStudioNudgeCard
+                        onOpenChartStudio={openChartStudioFromNudge}
+                        onDismiss={dismissNudge}
+                    />
+                )}
+
+                {/* The dismissable card already makes the pitch. */}
+                {!isNudgeVisible && (
+                    <ChartStudioInfoCallout
+                        onOpenChartStudio={
+                            chartStudioAvailable ? openChartStudioGallery : null
+                        }
+                    />
+                )}
+
+                {chartTypesEnabled && !isInsideChartGallery && (
+                    <CustomChartTypeSection
+                        projectUuid={projectUuid ?? ''}
+                        selected={{ kind: 'builtInVega' }}
+                        selectedDataAppViz={null}
+                        // Vega needs no columns to be usable, so the picker
+                        // stays open even before the query has run.
+                        hasColumns
+                        onSelectVega={() => {}}
+                        onSelectProjectType={(picked) =>
+                            selectProjectChartType(picked, itemsMap ?? {})
+                        }
+                        // Clearing leaves Vega for the empty project-type state.
+                        onClear={
+                            chartStudioAvailable && canCreateApp
+                                ? createProjectChartType
+                                : null
+                        }
+                        onCreateNew={
+                            chartStudioAvailable && canCreateApp
+                                ? () =>
+                                      void navigate({
+                                          pathname: chartTypeBuilderPath(
+                                              projectUrlIdentifier ?? '',
+                                          ),
+                                          search: location.search,
+                                      })
+                                : null
+                        }
+                        onBrowseGallery={() =>
+                            void navigate(
+                                `/projects/${projectUrlIdentifier}/chart-studio`,
+                            )
+                        }
+                    />
+                )}
+
+                <Config>
+                    <Config.Section>
+                        <Config.Group>
+                            <Group gap={4} wrap="nowrap">
+                                <Config.Heading>Vega-Lite JSON</Config.Heading>
                                 <DocumentationHelpButton
-                                    pos="relative"
-                                    top="2px"
                                     href="https://docs.lightdash.com/references/custom-charts#custom-charts"
+                                    // Block, so the anchor hugs the glyph and
+                                    // the Group centres what is actually seen
+                                    // rather than an inline text box.
+                                    iconProps={{ size: 14, display: 'block' }}
                                 />
-                            </Flex>
-                        </Config.Heading>
+                            </Group>
 
-                        <Button.Group>
-                            <SelectTemplate
-                                itemsMap={itemsMap}
-                                isCustomConfig={isCustomConfig}
-                                isEditorEmpty={isEditorEmpty}
-                                setEditorConfig={setEditorConfig}
-                            />
-
-                            {isAiEnabled && (
-                                <GenerateVizWithAi
+                            <Button.Group>
+                                <SelectTemplate
                                     itemsMap={itemsMap}
-                                    sampleResults={series.slice(0, 3)}
                                     setEditorConfig={setEditorConfig}
-                                    editorConfig={editorConfig}
                                 />
-                            )}
-                        </Button.Group>
-                    </Config.Group>
-                </Config.Section>
-            </Config>
+
+                                {isAiEnabled && (
+                                    <GenerateVizWithAi
+                                        itemsMap={itemsMap}
+                                        sampleResults={series.slice(0, 3)}
+                                        setEditorConfig={setEditorConfig}
+                                        editorConfig={editorConfig}
+                                    />
+                                )}
+                            </Button.Group>
+                        </Config.Group>
+                    </Config.Section>
+                </Config>
+            </Stack>
             <Group
                 h="calc(100vh - 300px)"
                 align="top"
-                mt="4px"
-                sx={{
-                    borderTop: '0.125rem solid #dee2e6',
-                }}
+                mt="md"
+                className={classes.editorPane}
             >
                 {/* Hack to show a monaco placeholder */}
                 {isEditorEmpty ? (
                     <Text
                         pos="absolute"
                         w="330px"
-                        color="ldGray.5"
-                        sx={{
-                            pointerEvents: 'none',
-                            zIndex: 100,
-                            fontFamily: 'monospace',
-                            marginLeft: '35px', // Stye to match Monaco text
-                            fontSize: '12px',
-                            lineHeight: '19px',
-                            letterSpacing: '0px',
-                        }}
+                        c="ldGray.5"
+                        className={classes.editorPlaceholder}
                     >
                         {`Start by entering your Vega-Lite JSON code or choose from our pre-built templates to create your chart.`}
                     </Text>
@@ -315,13 +448,14 @@ export const ConfigTabs: React.FC = memo(() => {
                                 );
                     }}
                     defaultLanguage="json"
+                    wrapperProps={{ onBlur: () => commitVisSpec.flush() }}
                     options={monacoOptions}
                     value={editorConfig}
                     onChange={(config) => {
                         setEditorConfig(config ?? '');
                     }}
                     theme={
-                        theme.colorScheme === 'dark'
+                        colorScheme === 'dark'
                             ? 'lightdash-dark'
                             : 'lightdash-light'
                     }

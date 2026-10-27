@@ -1,11 +1,11 @@
 import { lookup } from 'node:dns/promises';
 import { validatePublicHttpUrl } from './ssrfProtection';
 
-jest.mock('node:dns/promises', () => ({
-    lookup: jest.fn(),
+vi.mock('node:dns/promises', () => ({
+    lookup: vi.fn(),
 }));
 
-const mockedLookup = lookup as unknown as jest.MockedFunction<
+const mockedLookup = lookup as unknown as import('vitest').MockedFunction<
     () => Promise<{ address: string; family: number }[]>
 >;
 
@@ -51,9 +51,37 @@ describe('validatePublicHttpUrl', () => {
         ).rejects.toThrow(privateUrlError);
     });
 
+    it('accepts private IP targets when explicitly allowed', async () => {
+        await expect(
+            validatePublicHttpUrl('http://127.0.0.1:3000/mcp', {
+                allowedProtocols: ['http:', 'https:'],
+                allowPrivateAddresses: true,
+            }),
+        ).resolves.toMatchObject({
+            hostname: '127.0.0.1',
+            protocol: 'http:',
+        });
+    });
+
     it('rejects IPv4-mapped IPv6 private targets', async () => {
         await expect(
             validatePublicHttpUrl('http://[::ffff:127.0.0.1]:3000/mcp', {
+                allowedProtocols: ['http:', 'https:'],
+            }),
+        ).rejects.toThrow(privateUrlError);
+    });
+
+    it.each([
+        'http://198.18.0.1',
+        'http://[64:ff9b:1::7f00:1]',
+        'http://[100:0:0:1::1]',
+        'http://[2001:2::1]',
+        'http://[400::1]',
+        'http://[2001:5::1]',
+        'http://[3fff::1]',
+    ])('rejects non-public unicast target %s', async (url) => {
+        await expect(
+            validatePublicHttpUrl(url, {
                 allowedProtocols: ['http:', 'https:'],
             }),
         ).rejects.toThrow(privateUrlError);
@@ -89,6 +117,22 @@ describe('validatePublicHttpUrl', () => {
         ).resolves.toMatchObject({
             hostname: 'example.com',
             protocol: 'https:',
+        });
+    });
+
+    it('accepts public IPv6 literals in global unicast space', async () => {
+        mockedLookup.mockResolvedValueOnce([
+            { address: '2606:4700:4700::1111', family: 6 },
+        ]);
+
+        await expect(
+            validatePublicHttpUrl('https://[2606:4700:4700::1111]/mcp'),
+        ).resolves.toMatchObject({
+            hostname: '[2606:4700:4700::1111]',
+            protocol: 'https:',
+        });
+        expect(mockedLookup).toHaveBeenCalledWith('2606:4700:4700::1111', {
+            all: true,
         });
     });
 });

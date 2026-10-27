@@ -1,0 +1,212 @@
+import {
+    emitAiUsage,
+    registerAiUsageTracker,
+    type AiUsageEvent,
+} from '../aiUsage';
+import { aiUsageCompactedColumns } from './aiUsageStream';
+import { EventStreamSink } from './EventStreamSink';
+import { EVENT_STREAM_SCHEMA_VERSION } from './projection';
+import { eventStreamRegistry } from './registry';
+import { EventStreamRow } from './types';
+
+vi.mock('../../logging/logger', () => ({
+    __esModule: true,
+    default: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+    },
+}));
+
+const createWriterMock = () => ({
+    push: vi.fn<(stream: string, row: EventStreamRow) => void>(),
+    flush: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+});
+
+const aiUsageEvent: AiUsageEvent = {
+    event: 'ai.usage',
+    userId: 'user-1',
+    properties: {
+        eventId: 'evt-1',
+        outcome: 'complete',
+        feature: 'agent',
+        functionId: 'generateAgentResponse',
+        organizationId: 'org-1',
+        projectId: 'project-1',
+        aiAgentId: 'agent-1',
+        threadId: 'thread-1',
+        promptId: 'prompt-1',
+        dataAppId: null,
+        model: 'claude-sonnet-5',
+        provider: 'anthropic',
+        keyManagement: 'self-managed',
+        channel: 'embed',
+        externalUserId: 'viewer-42',
+        managedAgentRunId: null,
+        deepResearchRunId: 'run-1',
+        deepResearchPhase: 'investigating',
+        inputTokens: 1000,
+        outputTokens: 200,
+        cacheReadTokens: 800,
+        cacheWriteTokens: 50,
+        reasoningTokens: 30,
+        totalTokens: 1200,
+    },
+};
+
+describe('ai_usage stream projection', () => {
+    afterEach(() => {
+        vi.clearAllMocks();
+        registerAiUsageTracker(() => {});
+    });
+
+    it('keeps Autopilot run attribution from runner telemetry through the usage stream', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        registerAiUsageTracker((event) => sink.handle(event));
+        emitAiUsage(
+            {
+                telemetry: { functionId: 'autopilotHeartbeat' },
+                runtimeContext: {
+                    feature: 'managed-agent',
+                    runUuid: 'autopilot-run-1',
+                    organizationUuid: 'org-1',
+                    projectUuid: 'project-1',
+                    provider: 'openai',
+                    model: 'gpt-test',
+                    keyManagement: 'self-managed',
+                },
+            },
+            {
+                inputTokens: 100,
+                outputTokens: 20,
+                totalTokens: 120,
+                cacheReadTokens: null,
+                cacheWriteTokens: null,
+                reasoningTokens: null,
+            },
+        );
+        expect(writer.push).toHaveBeenCalledWith(
+            'ai_usage',
+            expect.objectContaining({
+                feature: 'managed-agent',
+                managed_agent_run_id: 'autopilot-run-1',
+                provider: 'openai',
+                model: 'gpt-test',
+                key_management: 'self-managed',
+                project_id: 'project-1',
+                input_tokens: 100,
+                output_tokens: 20,
+            }),
+        );
+    });
+
+    it('projects an ai.usage event', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle(aiUsageEvent);
+        expect(writer.push).toHaveBeenCalledTimes(1);
+        const [stream, row] = writer.push.mock.calls[0];
+        expect(stream).toBe('ai_usage');
+        expect(row).toMatchObject({
+            event_name: 'ai.usage',
+            org_id: 'org-1',
+            user_id: 'user-1',
+            schema_version: EVENT_STREAM_SCHEMA_VERSION,
+            event_id: 'evt-1',
+            outcome: 'complete',
+            project_id: 'project-1',
+            feature: 'agent',
+            function_id: 'generateAgentResponse',
+            agent_id: 'agent-1',
+            thread_id: 'thread-1',
+            prompt_id: 'prompt-1',
+            model: 'claude-sonnet-5',
+            provider: 'anthropic',
+            key_management: 'self-managed',
+            channel: 'embed',
+            external_user_id: 'viewer-42',
+            deep_research_run_id: 'run-1',
+            deep_research_phase: 'investigating',
+            input_tokens: 1000,
+            output_tokens: 200,
+            cache_read_tokens: 800,
+            cache_write_tokens: 50,
+            reasoning_tokens: 30,
+            total_tokens: 1200,
+        });
+        expect(new Date(row.event_ts).toISOString()).toBe(row.event_ts);
+    });
+
+    it('declares every attribution column it writes in the compacted schema', () => {
+        const writer = createWriterMock();
+        new EventStreamSink(eventStreamRegistry, writer).handle(aiUsageEvent);
+
+        const [, row] = writer.push.mock.calls[0]!;
+        const compacted = aiUsageCompactedColumns.map((column) => column.name);
+        expect(compacted).toEqual(
+            expect.arrayContaining(['channel', 'external_user_id']),
+        );
+        compacted.forEach((column) => expect(row).toHaveProperty(column));
+    });
+
+    it('projects null dimensions and token classes as null columns', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            ...aiUsageEvent,
+            properties: {
+                ...aiUsageEvent.properties,
+                projectId: null,
+                aiAgentId: null,
+                threadId: null,
+                promptId: null,
+                model: null,
+                provider: null,
+                keyManagement: null,
+                channel: null,
+                externalUserId: null,
+                managedAgentRunId: null,
+                deepResearchRunId: null,
+                deepResearchPhase: null,
+                cacheReadTokens: null,
+                cacheWriteTokens: null,
+                reasoningTokens: null,
+            },
+        });
+        expect(writer.push).toHaveBeenCalledTimes(1);
+        const [, row] = writer.push.mock.calls[0];
+        expect(row).toMatchObject({
+            event_name: 'ai.usage',
+            project_id: null,
+            agent_id: null,
+            thread_id: null,
+            prompt_id: null,
+            model: null,
+            provider: null,
+            key_management: null,
+            channel: null,
+            external_user_id: null,
+            deep_research_run_id: null,
+            deep_research_phase: null,
+            cache_read_tokens: null,
+            cache_write_tokens: null,
+            reasoning_tokens: null,
+        });
+    });
+
+    it('drops events without an organization id', () => {
+        const writer = createWriterMock();
+        const sink = new EventStreamSink(eventStreamRegistry, writer);
+        sink.handle({
+            ...aiUsageEvent,
+            properties: {
+                ...aiUsageEvent.properties,
+                organizationId: null,
+            },
+        });
+        expect(writer.push).not.toHaveBeenCalled();
+    });
+});

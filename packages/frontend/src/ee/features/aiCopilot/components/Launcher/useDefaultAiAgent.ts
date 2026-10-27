@@ -1,28 +1,57 @@
 import { useMemo } from 'react';
 import { useAiOrganizationSettings } from '../../hooks/useAiOrganizationSettings';
+import { useAiRouterConfig } from '../../hooks/useAiRouter';
 import { useProjectAiAgents } from '../../hooks/useProjectAiAgents';
 import { useGetUserAgentPreferences } from '../../hooks/useUserAgentPreferences';
+import {
+    getConcreteLauncherAgent,
+    resolveLauncherDefaultAgent,
+} from './launcherAgentSelection';
 
 export const useDefaultAiAgent = (projectUuid: string | undefined) => {
     const aiOrganizationSettingsQuery = useAiOrganizationSettings();
-    const { data: agents } = useProjectAiAgents({
+    const agentsQuery = useProjectAiAgents({
         projectUuid,
         options: {
             enabled:
                 aiOrganizationSettingsQuery.isSuccess &&
-                aiOrganizationSettingsQuery.data?.aiAgentsVisible,
+                !!aiOrganizationSettingsQuery.data?.aiAgentsVisible &&
+                (aiOrganizationSettingsQuery.data.isCopilotEnabled ||
+                    aiOrganizationSettingsQuery.data.isTrial),
         },
         redirectOnUnauthorized: false,
     });
-    const { data: preferences } = useGetUserAgentPreferences(projectUuid);
+    const agents = agentsQuery.data;
+    const preferencesQuery = useGetUserAgentPreferences(projectUuid);
+    const preferences = preferencesQuery.data;
+    const aiRouterConfigQuery = useAiRouterConfig();
 
-    const agent = useMemo(() => {
-        if (!agents || agents.length === 0) return null;
-        return (
-            agents.find((a) => a.uuid === preferences?.defaultAgentUuid) ??
-            agents[0]
-        );
-    }, [agents, preferences?.defaultAgentUuid]);
+    const selectedAgent = useMemo(
+        () =>
+            resolveLauncherDefaultAgent({
+                agents,
+                defaultAgentUuid: preferences?.defaultAgentUuid,
+                isRouterEnabled: aiRouterConfigQuery.data?.enabled === true,
+                isRouterLoading: aiRouterConfigQuery.isLoading,
+            }),
+        [
+            agents,
+            aiRouterConfigQuery.data?.enabled,
+            aiRouterConfigQuery.isLoading,
+            preferences?.defaultAgentUuid,
+        ],
+    );
 
-    return { agent, agents: agents ?? [] };
+    const isResolving =
+        agentsQuery.isLoading ||
+        preferencesQuery.isLoading ||
+        aiRouterConfigQuery.isLoading;
+
+    return {
+        agent: getConcreteLauncherAgent(selectedAgent),
+        selectedAgent,
+        agents: agents ?? [],
+        agentsUpdatedAt: agentsQuery.dataUpdatedAt,
+        isResolving,
+    };
 };

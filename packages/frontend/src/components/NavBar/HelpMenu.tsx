@@ -1,22 +1,35 @@
+import { subject } from '@casl/ability';
 import { LightdashMode } from '@lightdash/common';
-import { Button, getDefaultZIndex, Menu } from '@mantine-8/core';
+import { Button, getDefaultZIndex, Menu } from '@mantine/core';
 import { modals } from '@mantine/modals';
 import {
     IconBook,
     IconHelp,
     IconMessages,
+    IconRoad,
     IconSos,
     IconUsers,
 } from '@tabler/icons-react';
 import { type FC } from 'react';
+import { Link } from 'react-router';
 import { useIntercom } from 'react-use-intercom';
 import useHealth from '../../hooks/health/useHealth';
+import useApp from '../../providers/App/useApp';
 import SupportDrawerContent from '../../providers/SupportDrawer/SupportDrawerContent';
 import LargeMenuItem from '../common/LargeMenuItem';
 import MantineIcon from '../common/MantineIcon';
+import { useNavBarMenuProps } from './NavBarPortalContext';
 
-const HelpMenu: FC = () => {
+const HelpMenu: FC<{ withLabel?: boolean }> = ({ withLabel = false }) => {
+    const menuProps = useNavBarMenuProps();
     const health = useHealth();
+    const { user } = useApp();
+    const canViewRoadmap = user.data?.ability.can(
+        'view',
+        subject('Roadmap', {
+            organizationUuid: user.data.organizationUuid,
+        }),
+    );
     const isCloudCustomer = health.data?.mode === LightdashMode.CLOUD_BETA;
     const isDevelopment = health.data?.mode === LightdashMode.DEV;
 
@@ -37,23 +50,23 @@ const HelpMenu: FC = () => {
                 rel="noopener noreferrer"
             >
                 <MantineIcon icon={IconHelp} />
+                {withLabel && ' Help'}
             </Button>
         );
     }
 
     return (
         <Menu
-            withArrow
-            shadow="lg"
             position="bottom-end"
             arrowOffset={16}
             offset={-2}
             zIndex={getDefaultZIndex('max')}
-            portalProps={{ target: '#navbar-header' }}
+            {...menuProps}
         >
             <Menu.Target>
                 <Button aria-label="Help" variant="default" size="xs">
                     <MantineIcon icon={IconHelp} />
+                    {withLabel && ' Help'}
                 </Button>
             </Menu.Target>
 
@@ -66,6 +79,16 @@ const HelpMenu: FC = () => {
                     description="Chat with the Lightdash docs AI assistant"
                     icon={IconBook}
                 />
+
+                {canViewRoadmap && (
+                    <LargeMenuItem
+                        component={Link}
+                        to="/generalSettings/roadmap"
+                        title="Roadmap"
+                        description="Explore what we're building and track feature requests"
+                        icon={IconRoad}
+                    />
+                )}
 
                 {isCloudCustomer && (
                     <LargeMenuItem

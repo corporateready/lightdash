@@ -2,17 +2,18 @@
 
 import { type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import {
+    getReadableTextColor,
     type PieChartValueLabel,
     type PieChartValueOptions,
 } from '@lightdash/common';
 import {
-    ActionIcon,
     Box,
     Collapse,
     Group,
     Stack,
-    Tooltip,
     type StackProps,
+    ActionIcon,
+    Tooltip,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconChevronDown, IconChevronUp } from '@tabler/icons-react';
@@ -21,6 +22,7 @@ import MantineIcon from '../../common/MantineIcon';
 import ColorSelector from '../ColorSelector';
 import { EditableText } from '../common/EditableText';
 import { GrabIcon } from '../common/GrabIcon';
+import { useDebouncedDraft } from '../common/useDebouncedDraft';
 import { ValueOptions } from './ValueOptions';
 
 type GroupItemProps = {
@@ -39,6 +41,10 @@ type GroupItemProps = {
     valueLabel: PieChartValueLabel;
     showValue: boolean;
     showPercentage: boolean;
+    valueLabelColor?: string;
+    defaultValueLabelColor?: string;
+
+    granularityFields?: string[];
 
     onColorChange: (label: string, newColor: string) => void;
     onLabelChange: (label: string, newLabel: string) => void;
@@ -69,6 +75,10 @@ export const GroupItem = forwardRef<
             valueLabel,
             showValue,
             showPercentage,
+            valueLabelColor,
+            defaultValueLabelColor,
+
+            granularityFields,
 
             onColorChange,
             onLabelChange,
@@ -79,40 +89,45 @@ export const GroupItem = forwardRef<
         ref,
     ) => {
         const [opened, { toggle }] = useDisclosure();
+        const [draftLabel, setDraftLabel, flushLabel] = useDebouncedDraft(
+            label ?? '',
+            (value) => onLabelChange(defaultLabel, value),
+            { delay: 500 },
+        );
+        // An empty colour shows the default, as an unset one does
+        const [draftColor, setDraftColor, flushColor] = useDebouncedDraft(
+            color ?? '',
+            (value) => onColorChange(defaultLabel, value),
+            { delay: 500 },
+        );
 
         return (
-            <Stack ref={ref} spacing="xs" {...rest}>
-                <Group spacing="xs">
+            <Stack ref={ref} gap="xs" {...rest}>
+                <Group gap="xs">
                     {!isOnlyItem && (
                         <GrabIcon dragHandleProps={dragHandleProps} />
                     )}
 
                     <ColorSelector
-                        color={color}
+                        color={draftColor}
                         defaultColor={defaultColor}
                         swatches={swatches}
-                        onColorChange={(newColor: string) =>
-                            onColorChange(defaultLabel, newColor)
-                        }
+                        onColorChange={setDraftColor}
+                        onClose={flushColor}
                     />
-                    <Box style={{ flexGrow: 1 }}>
+                    <Box flex={1}>
                         <EditableText
                             placeholder={defaultLabel}
-                            value={label}
-                            onChange={(event) => {
-                                onLabelChange(
-                                    defaultLabel,
-                                    event.currentTarget.value,
-                                );
-                            }}
+                            value={draftLabel}
+                            granularityFields={granularityFields}
+                            onChange={(event) =>
+                                setDraftLabel(event.currentTarget.value)
+                            }
+                            onBlur={flushLabel}
                         />
                     </Box>
 
-                    <Tooltip
-                        variant="xs"
-                        label="Override value label options"
-                        withinPortal
-                    >
+                    <Tooltip label="Override value label options">
                         <ActionIcon onClick={toggle}>
                             <MantineIcon
                                 icon={opened ? IconChevronUp : IconChevronDown}
@@ -121,8 +136,8 @@ export const GroupItem = forwardRef<
                     </Tooltip>
                 </Group>
 
-                <Collapse in={opened}>
-                    <Stack ml="xl" spacing="xs" pb="xs">
+                <Collapse expanded={opened}>
+                    <Stack ml="xl" gap="xs" pb="xs">
                         <ValueOptions
                             valueLabel={valueLabel}
                             onValueLabelChange={(newValue) =>
@@ -140,6 +155,19 @@ export const GroupItem = forwardRef<
                             onToggleShowPercentage={(newValue) =>
                                 onValueOptionsChange(defaultLabel, {
                                     showPercentage: newValue,
+                                })
+                            }
+                            valueLabelColor={valueLabelColor}
+                            defaultValueLabelColor={
+                                defaultValueLabelColor ??
+                                (valueLabel === 'inside' && color
+                                    ? getReadableTextColor(color)
+                                    : color)
+                            }
+                            swatches={swatches}
+                            onValueLabelColorChange={(newColor) =>
+                                onValueOptionsChange(defaultLabel, {
+                                    valueLabelColor: newColor,
                                 })
                             }
                         />

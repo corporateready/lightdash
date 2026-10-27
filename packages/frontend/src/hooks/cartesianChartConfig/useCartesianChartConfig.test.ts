@@ -1,19 +1,54 @@
 import {
     CartesianSeriesType,
+    ChartType,
     createConditionalFormattingConfigWithSingleColor,
+    DimensionType,
+    FieldType,
     getItemMap,
+    getSeriesId,
     StackType,
+    TimeFrames,
+    type CartesianChart,
+    type Dimension,
+    type ItemsMap,
+    type MetricQuery,
     type Series,
+    type TableCalculationMetadata,
 } from '@lightdash/common';
 import { act, renderHook } from '@testing-library/react';
+import { createElement, type FC, type PropsWithChildren } from 'react';
 import { describe, expect, test, vi } from 'vitest';
 
 vi.mock('../useServerOrClientFeatureFlag', () => ({
     useServerFeatureFlag: async () => ({ data: { enabled: false } }),
 }));
 
-import useCartesianChartConfig from './useCartesianChartConfig';
+import { finalizeTimeAxisOptions } from '@lightdash/visualization/editor';
+import { type ReferenceLineField } from '../../components/common/ReferenceLine';
 import {
+    ServicesContext,
+    StateContext,
+    type VisualizationState,
+} from '../../components/LightdashVisualization/context';
+import {
+    buildInitialVisualizationState,
+    cartesianIntentActions,
+    createVisualizationStore,
+} from '../../features/visualization/store';
+import {
+    defaultVisualizationInputs,
+    visualizationTestServices,
+} from '../../testing/visualizationStore';
+import { VisualizationStoreTestProvider } from '../../testing/VisualizationStoreTestProvider';
+import useCartesianChartConfig, {
+    applyReferenceLines,
+    useCartesianEditorSync,
+    type CartesianTypeOptions,
+} from './useCartesianChartConfig';
+import {
+    buildInfiniteQueryResults,
+    buildPivotDetails,
+    changedPivotFieldSeriesMapArgs,
     existingMixedSeries,
     expectedMixedSeriesMap,
     expectedMultiPivotedSeriesMap,
@@ -22,6 +57,8 @@ import {
     explore,
     groupedMixedSeries,
     mergedMixedSeries,
+    mixedBarLineFlatSeries,
+    mixedBarLinePivotedSeries,
     multiPivotSeriesMapArgs,
     pivotSeriesMapArgs,
     simpleSeriesMapArgs,
@@ -34,6 +71,82 @@ import {
     mergeExistingAndExpectedSeries,
     sortDimensions,
 } from './utils';
+
+/** What the hook used to take as arguments: the seed config, the inputs and the gallery intent */
+type CartesianHookParams = {
+    initialChartConfig: CartesianChart | undefined;
+    pivotKeys: string[] | undefined;
+    resultsData: VisualizationState['resultsData'];
+    columnOrder: string[];
+    itemsMap: ItemsMap | undefined;
+    stacking: boolean | StackType | undefined;
+    cartesianType: CartesianTypeOptions | undefined;
+    colorPalette: string[];
+    tableCalculationsMetadata?: TableCalculationMetadata[];
+    unsavedMetricQuery?: MetricQuery;
+};
+
+const toInputs = (params: CartesianHookParams): VisualizationState => ({
+    ...defaultVisualizationInputs,
+    resultsData: params.resultsData,
+    itemsMap: params.itemsMap,
+    colorPalette: params.colorPalette,
+    columnOrder: params.columnOrder,
+    pivotDimensions: params.pivotKeys,
+    unsavedMetricQuery: params.unsavedMetricQuery,
+    tableCalculationsMetadata: params.tableCalculationsMetadata,
+});
+
+// Like withVisualizationStore, plus the gallery intent and inputs a rerender can change
+const renderCartesianConfig = (initialParams: CartesianHookParams) => {
+    let inputs = toInputs(initialParams);
+    const store = createVisualizationStore(
+        buildInitialVisualizationState(
+            {
+                type: ChartType.CARTESIAN,
+                config: initialParams.initialChartConfig,
+            },
+            { itemsMap: inputs.itemsMap, hasConfigOwner: false },
+            {
+                stacking: initialParams.stacking,
+                cartesianType: initialParams.cartesianType,
+            },
+        ),
+    );
+    const services = visualizationTestServices(() => inputs);
+    const wrapper: FC<PropsWithChildren> = ({ children }) =>
+        createElement(
+            VisualizationStoreTestProvider,
+            { store },
+            createElement(
+                ServicesContext.Provider,
+                { value: services },
+                createElement(
+                    StateContext.Provider,
+                    { value: inputs },
+                    children,
+                ),
+            ),
+        );
+    const rendered = renderHook(
+        () => {
+            useCartesianEditorSync();
+            return useCartesianChartConfig();
+        },
+        { wrapper },
+    );
+    const rerender = (params: CartesianHookParams) => {
+        inputs = toInputs(params);
+        act(() => {
+            store.dispatch(cartesianIntentActions.setStacking(params.stacking));
+            store.dispatch(
+                cartesianIntentActions.setCartesianType(params.cartesianType),
+            );
+        });
+        rendered.rerender();
+    };
+    return { result: rendered.result, rerender };
+};
 
 describe('sortDimensions', () => {
     test('should not sort anything if no explore', () => {
@@ -792,10 +905,331 @@ describe('getSeriesGroupedByField', () => {
     });
 });
 
+describe('reference-line semantic to physical axis integration', () => {
+    const timeField = 'orders_created_day';
+    const valueField = 'orders_revenue';
+    const stringField = 'orders_status';
+    const makeSeries = (yField: string = valueField): Series[] => [
+        {
+            type: CartesianSeriesType.BAR,
+            yAxisIndex: 0,
+            encode: {
+                xRef: { field: timeField },
+                yRef: { field: yField },
+            },
+        },
+    ];
+    const timeFieldItem: Dimension = {
+        fieldType: FieldType.DIMENSION,
+        hidden: false,
+        label: 'Created month',
+        name: timeField,
+        sql: '',
+        table: 'orders',
+        tableLabel: 'Orders',
+        type: DimensionType.DATE,
+        timeInterval: TimeFrames.MONTH,
+    };
+    const valueFieldItem: Dimension = {
+        fieldType: FieldType.DIMENSION,
+        hidden: false,
+        label: 'Revenue',
+        name: valueField,
+        sql: '',
+        table: 'orders',
+        tableLabel: 'Orders',
+        type: DimensionType.NUMBER,
+    };
+    const stringFieldItem: Dimension = {
+        fieldType: FieldType.DIMENSION,
+        hidden: false,
+        label: 'Status',
+        name: stringField,
+        sql: '',
+        table: 'orders',
+        tableLabel: 'Orders',
+        type: DimensionType.STRING,
+    };
+    const itemsMap: ItemsMap = {
+        [timeField]: timeFieldItem,
+        [valueField]: valueFieldItem,
+        [stringField]: stringFieldItem,
+    };
+    const editorReferenceLines: ReferenceLineField[] = [
+        {
+            fieldId: timeField,
+            data: {
+                uuid: 'date',
+                name: 'Year start',
+                xAxis: '2024',
+            },
+        },
+        {
+            fieldId: valueField,
+            data: {
+                uuid: 'threshold',
+                name: 'Revenue target',
+                yAxis: '2024',
+            },
+        },
+    ];
+
+    test.each([
+        { orientation: 'vertical', flipAxes: false },
+        { orientation: 'flipped', flipAxes: true },
+    ])(
+        'keeps editor-produced date and numeric lines on their physical axes when $orientation',
+        ({ flipAxes }) => {
+            const series = applyReferenceLines(
+                makeSeries(),
+                {
+                    xField: timeField,
+                    yField: [valueField],
+                    flipAxes,
+                },
+                editorReferenceLines,
+            );
+            const options = { dataset: { source: [] }, series };
+            const timeSlot = flipAxes ? 'yAxis' : 'xAxis';
+            const valueSlot = flipAxes ? 'xAxis' : 'yAxis';
+
+            const flagOn = finalizeTimeAxisOptions(options, {
+                kind: 'plain',
+                flipAxes,
+            });
+            const data = flagOn.series?.[0].markLine?.data ?? [];
+            const dateLine = data.find((line) => line.uuid === 'date');
+            const thresholdLine = data.find(
+                (line) => line.uuid === 'threshold',
+            );
+
+            expect(dateLine?.[timeSlot]).toBe(
+                Date.parse('2024-01-01T00:00:00Z'),
+            );
+            expect(dateLine?.[valueSlot]).toBeUndefined();
+            expect(dateLine?.label?.formatter).toBe('Year start');
+            expect(thresholdLine?.[valueSlot]).toBe('2024');
+            expect(thresholdLine?.[timeSlot]).toBeUndefined();
+
+            // No timezone mode means flag-off options and authored values pass
+            // through by reference, after the normal field-aware axis mapping.
+            expect(finalizeTimeAxisOptions(options, undefined)).toBe(options);
+            expect(series[0].markLine?.data[0][timeSlot]).toBe('2024');
+            expect(series[0].markLine?.data[1][valueSlot]).toBe('2024');
+        },
+    );
+
+    test.each([
+        {
+            orientation: 'flipped',
+            flipAxes: true,
+            legacyData: { xAxis: '2024-07-15' },
+            expectedTimeSlot: 'yAxis' as const,
+            expectedValueSlot: 'xAxis' as const,
+        },
+        {
+            orientation: 'vertical after flip-save-unflip',
+            flipAxes: false,
+            legacyData: { yAxis: '2024-07-15' },
+            expectedTimeSlot: 'xAxis' as const,
+            expectedValueSlot: 'yAxis' as const,
+        },
+    ])(
+        'repairs a legacy coarse-grain line before axis inference when $orientation',
+        ({ flipAxes, legacyData, expectedTimeSlot, expectedValueSlot }) => {
+            const series = applyReferenceLines(
+                makeSeries(),
+                { xField: timeField, yField: [valueField], flipAxes },
+                [
+                    {
+                        // Legacy extraction attributed the semantic time value
+                        // to the numeric field because it assumed physical keys.
+                        fieldId: valueField,
+                        data: { uuid: 'legacy-date', ...legacyData },
+                    },
+                ],
+                { itemsMap, resolvedTimezone: 'UTC' },
+            );
+            const line = series[0].markLine?.data[0];
+
+            expect(line?.[expectedTimeSlot]).toBe('2024-07-15');
+            expect(line?.[expectedValueSlot]).toBeUndefined();
+
+            const finalized = finalizeTimeAxisOptions(
+                {
+                    dataset: {
+                        source: [{ [timeField]: '2024-07-15' }],
+                    },
+                    series,
+                },
+                { kind: 'calendar', fieldId: timeField, flipAxes },
+            );
+            const finalizedLine = finalized.series?.[0].markLine?.data[0];
+
+            expect(finalizedLine?.[expectedTimeSlot]).toBe(
+                Date.parse('2024-07-15T00:00:00Z'),
+            );
+            expect(finalizedLine?.[expectedValueSlot]).toBeUndefined();
+        },
+    );
+
+    test('repairs an unambiguous explicitly-zoned legacy time value', () => {
+        const series = applyReferenceLines(
+            makeSeries(),
+            { xField: timeField, yField: [valueField], flipAxes: true },
+            [
+                {
+                    fieldId: valueField,
+                    data: {
+                        uuid: 'legacy-zoned',
+                        xAxis: '2024-07-15T12:00:00Z',
+                    },
+                },
+            ],
+            { itemsMap, resolvedTimezone: 'UTC' },
+        );
+
+        expect(series[0].markLine?.data[0].yAxis).toBe('2024-07-15T12:00:00Z');
+        expect(series[0].markLine?.data[0].xAxis).toBeUndefined();
+    });
+
+    test('leaves ambiguous numeric years and flag-off mappings unchanged', () => {
+        const layout = {
+            xField: timeField,
+            yField: [valueField],
+            flipAxes: true,
+        };
+        const numericYear: ReferenceLineField = {
+            fieldId: valueField,
+            data: { uuid: 'threshold', xAxis: '2024' },
+        };
+        const legacyDate: ReferenceLineField = {
+            fieldId: valueField,
+            data: { uuid: 'legacy-date', xAxis: '2024-07-15' },
+        };
+
+        const numericResult = applyReferenceLines(
+            makeSeries(),
+            layout,
+            [numericYear],
+            { itemsMap, resolvedTimezone: 'UTC' },
+        );
+        const flagOffResult = applyReferenceLines(
+            makeSeries(),
+            layout,
+            [legacyDate],
+            { itemsMap, resolvedTimezone: undefined },
+        );
+
+        expect(numericResult[0].markLine?.data[0].xAxis).toBe('2024');
+        expect(numericResult[0].markLine?.data[0].yAxis).toBeUndefined();
+        expect(flagOffResult[0].markLine?.data[0].xAxis).toBe('2024-07-15');
+        expect(flagOffResult[0].markLine?.data[0].yAxis).toBeUndefined();
+    });
+
+    test('does not reinterpret a date-shaped category reference during finalization', () => {
+        const series = applyReferenceLines(
+            makeSeries(stringField),
+            {
+                xField: timeField,
+                yField: [stringField],
+                flipAxes: true,
+            },
+            [
+                {
+                    fieldId: stringField,
+                    data: {
+                        uuid: 'category-date-shape',
+                        xAxis: '2024-07-15',
+                    },
+                },
+            ],
+            { itemsMap, resolvedTimezone: 'UTC' },
+        );
+        const finalized = finalizeTimeAxisOptions(
+            { dataset: { source: [] }, series },
+            { kind: 'plain', flipAxes: true },
+        );
+        const line = finalized.series?.[0].markLine?.data[0];
+
+        expect(line?.xAxis).toBe('2024-07-15');
+        expect(line?.yAxis).toBeUndefined();
+    });
+
+    test.each([
+        {
+            mode: 'flag on',
+            resolvedTimezone: 'UTC',
+            expectedSlot: 'yAxis' as const,
+            clearedSlot: 'xAxis' as const,
+        },
+        {
+            mode: 'flag off',
+            resolvedTimezone: undefined,
+            expectedSlot: 'xAxis' as const,
+            clearedSlot: 'yAxis' as const,
+        },
+    ])(
+        'maps a mis-keyed saved coarse-grain line through the full config hook when $mode',
+        ({ resolvedTimezone, expectedSlot, clearedSlot }) => {
+            const initialSeries = makeSeries()[0];
+            const params: CartesianHookParams = {
+                initialChartConfig: {
+                    layout: {
+                        xField: timeField,
+                        yField: [valueField],
+                        flipAxes: true,
+                    },
+                    eChartsConfig: {
+                        series: [
+                            {
+                                ...initialSeries,
+                                markLine: {
+                                    data: [
+                                        {
+                                            uuid: 'legacy-saved-date',
+                                            xAxis: '2024-07-15',
+                                        },
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                },
+                pivotKeys: undefined,
+                resultsData: {
+                    rows: [],
+                    metricQuery: {
+                        dimensions: [timeField],
+                        metrics: [valueField],
+                        filters: {},
+                        sorts: [],
+                        limit: 500,
+                        tableCalculations: [],
+                        additionalMetrics: [],
+                    },
+                    hasFetchedAllRows: true,
+                    resolvedTimezone,
+                } as never,
+                columnOrder: [timeField, valueField],
+                itemsMap,
+                stacking: false,
+                cartesianType: undefined,
+                colorPalette: [],
+            };
+            const { result } = renderCartesianConfig(params);
+            const line =
+                result.current.validConfig.eChartsConfig.series?.[0].markLine
+                    ?.data[0];
+
+            expect(line?.[expectedSlot]).toBe('2024-07-15');
+            expect(line?.[clearedSlot]).toBeUndefined();
+        },
+    );
+});
+
 describe('useCartesianChartConfig', () => {
-    const getSingleSeriesParams = (): Parameters<
-        typeof useCartesianChartConfig
-    >[0] => ({
+    const getSingleSeriesParams = (): CartesianHookParams => ({
         ...useCartesianChartConfigParamsMock,
         itemsMap: undefined,
         stacking: undefined,
@@ -834,10 +1268,29 @@ describe('useCartesianChartConfig', () => {
         columnOrder: ['orders_customer_id', 'orders_total_order_amount'],
     });
 
+    test('a new results object for the same query keeps a cleared x field or y field', () => {
+        const params = getSingleSeriesParams();
+        const clearedX = renderCartesianConfig(params);
+        act(() => clearedX.result.current.setXField(undefined));
+        clearedX.rerender({
+            ...params,
+            resultsData: { ...params.resultsData! },
+        });
+        expect(clearedX.result.current.dirtyLayout?.xField).toBeUndefined();
+
+        const removedY = renderCartesianConfig(params);
+        act(() => removedY.result.current.removeSingleSeries(0));
+        removedY.rerender({
+            ...params,
+            resultsData: { ...params.resultsData! },
+        });
+        expect(removedY.result.current.dirtyLayout?.yField).toEqual([]);
+    });
+
     test('should default series yAxisIndex to 0', () => {
-        const { result } = renderHook(
+        const { result } = renderCartesianConfig(
             // @ts-expect-error partially mock params for hook
-            () => useCartesianChartConfig(useCartesianChartConfigParamsMock),
+            useCartesianChartConfigParamsMock,
         );
 
         const series = result.current.validConfig!.eChartsConfig.series!;
@@ -873,9 +1326,9 @@ describe('useCartesianChartConfig', () => {
             },
         ];
 
-        const { result } = renderHook(() =>
+        const { result } = renderCartesianConfig(
             // @ts-expect-error partially mock params for hook
-            useCartesianChartConfig({
+            {
                 ...useCartesianChartConfigParamsMock,
                 initialChartConfig: {
                     ...useCartesianChartConfigParamsMock.initialChartConfig,
@@ -884,7 +1337,7 @@ describe('useCartesianChartConfig', () => {
                         series: seriesFromOldChart,
                     },
                 },
-            }),
+            },
         );
 
         const series = result.current.validConfig!.eChartsConfig.series!;
@@ -894,24 +1347,24 @@ describe('useCartesianChartConfig', () => {
     });
 
     test('should return undefined columnLimit when feature flag is off and no saved limit', () => {
-        const { result } = renderHook(
+        const { result } = renderCartesianConfig(
             // @ts-expect-error partially mock params for hook
-            () => useCartesianChartConfig(useCartesianChartConfigParamsMock),
+            useCartesianChartConfigParamsMock,
         );
 
         expect(result.current.columnLimit).toBeUndefined();
     });
 
     test('should preserve saved columnLimit in validConfig', () => {
-        const { result } = renderHook(() =>
+        const { result } = renderCartesianConfig(
             // @ts-expect-error partially mock params for hook
-            useCartesianChartConfig({
+            {
                 ...useCartesianChartConfigParamsMock,
                 initialChartConfig: {
                     ...useCartesianChartConfigParamsMock.initialChartConfig,
                     columnLimit: 5,
                 },
-            }),
+            },
         );
 
         expect(result.current.validConfig?.columnLimit).toBe(5);
@@ -925,15 +1378,13 @@ describe('useCartesianChartConfig', () => {
         ];
         const params = getSingleSeriesParams();
 
-        const { result } = renderHook(() =>
-            useCartesianChartConfig({
-                ...params,
-                initialChartConfig: {
-                    ...params.initialChartConfig!,
-                    conditionalFormattings,
-                },
-            }),
-        );
+        const { result } = renderCartesianConfig({
+            ...params,
+            initialChartConfig: {
+                ...params.initialChartConfig!,
+                conditionalFormattings,
+            },
+        });
 
         expect(result.current.validConfig.conditionalFormattings).toEqual(
             conditionalFormattings,
@@ -942,21 +1393,19 @@ describe('useCartesianChartConfig', () => {
 
     test('should preserve category overrides when conditional formattings are set', () => {
         const params = getSingleSeriesParams();
-        const { result } = renderHook(() =>
-            useCartesianChartConfig({
-                ...params,
-                initialChartConfig: {
-                    ...params.initialChartConfig!,
-                    layout: {
-                        ...params.initialChartConfig!.layout,
-                        colorByCategory: true,
-                        categoryColorOverrides: {
-                            retail: '#00ff00',
-                        },
+        const { result } = renderCartesianConfig({
+            ...params,
+            initialChartConfig: {
+                ...params.initialChartConfig!,
+                layout: {
+                    ...params.initialChartConfig!.layout,
+                    colorByCategory: true,
+                    categoryColorOverrides: {
+                        retail: '#00ff00',
                     },
                 },
-            }),
-        );
+            },
+        });
 
         act(() => {
             result.current.onSetConditionalFormattings([
@@ -982,15 +1431,13 @@ describe('useCartesianChartConfig', () => {
             }),
         ];
         const params = getSingleSeriesParams();
-        const { result } = renderHook(() =>
-            useCartesianChartConfig({
-                ...params,
-                initialChartConfig: {
-                    ...params.initialChartConfig!,
-                    conditionalFormattings,
-                },
-            }),
-        );
+        const { result } = renderCartesianConfig({
+            ...params,
+            initialChartConfig: {
+                ...params.initialChartConfig!,
+                conditionalFormattings,
+            },
+        });
 
         act(() => {
             result.current.setColorByCategory(true);
@@ -1004,22 +1451,20 @@ describe('useCartesianChartConfig', () => {
 
     test('should clear conditional formattings when adding a second series', () => {
         const params = getSingleSeriesParams();
-        const { result } = renderHook(() =>
-            useCartesianChartConfig({
-                ...params,
-                initialChartConfig: {
-                    ...params.initialChartConfig!,
-                    conditionalFormattings: [
-                        createConditionalFormattingConfigWithSingleColor(
-                            '#ff0000',
-                            {
-                                fieldId: 'orders_total_order_amount',
-                            },
-                        ),
-                    ],
-                },
-            }),
-        );
+        const { result } = renderCartesianConfig({
+            ...params,
+            initialChartConfig: {
+                ...params.initialChartConfig!,
+                conditionalFormattings: [
+                    createConditionalFormattingConfigWithSingleColor(
+                        '#ff0000',
+                        {
+                            fieldId: 'orders_total_order_amount',
+                        },
+                    ),
+                ],
+            },
+        });
 
         act(() => {
             result.current.addSingleSeries('orders_fulfillment_rate');
@@ -1028,52 +1473,75 @@ describe('useCartesianChartConfig', () => {
         expect(result.current.validConfig.conditionalFormattings).toEqual([]);
     });
 
-    test('should clear custom colors when stacking is enabled', () => {
+    test('should set and clear y-axis minInterval', () => {
+        const params = getSingleSeriesParams();
+        const { result } = renderCartesianConfig(params);
+
+        act(() => {
+            result.current.setYMinInterval(0, 1);
+        });
+
+        expect(result.current.dirtyEchartsConfig?.yAxis?.[0]?.minInterval).toBe(
+            1,
+        );
+
+        act(() => {
+            result.current.setYMinInterval(0, undefined);
+        });
+
+        expect(
+            result.current.dirtyEchartsConfig?.yAxis?.[0]?.minInterval,
+        ).toBeUndefined();
+    });
+
+    test('should set x-axis minInterval', () => {
+        const params = getSingleSeriesParams();
+        const { result } = renderCartesianConfig(params);
+
+        act(() => {
+            result.current.setXMinInterval(0, 1);
+        });
+
+        expect(result.current.dirtyEchartsConfig?.xAxis?.[0]?.minInterval).toBe(
+            1,
+        );
+    });
+
+    test('should clear category colors but keep conditional formatting when stacking is enabled', () => {
         const initialParams = getSingleSeriesParams();
         const conditionalFormattings = [
             createConditionalFormattingConfigWithSingleColor('#ff0000', {
                 fieldId: 'orders_total_order_amount',
             }),
         ];
-        const { result, rerender } = renderHook(
-            ({ params }) =>
-                // @ts-expect-error partially mock params for hook
-                useCartesianChartConfig(params),
-            {
-                initialProps: {
-                    params: {
-                        ...initialParams,
-                        initialChartConfig: {
-                            ...initialParams.initialChartConfig,
-                            layout: {
-                                ...initialParams.initialChartConfig?.layout,
-                                colorByCategory: true,
-                                categoryColorOverrides: {
-                                    retail: '#00ff00',
-                                },
-                            },
-                            conditionalFormattings,
-                        },
+        const { result, rerender } = renderCartesianConfig({
+            ...initialParams,
+            initialChartConfig: {
+                ...initialParams.initialChartConfig!,
+                layout: {
+                    ...initialParams.initialChartConfig!.layout,
+                    colorByCategory: true,
+                    categoryColorOverrides: {
+                        retail: '#00ff00',
                     },
                 },
+                conditionalFormattings,
             },
-        );
+        });
 
         rerender({
-            params: {
-                ...initialParams,
-                stacking: StackType.NORMAL,
-                initialChartConfig: {
-                    ...initialParams.initialChartConfig,
-                    layout: {
-                        ...initialParams.initialChartConfig?.layout,
-                        colorByCategory: true,
-                        categoryColorOverrides: {
-                            retail: '#00ff00',
-                        },
+            ...initialParams,
+            stacking: StackType.NORMAL,
+            initialChartConfig: {
+                ...initialParams.initialChartConfig!,
+                layout: {
+                    ...initialParams.initialChartConfig!.layout,
+                    colorByCategory: true,
+                    categoryColorOverrides: {
+                        retail: '#00ff00',
                     },
-                    conditionalFormattings,
                 },
+                conditionalFormattings,
             },
         });
 
@@ -1081,53 +1549,466 @@ describe('useCartesianChartConfig', () => {
         expect(
             result.current.dirtyLayout?.categoryColorOverrides,
         ).toBeUndefined();
-        expect(result.current.validConfig.conditionalFormattings).toEqual([]);
+        expect(result.current.validConfig.conditionalFormattings).toEqual(
+            conditionalFormattings,
+        );
+    });
+
+    test('should coerce conditional formatting to a single target when stacked', () => {
+        const initialParams = getSingleSeriesParams();
+        const multiMetricParams = {
+            ...initialParams,
+            stacking: StackType.NORMAL,
+            initialChartConfig: {
+                ...initialParams.initialChartConfig!,
+                layout: {
+                    xField: 'orders_customer_id',
+                    yField: ['orders_total_order_amount', 'orders_order_count'],
+                },
+                eChartsConfig: {
+                    series: [
+                        {
+                            type: CartesianSeriesType.BAR,
+                            yAxisIndex: 0,
+                            encode: {
+                                xRef: { field: 'orders_customer_id' },
+                                yRef: {
+                                    field: 'orders_total_order_amount',
+                                },
+                            },
+                        },
+                        {
+                            type: CartesianSeriesType.BAR,
+                            yAxisIndex: 0,
+                            encode: {
+                                xRef: { field: 'orders_customer_id' },
+                                yRef: { field: 'orders_order_count' },
+                            },
+                        },
+                    ],
+                },
+                conditionalFormattings: [
+                    createConditionalFormattingConfigWithSingleColor(
+                        '#ff0000',
+                        { fieldId: 'orders_total_order_amount' },
+                    ),
+                    createConditionalFormattingConfigWithSingleColor(
+                        '#0000ff',
+                        { fieldId: 'orders_order_count' },
+                    ),
+                ],
+            },
+        };
+
+        const { result } = renderCartesianConfig(multiMetricParams);
+
+        expect(
+            result.current.validConfig.conditionalFormattings?.map(
+                (config) => config.target?.fieldId,
+            ),
+        ).toEqual(['orders_total_order_amount', 'orders_total_order_amount']);
     });
 
     test('should clear conditional formattings when chart becomes ineligible', () => {
         const initialParams = getSingleSeriesParams();
-        const { result, rerender } = renderHook(
-            ({ params }) =>
-                // @ts-expect-error partially mock params for hook
-                useCartesianChartConfig(params),
-            {
-                initialProps: {
-                    params: {
-                        ...initialParams,
-                        initialChartConfig: {
-                            ...initialParams.initialChartConfig,
-                            conditionalFormattings: [
-                                createConditionalFormattingConfigWithSingleColor(
-                                    '#ff0000',
-                                    {
-                                        fieldId: 'orders_total_order_amount',
-                                    },
-                                ),
-                            ],
+        const { result, rerender } = renderCartesianConfig({
+            ...initialParams,
+            initialChartConfig: {
+                ...initialParams.initialChartConfig!,
+                conditionalFormattings: [
+                    createConditionalFormattingConfigWithSingleColor(
+                        '#ff0000',
+                        {
+                            fieldId: 'orders_total_order_amount',
                         },
-                    },
-                },
+                    ),
+                ],
             },
-        );
+        });
 
         rerender({
-            params: {
-                ...initialParams,
-                pivotKeys: ['orders_status'] as string[] | undefined,
-                initialChartConfig: {
-                    ...initialParams.initialChartConfig,
-                    conditionalFormattings: [
-                        createConditionalFormattingConfigWithSingleColor(
-                            '#ff0000',
-                            {
-                                fieldId: 'orders_total_order_amount',
-                            },
-                        ),
-                    ],
-                },
+            ...initialParams,
+            pivotKeys: ['orders_status'] as string[] | undefined,
+            initialChartConfig: {
+                ...initialParams.initialChartConfig!,
+                conditionalFormattings: [
+                    createConditionalFormattingConfigWithSingleColor(
+                        '#ff0000',
+                        {
+                            fieldId: 'orders_total_order_amount',
+                        },
+                    ),
+                ],
             },
         });
 
         expect(result.current.validConfig.conditionalFormattings).toEqual([]);
+    });
+});
+
+describe('PROD-11290 mixed bar/line chart types survive pivot changes', () => {
+    const typesByMetric = (series: Series[]) =>
+        series.map((serie) => ({
+            field: serie.encode.yRef.field,
+            type: serie.type,
+            yAxisIndex: serie.yAxisIndex,
+        }));
+
+    const secondMetricSeries = (series: Series[]) =>
+        series.filter(
+            (serie) => serie.encode.yRef.field === 'my_second_metric',
+        );
+
+    test('keeps each metric chart type when the pivot values change', () => {
+        const result = getExpectedSeriesMap({
+            ...pivotSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: mixedBarLinePivotedSeries,
+        });
+
+        expect(typesByMetric(Object.values(result))).toStrictEqual([
+            {
+                field: 'my_metric',
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+            },
+            {
+                field: 'my_second_metric',
+                type: CartesianSeriesType.LINE,
+                yAxisIndex: 1,
+            },
+            {
+                field: 'my_metric',
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+            },
+            {
+                field: 'my_second_metric',
+                type: CartesianSeriesType.LINE,
+                yAxisIndex: 1,
+            },
+        ]);
+    });
+
+    test('keeps each metric chart type when the pivot field changes', () => {
+        const result = getExpectedSeriesMap({
+            ...changedPivotFieldSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: mixedBarLinePivotedSeries,
+        });
+
+        expect(typesByMetric(Object.values(result))).toStrictEqual([
+            {
+                field: 'my_metric',
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+            },
+            {
+                field: 'my_second_metric',
+                type: CartesianSeriesType.LINE,
+                yAxisIndex: 1,
+            },
+        ]);
+    });
+
+    test('keeps each metric chart type when a breakdown is added', () => {
+        const result = getExpectedSeriesMap({
+            ...pivotSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: mixedBarLineFlatSeries,
+        });
+
+        secondMetricSeries(Object.values(result)).forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.LINE);
+            expect(serie.yAxisIndex).toBe(1);
+            expect(serie.smooth).toBe(true);
+            expect(serie.showSymbol).toBe(false);
+        });
+    });
+
+    test('keeps each metric chart type when a breakdown is removed', () => {
+        const result = getExpectedSeriesMap({
+            ...simpleSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: mixedBarLinePivotedSeries,
+        });
+
+        expect(typesByMetric(Object.values(result))).toStrictEqual([
+            {
+                field: 'my_metric',
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+            },
+            {
+                field: 'my_second_metric',
+                type: CartesianSeriesType.LINE,
+                yAxisIndex: 1,
+            },
+        ]);
+    });
+
+    test('keeps each metric chart type when the x field changes', () => {
+        const result = getExpectedSeriesMap({
+            ...simpleSeriesMapArgs,
+            xField: 'my_dimension_week',
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: mixedBarLineFlatSeries,
+        });
+
+        expect(typesByMetric(Object.values(result))).toStrictEqual([
+            {
+                field: 'my_metric',
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+            },
+            {
+                field: 'my_second_metric',
+                type: CartesianSeriesType.LINE,
+                yAxisIndex: 1,
+            },
+        ]);
+    });
+
+    test('keeps an area metric area-styled and stacked', () => {
+        const areaSeries: Series[] = [
+            {
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+                encode: {
+                    xRef: { field: 'my_dimension' },
+                    yRef: { field: 'my_metric' },
+                },
+            },
+            {
+                type: CartesianSeriesType.LINE,
+                areaStyle: {},
+                yAxisIndex: 1,
+                encode: {
+                    xRef: { field: 'my_dimension' },
+                    yRef: { field: 'my_second_metric' },
+                },
+            },
+        ];
+
+        const result = getExpectedSeriesMap({
+            ...pivotSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: areaSeries,
+        });
+
+        secondMetricSeries(Object.values(result)).forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.LINE);
+            expect(serie.areaStyle).toStrictEqual({});
+            expect(serie.stack).toBe('my_second_metric');
+        });
+        Object.values(result)
+            .filter((serie) => serie.encode.yRef.field === 'my_metric')
+            .forEach((serie) => {
+                expect(serie.type).toBe(CartesianSeriesType.BAR);
+                expect(serie.areaStyle).toBeUndefined();
+                expect(serie.stack).toBeUndefined();
+            });
+    });
+
+    test('falls back to the global defaults for a metric with no existing series', () => {
+        const result = getExpectedSeriesMap({
+            ...simpleSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.LINE,
+            existingSeries: [mixedBarLineFlatSeries[0]],
+        });
+
+        expect(typesByMetric(Object.values(result))).toStrictEqual([
+            {
+                field: 'my_metric',
+                type: CartesianSeriesType.BAR,
+                yAxisIndex: 0,
+            },
+            {
+                field: 'my_second_metric',
+                type: CartesianSeriesType.LINE,
+                yAxisIndex: 0,
+            },
+        ]);
+    });
+
+    test('is unchanged for a uniform chart with no existing series', () => {
+        expect(
+            getExpectedSeriesMap({
+                ...simpleSeriesMapArgs,
+                existingSeries: [],
+            }),
+        ).toStrictEqual(expectedSimpleSeriesMap);
+        expect(
+            getExpectedSeriesMap({
+                ...pivotSeriesMapArgs,
+                existingSeries: undefined,
+            }),
+        ).toStrictEqual(expectedPivotedSeriesMap);
+    });
+
+    test('preserves exact-match series overrides through the merge', () => {
+        const expectedSeriesMap = getExpectedSeriesMap({
+            ...pivotSeriesMapArgs,
+            defaultCartesianType: CartesianSeriesType.BAR,
+            existingSeries: mixedBarLinePivotedSeries,
+        });
+
+        const merged = mergeExistingAndExpectedSeries({
+            expectedSeriesMap,
+            existingSeries: mixedBarLinePivotedSeries,
+            sortedByPivot: false,
+        });
+
+        expect(
+            merged.find(
+                (serie) =>
+                    getSeriesId(serie) ===
+                    getSeriesId(mixedBarLinePivotedSeries[1]),
+            ),
+        ).toStrictEqual({
+            ...mixedBarLinePivotedSeries[1],
+            isFilteredOut: false,
+        });
+
+        const newSecondMetricSeries = merged.filter(
+            (serie) =>
+                serie.encode.yRef.field === 'my_second_metric' &&
+                getSeriesId(serie) !==
+                    getSeriesId(mixedBarLinePivotedSeries[1]),
+        );
+        expect(newSecondMetricSeries.length).toBeGreaterThan(0);
+        newSecondMetricSeries.forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.LINE);
+            expect(serie.yAxisIndex).toBe(1);
+            expect(serie.name).toBeUndefined();
+            expect(serie.color).toBeUndefined();
+        });
+    });
+});
+
+describe('PROD-11290 series regeneration through useCartesianChartConfig', () => {
+    const getParams = (
+        pivotField: string,
+        pivotValues: string[],
+    ): CartesianHookParams => ({
+        itemsMap: undefined,
+        stacking: undefined,
+        cartesianType: undefined,
+        colorPalette: [],
+        pivotKeys: [pivotField],
+        initialChartConfig: {
+            layout: {
+                xField: 'my_dimension',
+                yField: ['my_metric', 'my_second_metric'],
+            },
+            eChartsConfig: {
+                series: mixedBarLinePivotedSeries,
+            },
+        },
+        resultsData: {
+            ...buildInfiniteQueryResults({
+                rows: [
+                    {
+                        my_dimension: { value: { raw: 'a', formatted: 'a' } },
+                        my_metric: { value: { raw: 1, formatted: '1' } },
+                        my_second_metric: { value: { raw: 2, formatted: '2' } },
+                    },
+                ],
+                pivotDetails: buildPivotDetails(pivotField, pivotValues),
+            }),
+            metricQuery: {
+                exploreName: 'my_explore',
+                dimensions: ['my_dimension', pivotField],
+                metrics: ['my_metric', 'my_second_metric'],
+                filters: {},
+                sorts: [],
+                limit: 500,
+                tableCalculations: [],
+                additionalMetrics: [],
+            },
+        },
+        columnOrder: [
+            'my_dimension',
+            pivotField,
+            'my_metric',
+            'my_second_metric',
+        ],
+    });
+
+    const activeSeriesFor = (series: Series[], field: string) =>
+        series.filter(
+            (serie) =>
+                serie.encode.yRef.field === field && !serie.isFilteredOut,
+        );
+
+    test('a dashboard parameter changing the breakdown values keeps the bar/line mix and both axes', () => {
+        const { result, rerender } = renderCartesianConfig(
+            getParams('dimension_x', ['a']),
+        );
+
+        rerender(getParams('dimension_x', ['b', 'c']));
+
+        const series = result.current.validConfig!.eChartsConfig.series!;
+        const lineSeries = activeSeriesFor(series, 'my_second_metric');
+
+        expect(lineSeries.length).toBe(2);
+        lineSeries.forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.LINE);
+            expect(serie.yAxisIndex).toBe(1);
+        });
+        activeSeriesFor(series, 'my_metric').forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.BAR);
+            expect(serie.yAxisIndex).toBe(0);
+        });
+    });
+
+    test('a dashboard parameter changing the breakdown dimension keeps the bar/line mix and both axes', () => {
+        const { result, rerender } = renderCartesianConfig(
+            getParams('dimension_x', ['a']),
+        );
+
+        rerender(getParams('dimension_y', ['x', 'y']));
+
+        const series = result.current.validConfig!.eChartsConfig.series!;
+        const lineSeries = activeSeriesFor(series, 'my_second_metric');
+
+        expect(lineSeries.length).toBe(2);
+        lineSeries.forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.LINE);
+            expect(serie.yAxisIndex).toBe(1);
+        });
+        activeSeriesFor(series, 'my_metric').forEach((serie) => {
+            expect(serie.type).toBe(CartesianSeriesType.BAR);
+            expect(serie.yAxisIndex).toBe(0);
+        });
+    });
+});
+
+describe('picking a cartesian type before any series exists', () => {
+    // setChartType restores EMPTY_CARTESIAN_CHART_CONFIG when the session has
+    // never been cartesian, so there is no series to inherit a type from
+    const getParams = (cartesianType: CartesianTypeOptions) => ({
+        ...useCartesianChartConfigParamsMock,
+        itemsMap: undefined,
+        stacking: undefined,
+        colorPalette: [],
+        cartesianType,
+    });
+
+    test('generates series of the requested type rather than falling back to bar', () => {
+        const params = getParams({
+            type: CartesianSeriesType.LINE,
+            flipAxes: false,
+            hasAreaStyle: false,
+        });
+        // @ts-expect-error partially mock params for hook
+        const { result } = renderCartesianConfig(params);
+
+        const series = result.current.validConfig!.eChartsConfig.series!;
+
+        expect(series.length).toBeGreaterThan(0);
+        series.forEach((serie) =>
+            expect(serie.type).toBe(CartesianSeriesType.LINE),
+        );
     });
 });

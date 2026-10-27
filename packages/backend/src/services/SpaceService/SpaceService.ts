@@ -1,14 +1,15 @@
 import { subject } from '@casl/ability';
 import {
     AbilityAction,
+    ApiSpaceServiceAccountCandidatesResponse,
     BulkActionable,
     CreateSpace,
     ForbiddenError,
     getHighestSpaceRole,
     NotFoundError,
-    OrganizationMemberRole,
     ParameterError,
-    ProjectMemberRole,
+    PersonalSpaceSummary,
+    RegisteredAccount,
     SessionUser,
     Space,
     SpaceDeleteImpact,
@@ -16,16 +17,28 @@ import {
     SpaceShare,
     SpaceSummary,
     UpdateSpace,
+    UUID,
+    type KnexPaginateArgs,
+    type KnexPaginatedData,
     type SpaceAccess,
+    type SpaceAccessListFilters,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
+import { toSessionUser } from '../../auth/account';
 import { LightdashConfig } from '../../config/parseConfig';
+import type { ServiceAccountModel } from '../../ee/models/ServiceAccountModel';
 import type { AppGenerateService } from '../../ee/services/AppGenerateService/AppGenerateService';
+import type { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
+import { OrganizationMemberProfileModel } from '../../models/OrganizationMemberProfileModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
 import { PinnedListModel } from '../../models/PinnedListModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
-import { SpaceModel } from '../../models/SpaceModel';
+import { SpaceModel, type CascadedDocument } from '../../models/SpaceModel';
+import {
+    assertHumanManagedMutation,
+    getManagedAgentPolicy,
+} from '../AgentPermissionService/assertHumanManagedMutation';
 import { BaseService } from '../BaseService';
 import type { DashboardService } from '../DashboardService/DashboardService';
 import type { SavedChartService } from '../SavedChartsService/SavedChartService';
@@ -36,11 +49,13 @@ import type {
 import { SpacePermissionService } from './SpacePermissionService';
 
 type SpaceServiceArguments = {
+    featureFlagModel: FeatureFlagModel;
     analytics: LightdashAnalytics;
     lightdashConfig: LightdashConfig;
     projectModel: ProjectModel;
     spaceModel: SpaceModel;
     organizationModel: OrganizationModel;
+    organizationMemberProfileModel: OrganizationMemberProfileModel;
     pinnedListModel: PinnedListModel;
     spacePermissionService: SpacePermissionService;
     savedChartService: SavedChartService;
@@ -48,6 +63,7 @@ type SpaceServiceArguments = {
     // EE-only. When the license isn't active the repository leaves this
     // undefined and the cascade skips data apps (there are none to delete).
     appGenerateService: AppGenerateService | undefined;
+    serviceAccountModel?: ServiceAccountModel;
 };
 
 export const hasDirectAccessToSpace = (
@@ -80,6 +96,8 @@ export class SpaceService
     extends BaseService
     implements BulkActionable<Knex>, SoftDeletableService
 {
+    private readonly featureFlagModel: FeatureFlagModel;
+
     private readonly analytics: LightdashAnalytics;
 
     private readonly lightdashConfig: LightdashConfig;
@@ -89,6 +107,8 @@ export class SpaceService
     private readonly spaceModel: SpaceModel;
 
     private readonly organizationModel: OrganizationModel;
+
+    private readonly organizationMemberProfileModel: OrganizationMemberProfileModel;
 
     private readonly pinnedListModel: PinnedListModel;
 
@@ -100,18 +120,24 @@ export class SpaceService
 
     private readonly appGenerateService: AppGenerateService | undefined;
 
+    private readonly serviceAccountModel: ServiceAccountModel | undefined;
+
     constructor(args: SpaceServiceArguments) {
         super();
+        this.featureFlagModel = args.featureFlagModel;
         this.analytics = args.analytics;
         this.lightdashConfig = args.lightdashConfig;
         this.projectModel = args.projectModel;
         this.spaceModel = args.spaceModel;
         this.organizationModel = args.organizationModel;
+        this.organizationMemberProfileModel =
+            args.organizationMemberProfileModel;
         this.pinnedListModel = args.pinnedListModel;
         this.spacePermissionService = args.spacePermissionService;
         this.savedChartService = args.savedChartService;
         this.dashboardService = args.dashboardService;
         this.appGenerateService = args.appGenerateService;
+        this.serviceAccountModel = args.serviceAccountModel;
     }
 
     /** @internal For unit testing only */
@@ -121,12 +147,11 @@ export class SpaceService
         space: Pick<SpaceSummary, 'uuid'>,
         action: AbilityAction,
     ): Promise<boolean> {
-        const spaceCtx =
-            await this.spacePermissionService.getSpaceAccessContext(
-                user.userUuid,
-                space.uuid,
-            );
-        // eslint-disable-next-line no-direct-ability-check -- test-only method exercises raw CASL abilities
+        const spaceCtx = await this.spacePermissionService.resolveAccess(
+            user.userUuid,
+            { type: 'space', spaceUuid: space.uuid },
+        );
+        // eslint-disable-next-line lightdash/no-direct-ability-check -- test-only method exercises raw CASL abilities
         return user.ability.can(action, subject(contentType, spaceCtx));
     }
 
@@ -140,7 +165,10 @@ export class SpaceService
     ): Promise<Space> {
         const space = await this.spaceModel.get(spaceUuid);
         const [ctx, groupsAccess, rawBreadcrumbs] = await Promise.all([
-            this.spacePermissionService.getAllSpaceAccessContext(spaceUuid),
+            this.spacePermissionService.resolveAccess(user.userUuid, {
+                type: 'space',
+                spaceUuid,
+            }),
             this.spacePermissionService.getGroupAccess(spaceUuid),
             this.spaceModel.getSpaceBreadcrumbs(spaceUuid, space.projectUuid),
         ]);
@@ -159,25 +187,7 @@ export class SpaceService
             hasAccess: accessibleUuids.has(b.uuid),
         }));
 
-        // `resolveSpaceAccess` drops admins from restricted spaces; re-add
-        // them for audit display. A user already in `ctx.access` keeps the
-        // role they were granted directly — admin powers come via CASL.
-        const existingAccessUuids = new Set(ctx.access.map((a) => a.userUuid));
-        const adminAccess: SpaceAccess[] = ctx.admins
-            .filter((admin) => !existingAccessUuids.has(admin.userUuid))
-            .map((admin) => ({
-                userUuid: admin.userUuid,
-                role: SpaceMemberRole.ADMIN,
-                hasDirectAccess: false,
-                projectRole: ProjectMemberRole.ADMIN,
-                inheritedRole:
-                    admin.source === 'organization'
-                        ? OrganizationMemberRole.ADMIN
-                        : ProjectMemberRole.ADMIN,
-                inheritedFrom: admin.source,
-            }));
-
-        const allAccess: SpaceAccess[] = [...ctx.access, ...adminAccess];
+        const allAccess = this.spacePermissionService.mergeAdminAccess(ctx);
 
         const userInfoMap =
             await this.spacePermissionService.getUserMetadataByUuids(
@@ -190,6 +200,8 @@ export class SpaceService
             lastName: userInfoMap[a.userUuid]?.lastName ?? '',
             email: userInfoMap[a.userUuid]?.email ?? '',
             isInternal: userInfoMap[a.userUuid]?.isInternal ?? false,
+            avatarUrl: userInfoMap[a.userUuid]?.avatarUrl ?? null,
+            avatarGradient: userInfoMap[a.userUuid]?.avatarGradient ?? null,
         }));
 
         const [queries, dashboards, childSpaces] = await Promise.all([
@@ -215,11 +227,122 @@ export class SpaceService
         user: SessionUser,
         spaceUuid: string,
     ): Promise<Space> {
+        const space = await this.spaceModel.get(spaceUuid);
+        if (space.projectUuid !== projectUuid) {
+            throw new NotFoundError(`Space with uuid ${spaceUuid} not found`);
+        }
+
         if (!(await this.spacePermissionService.can('view', user, spaceUuid))) {
             throw new ForbiddenError();
         }
 
         return this.assembleFullSpace(spaceUuid, user);
+    }
+
+    async getPersonalSpace(
+        projectUuid: string,
+        user: SessionUser,
+    ): Promise<PersonalSpaceSummary | null> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        return this.spaceModel.findPersonalSpace(projectUuid, user.userId);
+    }
+
+    async getSpaceAccessList(
+        projectUuid: string,
+        user: SessionUser,
+        spaceUuid: string,
+        {
+            paginateArgs,
+            filters,
+        }: {
+            paginateArgs?: KnexPaginateArgs;
+            filters?: SpaceAccessListFilters;
+        },
+    ): Promise<KnexPaginatedData<SpaceShare[]>> {
+        const space = await this.spaceModel.get(spaceUuid);
+        if (space.projectUuid !== projectUuid) {
+            throw new NotFoundError(`Space with uuid ${spaceUuid} not found`);
+        }
+
+        if (!(await this.spacePermissionService.can('view', user, spaceUuid))) {
+            throw new ForbiddenError();
+        }
+
+        if (filters?.userUuids && filters.userUuids.length > 100) {
+            throw new ParameterError('userUuids accepts at most 100 values');
+        }
+
+        if (filters?.userUuids?.length === 0) {
+            return {
+                data: [],
+                ...(paginateArgs
+                    ? {
+                          pagination: {
+                              ...paginateArgs,
+                              totalPageCount: 0,
+                              totalResults: 0,
+                          },
+                      }
+                    : {}),
+            };
+        }
+
+        return this.spacePermissionService.getPaginatedSpaceAccess(spaceUuid, {
+            paginateArgs,
+            filters,
+            currentUserUuid: user.userUuid,
+        });
+    }
+
+    /**
+     * Space access rows for users outside the space's organization never grant
+     * access (no CASL rule matches them) but would linger as dangling state and
+     * show up in access lists — reject them at the boundary instead.
+     */
+    private async validateSpaceShareTargetUsers(
+        organizationUuid: string,
+        userUuids: string[],
+        includeServiceAccounts = false,
+    ): Promise<void> {
+        const uniqueUserUuids = [...new Set(userUuids)];
+        const memberUuids = new Set(
+            await this.organizationMemberProfileModel.findOrganizationMemberUuids(
+                organizationUuid,
+                uniqueUserUuids,
+            ),
+        );
+        const missingUserUuids = uniqueUserUuids.filter(
+            (userUuid) => !memberUuids.has(userUuid),
+        );
+        const serviceAccounts =
+            includeServiceAccounts && missingUserUuids.length > 0
+                ? await this.serviceAccountModel?.getSpaceShareCandidates(
+                      organizationUuid,
+                      missingUserUuids,
+                  )
+                : [];
+        const serviceAccountUserUuids = new Set(
+            serviceAccounts?.map(({ userUuid }) => userUuid),
+        );
+        if (
+            missingUserUuids.some(
+                (userUuid) => !serviceAccountUserUuids.has(userUuid),
+            )
+        ) {
+            throw new NotFoundError(
+                'Cannot share space: user is not a member of this organization',
+            );
+        }
     }
 
     async createSpace(
@@ -254,6 +377,13 @@ export class SpaceService
             }
         }
 
+        if (space.access && space.access.length > 0) {
+            await this.validateSpaceShareTargetUsers(
+                organizationUuid,
+                space.access.map((access) => access.userUuid),
+            );
+        }
+
         let inheritParentPermissions: boolean;
         if (space.inheritParentPermissions !== undefined) {
             inheritParentPermissions = space.inheritParentPermissions;
@@ -262,6 +392,8 @@ export class SpaceService
         } else {
             inheritParentPermissions = false;
         }
+
+        await this.assertHumanAccessMutation(user, organizationUuid);
 
         const newSpace = await this.spaceModel.createSpace(
             {
@@ -331,7 +463,36 @@ export class SpaceService
             }
         }
 
-        const { inheritParentPermissions } = updateSpace;
+        if (
+            (updateSpace.inheritParentPermissions !== undefined &&
+                updateSpace.inheritParentPermissions !==
+                    space.inheritParentPermissions) ||
+            (updateSpace.projectMemberAccessRole !== undefined &&
+                updateSpace.projectMemberAccessRole !==
+                    space.projectMemberAccessRole)
+        ) {
+            await this.assertHumanAccessMutation(user, space.organizationUuid);
+        }
+
+        const spaceUpdate = {
+            ...updateSpace,
+            inheritParentPermissions: updateSpace.inheritParentPermissions,
+        };
+        if (
+            (updateSpace.inheritParentPermissions !== undefined ||
+                updateSpace.projectMemberAccessRole !== undefined) &&
+            (await getManagedAgentPolicy({
+                organizationUuid: space.organizationUuid,
+                ability: user.ability,
+                oauth: false,
+                database: this.spaceModel.database,
+                featureFlagModel: this.featureFlagModel,
+            })) !== null
+        ) {
+            delete spaceUpdate.inheritParentPermissions;
+            delete spaceUpdate.projectMemberAccessRole;
+        }
+        const { inheritParentPermissions } = spaceUpdate;
 
         // When switching from inherit to not-inherit, copy inherited permissions
         // as direct access entries so users don't lose access.
@@ -340,9 +501,9 @@ export class SpaceService
             inheritParentPermissions === false;
 
         if (turnInheritOff) {
-            const ctx = await this.spacePermissionService.getSpaceAccessContext(
+            const ctx = await this.spacePermissionService.resolveAccess(
                 user.userUuid,
-                spaceUuid,
+                { type: 'space', spaceUuid },
             );
             const userAccess = ctx.access.find(
                 (a) => a.userUuid === user.userUuid,
@@ -375,21 +536,21 @@ export class SpaceService
             }
             await this.spaceModel.updateWithCopiedPermissions(
                 spaceUuid,
-                { ...updateSpace, inheritParentPermissions },
+                spaceUpdate,
                 userAccessEntries,
                 groupAccessEntries,
             );
         } else {
-            await this.spaceModel.update(spaceUuid, {
-                ...updateSpace,
-                inheritParentPermissions,
-            });
+            await this.spaceModel.update(spaceUuid, spaceUpdate);
         }
 
         const updatedSpace = await this.assembleFullSpace(spaceUuid, user);
-        const directAccessCount = updatedSpace.access.filter(
-            (a) => a.hasDirectAccess,
-        ).length;
+        const rawDirectAccess =
+            await this.spacePermissionService.getRawDirectAccess([spaceUuid]);
+        const directAccessCount = new Set(
+            rawDirectAccess[spaceUuid]?.users.map(({ userUuid }) => userUuid) ??
+                [],
+        ).size;
 
         const isNested = !!space.parentSpaceUuid;
 
@@ -408,6 +569,19 @@ export class SpaceService
         });
 
         return updatedSpace;
+    }
+
+    private async assertHumanAccessMutation(
+        user: SessionUser,
+        organizationUuid: string | undefined,
+    ): Promise<void> {
+        await assertHumanManagedMutation({
+            organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.spaceModel.database,
+            featureFlagModel: this.featureFlagModel,
+        });
     }
 
     private async hasAccess(
@@ -469,7 +643,9 @@ export class SpaceService
             trackEvent?: boolean;
         } = {},
     ) {
-        const space = await this.spaceModel.getSpaceSummary(spaceUuid);
+        const space = await this.spaceModel.getSpaceSummary(spaceUuid, {
+            projectUuid,
+        });
 
         if (!space) {
             throw new NotFoundError('Space not found');
@@ -492,9 +668,13 @@ export class SpaceService
             );
         }
 
+        if (space.inheritParentPermissions) {
+            await this.assertHumanAccessMutation(user, space.organizationUuid);
+        }
+
         await this.spaceModel.moveToSpace(
             {
-                projectUuid: space.projectUuid,
+                projectUuid,
                 itemUuid: spaceUuid,
                 targetSpaceUuid,
             },
@@ -626,7 +806,41 @@ export class SpaceService
             });
         }
 
-        await this.spaceModel.softDelete(spaceUuid, user.userUuid);
+        const documents = await this.spaceModel.softDelete(
+            spaceUuid,
+            user.userUuid,
+        );
+        this.logCascadedDocuments(user, 'delete', 'Document', {
+            organizationUuid: user.organizationUuid ?? 'unknown',
+            spaceUuid,
+            documents,
+        });
+    }
+
+    /** Documents follow their Space in SQL, so each gets the bypass audit
+     * event that cascaded charts and dashboards log from their services. */
+    private logCascadedDocuments(
+        user: SessionUser,
+        action: 'delete' | 'manage',
+        type: 'Document' | 'DeletedContent',
+        {
+            organizationUuid,
+            spaceUuid,
+            documents,
+        }: {
+            organizationUuid: string;
+            spaceUuid: string;
+            documents: CascadedDocument[];
+        },
+    ): void {
+        for (const { documentUuid, projectUuid } of documents) {
+            this.logBypassEvent(user, action, {
+                type,
+                metadata: { documentUuid, spaceUuid },
+                organizationUuid,
+                projectUuid,
+            });
+        }
     }
 
     async getDeleteImpact(
@@ -653,6 +867,25 @@ export class SpaceService
         ]);
 
         const allCharts = [...charts, ...sqlCharts];
+        const contexts = await this.spacePermissionService.resolveAccessBatch(
+            user.userUuid,
+            allUuids.map((uuid) => ({ type: 'space', spaceUuid: uuid })),
+        );
+        const ability = this.createAuditedAbility(user);
+        const documentSpaceUuids = contexts.flatMap(({ target, context }) =>
+            context && ability.can('view', subject('Document', context))
+                ? [target.spaceUuid]
+                : [],
+        );
+        const documents =
+            await this.spaceModel.getDocumentsInSpaces(documentSpaceUuids);
+        const documentCounts = new Map<string, number>();
+        documents.forEach(({ spaceUuid: documentSpaceUuid }) => {
+            documentCounts.set(
+                documentSpaceUuid,
+                (documentCounts.get(documentSpaceUuid) ?? 0) + 1,
+            );
+        });
 
         return {
             spaces: spaces.map((s) => ({
@@ -662,6 +895,7 @@ export class SpaceService
                 chartCount: Number(s.chartCount),
                 dashboardCount: Number(s.dashboardCount),
                 appCount: Number(s.appCount),
+                documentCount: documentCounts.get(s.uuid) ?? 0,
             })),
             charts: allCharts.map((c) => ({
                 uuid: c.uuid,
@@ -680,6 +914,8 @@ export class SpaceService
             chartCount: allCharts.length,
             dashboardCount: dashboards.length,
             appCount: apps.length,
+            documents,
+            documentCount: documents.length,
         };
     }
 
@@ -690,6 +926,7 @@ export class SpaceService
     ): Promise<void> {
         const space = await this.spaceModel.getSpaceSummary(spaceUuid, {
             deleted: true,
+            projectUuid: options?.projectUuid,
         });
 
         if (options?.bypassPermissions) {
@@ -726,7 +963,12 @@ export class SpaceService
             }
         }
 
-        await this.spaceModel.restore(spaceUuid);
+        const restoredDocuments = await this.spaceModel.restore(spaceUuid);
+        this.logCascadedDocuments(user, 'manage', 'DeletedContent', {
+            organizationUuid: space.organizationUuid,
+            spaceUuid,
+            documents: restoredDocuments,
+        });
 
         // Cascade: restore children that were cascade-deleted by the same user
         if (space.deletedBy?.userUuid) {
@@ -739,6 +981,7 @@ export class SpaceService
                 // eslint-disable-next-line no-await-in-loop
                 await this.savedChartService.restore(user, chartUuid, {
                     bypassPermissions: true, // space restore authorized above
+                    projectUuid: space.projectUuid,
                 });
             }
 
@@ -751,6 +994,7 @@ export class SpaceService
                 // eslint-disable-next-line no-await-in-loop
                 await this.dashboardService.restore(user, dashboardUuid, {
                     bypassPermissions: true, // space restore authorized above
+                    projectUuid: space.projectUuid,
                 });
             }
 
@@ -782,6 +1026,7 @@ export class SpaceService
                 // eslint-disable-next-line no-await-in-loop
                 await this.restore(user, childSpaceUuid, {
                     bypassPermissions: true, // space restore authorized above
+                    projectUuid: space.projectUuid,
                 });
             }
         }
@@ -811,6 +1056,7 @@ export class SpaceService
         } else {
             const space = await this.spaceModel.getSpaceSummary(spaceUuid, {
                 deleted: true,
+                projectUuid: options?.projectUuid,
             });
             const auditedAbility = this.createAuditedAbility(user);
             if (
@@ -854,6 +1100,30 @@ export class SpaceService
         await this.spaceModel.permanentDelete(spaceUuid);
     }
 
+    async getSpaceServiceAccountCandidates(
+        account: RegisteredAccount,
+        projectUuid: UUID,
+        spaceUuid: UUID,
+    ): Promise<ApiSpaceServiceAccountCandidatesResponse['results']> {
+        const space = await this.spaceModel.getSpaceSummary(spaceUuid, {
+            projectUuid,
+        });
+        if (
+            !(await this.spacePermissionService.can(
+                'manage',
+                toSessionUser(account),
+                space.uuid,
+            ))
+        ) {
+            throw new ForbiddenError();
+        }
+        return (
+            this.serviceAccountModel?.getSpaceShareCandidates(
+                space.organizationUuid,
+            ) ?? []
+        );
+    }
+
     async addSpaceUserAccess(
         user: SessionUser,
         spaceUuid: string,
@@ -865,6 +1135,15 @@ export class SpaceService
         ) {
             throw new ForbiddenError();
         }
+
+        const space = await this.spaceModel.getSpaceSummary(spaceUuid);
+        await this.validateSpaceShareTargetUsers(
+            space.organizationUuid,
+            [shareWithUserUuid],
+            true,
+        );
+
+        await this.assertHumanAccessMutation(user, user.organizationUuid);
 
         await this.spaceModel.addSpaceAccess(
             spaceUuid,
@@ -884,6 +1163,8 @@ export class SpaceService
             throw new ForbiddenError();
         }
 
+        await this.assertHumanAccessMutation(user, user.organizationUuid);
+
         await this.spaceModel.removeSpaceAccess(spaceUuid, shareWithUserUuid);
     }
 
@@ -898,6 +1179,8 @@ export class SpaceService
         ) {
             throw new ForbiddenError();
         }
+
+        await this.assertHumanAccessMutation(user, user.organizationUuid);
 
         await this.spaceModel.addSpaceGroupAccess(
             spaceUuid,
@@ -916,6 +1199,8 @@ export class SpaceService
         ) {
             throw new ForbiddenError();
         }
+
+        await this.assertHumanAccessMutation(user, user.organizationUuid);
 
         await this.spaceModel.removeSpaceGroupAccess(
             spaceUuid,

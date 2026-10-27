@@ -1,6 +1,18 @@
-import { CreateEmbedJwt, SEED_PROJECT, UpdateEmbed } from '@lightdash/common';
+import {
+    ApiGetAsyncQueryResults,
+    CreateEmbedJwt,
+    DashboardTileTypes,
+    DateGranularity,
+    DateZoomConfig,
+    QueryHistoryStatus,
+    SEED_PROJECT,
+    UpdateEmbed,
+} from '@lightdash/common';
+import { randomUUID } from 'crypto';
+import { assert } from 'vitest';
 import { ApiClient, Body } from '../helpers/api-client';
 import { login } from '../helpers/auth';
+import { uniqueName } from '../helpers/test-isolation';
 
 const EMBED_API_PREFIX = `/api/v1/embed/${SEED_PROJECT.project_uuid}`;
 
@@ -195,9 +207,104 @@ describe('Embed Dashboard JWT API', () => {
             return resp.body.results.url.split('#')[1];
         }
 
+        // Same dashboard token, opted into explore mode
+        async function freshExploreDashboardJwt(): Promise<string> {
+            const resp = await getEmbedUrl(admin, {
+                user: {
+                    externalId: 'dashboard-user@example.com',
+                    email: 'dashboard-user@example.com',
+                },
+                content: {
+                    type: 'dashboard',
+                    dashboardUuid: testDashboardUuid,
+                    canExportCsv: true,
+                    canExportImages: false,
+                    canViewUnderlyingData: true,
+                    canDateZoom: true,
+                    canExplore: true,
+                    projectUuid: SEED_PROJECT.project_uuid,
+                },
+                expiresIn: '24h',
+            });
+            expect(resp.status).toBe(200);
+            return resp.body.results.url.split('#')[1];
+        }
+
         // Refresh JWT before each test so it uses the current embed secret
         beforeEach(async () => {
             dashboardJwtToken = await freshDashboardJwt();
+        });
+
+        it('an embed viewer can run a dashboard tile and read its results', async () => {
+            const client = embedClient();
+            const options = {
+                headers: embedHeaders(dashboardJwtToken),
+                failOnStatusCode: false,
+            };
+            const dashboardResp = await client.post<
+                Body<{ tiles: { uuid: string; type: DashboardTileTypes }[] }>
+            >(`${EMBED_API_PREFIX}/dashboard`, {}, options);
+            assert.strictEqual(
+                dashboardResp.status,
+                200,
+                JSON.stringify(dashboardResp.body),
+            );
+            const tile = dashboardResp.body.results.tiles.find(
+                (candidate) =>
+                    candidate.type === DashboardTileTypes.SAVED_CHART,
+            );
+            expect(tile).toBeDefined();
+
+            const queryResp = await client.post<Body<{ queryUuid: string }>>(
+                `${EMBED_API_PREFIX}/query/dashboard-tile`,
+                {
+                    tileUuid: tile!.uuid,
+                    dashboardFilters: {
+                        dimensions: [],
+                        metrics: [],
+                        tableCalculations: [],
+                    },
+                    dashboardSorts: [],
+                    invalidateCache: true,
+                },
+                options,
+            );
+            assert.strictEqual(
+                queryResp.status,
+                200,
+                JSON.stringify(queryResp.body),
+            );
+            const { queryUuid } = queryResp.body.results;
+            expect(queryUuid).toBeTruthy();
+
+            let results: ApiGetAsyncQueryResults | undefined;
+            for (let attempt = 0; attempt <= 60; attempt += 1) {
+                const resp = await client.get<Body<ApiGetAsyncQueryResults>>(
+                    `/api/v2/projects/${SEED_PROJECT.project_uuid}/query/${queryUuid}`,
+                    options,
+                );
+                assert.strictEqual(resp.status, 200, JSON.stringify(resp.body));
+                results = resp.body.results;
+                if (
+                    results.status !== QueryHistoryStatus.PENDING &&
+                    results.status !== QueryHistoryStatus.QUEUED &&
+                    results.status !== QueryHistoryStatus.EXECUTING
+                ) {
+                    break;
+                }
+                if (attempt < 60) await delay(1000);
+            }
+
+            const failureMessage = `Query ${queryUuid}: ${JSON.stringify(results)}`;
+            assert.strictEqual(
+                results?.status,
+                QueryHistoryStatus.READY,
+                failureMessage,
+            );
+            assert.notProperty(results, 'error', failureMessage);
+            if (results?.status === QueryHistoryStatus.READY) {
+                assert.isAbove(results.rows.length, 0, failureMessage);
+            }
         });
 
         describe('Explore Access (Regression Tests)', () => {
@@ -248,7 +355,9 @@ describe('Embed Dashboard JWT API', () => {
         });
 
         describe('GET dashboard details', () => {
-            it('should get dashboard using JWT token (authorized)', async () => {
+            // Embed JWTs carry no session user; the app route rejects them
+            // and the embed routes serve their dashboard instead.
+            it('should reject the app dashboard route for a JWT token', async () => {
                 const client = embedClient();
                 const resp = await client.get(
                     `/api/v1/dashboards/${testDashboardUuid}?projectUuid=${SEED_PROJECT.project_uuid}`,
@@ -257,7 +366,7 @@ describe('Embed Dashboard JWT API', () => {
                         failOnStatusCode: false,
                     },
                 );
-                expect(resp.status).toBe(500);
+                expect(resp.status).toBe(403);
             });
         });
 
@@ -292,7 +401,7 @@ describe('Embed Dashboard JWT API', () => {
                 tableCalculations: [],
             };
 
-            it('should calculate totals from raw metricQuery with embed JWT', async () => {
+            it('should fail to calculate totals from raw metricQuery without canExplore', async () => {
                 const client = embedClient();
                 const resp = await client.post<Body<unknown>>(
                     `/api/v1/embed/${SEED_PROJECT.project_uuid}/calculate-total`,
@@ -305,13 +414,12 @@ describe('Embed Dashboard JWT API', () => {
                         failOnStatusCode: false,
                     },
                 );
-                // Should succeed - embed JWT can calculate totals from raw query
-                expect(resp.status).toBe(200);
-                expect(resp.body.status).toBe('ok');
-                expect(typeof resp.body.results).toBe('object');
+                // Raw metric queries require view:Explore, granted only by canExplore
+                expect(resp.status).toBe(403);
+                expect(resp.body).toHaveProperty('error');
             });
 
-            it('should calculate subtotals from raw metricQuery with embed JWT', async () => {
+            it('should fail to calculate subtotals from raw metricQuery without canExplore', async () => {
                 const client = embedClient();
                 const resp = await client.post<Body<unknown>>(
                     `/api/v1/embed/${SEED_PROJECT.project_uuid}/calculate-subtotals`,
@@ -328,7 +436,46 @@ describe('Embed Dashboard JWT API', () => {
                         failOnStatusCode: false,
                     },
                 );
-                // Should succeed - embed JWT can calculate subtotals from raw query
+                // Raw metric queries require view:Explore, granted only by canExplore
+                expect(resp.status).toBe(403);
+                expect(resp.body).toHaveProperty('error');
+            });
+
+            it('should calculate totals from raw metricQuery with canExplore', async () => {
+                const client = embedClient();
+                const resp = await client.post<Body<unknown>>(
+                    `/api/v1/embed/${SEED_PROJECT.project_uuid}/calculate-total`,
+                    {
+                        explore: 'orders',
+                        metricQuery: testMetricQuery,
+                    },
+                    {
+                        headers: embedHeaders(await freshExploreDashboardJwt()),
+                        failOnStatusCode: false,
+                    },
+                );
+                expect(resp.status).toBe(200);
+                expect(resp.body.status).toBe('ok');
+                expect(typeof resp.body.results).toBe('object');
+            });
+
+            it('should calculate subtotals from raw metricQuery with canExplore', async () => {
+                const client = embedClient();
+                const resp = await client.post<Body<unknown>>(
+                    `/api/v1/embed/${SEED_PROJECT.project_uuid}/calculate-subtotals`,
+                    {
+                        explore: 'orders',
+                        metricQuery: testMetricQuery,
+                        columnOrder: [
+                            'orders_status',
+                            'orders_total_order_amount',
+                        ],
+                    },
+                    {
+                        headers: embedHeaders(await freshExploreDashboardJwt()),
+                        failOnStatusCode: false,
+                    },
+                );
                 expect(resp.status).toBe(200);
                 expect(resp.body.status).toBe('ok');
                 expect(typeof resp.body.results).toBe('object');
@@ -367,6 +514,180 @@ describe('Embed Dashboard JWT API', () => {
                 // Should fail - no JWT token provided
                 expect(resp.status).toBe(403);
             });
+        });
+    });
+
+    // The embed dashboard payload must surface the persisted dateZoomConfig:
+    // embedded dashboards seed their date-zoom controls from this, so if the
+    // backend stopped returning it the embed picker would silently lose its
+    // configured controls.
+    describe('Date zoom config in embed payload', () => {
+        const apiV1 = '/api/v1';
+        let embedDashboardUuid: string;
+        let dateZoomConfig: DateZoomConfig;
+        let snapshot: {
+            dashboardUuids?: string[];
+            allowAllDashboards?: boolean;
+            chartUuids?: string[];
+            allowAllCharts?: boolean;
+        };
+
+        beforeAll(async () => {
+            if (!embedEnabled) return;
+
+            // Snapshot the embed config so afterAll can restore it.
+            const snap = await getEmbedConfig(admin);
+            snapshot = snap.body.results;
+
+            // Create a throwaway dashboard with one chart tile.
+            const dashResp = await admin.post<Body<{ uuid: string }>>(
+                `${apiV1}/projects/${SEED_PROJECT.project_uuid}/dashboards`,
+                { name: uniqueName('Embed date zoom'), tiles: [], tabs: [] },
+            );
+            expect(dashResp.status).toBe(201);
+            embedDashboardUuid = dashResp.body.results.uuid;
+
+            const chartResp = await admin.post<Body<{ uuid: string }>>(
+                `${apiV1}/projects/${SEED_PROJECT.project_uuid}/saved`,
+                {
+                    name: uniqueName('Embed date zoom chart'),
+                    tableName: 'orders',
+                    metricQuery: {
+                        exploreName: 'orders',
+                        dimensions: ['orders_status'],
+                        metrics: ['orders_average_order_size'],
+                        filters: {},
+                        sorts: [],
+                        limit: 1,
+                        tableCalculations: [],
+                    },
+                    chartConfig: { type: 'table' },
+                    tableConfig: { columnOrder: [] },
+                    dashboardUuid: embedDashboardUuid,
+                    spaceUuid: null,
+                },
+            );
+            expect(chartResp.status).toBe(200);
+
+            const emptyFilters = {
+                dimensions: [],
+                metrics: [],
+                tableCalculations: [],
+            };
+
+            // Attach the chart as a tile, then read back its assigned uuid.
+            await admin.patch(`${apiV1}/dashboards/${embedDashboardUuid}`, {
+                tiles: [
+                    {
+                        tabUuid: undefined,
+                        type: DashboardTileTypes.SAVED_CHART,
+                        x: 0,
+                        y: 0,
+                        h: 5,
+                        w: 5,
+                        properties: {
+                            savedChartUuid: chartResp.body.results.uuid,
+                        },
+                    },
+                ],
+                tabs: [],
+                filters: emptyFilters,
+            });
+
+            const getResp = await admin.get<
+                Body<{ tiles: Array<{ uuid: string }> }>
+            >(`${apiV1}/dashboards/${embedDashboardUuid}`);
+            const tileUuid = getResp.body.results.tiles[0].uuid;
+
+            const controlUuid = randomUUID();
+            dateZoomConfig = {
+                controls: [
+                    {
+                        uuid: controlUuid,
+                        name: uniqueName('Revenue zoom'),
+                        granularity: DateGranularity.MONTH,
+                    },
+                ],
+                tileTargets: {
+                    [tileUuid]: {
+                        controlUuid,
+                        fieldId: 'orders_order_date_month',
+                        tableName: 'orders',
+                    },
+                },
+            };
+
+            await admin.patch(`${apiV1}/dashboards/${embedDashboardUuid}`, {
+                tiles: getResp.body.results.tiles,
+                tabs: [],
+                filters: emptyFilters,
+                config: { isDateZoomDisabled: false, dateZoomConfig },
+            });
+
+            // Allow the throwaway dashboard through the embed config.
+            await updateEmbedConfig(admin, {
+                dashboardUuids: [
+                    ...(snapshot.dashboardUuids ?? []),
+                    embedDashboardUuid,
+                ],
+                allowAllDashboards: snapshot.allowAllDashboards ?? false,
+                chartUuids: snapshot.chartUuids ?? [],
+                allowAllCharts: true,
+            });
+            await waitForEmbedConfigWithDashboards(admin, [embedDashboardUuid]);
+        });
+
+        afterAll(async () => {
+            if (!embedEnabled) return;
+            if (snapshot) {
+                await updateEmbedConfig(admin, {
+                    dashboardUuids: snapshot.dashboardUuids ?? [],
+                    allowAllDashboards: snapshot.allowAllDashboards ?? false,
+                    chartUuids: snapshot.chartUuids ?? [],
+                    allowAllCharts: snapshot.allowAllCharts ?? true,
+                });
+            }
+            if (embedDashboardUuid) {
+                await admin
+                    .delete(`${apiV1}/dashboards/${embedDashboardUuid}`, {
+                        failOnStatusCode: false,
+                    })
+                    .catch(() => {});
+            }
+        });
+
+        it('returns the saved dateZoomConfig in the embed dashboard payload', async () => {
+            const urlResp = await getEmbedUrl(admin, {
+                user: {
+                    externalId: 'date-zoom-user@example.com',
+                    email: 'date-zoom-user@example.com',
+                },
+                content: {
+                    type: 'dashboard',
+                    dashboardUuid: embedDashboardUuid,
+                    canExportCsv: true,
+                    canExportImages: false,
+                    canViewUnderlyingData: true,
+                    canDateZoom: true,
+                    projectUuid: SEED_PROJECT.project_uuid,
+                },
+                expiresIn: '24h',
+            });
+            expect(urlResp.status).toBe(200);
+            const token = urlResp.body.results.url.split('#')[1];
+
+            const client = new ApiClient();
+            const resp = await client.post<
+                Body<{ config?: { dateZoomConfig?: DateZoomConfig } }>
+            >(
+                `${EMBED_API_PREFIX}/dashboard`,
+                {},
+                { headers: { 'Lightdash-Embed-Token': token } },
+            );
+            expect(resp.status).toBe(200);
+            expect(resp.body.results.config?.dateZoomConfig).toEqual(
+                dateZoomConfig,
+            );
         });
     });
 });

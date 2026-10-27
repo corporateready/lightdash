@@ -1,4 +1,6 @@
+import type { ApiSuccess } from './api/success';
 import { type DashboardDAO } from './dashboard';
+import type { Document } from './document';
 import { type SavedChartDAO } from './savedCharts';
 import { type SpaceSummaryBase } from './space';
 
@@ -32,6 +34,16 @@ export type PromotedSqlChart = {
     spacePath: string;
 };
 
+export type PromotedApp = {
+    uuid: string;
+    name: string;
+};
+
+export type PromotedDocument = {
+    uuid: string;
+    name: string;
+};
+
 export type PromotionChanges = {
     spaces: {
         action: PromotionAction;
@@ -49,7 +61,20 @@ export type PromotionChanges = {
         action: PromotionAction;
         data: PromotedSqlChart;
     }[];
+    // Apps the promotion carries along: data apps referenced by DATA_APP
+    // dashboard tiles, and custom chart types bound by charts' DATA_APP_VIZ
+    // configs. SQL charts never carry apps.
+    dataApps?: {
+        action: PromotionAction;
+        data: PromotedApp;
+    }[];
+    documents?: {
+        action: PromotionAction;
+        data: PromotedDocument;
+    }[];
 };
+
+export type ApiPromoteDocumentResponse = ApiSuccess<Document>;
 
 export type ApiPromoteChartResponse = {
     status: 'ok';

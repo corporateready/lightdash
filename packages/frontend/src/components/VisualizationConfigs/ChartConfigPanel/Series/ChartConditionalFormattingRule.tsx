@@ -7,19 +7,19 @@ import {
     type FilterableItem,
 } from '@lightdash/common';
 import {
-    ActionIcon,
+    TextInput,
     Collapse,
     Group,
-    Select,
     Stack,
     Text,
-    TextInput,
+    ActionIcon,
+    Select,
     Tooltip,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import { IconChevronDown, IconChevronUp, IconTrash } from '@tabler/icons-react';
 import { useMemo, useState, type FC } from 'react';
-import { useParams } from 'react-router';
+import { useProjectUuid } from '../../../../hooks/useProjectUuid';
 import FilterInputComponent from '../../../common/Filters/FilterInputs';
 import { getFilterOperatorOptions } from '../../../common/Filters/FilterInputs/utils';
 import FiltersProvider from '../../../common/Filters/FiltersProvider';
@@ -44,7 +44,7 @@ export const ChartConditionalFormattingRule: FC<Props> = ({
     onChangeRuleOperator,
     onRemoveRule,
 }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const { ref, hovered } = useHover();
     const [isOpen, setIsOpen] = useState(ruleIndex === 0);
 
@@ -68,18 +68,14 @@ export const ChartConditionalFormattingRule: FC<Props> = ({
     }, [filterType]);
 
     return (
-        <Stack spacing="xs" ref={ref}>
-            <Group noWrap position="apart">
-                <Group spacing="xs">
+        <Stack gap="xs" ref={ref}>
+            <Group wrap="nowrap" justify="space-between">
+                <Group gap="xs">
                     <Text fw={500} fz="xs">
                         Condition {ruleIndex + 1}
                     </Text>
                     {hasRemove && hovered && (
-                        <Tooltip
-                            label="Remove condition"
-                            position="left"
-                            withinPortal
-                        >
+                        <Tooltip label="Remove condition" position="left">
                             <ActionIcon onClick={onRemoveRule}>
                                 <MantineIcon icon={IconTrash} />
                             </ActionIcon>
@@ -92,9 +88,10 @@ export const ChartConditionalFormattingRule: FC<Props> = ({
                     />
                 </ActionIcon>
             </Group>
-            <Collapse in={isOpen}>
-                <Group noWrap spacing="xs">
+            <Collapse expanded={isOpen}>
+                <Group wrap="nowrap" gap="xs">
                     <Select
+                        allowDeselect={false}
                         value={rule.operator}
                         data={filterOperatorOptions}
                         onChange={(value) => {
@@ -105,6 +102,7 @@ export const ChartConditionalFormattingRule: FC<Props> = ({
                         disabled={!field || !filterType}
                     />
                     <Select
+                        allowDeselect={false}
                         display={field && filterType ? 'none' : 'block'}
                         placeholder="Value(s)"
                         data={[]}
@@ -120,7 +118,11 @@ export const ChartConditionalFormattingRule: FC<Props> = ({
                                     onChange={onChangeRule}
                                 />
                             ) : (
-                                <TextInput disabled placeholder="Values" />
+                                <TextInput
+                                    size="xs"
+                                    disabled
+                                    placeholder="Values"
+                                />
                             )}
                         </FiltersProvider>
                     ) : null}

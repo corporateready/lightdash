@@ -1,4 +1,10 @@
-import { AnonymousAccount, ForbiddenError, OssEmbed } from '@lightdash/common';
+import {
+    AnonymousAccount,
+    assertUnreachable,
+    ForbiddenError,
+    OssEmbed,
+    type UUID,
+} from '@lightdash/common';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
 import { BaseService } from '../BaseService';
 
@@ -15,8 +21,8 @@ export class PermissionsService extends BaseService {
     }
 
     private async checkEmbeddedDashboardPermission(
-        dashboardUuid: string,
-        savedChartUuid: string,
+        dashboardUuid: UUID,
+        savedChartUuid: UUID,
         embed: OssEmbed,
     ) {
         if (
@@ -42,7 +48,7 @@ export class PermissionsService extends BaseService {
     }
 
     private static checkEmbeddedChartPermissions(
-        savedChartUuid: string,
+        savedChartUuid: UUID,
         embed: OssEmbed,
     ) {
         if (
@@ -58,7 +64,7 @@ export class PermissionsService extends BaseService {
      */
     async checkEmbedPermissions(
         account: AnonymousAccount,
-        savedChartUuid: string,
+        savedChartUuid: UUID,
     ) {
         const { embed } = account;
         const { content } = account.access;
@@ -69,22 +75,50 @@ export class PermissionsService extends BaseService {
             );
         }
 
-        if (content.type === 'dashboard' && content.dashboardUuid) {
-            return this.checkEmbeddedDashboardPermission(
-                content.dashboardUuid,
-                savedChartUuid,
-                embed,
-            );
+        switch (content.type) {
+            case 'dashboard':
+                if (!content.dashboardUuid) {
+                    throw new ForbiddenError(
+                        'Invalid access for embed permissions',
+                    );
+                }
+                return this.checkEmbeddedDashboardPermission(
+                    content.dashboardUuid,
+                    savedChartUuid,
+                    embed,
+                );
+            case 'chart':
+                if (!content.chartUuids.includes(savedChartUuid)) {
+                    throw new ForbiddenError(
+                        `Chart ${savedChartUuid} is not authorized by this token`,
+                    );
+                }
+                return PermissionsService.checkEmbeddedChartPermissions(
+                    savedChartUuid,
+                    embed,
+                );
+            case 'dataApp':
+                throw new ForbiddenError(
+                    'Data app embeds cannot access charts',
+                );
+            case 'aiAgent':
+                throw new ForbiddenError(
+                    'AI agent embeds cannot access charts',
+                );
+            case 'metricsCatalog':
+                throw new ForbiddenError(
+                    'Metrics catalog embeds cannot access charts',
+                );
+            case 'apiAccess':
+                throw new ForbiddenError(
+                    'API access embeds cannot access charts',
+                );
+            default:
+                return assertUnreachable(
+                    content.type,
+                    'Invalid access for embed permissions',
+                );
         }
-
-        if (content.type === 'chart') {
-            return PermissionsService.checkEmbeddedChartPermissions(
-                savedChartUuid,
-                embed,
-            );
-        }
-
-        throw new ForbiddenError('Invalid access for embed permissions');
     }
 
     /**

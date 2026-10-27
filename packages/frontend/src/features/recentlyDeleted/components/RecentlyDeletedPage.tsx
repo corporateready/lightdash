@@ -2,7 +2,9 @@ import {
     assertUnreachable,
     ChartSourceType,
     ContentType,
+    DATA_APP_VIZ_TEMPLATE,
     FeatureFlags,
+    type DataAppVizsFilter,
     type DeletedContentWithDescendants,
 } from '@lightdash/common';
 import {
@@ -15,38 +17,33 @@ import {
     Title,
     Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import {
     IconAppWindow,
     IconCalendar,
     IconClock,
     IconFolder,
+    IconFileText,
     IconLayoutDashboard,
+    IconPuzzle,
     IconRefresh,
     IconSearch,
     IconTextCaption,
     IconUser,
     IconX,
 } from '@tabler/icons-react';
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type FC,
-    type UIEvent,
-} from 'react';
+import { useEffect, useMemo, useRef, useState, type FC } from 'react';
 import Callout from '../../../components/common/Callout';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
-    type MRT_Virtualizer,
+    type ContentTableColumnDef,
+    type ContentTableVirtualizer,
 } from '../../../components/common/ContentTable';
 import MantineIcon from '../../../components/common/MantineIcon';
 import { ChartIcon, IconBox } from '../../../components/common/ResourceIcon';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../providers/App/useApp';
 import {
@@ -55,6 +52,10 @@ import {
     useRestoreDeletedContent,
 } from '../hooks/useDeletedContent';
 import { useDeletedContentFilters } from '../hooks/useDeletedContentFilters';
+import {
+    CHART_TYPES_FILTER_VALUE,
+    type DeletedContentTypeFilter,
+} from '../types';
 import { ContentTypeFilter } from './ContentTypeFilter';
 import { DeletedByFilter } from './DeletedByFilter';
 import DeletedContentActionMenu from './DeletedContentActionMenu';
@@ -65,6 +66,11 @@ function getDeletedContentDescription(
 ): string | null {
     const parts: string[] = [];
     if (item.contentType === ContentType.SPACE) {
+        if (item.documentCount > 0) {
+            parts.push(
+                `${item.documentCount} document${item.documentCount !== 1 ? 's' : ''}`,
+            );
+        }
         if (item.nestedSpaceCount > 0)
             parts.push(
                 `${item.nestedSpaceCount} space${item.nestedSpaceCount !== 1 ? 's' : ''}`,
@@ -129,22 +135,18 @@ const formatDaysRemaining = (
 
 const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
     const theme = useMantineTheme();
-    const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
 
     const { health, user } = useApp();
     const retentionDays = health.data?.softDelete.retentionDays;
     const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
     const dataAppsEnabled = dataAppsFlag.data?.enabled ?? false;
 
-    const [selectedContentType, setSelectedContentType] = useState<
-        | 'all'
-        | ContentType.CHART
-        | ContentType.DASHBOARD
-        | ContentType.SPACE
-        | ContentType.DATA_APP
-    >('all');
+    const [selectedContentType, setSelectedContentType] =
+        useState<DeletedContentTypeFilter>('all');
 
     const {
         search,
@@ -164,12 +166,28 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
         300,
     );
 
-    // Convert selectedContentType to array format for API
+    // Convert selectedContentType to array format for API. Custom chart
+    // types share ContentType.DATA_APP; the dataAppVizsFilter splits them.
     const contentTypesFilter = useMemo(() => {
-        if (debouncedSearchAndFilters.selectedContentType === 'all') {
+        const selected = debouncedSearchAndFilters.selectedContentType;
+        if (selected === 'all') {
             return debouncedSearchAndFilters.apiFilters.contentTypes;
         }
-        return [debouncedSearchAndFilters.selectedContentType];
+        if (selected === CHART_TYPES_FILTER_VALUE) {
+            return [ContentType.DATA_APP];
+        }
+        return [selected];
+    }, [debouncedSearchAndFilters]);
+
+    const dataAppVizsFilter = useMemo<DataAppVizsFilter | undefined>(() => {
+        switch (debouncedSearchAndFilters.selectedContentType) {
+            case ContentType.DATA_APP:
+                return 'exclude';
+            case CHART_TYPES_FILTER_VALUE:
+                return 'only';
+            default:
+                return undefined;
+        }
     }, [debouncedSearchAndFilters]);
 
     const { data, fetchNextPage, isError, isFetching, isLoading, refetch } =
@@ -180,6 +198,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
             contentTypes: contentTypesFilter,
             deletedByUserUuids:
                 debouncedSearchAndFilters.apiFilters.deletedByUserUuids,
+            dataAppVizsFilter,
         });
 
     const flatData = useMemo<DeletedContentWithDescendants[]>(
@@ -197,37 +216,25 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
 
     const isAdmin = user.data?.ability?.can('manage', 'Organization') ?? false;
 
-    // Fetch more data when scrolling near bottom
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                if (
-                    scrollHeight - scrollTop - clientHeight < 400 &&
-                    !isFetching &&
-                    totalFetched < totalDBRowCount
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, totalFetched, totalDBRowCount],
-    );
+    const {
+        containerRef: tableContainerRef,
+        onScroll,
+        scrollToTop,
+    } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
 
     // Scroll to top when filters change
     useEffect(() => {
-        if (tableContainerRef.current) {
-            tableContainerRef.current.scrollTop = 0;
-        }
-    }, [debouncedSearchAndFilters]);
+        scrollToTop();
+    }, [debouncedSearchAndFilters, scrollToTop]);
 
-    // Check on mount if table needs initial fetch
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
-
-    const columns = useMemo<MRT_ColumnDef<DeletedContentWithDescendants>[]>(
+    const columns = useMemo<
+        ContentTableColumnDef<DeletedContentWithDescendants>[]
+    >(
         () => [
             {
                 accessorKey: 'name',
@@ -235,7 +242,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                 size: 300,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconTextCaption} color="ldGray.6" />
+                        <MantineIcon icon={IconTextCaption} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -257,6 +264,13 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                                         color="green.6"
                                     />
                                 );
+                            case ContentType.DOCUMENT:
+                                return (
+                                    <IconBox
+                                        icon={IconFileText}
+                                        color="dimmed"
+                                    />
+                                );
                             case ContentType.SPACE:
                                 return (
                                     <IconBox
@@ -265,7 +279,15 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                                     />
                                 );
                             case ContentType.DATA_APP:
-                                return (
+                                // Custom chart types share the content type;
+                                // give them their own icon so rows read right.
+                                return row.original.template ===
+                                    DATA_APP_VIZ_TEMPLATE ? (
+                                    <IconBox
+                                        icon={IconPuzzle}
+                                        color="indigo.6"
+                                    />
+                                ) : (
                                     <IconBox
                                         icon={IconAppWindow}
                                         color="orange.6"
@@ -290,7 +312,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                                     {row.original.name}
                                 </Text>
                                 {description && (
-                                    <Text fz={12} c="dimmed" lineClamp={1}>
+                                    <Text fz="xs" c="dimmed" lineClamp={1}>
                                         {description}
                                     </Text>
                                 )}
@@ -311,10 +333,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                               column: { columnDef: { header: string } };
                           }) => (
                               <Group gap="two" wrap="nowrap">
-                                  <MantineIcon
-                                      icon={IconUser}
-                                      color="ldGray.6"
-                                  />
+                                  <MantineIcon icon={IconUser} color="dimmed" />
                                   {column.columnDef.header}
                               </Group>
                           ),
@@ -324,16 +343,16 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                               row: { original: DeletedContentWithDescendants };
                           }) =>
                               row.original.deletedBy ? (
-                                  <Text fz="xs" c="ldGray.6">
+                                  <Text fz="xs" c="dimmed">
                                       {row.original.deletedBy.firstName}{' '}
                                       {row.original.deletedBy.lastName}
                                   </Text>
                               ) : (
-                                  <Text fz="xs" c="ldGray.6">
+                                  <Text fz="xs" c="dimmed">
                                       Unknown
                                   </Text>
                               ),
-                      } as MRT_ColumnDef<DeletedContentWithDescendants>,
+                      } as ContentTableColumnDef<DeletedContentWithDescendants>,
                   ]
                 : []),
             {
@@ -342,12 +361,12 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                 size: 130,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconCalendar} color="ldGray.6" />
+                        <MantineIcon icon={IconCalendar} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
                 Cell: ({ row }) => (
-                    <Text fz="xs" c="ldGray.6">
+                    <Text fz="xs" c="dimmed">
                         {new Date(row.original.deletedAt).toLocaleDateString()}
                     </Text>
                 ),
@@ -358,7 +377,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                 size: 140,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconClock} color="ldGray.6" />
+                        <MantineIcon icon={IconClock} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -401,6 +420,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                                         });
                                         break;
                                     case ContentType.DASHBOARD:
+                                    case ContentType.DOCUMENT:
                                         restoreContent({
                                             uuid: item.uuid,
                                             contentType: item.contentType,
@@ -416,6 +436,9 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                                         restoreContent({
                                             uuid: item.uuid,
                                             contentType: item.contentType,
+                                            isChartType:
+                                                item.template ===
+                                                DATA_APP_VIZ_TEMPLATE,
                                         });
                                         break;
                                     default:
@@ -436,6 +459,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                                         });
                                         break;
                                     case ContentType.DASHBOARD:
+                                    case ContentType.DOCUMENT:
                                         permanentlyDelete({
                                             uuid: item.uuid,
                                             contentType: item.contentType,
@@ -481,46 +505,15 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
         columns,
         data: flatData,
         enableColumnResizing: true,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: false,
         enableRowVirtualization: true,
         enableTopToolbar: true,
         enableBottomToolbar: false,
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
-                'th > div > div:last-child': {
-                    top: -10,
-                    right: -5,
-                },
-                'th > div > div:last-child > .mantine-Divider-root': {
-                    border: 'none',
-                },
-            },
-        },
         mantineTableContainerProps: {
             ref: tableContainerRef,
             style: { maxHeight: 'calc(100dvh - 420px)' },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
@@ -585,11 +578,10 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                 p={`${theme.spacing.sm} ${theme.spacing.md}`}
                 wrap="nowrap"
             >
-                <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                    <Tooltip withinPortal label="Search by item name">
+                <Group gap="xs" wrap="nowrap" flex={1} miw={0}>
+                    <Tooltip label="Search by item name">
                         <TextInput
                             size="xs"
-                            radius="md"
                             type="search"
                             variant="default"
                             placeholder="Search deleted items..."
@@ -597,7 +589,7 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                             leftSection={
                                 <MantineIcon
                                     size="md"
-                                    color="ldGray.6"
+                                    color="dimmed"
                                     icon={IconSearch}
                                 />
                             }
@@ -671,14 +663,10 @@ const RecentlyDeletedPage: FC<Props> = ({ projectUuid }) => {
                         </Text>
                     </Box>
                     <Tooltip label="Click to refresh the list">
-                        <ActionIcon
-                            onClick={() => refetch()}
-                            variant="subtle"
-                            size="xs"
-                        >
+                        <ActionIcon onClick={() => refetch()} size="xs">
                             <MantineIcon
                                 icon={IconRefresh}
-                                color="ldGray.6"
+                                color="dimmed"
                                 stroke={2}
                             />
                         </ActionIcon>

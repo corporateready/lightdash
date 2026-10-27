@@ -1,7 +1,15 @@
-import { JWT_HEADER_NAME } from '@lightdash/common';
+import {
+    EMBED_DASHBOARD_HEADER_NAME,
+    JWT_HEADER_NAME,
+} from '@lightdash/common';
 import nock from 'nock';
-import { describe, expect, it } from 'vitest';
-import { BASE_API_URL, lightdashApi } from './api';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    BASE_API_URL,
+    createLightdashApi,
+    networkHistory,
+    sharedLightdashApi,
+} from './api';
 import { EMBED_KEY } from './ee/providers/Embed/types';
 import {
     clearInMemoryStorage,
@@ -23,7 +31,7 @@ describe('api', () => {
                 results: 'test',
             });
 
-        const result = await lightdashApi({
+        const result = await sharedLightdashApi({
             method: 'GET',
             url: '/test',
             body: null,
@@ -36,6 +44,28 @@ describe('api', () => {
         expect(scope.isDone()).toBe(true);
     });
 
+    it('preserves metadata outside results when the full response is requested', async () => {
+        const response = {
+            status: 'ok',
+            results: null,
+            parent: {
+                projectUuid: 'parent',
+                projectName: null,
+                principal: 'agent@example.test',
+            },
+        };
+        const scope = nock(BASE_API_URL)
+            .get('/api/v2/projects/preview/ai-access/service-account')
+            .reply(200, response);
+        const result = await sharedLightdashApi.response({
+            version: 'v2',
+            method: 'GET',
+            url: '/projects/preview/ai-access/service-account',
+        });
+        scope.done();
+        expect(result).toEqual(response);
+    });
+
     it('should allow custom headers', async () => {
         const scope = nock(BASE_API_URL)
             .matchHeader('Content-Type', 'application/json')
@@ -46,7 +76,7 @@ describe('api', () => {
                 results: 'another test',
             });
 
-        const result = await lightdashApi({
+        const result = await sharedLightdashApi({
             method: 'GET',
             url: '/test',
             body: null,
@@ -74,7 +104,7 @@ describe('api', () => {
                 results: 'token headers',
             });
 
-        const result = await lightdashApi({
+        const result = await sharedLightdashApi({
             method: 'GET',
             url: '/test',
             body: null,
@@ -90,5 +120,625 @@ describe('api', () => {
         expect(result).toEqual('token headers');
 
         clearInMemoryStorage();
+    });
+
+    it('sends the dashboard an AI-agent embed is viewing alongside its token', async () => {
+        setToInMemoryStorage(EMBED_KEY, {
+            token: 'system token',
+            projectUuid: 'project-uuid',
+            dashboardUuid: 'dashboard-uuid',
+        });
+        const scope = nock(BASE_API_URL)
+            .matchHeader(JWT_HEADER_NAME, 'system token')
+            .matchHeader(EMBED_DASHBOARD_HEADER_NAME, 'dashboard-uuid')
+            .post('/api/v1/embed/project-uuid/dashboard')
+            .query({ projectUuid: 'project-uuid' })
+            .reply(200, { status: 'ok', results: 'dashboard' });
+
+        const result = await sharedLightdashApi({
+            method: 'POST',
+            url: '/embed/project-uuid/dashboard',
+            body: '{}',
+        });
+
+        scope.done();
+        expect(result).toEqual('dashboard');
+        clearInMemoryStorage();
+    });
+
+    it('adds embed token headers to stream requests', async () => {
+        setToInMemoryStorage(EMBED_KEY, {
+            token: 'system token',
+            projectUuid: 'project-uuid',
+        });
+        const scope = nock(BASE_API_URL)
+            .matchHeader(JWT_HEADER_NAME, 'system token')
+            .post(
+                '/api/v1/projects/project-uuid/aiAgents/agent-uuid/threads/thread-uuid/stream',
+            )
+            .query({ projectUuid: 'project-uuid' })
+            .reply(200, 'stream response');
+
+        const result = await sharedLightdashApi.stream({
+            method: 'POST',
+            url: '/projects/project-uuid/aiAgents/agent-uuid/threads/thread-uuid/stream',
+            body: JSON.stringify({}),
+            headers: undefined,
+        });
+
+        scope.done();
+
+        expect(result.ok).toEqual(true);
+        expect(scope.isDone()).toBe(true);
+
+        clearInMemoryStorage();
+    });
+});
+
+describe('createLightdashApi', () => {
+    beforeEach(() => {
+        clearInMemoryStorage();
+        setToInMemoryStorage(EMBED_KEY, { token: 'shared token' });
+    });
+
+    afterEach(() => {
+        clearInMemoryStorage();
+    });
+
+    it('sends each client its own token, not the shared one', async () => {
+        const dashboardApi = createLightdashApi(() => ({
+            token: 'dashboard token',
+            projectUuid: 'project-uuid',
+        }));
+        const chartApi = createLightdashApi(() => ({
+            token: 'chart token',
+            projectUuid: 'project-uuid',
+        }));
+        const dashboardScope = nock(BASE_API_URL)
+            .matchHeader(JWT_HEADER_NAME, 'dashboard token')
+            .get('/api/v1/dashboard')
+            .query(true)
+            .reply(200, { status: 'ok', results: 'dashboard' });
+        const chartScope = nock(BASE_API_URL)
+            .matchHeader(JWT_HEADER_NAME, 'chart token')
+            .get('/api/v1/chart')
+            .query(true)
+            .reply(200, { status: 'ok', results: 'chart' })
+            .get('/api/v1/chart-stream')
+            .query(true)
+            .reply(200, 'stream');
+
+        await expect(
+            dashboardApi({ method: 'GET', url: '/dashboard' }),
+        ).resolves.toEqual('dashboard');
+        await expect(
+            chartApi({ method: 'GET', url: '/chart' }),
+        ).resolves.toEqual('chart');
+        await expect(
+            chartApi.stream({ method: 'GET', url: '/chart-stream' }),
+        ).resolves.toHaveProperty('ok', true);
+        expect(dashboardScope.isDone()).toBe(true);
+        expect(chartScope.isDone()).toBe(true);
+    });
+
+    it('reads the token on every request so rotation needs no new client', async () => {
+        let token = 'first token';
+        const api = createLightdashApi(() => ({ token }));
+        const scope = nock(BASE_API_URL)
+            .matchHeader(JWT_HEADER_NAME, 'second token')
+            .get('/api/v1/test')
+            .reply(200, { status: 'ok', results: 'rotated' });
+
+        token = 'second token';
+
+        await expect(api({ method: 'GET', url: '/test' })).resolves.toEqual(
+            'rotated',
+        );
+        expect(scope.isDone()).toBe(true);
+    });
+});
+
+describe('networkHistory retention', () => {
+    beforeEach(() => {
+        networkHistory.length = 0;
+        clearInMemoryStorage();
+    });
+
+    afterEach(() => {
+        networkHistory.length = 0;
+    });
+
+    it.each([0, 10, 11, 25])(
+        'keeps the latest ten entries after %i successful requests',
+        async (requestCount) => {
+            const urls = Array.from(
+                { length: requestCount },
+                (_, index) => `/history/${index}`,
+            );
+            for (const url of urls) {
+                const scope = nock(BASE_API_URL)
+                    .get(`/api/v1${url}`)
+                    .reply(200, { status: 'ok', results: url });
+
+                await expect(
+                    sharedLightdashApi({ method: 'GET', url }),
+                ).resolves.toBe(url);
+                scope.done();
+            }
+
+            expect(networkHistory.map((entry) => entry.url)).toEqual(
+                urls.slice(-10),
+            );
+        },
+    );
+
+    it.each(['errors', 'mixed'] as const)(
+        'keeps recent requests in completion order with %s',
+        async (outcomes) => {
+            const urls = Array.from(
+                { length: 15 },
+                (_, index) => `/history/${index}`,
+            );
+            for (const [index, url] of urls.entries()) {
+                const failed = outcomes === 'errors' || index % 2 === 0;
+                const scope = nock(BASE_API_URL)
+                    .get(`/api/v1${url}`)
+                    .reply(
+                        failed ? 404 : 200,
+                        failed
+                            ? {
+                                  status: 'error',
+                                  error: {
+                                      name: 'NotFoundError',
+                                      statusCode: 404,
+                                      message: 'Missing example',
+                                  },
+                              }
+                            : { status: 'ok', results: url },
+                    );
+                const response = sharedLightdashApi({ method: 'GET', url });
+                if (failed) {
+                    await expect(response).rejects.toMatchObject({
+                        error: { name: 'NotFoundError', statusCode: 404 },
+                    });
+                } else {
+                    await expect(response).resolves.toBe(url);
+                }
+                scope.done();
+            }
+
+            expect(networkHistory.map((entry) => entry.url)).toEqual(
+                urls.slice(-10),
+            );
+        },
+    );
+
+    it('bounds shared history across clients and full response requests', async () => {
+        const api = createLightdashApi(() => undefined);
+        for (let index = 0; index < 12; index += 1) {
+            const url = `/history/${index}`;
+            const envelope = { status: 'ok', results: index };
+            const scope = nock(BASE_API_URL)
+                .get(`/api/v1${url}`)
+                .reply(200, envelope);
+            if (index % 2 === 0) {
+                await expect(
+                    api.response({ method: 'GET', url }),
+                ).resolves.toEqual(envelope);
+            } else {
+                await expect(
+                    sharedLightdashApi({ method: 'GET', url }),
+                ).resolves.toBe(index);
+            }
+            scope.done();
+        }
+
+        expect(networkHistory).toHaveLength(10);
+        expect(networkHistory[0].url).toBe('/history/2');
+        expect(networkHistory[9].url).toBe('/history/11');
+    });
+});
+
+describe('networkHistory redaction', () => {
+    beforeEach(() => {
+        networkHistory.length = 0;
+    });
+
+    it('redacts body and response of sensitive requests on success', async () => {
+        const scope = nock(BASE_API_URL)
+            .post('/api/v1/login')
+            .reply(200, {
+                status: 'ok',
+                results: { token: 'secret-response' },
+            });
+
+        await sharedLightdashApi({
+            method: 'POST',
+            url: '/login',
+            body: JSON.stringify({ email: 'a@b.com', password: 'hunter2' }),
+            sensitive: true,
+        });
+
+        scope.done();
+
+        expect(networkHistory).toHaveLength(1);
+        expect(JSON.stringify(networkHistory)).not.toContain('hunter2');
+        expect(JSON.stringify(networkHistory)).not.toContain('secret-response');
+        expect(networkHistory[0]).toMatchObject({
+            method: 'POST',
+            url: '/login',
+            status: 200,
+            body: '[REDACTED: sensitive request]',
+            json: '[REDACTED: sensitive request]',
+        });
+    });
+
+    it('redacts body and error of sensitive requests on failure', async () => {
+        const scope = nock(BASE_API_URL)
+            .post('/api/v1/login')
+            .reply(401, {
+                status: 'error',
+                error: {
+                    name: 'AuthorizationError',
+                    statusCode: 401,
+                    message: 'Invalid credentials for hunter2',
+                    data: {},
+                },
+            });
+
+        await expect(
+            sharedLightdashApi({
+                method: 'POST',
+                url: '/login',
+                body: JSON.stringify({
+                    email: 'a@b.com',
+                    password: 'hunter2',
+                }),
+                sensitive: true,
+            }),
+        ).rejects.toMatchObject({
+            error: { name: 'AuthorizationError' },
+        });
+
+        scope.done();
+
+        expect(networkHistory).toHaveLength(1);
+        expect(JSON.stringify(networkHistory)).not.toContain('hunter2');
+        expect(networkHistory[0]).toMatchObject({
+            method: 'POST',
+            url: '/login',
+            body: '[REDACTED: sensitive request]',
+            error: '[REDACTED: sensitive request]',
+        });
+    });
+
+    it('retains body and response of non-sensitive requests', async () => {
+        const scope = nock(BASE_API_URL).post('/api/v1/test').reply(200, {
+            status: 'ok',
+            results: 'visible',
+        });
+
+        await sharedLightdashApi({
+            method: 'POST',
+            url: '/test',
+            body: JSON.stringify({ foo: 'bar' }),
+        });
+
+        scope.done();
+
+        expect(networkHistory).toHaveLength(1);
+        expect(networkHistory[0]).toMatchObject({
+            body: JSON.stringify({ foo: 'bar' }),
+            json: JSON.stringify({
+                status: 'ok',
+                results: 'visible',
+            }),
+        });
+    });
+});
+
+describe('network error messages', () => {
+    let previousFetch: typeof fetch;
+
+    beforeEach(() => {
+        previousFetch = globalThis.fetch;
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+        globalThis.fetch = previousFetch;
+        vi.restoreAllMocks();
+    });
+
+    const healthOk = () =>
+        new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+
+    const request = () =>
+        sharedLightdashApi({
+            method: 'PATCH',
+            url: '/projects/abc',
+            body: JSON.stringify({}),
+            diagnoseTransportFailures: true,
+        });
+
+    it('keeps the generic message and never probes unless the request opts in', async () => {
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(healthOk());
+
+        await expect(
+            sharedLightdashApi({
+                method: 'GET',
+                url: '/user',
+                body: undefined,
+            }),
+        ).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                statusCode: 500,
+                message:
+                    'We are currently unable to reach the server. Please try again in a few moments.',
+                data: {},
+            },
+        });
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('says the request was blocked when fetch rejects but the server answers a probe', async () => {
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(healthOk());
+
+        await expect(request()).rejects.toMatchObject({
+            status: 'error',
+            error: {
+                name: 'NetworkError',
+                statusCode: 500,
+                message: expect.stringContaining(
+                    'The server is reachable, but this request was blocked before it arrived',
+                ),
+                data: {
+                    kind: 'blocked',
+                    path: 'http://test.lightdash/api/v1/projects/abc',
+                    cause: 'Failed to fetch',
+                    probe: { ok: true, status: 200 },
+                },
+            },
+        });
+    });
+
+    it('keeps the request out of the toast text', async () => {
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(healthOk());
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                message: expect.not.stringContaining('/projects/abc'),
+            },
+        });
+    });
+
+    it('falls back to the generic message with no diagnostics inside an embed', async () => {
+        setToInMemoryStorage(EMBED_KEY, { token: 'jwt' });
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(healthOk());
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                message:
+                    'We are currently unable to reach the server. Please try again in a few moments.',
+                data: {},
+            },
+        });
+        clearInMemoryStorage();
+    });
+
+    it('treats an error body that is not the API envelope as intercepted', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ message: 'Forbidden' }), {
+                status: 403,
+                headers: { 'Content-Type': 'application/json' },
+            }),
+        );
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                message: expect.stringContaining(
+                    'with HTTP 403 instead of the server',
+                ),
+                data: { kind: 'intercepted', responseStatus: 403 },
+            },
+        });
+    });
+
+    it('says the server is unreachable when the probe fails too', async () => {
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValue(new TypeError('Failed to fetch'));
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                message: expect.stringContaining(
+                    'The server cannot be reached from your network right now',
+                ),
+                data: { kind: 'unreachable' },
+            },
+        });
+    });
+
+    it('reports the HTTP status when the response is not the API envelope', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue(
+            new Response('<html>blocked</html>', {
+                status: 502,
+                headers: { 'Content-Type': 'text/html' },
+            }),
+        );
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                message: expect.stringContaining(
+                    'with HTTP 502 instead of the server',
+                ),
+                data: { kind: 'intercepted', responseStatus: 502 },
+            },
+        });
+    });
+
+    it('reports a cancelled request', async () => {
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValue(new DOMException('Aborted', 'AbortError'));
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                message: expect.stringContaining('was cancelled'),
+                data: { kind: 'cancelled' },
+            },
+        });
+    });
+
+    it('reports being offline ahead of any other cause', async () => {
+        vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValue(new TypeError('Failed to fetch'));
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'NetworkError',
+                message:
+                    'You appear to be offline. Check your internet connection and try again.',
+                data: { kind: 'offline' },
+            },
+        });
+    });
+
+    it('records the diagnosed error in networkHistory', async () => {
+        networkHistory.length = 0;
+        globalThis.fetch = vi
+            .fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(healthOk());
+
+        await expect(request()).rejects.toBeDefined();
+
+        expect(networkHistory).toHaveLength(1);
+        expect(networkHistory[0].error).toContain('"kind":"blocked"');
+    });
+
+    it('passes real API errors through untouched', async () => {
+        const scope = nock(BASE_API_URL)
+            .patch('/api/v1/projects/abc')
+            .reply(400, {
+                status: 'error',
+                error: {
+                    name: 'ParameterError',
+                    statusCode: 400,
+                    message:
+                        'SSH tunnel is enabled but no public key has been generated.',
+                    data: {},
+                },
+            });
+
+        await expect(request()).rejects.toMatchObject({
+            error: {
+                name: 'ParameterError',
+                statusCode: 400,
+                message:
+                    'SSH tunnel is enabled but no public key has been generated.',
+            },
+        });
+        scope.done();
+    });
+
+    it('uses the same messages for stream requests', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue(
+            new Response('<html>blocked</html>', {
+                status: 403,
+                headers: { 'Content-Type': 'text/html' },
+            }),
+        );
+
+        await expect(
+            sharedLightdashApi.stream({
+                method: 'POST',
+                url: '/stream',
+                body: JSON.stringify({}),
+                diagnoseTransportFailures: true,
+            }),
+        ).rejects.toThrow('with HTTP 403 instead of the server');
+    });
+});
+
+describe('fetch binding', () => {
+    const okResponse = (results: unknown) =>
+        new Response(JSON.stringify({ status: 'ok', results }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+        });
+
+    let previousFetch: typeof fetch;
+
+    beforeEach(() => {
+        previousFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+        globalThis.fetch = previousFetch;
+    });
+
+    it('calls the fetch implementation active at request time', async () => {
+        const stub = vi.fn().mockResolvedValue(okResponse('late-bound'));
+        globalThis.fetch = stub;
+
+        const results = await sharedLightdashApi({
+            method: 'GET',
+            url: '/test',
+            body: null,
+        });
+
+        expect(stub).toHaveBeenCalledTimes(1);
+        expect(results).toEqual('late-bound');
+    });
+
+    it('is not stranded when a host page installs and removes a fetch wrapper', async () => {
+        // Regression: an embedding host page monkey-patched window.fetch and,
+        // on teardown, restored it while nulling the wrapper's saved
+        // original. A fetch reference captured at module evaluation kept
+        // pointing at the dead wrapper, so every request threw before
+        // dispatch and surfaced as the generic NetworkError.
+        const restored = vi.fn().mockResolvedValue(okResponse('recovered'));
+
+        let saved: typeof fetch | null = globalThis.fetch;
+        const wrapper: typeof fetch = (...args) => {
+            if (typeof saved !== 'function') {
+                throw new TypeError('saved is not a function');
+            }
+            return saved(...args);
+        };
+        globalThis.fetch = wrapper;
+        // host page tears its wrapper down
+        saved = null;
+        globalThis.fetch = restored;
+
+        const results = await sharedLightdashApi({
+            method: 'GET',
+            url: '/test',
+            body: null,
+        });
+
+        expect(restored).toHaveBeenCalledTimes(1);
+        expect(results).toEqual('recovered');
     });
 });

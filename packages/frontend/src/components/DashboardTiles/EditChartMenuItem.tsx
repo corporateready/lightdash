@@ -1,37 +1,95 @@
-import { type DashboardChartTile } from '@lightdash/common';
+import { type DashboardChartTile, type SavedChart } from '@lightdash/common';
+import { Menu } from '@mantine/core';
 import { IconFilePencil } from '@tabler/icons-react';
 import { type FC } from 'react';
-import { useParams } from 'react-router';
+import { useNavigate, useParams } from 'react-router';
+import {
+    selectActiveTab,
+    selectDashboardFilters,
+    selectDashboardTabs,
+    selectDashboardTiles,
+    selectHaveFiltersChanged,
+    selectHaveTilesChanged,
+    useDashboardSelector,
+} from '../../features/dashboard/store';
 import useDashboardStorage from '../../hooks/dashboard/useDashboardStorage';
+import { useChartPermissions } from '../../hooks/useChartPermissions';
+import { useContentAuthoringEnabled } from '../../hooks/useContentAuthoringEnabled';
+import { useProjectUrlIdentifier } from '../../hooks/useProjectRoute';
 import useApp from '../../providers/App/useApp';
+import { useDashboardChartEdit } from '../../providers/Dashboard/useDashboardChartEdit';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import LinkMenuItem, { type LinkMenuItemProps } from '../common/LinkMenuItem';
 import MantineIcon from '../common/MantineIcon';
 
 type Props = LinkMenuItemProps & {
     tile: DashboardChartTile;
+    chartSlug?: string;
+    /**
+     * The loaded chart. Only supplied where the tile has one, which is what
+     * makes editing in place possible instead of navigating.
+     */
+    chart?: SavedChart;
 };
 
-const EditChartMenuItem: FC<Props> = ({ tile, ...props }) => {
+const EditChartMenuItem: FC<Props> = ({ tile, chartSlug, chart, ...props }) => {
+    const { mode } = useParams<{ mode?: string }>();
+    const navigate = useNavigate();
+    const authoringEnabled = useContentAuthoringEnabled();
     const { user } = useApp();
-    const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
-    const filtersFromContext = useDashboardContext((c) => c.dashboardFilters);
-    const haveTilesChanged = useDashboardContext((c) => c.haveTilesChanged);
-    const haveFiltersChanged = useDashboardContext((c) => c.haveFiltersChanged);
+    const dashboardTiles = useDashboardSelector(selectDashboardTiles);
+    const filtersFromContext = useDashboardSelector(selectDashboardFilters);
+    const haveTilesChanged = useDashboardSelector(selectHaveTilesChanged);
+    const haveFiltersChanged = useDashboardSelector(selectHaveFiltersChanged);
     const dashboard = useDashboardContext((c) => c.dashboard);
-    const activeTab = useDashboardContext((c) => c.activeTab);
-    const dashboardTabs = useDashboardContext((c) => c.dashboardTabs);
+    const activeTab = useDashboardSelector(selectActiveTab);
+    const dashboardTabs = useDashboardSelector(selectDashboardTabs);
 
     const { storeDashboard } = useDashboardStorage();
+    const onEditChart = useDashboardChartEdit();
 
-    const { projectUuid, dashboardUuid } = useParams<{
-        projectUuid: string;
-        dashboardUuid: string;
-    }>();
+    const projectUrlIdentifier = useProjectUrlIdentifier();
 
     const userCanManageExplore = user.data?.ability?.can('manage', 'Explore');
 
+    // Otherwise the menu opens an editor that only fails on save.
+    const { canMutateVerification } = useChartPermissions(chart);
+
+    if (!authoringEnabled) return null;
+
     if (!tile.properties.savedChartUuid || !userCanManageExplore) return null;
+
+    // Edit over the dashboard when the host offers it and the chart is loaded.
+    if (onEditChart && chart && canMutateVerification) {
+        return (
+            <Menu.Item
+                display={authoringEnabled ? undefined : 'none'}
+                leftSection={<MantineIcon icon={IconFilePencil} />}
+                onClick={() => onEditChart(chart)}
+                disabled={props.disabled}
+            >
+                Edit chart
+            </Menu.Item>
+        );
+    }
+
+    const href = `/projects/${projectUrlIdentifier}/saved/${chartSlug ?? tile.properties.savedChartUuid}/edit?fromDashboard=${dashboard?.uuid}`;
+
+    if (mode === 'edit') {
+        return (
+            <Menu.Item
+                {...props}
+                leftSection={<MantineIcon icon={IconFilePencil} />}
+                onClick={() => {
+                    void navigate(href, {
+                        state: { saveDashboardBeforeChartEdit: true },
+                    });
+                }}
+            >
+                Edit chart
+            </Menu.Item>
+        );
+    }
 
     return (
         <LinkMenuItem
@@ -47,10 +105,11 @@ const EditChartMenuItem: FC<Props> = ({ tile, ...props }) => {
                         dashboard?.name,
                         activeTab?.uuid,
                         dashboardTabs,
+                        dashboard?.slug,
                     );
                 }
             }}
-            href={`/projects/${projectUuid}/saved/${tile.properties.savedChartUuid}/edit?fromDashboard=${dashboardUuid}`}
+            href={href}
             {...props}
         >
             Edit chart

@@ -1,19 +1,20 @@
-import { FeatureFlags, type DashboardFilterRule } from '@lightdash/common';
-import {
-    Button,
-    Divider,
-    Group,
-    Popover,
-    Text,
-    Tooltip,
-} from '@mantine-8/core';
-import { useDisclosure, useId } from '@mantine-8/hooks';
+import { type DashboardFilterRule } from '@lightdash/common';
+import { Button, Divider, Group, Popover, Text, Tooltip } from '@mantine/core';
+import { useDisclosure, useId } from '@mantine/hooks';
 import { IconEye, IconEyeOff, IconRotate2 } from '@tabler/icons-react';
-import { useCallback, useMemo, type FC } from 'react';
+import { useCallback, useMemo, type FC, type ReactNode } from 'react';
 import MantineIcon from '../../components/common/MantineIcon';
-import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
+import { useUiStrings } from '../../ee/providers/Embed/useUiStrings';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
-import useDashboardTileStatusContext from '../../providers/Dashboard/useDashboardTileStatusContext';
+import {
+    selectDashboardTabs,
+    selectDashboardTiles,
+    selectHaveFiltersChanged,
+    selectIsAddFilterDisabled,
+    selectSqlChartTilesMetadata,
+    useDashboardSelector,
+    useHasDashboardTemporaryFilters,
+} from '../dashboard/store';
 import FilterConfiguration from './FilterConfiguration';
 
 type Props = {
@@ -24,6 +25,16 @@ type Props = {
     onPopoverClose: () => void;
     onSave: (value: DashboardFilterRule) => void;
     onResetDashboardFilters: () => void;
+    /** Public class contract hooks — set only by embed wrappers, never in the main app. */
+    triggerClassName?: string;
+    dropdownClassName?: string;
+    /**
+     * Overrides the view-mode tooltip on the trigger button. Pass `null` to
+     * hide it entirely. Defaults to the app's "edit mode" copy.
+     */
+    unsavedFiltersTooltip?: string | null;
+    /** Shown in place of the edit-mode eye (default: the eye). */
+    editModeAction?: ReactNode;
 };
 
 const AddFilterButton: FC<Props> = ({
@@ -34,29 +45,27 @@ const AddFilterButton: FC<Props> = ({
     onPopoverClose,
     onSave,
     onResetDashboardFilters,
+    triggerClassName,
+    dropdownClassName,
+    unsavedFiltersTooltip,
+    editModeAction,
 }) => {
     const popoverId = useId();
-    const isAddFilterDisabled = useDashboardContext(
-        (c) => c.isAddFilterDisabled,
-    );
+    const getUiString = useUiStrings();
+    const isAddFilterDisabled = useDashboardSelector(selectIsAddFilterDisabled);
     const setIsAddFilterDisabled = useDashboardContext(
         (c) => c.setIsAddFilterDisabled,
     );
-    const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
-    const dashboardTabs = useDashboardContext((c) => c.dashboardTabs);
+    const dashboardTiles = useDashboardSelector(selectDashboardTiles);
+    const dashboardTabs = useDashboardSelector(selectDashboardTabs);
     const allFilterableFields = useDashboardContext(
         (c) => c.allFilterableFields,
     );
     const allFilterableMetrics = useDashboardContext(
         (c) => c.allFilterableMetrics,
     );
-    const { data: metricDashboardFiltersFlag } = useServerFeatureFlag(
-        FeatureFlags.MetricDashboardFilters,
-    );
-    const isMetricFiltersEnabled =
-        metricDashboardFiltersFlag?.enabled ?? import.meta.env.DEV;
-    const sqlChartTilesMetadata = useDashboardTileStatusContext(
-        (c) => c.sqlChartTilesMetadata,
+    const sqlChartTilesMetadata = useDashboardSelector(
+        selectSqlChartTilesMetadata,
     );
     const disabled = useMemo(() => {
         return (
@@ -74,12 +83,9 @@ const AddFilterButton: FC<Props> = ({
         (c) => c.isFetchingDashboardFilters,
     );
 
-    const haveFiltersChanged = useDashboardContext(
-        (c) =>
-            c.haveFiltersChanged ||
-            c.dashboardTemporaryFilters.dimensions.length > 0 ||
-            c.dashboardTemporaryFilters.metrics.length > 0,
-    );
+    const hasTemporaryFilters = useHasDashboardTemporaryFilters();
+    const haveFiltersChanged =
+        useDashboardSelector(selectHaveFiltersChanged) || hasTemporaryFilters;
 
     const setHaveFiltersChanged = useDashboardContext(
         (c) => c.setHaveFiltersChanged,
@@ -106,15 +112,28 @@ const AddFilterButton: FC<Props> = ({
     const showResetFiltersButton = !isEditMode && haveFiltersChanged;
     const hasAttachedButton = showResetFiltersButton || isEditMode;
 
+    const tooltipLabel =
+        unsavedFiltersTooltip === undefined ? (
+            <Text fz="xs">
+                Only filters added in{' '}
+                <Text span fz="xs" fw={600}>
+                    'edit'
+                </Text>{' '}
+                mode will be saved
+            </Text>
+        ) : unsavedFiltersTooltip === null ? null : (
+            <Text fz="xs">{unsavedFiltersTooltip}</Text>
+        );
+
     if (isAddFilterDisabled && !isEditMode) {
         if (showResetFiltersButton)
             return (
-                <Tooltip label="Reset all filters" withinPortal>
+                <Tooltip label={getUiString('filters.resetAll')}>
                     <Button
-                        aria-label="Reset all filters"
+                        data-dashboard-filter-control
+                        aria-label={getUiString('filters.resetAll')}
                         size="xs"
                         variant="default"
-                        radius="md"
                         color="gray"
                         onClick={() => {
                             setHaveFiltersChanged(false);
@@ -135,7 +154,7 @@ const AddFilterButton: FC<Props> = ({
     }
 
     return (
-        <Group gap={0}>
+        <Group gap={0} wrap="nowrap" data-filter-actions>
             <Popover
                 position="bottom-start"
                 trapFocus
@@ -147,29 +166,23 @@ const AddFilterButton: FC<Props> = ({
                 disabled={disabled}
                 transitionProps={{ transition: 'pop-top-left' }}
                 withArrow
-                shadow="md"
                 offset={1}
                 arrowOffset={14}
-                withinPortal
+                classNames={{ dropdown: dropdownClassName }}
             >
                 <Popover.Target>
                     <Tooltip
-                        disabled={isPopoverOpen || isEditMode}
+                        disabled={
+                            isPopoverOpen || isEditMode || tooltipLabel === null
+                        }
                         position="top-start"
-                        withinPortal
                         offset={0}
                         arrowOffset={16}
-                        label={
-                            <Text fz="xs">
-                                Only filters added in{' '}
-                                <Text span fw={600}>
-                                    'edit'
-                                </Text>{' '}
-                                mode will be saved
-                            </Text>
-                        }
+                        label={tooltipLabel}
                     >
                         <Button
+                            data-dashboard-filter-control
+                            className={triggerClassName}
                             size="xs"
                             variant="default"
                             radius={100}
@@ -196,7 +209,7 @@ const AddFilterButton: FC<Props> = ({
                                     : onPopoverOpen(popoverId)
                             }
                         >
-                            Add filter
+                            {getUiString('filters.addFilter')}
                         </Button>
                     </Tooltip>
                 </Popover.Target>
@@ -209,9 +222,7 @@ const AddFilterButton: FC<Props> = ({
                             activeTabUuid={activeTabUuid}
                             fields={[
                                 ...(allFilterableFields || []),
-                                ...(isMetricFiltersEnabled
-                                    ? (allFilterableMetrics ?? [])
-                                    : []),
+                                ...(allFilterableMetrics ?? []),
                             ]}
                             tiles={dashboardTiles}
                             tabs={dashboardTabs}
@@ -232,40 +243,43 @@ const AddFilterButton: FC<Props> = ({
                 <>
                     <Divider orientation="vertical" />
 
-                    <Tooltip
-                        label={
-                            isAddFilterDisabled
-                                ? 'Hidden from viewers. Click to show.'
-                                : 'Visible to viewers. Click to hide.'
-                        }
-                        withinPortal
-                    >
-                        <Button
-                            aria-label="Toggle filter visibility for viewers"
-                            size="xs"
-                            variant="default"
-                            color="gray"
-                            onClick={() =>
-                                setIsAddFilterDisabled(!isAddFilterDisabled)
+                    {editModeAction ?? (
+                        <Tooltip
+                            label={
+                                isAddFilterDisabled
+                                    ? 'Hidden from viewers. Click to show.'
+                                    : 'Visible to viewers. Click to hide.'
                             }
-                            styles={{
-                                root: {
-                                    borderLeft: '0px',
-                                    borderStartStartRadius: '0px',
-                                    borderEndStartRadius: '0px',
-                                    borderStartEndRadius: '100px',
-                                    borderEndEndRadius: '100px',
-                                    borderStyle: 'dashed',
-                                },
-                            }}
                         >
-                            <MantineIcon
-                                icon={
-                                    isAddFilterDisabled ? IconEyeOff : IconEye
+                            <Button
+                                aria-label="Toggle filter visibility for viewers"
+                                size="xs"
+                                variant="default"
+                                color="gray"
+                                onClick={() =>
+                                    setIsAddFilterDisabled(!isAddFilterDisabled)
                                 }
-                            />
-                        </Button>
-                    </Tooltip>
+                                styles={{
+                                    root: {
+                                        borderLeft: '0px',
+                                        borderStartStartRadius: '0px',
+                                        borderEndStartRadius: '0px',
+                                        borderStartEndRadius: '100px',
+                                        borderEndEndRadius: '100px',
+                                        borderStyle: 'dashed',
+                                    },
+                                }}
+                            >
+                                <MantineIcon
+                                    icon={
+                                        isAddFilterDisabled
+                                            ? IconEyeOff
+                                            : IconEye
+                                    }
+                                />
+                            </Button>
+                        </Tooltip>
+                    )}
                 </>
             )}
 
@@ -273,12 +287,11 @@ const AddFilterButton: FC<Props> = ({
                 <>
                     <Divider orientation="vertical" />
 
-                    <Tooltip label="Reset all filters" withinPortal>
+                    <Tooltip label="Reset all filters">
                         <Button
                             aria-label="Reset all filters"
                             size="xs"
                             variant="default"
-                            radius="md"
                             color="gray"
                             onClick={() => {
                                 setHaveFiltersChanged(false);

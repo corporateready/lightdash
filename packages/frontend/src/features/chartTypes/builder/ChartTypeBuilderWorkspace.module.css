@@ -1,0 +1,90 @@
+.root {
+    container: chart-type-workspace / inline-size;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+}
+
+.versionSurface {
+    height: 100%;
+    min-width: 0;
+    display: flex;
+}
+
+.configurationSidebar {
+    flex-shrink: 0;
+    min-height: 0;
+}
+
+@container chart-type-workspace (max-width: 80rem) {
+    .root[data-history-open='true'] .configurationSidebar {
+        display: none;
+    }
+}
+
+.main {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+}
+
+.content {
+    height: 100%;
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+.historyResizeHandle {
+    width: 1px;
+    flex: 0 0 1px;
+    cursor: col-resize;
+    background-color: var(--mantine-color-default-border);
+    transition:
+        background-color 120ms ease,
+        box-shadow 120ms ease;
+}
+
+.historyResizeHandle:hover,
+.historyResizeHandle[data-active],
+.historyResizeHandle:focus-visible {
+    background-color: light-dark(
+        var(--mantine-color-ldGray-4),
+        var(--mantine-color-ldDark-3)
+    );
+    box-shadow: 0 0 0 1px
+        light-dark(var(--mantine-color-ldGray-4), var(--mantine-color-ldDark-3));
+}
+
+.historyPanel {
+    transition: flex-basis var(--history-transition-duration) ease;
+}
+
+.historyContent {
+    height: 100%;
+    min-width: 240px;
+}
+
+.root:not([data-history-open]) .historyPanel {
+    /* Preserve the splitter's last open size while animating it out of flow. */
+    flex-basis: 0 !important;
+    flex-grow: 0 !important;
+}
+
+.root:not([data-history-open]) .historyResizeHandle {
+    display: none;
+}
+
+.root[data-history-resizing] .historyPanel {
+    transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .historyPanel {
+        transition: none;
+    }
+}

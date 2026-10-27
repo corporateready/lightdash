@@ -14,7 +14,6 @@ import {
     type Dashboard,
     type DashboardScheduler,
     type SavedChart,
-    type ScheduledJobs,
     type SchedulerAndTargets,
     type SchedulerSlackTarget,
     type UpdateSchedulerAndTargetsWithoutId,
@@ -25,10 +24,7 @@ import { login, loginAsEditor, loginAsViewer } from '../helpers/auth';
 const apiUrl = '/api/v1';
 
 const cron = '59 23 * * *';
-const createSchedulerBody: Omit<
-    CreateSchedulerAndTargetsWithoutIds,
-    'enabled' | 'includeLinks'
-> = {
+const createSchedulerBody: CreateSchedulerAndTargetsWithoutIds = {
     name: 'test',
     cron,
     targets: [{ channel: 'C1' }, { channel: 'C2' }],
@@ -37,6 +33,8 @@ const createSchedulerBody: Omit<
     timezone: 'UTC', // Explicitly set the timezone to be UTC since the project default might have been changed which will make the tests fail
     appUuid: null,
     appName: null,
+    enabled: true,
+    includeLinks: true,
 };
 
 const getUpdateSchedulerBody = (
@@ -173,15 +171,6 @@ describe('Lightdash scheduler endpoints', () => {
         );
         expect(schedulerIds).toContain(schedulerUuid);
 
-        // Get created jobs
-        const jobsResp = await admin.get<{ results: ScheduledJobs[] }>(
-            `${apiUrl}/schedulers/${schedulerUuid}/jobs`,
-        );
-        expect(jobsResp.body.results).toHaveLength(1);
-        expect(`${jobsResp.body.results[0].date}`.split('T')[1]).toBe(
-            '23:59:00.000Z',
-        );
-
         // Update
         const updateResponse = await admin.patch<{
             results: SchedulerAndTargets;
@@ -210,12 +199,12 @@ describe('Lightdash scheduler endpoints', () => {
         );
         expect(deleteResponse.status).toBe(200);
 
-        // Jobs are deleted
-        const deletedJobsResp = await admin.get(
-            `${apiUrl}/schedulers/${schedulerUuid}/jobs`,
+        // Scheduler is deleted
+        const deletedSchedulerResp = await admin.get(
+            `${apiUrl}/schedulers/${schedulerUuid}`,
             { failOnStatusCode: false },
         );
-        expect(deletedJobsResp.status).toBe(404);
+        expect(deletedSchedulerResp.status).toBe(404);
     });
 
     it('Should create/update/delete dashboard scheduler', async () => {
@@ -239,15 +228,6 @@ describe('Lightdash scheduler endpoints', () => {
         expect(createResponse.body.results.targets).toHaveLength(2);
 
         const { schedulerUuid, targets } = createResponse.body.results;
-
-        // Get created jobs
-        const jobsResp = await admin.get<{ results: ScheduledJobs[] }>(
-            `${apiUrl}/schedulers/${schedulerUuid}/jobs`,
-        );
-        expect(jobsResp.body.results).toHaveLength(1);
-        expect(`${jobsResp.body.results[0].date}`.split('T')[1]).toBe(
-            '23:59:00.000Z',
-        );
 
         // Get all dashboard schedulers
         const dashSchedulersResp = await admin.get<{
@@ -288,12 +268,12 @@ describe('Lightdash scheduler endpoints', () => {
         );
         expect(deleteResponse.status).toBe(200);
 
-        // Jobs are deleted
-        const deletedJobsResp = await admin.get(
-            `${apiUrl}/schedulers/${schedulerUuid}/jobs`,
+        // Scheduler is deleted
+        const deletedSchedulerResp = await admin.get(
+            `${apiUrl}/schedulers/${schedulerUuid}`,
             { failOnStatusCode: false },
         );
-        expect(deletedJobsResp.status).toBe(404);
+        expect(deletedSchedulerResp.status).toBe(404);
     });
 
     it('Should search schedulers by full name substring instead of loose token matches', async () => {

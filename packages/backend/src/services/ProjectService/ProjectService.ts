@@ -2,41 +2,62 @@ import { subject } from '@casl/ability';
 import {
     Account,
     addDashboardFiltersToMetricQuery,
+    AdditionalMetric,
+    AgentCapability,
+    AiAccessRefusedError,
+    allowsOptionalUserCredentials,
     AlreadyExistsError,
     AndFilterGroup,
-    AnonymousAccount,
     AnyType,
     ApiChartAndResults,
+    ApiCompiledMergeQueryResults,
+    ApiCompiledQueryResults,
     ApiCreatePreviewResults,
+    ApiDataTimezonePreviewResults,
     ApiDeployExploresResults,
+    ApiExploreResults,
     ApiFormulaValidationResults,
     ApiQueryResults,
     ApiSqlQueryResults,
+    ApiUpstreamDiffResults,
+    applyWarehouseLocation,
     assertEmbeddedAuth,
     assertIsAccountWithOrg,
+    assertRegisteredAccount,
     assertUnreachable,
+    assertValidBigqueryKeyfile,
     AthenaAuthenticationType,
     BigqueryAuthenticationType,
+    buildDataTimezonePreviewResponse,
+    buildDataTimezonePreviewSql,
+    buildMergeItems,
     CacheMetadata,
-    calculateCompilationReport,
     calculateExploreWarningReport,
     ChartSourceType,
     ChartSummary,
+    combineManifestSources,
+    CompilationSource,
     CompiledDimension,
+    ConflictError,
     ContentType,
     convertCustomMetricToDbt,
     convertExplores,
+    convertItemTypeToDimensionType,
+    CopyPreviewContentPayload,
     countCustomDimensionsInMetricQuery,
     countTotalFilterRules,
-    createDimensionWithGranularity,
     CreateJob,
     CreateProject,
     CreateProjectMember,
     CreateProjectOptionalCredentials,
     CreateProjectTableConfiguration,
     CreateSnowflakeCredentials,
+    CreateTrainingPreviewResults,
     CreateVirtualViewPayload,
     CreateWarehouseCredentials,
+    CreateWarehouseCredentialsWithOptionalSecrets,
+    currentUtcWallClock,
+    CustomDimension,
     CustomFormatType,
     CustomSqlQueryForbiddenError,
     DashboardAvailableFilters,
@@ -47,52 +68,91 @@ import {
     DateZoom,
     DbtExposure,
     DbtExposureType,
+    DbtManifest,
     DbtManifestVersion,
+    DbtProjectConfig,
     DbtProjectEnvironmentVariable,
     DbtProjectType,
     DbtRawModelNode,
-    deepEqual,
+    DbtVersionOption,
+    DEFAULT_SPOTLIGHT_CONFIG,
     DefaultSupportedDbtVersion,
     DimensionType,
+    DirectAccessResourceType,
     DownloadFileType,
+    DuckdbConnectionType,
+    EnableLearnResults,
+    EnsurePlaygroundProjectResults,
     Explore,
     ExploreError,
+    ExploreSplitError,
     ExploreType,
     FeatureFlags,
+    Field,
+    FieldType,
+    fillOmittedSecrets,
     FilterableDimension,
+    FilterAutocompleteValue,
     findReplaceableCustomMetrics,
     ForbiddenError,
     formatRows,
     getAccountUserTimezone,
-    getAllDimensionsMap,
-    getAvailableFilterFieldIds,
+    getAiExecutionCredentialUuid,
     getAvailableParametersFromTables,
+    getBigqueryKeyfileCredentials,
     getColumnTimezone,
+    getCompiledModels,
+    getCustomSqlFieldKey,
+    getDashboardFilterableFieldKey,
     getDashboardFilterRulesForTables,
+    getDashboardTileParameterOverrides,
+    getDbtEnvironmentVariableKeyError,
     getDimensions,
+    getEffectiveParameterDefinitions,
     getErrorMessage,
-    getFields,
+    getExecutableFilterFieldIds,
+    getFieldFormatOverrideProps,
+    getHiddenFilterableFieldIds,
     getIntrinsicUserAttributes,
     getItemId,
+    getItemMap,
+    getMergeSourceTableLabel,
     getMetricOverridesWithPopInheritance,
     getMetrics,
+    getModelsFromManifest,
     getParameterReferences,
+    getPersonSignIn,
     getPreAggregateExploreName,
-    getTimeDimensionsMap,
+    getRequestMethod,
     getTimezoneLabel,
+    getUnaccountedDimensions,
     GroupType,
     hasConnectionChanges,
     hasIntersection,
     hasWarehouseCredentials,
-    IntrinsicUserAttributes,
+    isAdditionalMetric,
+    isAiAccessQueryContext,
+    isAwsIamRoleArn,
     isCartesianChartConfig,
+    isCustomDimension,
+    isCustomSqlDimension,
     isDateItem,
+    isDimension,
     isExploreError,
+    isField,
     isFilterableDimension,
     isJwtUser,
+    isMergeMetricSource,
+    isMergeResultSource,
+    isMetric,
+    isMissingBigqueryKeyfile,
     isNotNull,
-    isStandardDateGranularity,
-    isSubDayGranularity,
+    isPeriodOverPeriodAdditionalMetric,
+    isReservedParameterName,
+    isSqlTableCalculation,
+    isSshTunnelErrorData,
+    isTodayParameterDefault,
+    isUserManagedExplore,
     isUserWithOrg,
     isValidTimezone,
     ItemsMap,
@@ -104,117 +164,214 @@ import {
     LightdashError,
     LightdashProjectConfig,
     LightdashUser,
+    ManifestCollision,
+    ManifestSource,
+    MAX_RESULTS_CACHE_TTL_SECONDS,
     maybeOverrideDbtConnection,
     maybeOverrideWarehouseConnection,
     maybeReplaceFieldsInChartVersion,
+    MERGE_TABLE_NAME,
+    mergeCalculationReferencePattern,
+    MergeFieldTypes,
+    MergeJoinKeyPart,
+    MergeQuery,
+    MergeQueryColumns,
+    MergeQueryError,
+    MergeQueryErrorKind,
+    MergeQueryField,
+    MergeQueryMetricSource,
     mergeWarehouseCredentials,
     MetricQuery,
+    MetricType,
+    MIN_RESULTS_CACHE_TTL_SECONDS,
     MissingWarehouseCredentialsError,
     MostPopularAndRecentlyUpdated,
     normalizeIndexColumns,
+    normalizeWarehouseCredentials,
     NotFoundError,
+    omitDisallowedParameterValues,
     OpenIdIdentityIssuerType,
     ParameterError,
+    parseTableCalculationFunctions,
+    PersonSignInProvider,
     PivotChartData,
     PivotConfiguration,
     PivotValuesColumn,
+    placeMergeSortNulls,
+    PlaygroundProjectTrigger,
     PreAggregateCheckResult,
     PreAggregateMatchMiss,
+    preAggregateMaterialization,
     PreAggregateMissReason,
     preAggregateUtils,
+    PreviewExpiresAt,
+    PreviewWarehouseSignInExpiredError,
     Project,
     ProjectCatalog,
+    ProjectContextEntry,
+    ProjectDbtSource,
     ProjectDefaults,
     ProjectGroupAccess,
     ProjectMemberProfile,
     ProjectMemberRole,
+    ProjectSummary,
     ProjectType,
     QueryExecutionContext,
+    QuerySurface,
+    RedshiftAuthenticationType,
+    RegisteredAccount,
     ReplaceableCustomFields,
     ReplaceCustomFields,
     ReplaceCustomFieldsPayload,
-    replaceDimensionInExplore,
     RequestMethod,
+    resolveDashboardTileParameters,
+    resolveDbtVersion,
     ResolvedProjectColorPalette,
+    resolveFallbackParameterValues,
+    resolveMergeSorts,
     resolveQueryTimezone,
-    resolveToBaseTimeDimension,
     ResultRow,
+    ResultsCacheProjectSettings,
     SavedChartDAO,
     SavedChartsInfoForDashboardAvailableFilters,
     SessionUser,
+    SignInSubjectBasis,
+    SingleConnectionProjectError,
     snakeCaseName,
     SnowflakeAuthenticationType,
-    SnowflakeTokenError,
     SortField,
     SpaceQuery,
     SpaceSummary,
     SqlRunnerPayload,
     SqlRunnerPivotQueryPayload,
+    SqlRunnerWarehouseConnection,
+    SshTunnelError,
     SummaryExplore,
+    SupportedDbtAdapter,
+    supportsConnectionDatabaseListing,
     TablesConfiguration,
     TableSelectionType,
+    TooManyRequestsError,
     UnexpectedServerError,
+    UpdateAgentSqlScope,
     UpdateDefaultUserSpaces,
     UpdateMetadata,
     UpdateProject,
+    UpdateProjectDetails,
     UpdateProjectMember,
     UpdateQueryTimezoneSettings,
+    UpdateResultsCacheProjectSettings,
     UpdateSchedulerSettings,
     UpdateVirtualViewPayload,
     UserAccessControls,
     UserAttributeValueMap,
+    UserWarehouseCredentialPurpose,
     UserWarehouseCredentials,
+    UserWarehouseCredentialsWithSecrets,
+    usesAwsWebIdentity,
+    validateMergeQuery,
+    VizAggregationOptions,
     VizColumn,
     WarehouseClient,
+    WarehouseConnection,
     WarehouseConnectionError,
+    WarehouseConnectionTestResults,
     WarehouseCredentials,
+    WarehouseDatabaseListing,
     WarehouseTablesCatalog,
     WarehouseTableSchema,
     WarehouseTypes,
+    withAgentMarkerTag,
+    type AgentConnectionTaskEffect,
+    type AgentSqlScope,
     type ApiCreateProjectResults,
-    type CreateDatabricksCredentials,
+    type ChartUsageIn,
+    type DashboardTileParameterInputs,
+    type DataTimezonePreviewRequest,
+    type MergeCompiledLeg,
+    type MergeItemEntry,
+    type MergeTypedColumn,
     type Metric,
+    type OrganizationProject,
     type ParameterDefinitions,
+    type ParameterFallbackSources,
     type ParametersValuesMap,
+    type QueryResultProducer,
     type RunQueryTags,
+    type SharedSignInStatus,
+    type SignInSubject,
     type Tag,
+    type UUID,
+    type WarehouseLocation,
     type WarehouseSqlBuilder,
+    type WeekDay,
 } from '@lightdash/common';
+import { extractColumnRefs, parse as parseFormula } from '@lightdash/formula';
 import {
     BigqueryWarehouseClient,
-    DATABRICKS_DEFAULT_OAUTH_CLIENT_ID,
-    exchangeDatabricksOAuthCredentials,
-    refreshDatabricksOAuthToken,
-    SshTunnel,
+    getGoogleOauthTokenError,
     warehouseSqlBuilderFromType,
 } from '@lightdash/warehouses';
 import * as Sentry from '@sentry/node';
+import { createHmac, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
+import { GoogleAuth } from 'google-auth-library';
 import * as yaml from 'js-yaml';
-import { uniq } from 'lodash';
+import { type Knex } from 'knex';
+import { isEqual, uniq } from 'lodash';
 import fetch from 'node-fetch';
 import { Readable } from 'stream';
 import { URL } from 'url';
+import { promisify } from 'util';
 import { v4 as uuidv4 } from 'uuid';
+import v8 from 'v8';
 import { Worker } from 'worker_threads';
+import { gzip } from 'zlib';
 import {
     LightdashAnalytics,
     MetricQueryExecutionProperties,
     ProjectEvent,
+    type OnboardingFlow,
 } from '../../analytics/LightdashAnalytics';
+import { trackSafely } from '../../analytics/trackSafely';
+import {
+    fromServiceAccount,
+    fromSession,
+    toSessionUser,
+} from '../../auth/account/account';
+import { type AgentConnectionGrantService } from '../../auth/agentConnectionGrants/AgentConnectionGrantService';
+import { grantAllowsCapabilities } from '../../auth/agentConnectionGrants/resourceConstraints';
 import { S3CacheClient } from '../../clients/Aws/S3CacheClient';
 import EmailClient from '../../clients/EmailClient/EmailClient';
 import { type FileStorageClient } from '../../clients/FileStorage/FileStorageClient';
 import type { INatsClient } from '../../clients/NatsClient';
+import { resolveDbtSourceFetchConcurrency } from '../../config/dbtSourceFetchConcurrency';
 import { LightdashConfig } from '../../config/parseConfig';
 import { normalizeDatabricksHostLenient } from '../../controllers/authentication/strategies/databricksStrategy';
+import type { DbProjectParameter } from '../../database/entities/projectParameters';
 import type { DbTagUpdate } from '../../database/entities/tags';
+import {
+    getMissingDbtNodeReferences,
+    withCrossSourceRefsHint,
+} from '../../dbt/dbtExternalNodes';
+import { getDbtPartialParseBaselinePath } from '../../dbt/dbtPartialParseBaseline';
+import { scanDbtProject } from '../../dbt/dbtProjectScan';
+import { DbtSourceError } from '../../dbt/DbtSourceError';
 import { type DbPreAggregateDefinitionIn } from '../../ee/database/entities/preAggregates';
 import { PreAggregateModel } from '../../ee/models/PreAggregateModel';
 import { enhanceExploresForPreAggregates } from '../../ee/preAggregates/enhanceExploresForPreAggregates';
+import { isPreAggregatesEnabled } from '../../ee/preAggregates/isPreAggregatesEnabled';
+import { computeMaterializationFingerprint } from '../../ee/preAggregates/materializationFingerprint';
 import { preAggregatePostProcessor } from '../../ee/preAggregates/postProcessor';
-import { buildMaterializationMetricQuery } from '../../ee/services/PreAggregateMaterializationService/buildMaterializationMetricQuery';
+import type { AiAgentService } from '../../ee/services/AiAgentService/AiAgentService';
+import type { AppGenerateService } from '../../ee/services/AppGenerateService/AppGenerateService';
+import { seedTrainingCopyDocuments } from '../../ee/services/ProjectService/seedPlaygroundDocuments';
+import { seedMissingTrainingCopyMetricsTrees } from '../../ee/services/ProjectService/seedPlaygroundMetricsTrees';
 import { errorHandler } from '../../errors';
+import {
+    newExploreCacheReadContext,
+    summarizeExploreCacheRead,
+} from '../../logging/exploreCacheReadMetrics';
 import Logger from '../../logging/logger';
 import { measureTime } from '../../logging/measureTime';
 import { AnalyticsModel } from '../../models/AnalyticsModel';
@@ -222,56 +379,289 @@ import type { CatalogModel } from '../../models/CatalogModel/CatalogModel';
 import { ContentModel } from '../../models/ContentModel/ContentModel';
 import { ContentVerificationModel } from '../../models/ContentVerificationModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import { type DbtSourceRefCatalogModel } from '../../models/DbtSourceRefCatalogModel';
+import type { DocumentModel } from '../../models/DocumentModel';
 import { DownloadFileModel } from '../../models/DownloadFileModel';
 import { EmailModel } from '../../models/EmailModel';
 import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
+import { GithubAppInstallationsModel } from '../../models/GithubAppInstallations/GithubAppInstallationsModel';
 import { GroupsModel } from '../../models/GroupsModel';
 import { JobModel } from '../../models/JobModel/JobModel';
 import { OnboardingModel } from '../../models/OnboardingModel/OnboardingModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
+import { OrganizationSettingsModel } from '../../models/OrganizationSettingsModel';
 import { OrganizationWarehouseCredentialsModel } from '../../models/OrganizationWarehouseCredentialsModel';
 import { ProjectCompileLogModel } from '../../models/ProjectCompileLogModel';
-import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import { ProjectDbtSourcesModel } from '../../models/ProjectDbtSourcesModel';
+import { type ExploreNaming } from '../../models/ProjectModel/exploreNameAllocation';
+import {
+    ProjectModel,
+    type ExploreWriteCheck,
+    type PushToPreview,
+    type StagedExploreWriteCheck,
+} from '../../models/ProjectModel/ProjectModel';
 import { ProjectParametersModel } from '../../models/ProjectParametersModel';
+import type { RefreshTokenRotation } from '../../models/RefreshTokenRotation/RefreshTokenRotation';
 import { SavedChartModel } from '../../models/SavedChartModel';
 import { SpaceModel } from '../../models/SpaceModel';
 import { SshKeyPairModel } from '../../models/SshKeyPairModel';
 import type { TagsModel } from '../../models/TagsModel';
 import { UserAttributesModel } from '../../models/UserAttributesModel';
 import { UserModel } from '../../models/UserModel';
+import { UserOAuthGrantsModel } from '../../models/UserOAuthGrantsModel';
+import type { PersonalCredentialPersistencePolicy } from '../../models/UserWarehouseCredentials/UserWarehouseCredentialsModel';
 import { UserWarehouseCredentialsModel } from '../../models/UserWarehouseCredentials/UserWarehouseCredentialsModel';
 import { WarehouseAvailableTablesModel } from '../../models/WarehouseAvailableTablesModel/WarehouseAvailableTablesModel';
-import { DbtBaseProjectAdapter } from '../../projectAdapters/dbtBaseProjectAdapter';
-import { projectAdapterFromConfig } from '../../projectAdapters/projectAdapter';
-import { compileMetricQuery } from '../../queryCompiler';
-import { SchedulerClient } from '../../scheduler/SchedulerClient';
-import { ProjectAdapter } from '../../types';
+import { type WarehouseConnectionCompileModel } from '../../models/WarehouseConnectionCompileModel/WarehouseConnectionCompileModel';
 import {
-    runWorkerThread,
-    wrapSentryTransaction,
-    wrapSentryTransactionSync,
-} from '../../utils';
+    type WarehouseConnectionIdentityModel,
+    type WarehouseConnectionMap,
+} from '../../models/WarehouseConnectionIdentityModel/WarehouseConnectionIdentityModel';
+import {
+    WarehouseConnectionModel,
+    type WarehouseConnectionProject,
+} from '../../models/WarehouseConnectionModel/WarehouseConnectionModel';
+import {
+    type ConnectionBinding,
+    type ConnectionRouteWithOriginal,
+} from '../../models/WarehouseConnectionRouter/WarehouseConnectionRouter';
+import { WarehouseConnectionTablesModel } from '../../models/WarehouseConnectionTablesModel/WarehouseConnectionTablesModel';
+import { type CompilableDbtSource } from '../../projectAdapters/CompileGroup';
+import {
+    CrossSourceCancellation,
+    waitForDbtSourceCleanup,
+} from '../../projectAdapters/crossSourceCancellation';
+import {
+    CrossSourceCatalogCache,
+    logCrossSourceCacheError,
+} from '../../projectAdapters/crossSourceCatalogCache';
+import { resolveCrossSourceManifests } from '../../projectAdapters/crossSourceRefs';
+import { DbtBaseProjectAdapter } from '../../projectAdapters/dbtBaseProjectAdapter';
+import { DbtSourceDiskPool } from '../../projectAdapters/DbtSourceDiskPool';
+import { assertGithubInstallationResolved } from '../../projectAdapters/githubAuthorization';
+import { projectAdapterFromConfig } from '../../projectAdapters/projectAdapter';
+import {
+    SourceFailureIsolation,
+    validateDbtSourceManifest,
+} from '../../projectAdapters/sourceFailureIsolation';
+import { compileMetricQuery } from '../../queryCompiler';
+import {
+    armCompileShutdown,
+    CompileInterruptedError,
+    disarmCompileShutdown,
+    getCompileShutdownSignal,
+    markCompilePublished,
+    throwIfCompileAborted,
+} from '../../scheduler/compileShutdown';
+import { SchedulerClient } from '../../scheduler/SchedulerClient';
+import { traceSpan } from '../../tracing/tracing';
+import {
+    CachedWarehouse,
+    DbtManifestFetchTimings,
+    ProjectAdapter,
+    TrackingParams,
+} from '../../types';
+import {
+    type DbtManifestFetchOptions,
+    type DbtManifestFetchResult,
+} from '../../types';
+import { runWorkerThread, wrapSentryTransaction } from '../../utils';
+import {
+    captureAgentConnectionTask,
+    getAgentConnectionEffectCapabilities,
+    normalizeAgentConnectionExecution,
+} from '../../utils/agentConnectionExecution';
+import { AWS_WEB_IDENTITY_MESSAGES } from '../../utils/awsWebIdentity/messages';
+import { assertValidPersistedBigquerySsoKeyfile } from '../../utils/bigquerySsoCredentials';
 import { buildCacheHash, getCacheUserUuid } from '../../utils/cacheUtils';
 import { metricQueryWithLimit as applyMetricQueryLimit } from '../../utils/csvLimitUtils';
-import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
+import { omitDbtEnvironment } from '../../utils/dbtProjectConfig';
 import {
-    CompiledQuery,
-    MetricQueryBuilder,
-} from '../../utils/QueryBuilder/MetricQueryBuilder';
+    redactExploreSql,
+    redactFieldSql,
+    resolveAdditionalMetricsSql,
+} from '../../utils/embedCompiledSql';
+import { pickEmbedProject } from '../../utils/embedProject';
+import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
+import { ExploreCompilationSummary } from '../../utils/ExploreCompilationSummary';
+import { createComposeMergeQueryBuilder } from '../../utils/QueryBuilder/composeMergeSql';
+import { applyMergeTerminalWrapper } from '../../utils/QueryBuilder/MergeQueryBuilder';
 import { PivotQueryBuilder } from '../../utils/QueryBuilder/PivotQueryBuilder';
+import { QueryComposer } from '../../utils/QueryBuilder/QueryComposer';
 import { applyLimitToSqlQuery } from '../../utils/QueryBuilder/utils';
+import {
+    getResultEntitlementFingerprint,
+    getResultEntitlementFingerprintForms,
+    isSameResultProducer,
+    isSameResultProducerOwner,
+    isSameResultReader,
+    matchesResultEntitlementFingerprint,
+} from '../../utils/queryResultProducer';
 import { SubtotalsCalculator } from '../../utils/SubtotalsCalculator';
+import { copyWarehouseCredentialVersions } from '../../utils/warehouseCredentialVersion';
 import { AdminNotificationService } from '../AdminNotificationService/AdminNotificationService';
+import { assertHumanManagedMutation } from '../AgentPermissionService/assertHumanManagedMutation';
+import {
+    agentExecutionContext,
+    buildQueryAgentIdentity,
+    buildResultReader,
+    getContentWriteAgentIdentity,
+} from '../AiAccessService/agentExecutionContext';
+import { AiAccessService } from '../AiAccessService/AiAccessService';
 import { BaseService } from '../BaseService';
+import {
+    NO_CLI_DEPLOY_SELECTION,
+    resolveCliDeploySource,
+    withoutClientBindings,
+    type CliDeploySelection,
+} from '../cliDeploy';
+import type { DirectAccessService } from '../DirectAccess/DirectAccessService';
+import type { DocumentQueryContext } from '../DocumentService/DocumentQueryContext';
+import { inferCliDeploySource } from '../inferCliDeploySource';
+import {
+    MultiConnectionCompiler,
+    withConnectionWarnings,
+    type MultiConnectionCompilation,
+    type MultiConnectionSave,
+} from '../MultiConnectionCompiler/MultiConnectionCompiler';
+import { resolveOrganizationExportLimits } from '../OrganizationSettingsService/resolveExportLimits';
+import { type PermissionsService } from '../PermissionsService/PermissionsService';
+import { resolveCliPreviewDeploy } from '../resolveCliPreviewDeploy';
 import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import {
+    auditAndFilterExplore,
+    auditMetricQueryAttributeAccess,
+} from '../UserAttributesService/userAttributeAudit';
 import {
     doesExploreMatchRequiredAttributes,
     exploreHasFilteredAttribute,
-    getFilteredExplore,
+    mergeUserAttributes,
 } from '../UserAttributesService/UserAttributeUtils';
 import { UserService } from '../UserService';
+import {
+    aiClientFromQueryContext,
+    connectionContextFromAccount,
+    connectionContextFromUser,
+    ConnectionSurface,
+    connectionSurfaceFromAgentSurface,
+    connectionSurfaceFromQuerySurface,
+    surfaceFromQueryContext,
+    WarehouseCredentialKind,
+    type ConnectionContext,
+} from '../WarehouseClientFactory/ConnectionContext';
+import {
+    type CredentialOwner,
+    type CredentialRefreshSource,
+    type CredentialSelection,
+    type CredentialSelectionSource,
+    type DbtTargetPolicy,
+} from '../WarehouseClientFactory/CredentialResolver';
+import { createCredentialResolverRegistry } from '../WarehouseClientFactory/credentialResolvers';
+import {
+    composePersonalWarehouseCredentials,
+    projectPersonalWarehouseCredentials,
+} from '../WarehouseClientFactory/personalCredentialOverlay';
+import { resolvePersonalCredentialPolicy } from '../WarehouseClientFactory/personalCredentialPolicy';
+import { prepareWarehouseOAuthCredentials } from '../WarehouseClientFactory/preparedOAuthCredentials';
+import { DatabricksOAuthCredentialResolver } from '../WarehouseClientFactory/resolvers/DatabricksOAuthCredentialResolver';
+import { SnowflakeOAuthCredentialResolver } from '../WarehouseClientFactory/resolvers/SnowflakeOAuthCredentialResolver';
+import {
+    WarehouseClientConstructionError,
+    WarehouseClientFactory,
+    type ResolvedWarehouseConnection,
+    type ScopedWarehouseConnection,
+    type WarehouseClientRef,
+    type WarehouseConnectionLease,
+    type WarehouseConnectionLeaseRef,
+} from '../WarehouseClientFactory/WarehouseClientFactory';
+import type {
+    ResolvedWarehouseCredentials,
+    WarehouseCredentialBase,
+    WarehouseCredentialResolutionContext,
+    WarehouseCredentialSource,
+} from '../WarehouseClientFactory/WarehouseCredentialSource';
+import {
+    EXTRA_CONNECTION_SELECT_CREDENTIALS_MESSAGE,
+    getExtraConnectionRequireUserCredentials,
+} from '../WarehouseConnectionService/extraConnectionUserCredentials';
+import {
+    assertAnalyticsProjectEnabled,
+    createAnalyticsClient,
+} from './analyticsProject/analyticsProjectClient';
+import { createAnalyticsExplores } from './analyticsProject/createAnalyticsExplores';
+import {
+    credentialsForListedDatabase,
+    findListedCatalogDatabase,
+    findListedDatabase,
+    getDatabaseListFailureReason,
+    listConnectionDatabases,
+} from './connectionSqlRunner';
 import { getFieldValuesMetricQuery } from './fieldValuesQueryBuilder';
 import { getAvailableParameterDefinitions } from './parameters';
+import { mergePersonalWarehouseCredentials } from './personalWarehouseCredentials';
+import {
+    reconcilePlaygroundBundles,
+    type ReconcilePlaygroundBundlesResult,
+} from './playgroundBundle';
+import {
+    assertIncomingPreAggregateRefresh,
+    assertPreAggregateRefresh,
+    EMPTY_PRE_AGGREGATE_REFRESH,
+} from './preAggregateRefresh';
+import {
+    checkGoogleRefreshTokenCached,
+    getBigquerySsoCredentials,
+    getPreviewOwnsBigquerySsoCredentials,
+    getPushedPreviewCredentials,
+    recheckGoogleRefreshToken,
+    repairStalePreviewBigquerySso,
+    type CheckGoogleRefreshToken,
+} from './previewBigquerySsoCredentials';
+import { projectMergedManifest } from './projectMergedManifest';
+import { TRAINING_SPACE } from './provisionTrainingProject';
+import { applyCurrentGithubInstallationId } from './resolveGithubInstallationId';
+import {
+    buildConnectionTestResults,
+    tunnelHopsAllOk,
+    tunnelHopsFailedAt,
+} from './warehouseConnectionHops';
+import {
+    toWarehouseSqlBuilderSettings,
+    type WarehouseSqlBuilderSettings,
+} from './warehouseSqlBuilderSettings';
+
+const manifestWithCompilationSelection = (
+    manifest: DbtManifest,
+    selectedModelIds?: string[],
+): DbtManifest => {
+    const compiledModelIds = new Set(
+        getCompiledModels(getModelsFromManifest(manifest), selectedModelIds)
+            .filter((node) => node.resource_type === 'model')
+            .map((node) => node.unique_id),
+    );
+
+    return {
+        ...manifest,
+        nodes: Object.fromEntries(
+            Object.entries(manifest.nodes).map(([uniqueId, node]) => [
+                uniqueId,
+                node.resource_type === 'model'
+                    ? { ...node, compiled: compiledModelIds.has(uniqueId) }
+                    : node,
+            ]),
+        ) as DbtManifest['nodes'],
+    };
+};
+
+const gzipAsync = promisify(gzip);
+
+type TestProjectAdapterCredentials =
+    | { kind: 'submitted_resolved'; credentials: CreateWarehouseCredentials }
+    | {
+          kind: 'stored';
+          projectUuid: string;
+          credentials: CreateWarehouseCredentials;
+      };
 
 type RefreshTokenRotationSource =
     | { kind: 'project'; projectUuid: string }
@@ -279,18 +669,43 @@ type RefreshTokenRotationSource =
           kind: 'organization';
           organizationWarehouseCredentialsUuid: string;
       }
-    | { kind: 'user'; userWarehouseCredentialsUuid: string };
+    | {
+          kind: 'user';
+          userWarehouseCredentialsUuid: string;
+          refreshSource: CredentialRefreshSource;
+      }
+    | {
+          kind: 'warehouseConnection';
+          project: WarehouseConnectionProject;
+          warehouseConnectionUuid: string;
+      };
+
+/**
+ * Projects created by Lightdash itself rather than by a user: the onboarding
+ * playground and the training project. Only these may use embedded DuckDB
+ * credentials or the `TRAINING` project type.
+ */
+export type InternalProvisioningSource =
+    | 'playground'
+    | 'training'
+    | 'analytics';
+export type InternalProvisioning = { source: InternalProvisioningSource };
 
 export type ProjectServiceArguments = {
+    getAgentConnectionGrantService?: () => AgentConnectionGrantService;
+    refreshTokenRotation: Pick<RefreshTokenRotation, 'run'>;
     lightdashConfig: LightdashConfig;
     analytics: LightdashAnalytics;
     projectModel: ProjectModel;
+    dbtSourceRefCatalogModel: DbtSourceRefCatalogModel;
+    projectDbtSourcesModel: ProjectDbtSourcesModel;
     preAggregateModel: PreAggregateModel;
     onboardingModel: OnboardingModel;
     savedChartModel: SavedChartModel;
     jobModel: JobModel;
     emailClient: EmailClient;
     spaceModel: SpaceModel;
+    documentModel: DocumentModel;
     sshKeyPairModel: SshKeyPairModel;
     userAttributesModel: UserAttributesModel;
     s3CacheClient: S3CacheClient;
@@ -299,6 +714,10 @@ export type ProjectServiceArguments = {
     emailModel: EmailModel;
     userWarehouseCredentialsModel: UserWarehouseCredentialsModel;
     warehouseAvailableTablesModel: WarehouseAvailableTablesModel;
+    warehouseConnectionModel: WarehouseConnectionModel;
+    warehouseConnectionCompileModel: WarehouseConnectionCompileModel;
+    warehouseConnectionTablesModel: WarehouseConnectionTablesModel;
+    warehouseConnectionIdentityModel: WarehouseConnectionIdentityModel;
     schedulerClient: SchedulerClient;
     downloadFileModel: DownloadFileModel;
     fileStorageClient: FileStorageClient;
@@ -308,29 +727,162 @@ export type ProjectServiceArguments = {
     contentModel: ContentModel;
     encryptionUtil: EncryptionUtil;
     userModel: UserModel;
+    userOAuthGrantsModel: UserOAuthGrantsModel;
     featureFlagModel: FeatureFlagModel;
+    aiAccessService: AiAccessService;
     projectParametersModel: ProjectParametersModel;
     organizationWarehouseCredentialsModel: OrganizationWarehouseCredentialsModel;
     organizationModel: OrganizationModel;
     projectCompileLogModel: ProjectCompileLogModel;
     adminNotificationService: AdminNotificationService;
+    permissionsService: PermissionsService;
     spacePermissionService: SpacePermissionService;
+    directAccessService: DirectAccessService;
     natsClient?: INatsClient;
     contentVerificationModel?: ContentVerificationModel;
+    organizationSettingsModel: OrganizationSettingsModel;
+    githubAppInstallationsModel?: GithubAppInstallationsModel;
+    projectContextModel?: {
+        replaceEntriesForProject(
+            projectUuid: string,
+            entries: ProjectContextEntry[],
+        ): Promise<void>;
+    };
+    isProjectContextEnabled?: (args: {
+        user: Pick<SessionUser, 'userUuid'> &
+            Partial<Pick<SessionUser, 'organizationName'>>;
+        organizationUuid: string;
+    }) => Promise<boolean>;
+    // Lazily resolves the EE data-app service so preview creation can duplicate
+    // the upstream project's data apps. A thunk — not the instance — because
+    // AppGenerateService depends on ProjectService, so eager injection would
+    // create a construction cycle. Resolves undefined in core (non-EE) builds.
+    getAppGenerateService?: () => AppGenerateService | undefined;
+    getDataAppCustomSqlProvenance: (args: {
+        account: Account;
+        projectUuid: string;
+        organizationUuid: string;
+        exploreName: string;
+        previewToken: string;
+    }) => Promise<{
+        tableCalculations: Set<string>;
+        customDimensions: Set<string>;
+        additionalMetrics: Set<string>;
+    }>;
+    getAiAgentService?: () => AiAgentService | undefined;
+    onProjectCreated?: (args: {
+        user: SessionUser;
+        projectUuid: string;
+        projectType: ProjectType;
+        provisioningSource?: InternalProvisioningSource;
+    }) => Promise<void>;
+    provisionPlaygroundProject?: (args: {
+        user: SessionUser;
+        projectService: ProjectService;
+        canViewProject: (project: OrganizationProject) => boolean;
+        trigger: PlaygroundProjectTrigger;
+    }) => Promise<EnsurePlaygroundProjectResults>;
+    /**
+     * Creates the org's training project when an admin enables Learn
+     * (CS-257). Wired by the service repository (core seeds what core can)
+     * and overridden by EE (adds the data app, agent and research run).
+     */
+    provisionTrainingProject?: (args: {
+        user: SessionUser;
+        projectService: ProjectService;
+    }) => Promise<EnableLearnResults>;
+    /**
+     * Seeds a fresh training copy with the Enterprise samples copies do not
+     * carry (the training agent's knowledge document). Set by EE; core has
+     * none.
+     */
+    seedTrainingCopyEnterpriseContent?: (args: {
+        organizationUuid: string;
+        projectUuid: string;
+        createdByUserUuid: string | null;
+    }) => Promise<void>;
 };
 
-export class ProjectService extends BaseService {
+const isValidDbtCloudWebhookSignature = (
+    secret: string,
+    rawBody: Buffer,
+    signature: string,
+): boolean => {
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    const expectedBuffer = Buffer.from(expected, 'utf8');
+    const signatureBuffer = Buffer.from(signature, 'utf8');
+    if (expectedBuffer.length !== signatureBuffer.length) {
+        return false;
+    }
+    return timingSafeEqual(expectedBuffer, signatureBuffer);
+};
+
+const WINDOW_CLAUSE_PATTERN = /\bover\s*\(/i;
+
+type ResolvedCompileAdapter = {
+    adapter: ProjectAdapter;
+    stagedMergedManifest?: Buffer;
+    connectionWarnings?: string[];
+    failedDbtSourceUuids?: string[];
+    exploreNaming?: ExploreNaming;
+};
+type SaveCompiledExploresArgs = {
+    userUuid: string;
+    projectUuid: string;
+    compilationSource: CompilationSource;
+    jobUuid?: string | null;
+    requestMethod?: string | null;
+    projectConfigDefaults?: ProjectDefaults;
+    cliVersion?: string | null;
+    complete?: boolean;
+    dbtModelNames?: string[];
+    connectionWarnings?: string[];
+    failedDbtSourceUuids?: string[];
+};
+
+const connectionCheckedExploreStreams = new WeakSet<
+    AsyncIterable<Explore | ExploreError>
+>();
+
+type PreparedExploreStream = {
+    exploreStream: AsyncIterable<Explore | ExploreError>;
+    lightdashProjectConfig: LightdashProjectConfig;
+    projectContext: ProjectContextEntry[] | undefined;
+    stagedMergedManifest?: Buffer;
+    connectionWarnings?: string[];
+    failedDbtSourceUuids?: string[];
+    onCompiled?: (summary: ExploreCompilationSummary) => void;
+    exploreNaming?: ExploreNaming;
+    multiConnection: PreparedMultiConnectionSave | null;
+};
+
+type PreparedMultiConnectionSave = MultiConnectionSave & { warnings: string[] };
+
+export class ProjectService
+    extends BaseService
+    implements WarehouseCredentialSource
+{
+    protected readonly unfilteredExploreSnapshots = new WeakMap<
+        Explore,
+        Explore
+    >();
+
+    static CREATE_PROJECT_JOB_ENQUEUE_GRACE_MS = 15 * 60 * 1000;
+
     lightdashConfig: LightdashConfig;
 
     analytics: LightdashAnalytics;
 
     projectModel: ProjectModel;
 
+    dbtSourceRefCatalogModel: DbtSourceRefCatalogModel;
+    projectDbtSourcesModel: ProjectDbtSourcesModel;
+
     preAggregateModel: PreAggregateModel;
 
     onboardingModel: OnboardingModel;
 
-    warehouseClients: Record<string, WarehouseClient>;
+    public readonly warehouseClientFactory: WarehouseClientFactory;
 
     savedChartModel: SavedChartModel;
 
@@ -340,7 +892,7 @@ export class ProjectService extends BaseService {
 
     spaceModel: SpaceModel;
 
-    sshKeyPairModel: SshKeyPairModel;
+    documentModel: DocumentModel;
 
     userAttributesModel: UserAttributesModel;
 
@@ -353,6 +905,13 @@ export class ProjectService extends BaseService {
     userWarehouseCredentialsModel: UserWarehouseCredentialsModel;
 
     warehouseAvailableTablesModel: WarehouseAvailableTablesModel;
+
+    warehouseConnectionModel: WarehouseConnectionModel;
+
+    warehouseConnectionIdentityModel: WarehouseConnectionIdentityModel;
+
+    multiConnectionCompiler: MultiConnectionCompiler;
+    warehouseConnectionTablesModel: WarehouseConnectionTablesModel;
 
     emailModel: EmailModel;
 
@@ -374,7 +933,10 @@ export class ProjectService extends BaseService {
 
     userModel: UserModel;
 
+    userOAuthGrantsModel: UserOAuthGrantsModel;
+
     featureFlagModel: FeatureFlagModel;
+    aiAccessService: AiAccessService;
 
     projectParametersModel: ProjectParametersModel;
 
@@ -386,20 +948,66 @@ export class ProjectService extends BaseService {
 
     adminNotificationService: AdminNotificationService;
 
+    permissionsService: PermissionsService;
+
     spacePermissionService: SpacePermissionService;
+
+    directAccessService: DirectAccessService;
 
     contentVerificationModel: ContentVerificationModel | undefined;
 
+    organizationSettingsModel: OrganizationSettingsModel;
+
+    githubAppInstallationsModel: GithubAppInstallationsModel | undefined;
+
+    projectContextModel:
+        | {
+              replaceEntriesForProject(
+                  projectUuid: string,
+                  entries: ProjectContextEntry[],
+              ): Promise<void>;
+          }
+        | undefined;
+
+    isProjectContextEnabled:
+        | ProjectServiceArguments['isProjectContextEnabled']
+        | undefined;
+
+    getAppGenerateService: (() => AppGenerateService | undefined) | undefined;
+
+    getDataAppCustomSqlProvenance: ProjectServiceArguments['getDataAppCustomSqlProvenance'];
+
+    getAiAgentService: (() => AiAgentService | undefined) | undefined;
+
+    onProjectCreated: ProjectServiceArguments['onProjectCreated'];
+
+    provisionPlaygroundProject: ProjectServiceArguments['provisionPlaygroundProject'];
+
+    provisionTrainingProject: ProjectServiceArguments['provisionTrainingProject'];
+
+    seedTrainingCopyEnterpriseContent: ProjectServiceArguments['seedTrainingCopyEnterpriseContent'];
+
+    private readonly databricksOAuthCredentialResolver: DatabricksOAuthCredentialResolver;
+
+    private readonly snowflakeOAuthCredentialResolver: SnowflakeOAuthCredentialResolver;
+
+    private readonly getAgentConnectionGrantService: ProjectServiceArguments['getAgentConnectionGrantService'];
+
     constructor({
+        getAgentConnectionGrantService,
+        refreshTokenRotation,
         lightdashConfig,
         analytics,
         projectModel,
+        projectDbtSourcesModel,
+        dbtSourceRefCatalogModel,
         preAggregateModel,
         onboardingModel,
         savedChartModel,
         jobModel,
         emailClient,
         spaceModel,
+        documentModel,
         sshKeyPairModel,
         userAttributesModel,
         s3CacheClient,
@@ -407,6 +1015,10 @@ export class ProjectService extends BaseService {
         dashboardModel,
         userWarehouseCredentialsModel,
         warehouseAvailableTablesModel,
+        warehouseConnectionModel,
+        warehouseConnectionCompileModel,
+        warehouseConnectionTablesModel,
+        warehouseConnectionIdentityModel,
         emailModel,
         schedulerClient,
         downloadFileModel,
@@ -417,33 +1029,121 @@ export class ProjectService extends BaseService {
         contentModel,
         encryptionUtil,
         userModel,
+        userOAuthGrantsModel,
         featureFlagModel,
+        aiAccessService,
         projectParametersModel,
         projectCompileLogModel,
         organizationWarehouseCredentialsModel,
         organizationModel,
         adminNotificationService,
+        permissionsService,
         spacePermissionService,
+        directAccessService,
         contentVerificationModel,
+        organizationSettingsModel,
+        githubAppInstallationsModel,
+        projectContextModel,
+        isProjectContextEnabled,
+        getAppGenerateService,
+        getDataAppCustomSqlProvenance,
+        getAiAgentService,
+        onProjectCreated,
+        provisionPlaygroundProject,
+        provisionTrainingProject,
+        seedTrainingCopyEnterpriseContent,
     }: ProjectServiceArguments) {
         super();
+        this.getAgentConnectionGrantService = getAgentConnectionGrantService;
         this.lightdashConfig = lightdashConfig;
         this.analytics = analytics;
         this.projectModel = projectModel;
+        this.projectDbtSourcesModel = projectDbtSourcesModel;
+        this.dbtSourceRefCatalogModel = dbtSourceRefCatalogModel;
         this.preAggregateModel = preAggregateModel;
         this.onboardingModel = onboardingModel;
-        this.warehouseClients = {};
+        this.snowflakeOAuthCredentialResolver =
+            new SnowflakeOAuthCredentialResolver({
+                refreshTokenRotation,
+                featureFlagModel,
+                projectModel,
+                organizationWarehouseCredentialsModel,
+                userWarehouseCredentialsModel,
+                warehouseConnectionModel,
+                userOAuthGrantsModel,
+                logger: this.logger,
+                attributeSharedSignInExpiry: (
+                    projectUuid,
+                    credentials,
+                    error,
+                ) =>
+                    this.warehouseClientFactory.attributeSharedSignInExpiry(
+                        projectUuid,
+                        credentials,
+                        error,
+                    ),
+            });
+        this.databricksOAuthCredentialResolver =
+            new DatabricksOAuthCredentialResolver({
+                refreshTokenRotation,
+                featureFlagModel,
+                projectModel,
+                organizationWarehouseCredentialsModel,
+                userWarehouseCredentialsModel,
+                warehouseConnectionModel,
+                lightdashConfig,
+                logger: this.logger,
+                attributeSharedSignInExpiry: (
+                    projectUuid,
+                    credentials,
+                    error,
+                ) =>
+                    this.warehouseClientFactory.attributeSharedSignInExpiry(
+                        projectUuid,
+                        credentials,
+                        error,
+                    ),
+            });
+        const credentialResolvers = createCredentialResolverRegistry({
+            lightdashConfig,
+            userOAuthGrantsModel,
+            sshKeyPairModel,
+            snowflakeOAuthCredentialResolver:
+                this.snowflakeOAuthCredentialResolver,
+            databricksOAuthCredentialResolver:
+                this.databricksOAuthCredentialResolver,
+        });
+        this.warehouseClientFactory = new WarehouseClientFactory({
+            credentialResolvers,
+            lightdashConfig,
+            projectModel,
+            featureFlagModel,
+            aiAccessService,
+            credentialSource: this,
+            logger: this.logger,
+        });
         this.savedChartModel = savedChartModel;
         this.jobModel = jobModel;
         this.emailClient = emailClient;
         this.spaceModel = spaceModel;
-        this.sshKeyPairModel = sshKeyPairModel;
+        this.documentModel = documentModel;
         this.userAttributesModel = userAttributesModel;
         this.s3CacheClient = s3CacheClient;
         this.analyticsModel = analyticsModel;
         this.dashboardModel = dashboardModel;
         this.userWarehouseCredentialsModel = userWarehouseCredentialsModel;
         this.warehouseAvailableTablesModel = warehouseAvailableTablesModel;
+        this.warehouseConnectionModel = warehouseConnectionModel;
+        this.warehouseConnectionIdentityModel =
+            warehouseConnectionIdentityModel;
+        this.multiConnectionCompiler = new MultiConnectionCompiler({
+            dbtSourceRefCatalogModel,
+            projectModel,
+            projectDbtSourcesModel,
+            warehouseConnectionCompileModel,
+            warehouseClientFactory: this.warehouseClientFactory,
+        });
+        this.warehouseConnectionTablesModel = warehouseConnectionTablesModel;
         this.emailModel = emailModel;
         this.schedulerClient = schedulerClient;
         this.downloadFileModel = downloadFileModel;
@@ -454,15 +1154,309 @@ export class ProjectService extends BaseService {
         this.contentModel = contentModel;
         this.encryptionUtil = encryptionUtil;
         this.userModel = userModel;
+        this.userOAuthGrantsModel = userOAuthGrantsModel;
         this.featureFlagModel = featureFlagModel;
+        this.aiAccessService = aiAccessService;
         this.projectParametersModel = projectParametersModel;
         this.projectCompileLogModel = projectCompileLogModel;
         this.organizationWarehouseCredentialsModel =
             organizationWarehouseCredentialsModel;
         this.organizationModel = organizationModel;
         this.adminNotificationService = adminNotificationService;
+        this.permissionsService = permissionsService;
         this.spacePermissionService = spacePermissionService;
+        this.directAccessService = directAccessService;
         this.contentVerificationModel = contentVerificationModel;
+        this.organizationSettingsModel = organizationSettingsModel;
+        this.githubAppInstallationsModel = githubAppInstallationsModel;
+        this.projectContextModel = projectContextModel;
+        this.isProjectContextEnabled = isProjectContextEnabled;
+        this.getAppGenerateService = getAppGenerateService;
+        this.getDataAppCustomSqlProvenance = getDataAppCustomSqlProvenance;
+        this.getAiAgentService = getAiAgentService;
+        this.onProjectCreated = onProjectCreated;
+        this.provisionPlaygroundProject = provisionPlaygroundProject;
+        this.provisionTrainingProject = provisionTrainingProject;
+        this.seedTrainingCopyEnterpriseContent =
+            seedTrainingCopyEnterpriseContent;
+    }
+
+    /**
+     * Enable Learn for the user's organization (CS-257): create the training
+     * project, seeded, with the caller as its assigned admin. Idempotent.
+     * Org admins only.
+     */
+    /** Run by the scheduler; moves sample-data projects to this server's playground bundle. */
+    async reconcilePlaygroundBundles(): Promise<ReconcilePlaygroundBundlesResult> {
+        return reconcilePlaygroundBundles({ projectModel: this.projectModel });
+    }
+
+    async enableLearn(user: SessionUser): Promise<EnableLearnResults> {
+        await this.assertCanViewLearn(user);
+        if (!this.provisionTrainingProject) {
+            throw new NotFoundError('Learn is not available');
+        }
+        const { organizationUuid } = user;
+        if (!organizationUuid) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('Organization', { organizationUuid }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'Only an organization admin can enable Learn',
+            );
+        }
+        const result = await this.provisionTrainingProject({
+            user,
+            projectService: this,
+        });
+        // The admin's cached abilities predate the project; other users'
+        // entries expire on their own (per-pod TTL).
+        this.userModel.invalidateSessionUserCache(user.userUuid);
+        return result;
+    }
+
+    async ensureAnalyticsProject(user: SessionUser): Promise<{
+        projectUuid: string;
+        url: string;
+        created: boolean;
+    }> {
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        const { organizationUuid } = user;
+        await this.assertAnalyticsProjectAdministration(user);
+        // Fail before creating a project if the signed file reads cannot authenticate.
+        const analyticsClient = await createAnalyticsClient(
+            organizationUuid,
+            this.featureFlagModel,
+            { allowEmpty: true },
+        );
+        await analyticsClient.test();
+        // Both models are backend-owned. Compilation itself needs no warehouse IO.
+        const explores = createAnalyticsExplores();
+        return this.projectModel.runInAnalyticsProvisioningLock(
+            organizationUuid,
+            async () => {
+                const existing = (
+                    await this.projectModel.getAllByOrganizationUuid(
+                        organizationUuid,
+                    )
+                ).find((project) => project.provisioningSource === 'analytics');
+                const projectUuid =
+                    existing?.projectUuid ??
+                    (
+                        await this.createWithoutCompile(
+                            user,
+                            {
+                                name: 'Lightdash analytics',
+                                type: ProjectType.DEFAULT,
+                                dbtConnection: { type: DbtProjectType.NONE },
+                                dbtVersion: DefaultSupportedDbtVersion,
+                                warehouseConnection: {
+                                    type: WarehouseTypes.DUCKDB,
+                                    connectionType:
+                                        DuckdbConnectionType.ANALYTICS,
+                                    database: 'memory',
+                                    schema: 'main',
+                                },
+                            },
+                            RequestMethod.BACKEND,
+                            { source: 'analytics' },
+                        )
+                    ).project.projectUuid;
+                // Also repairs a previous attempt that created the project but
+                // failed while saving models; never delete existing content.
+                await this.projectModel.saveExploresToCache(
+                    projectUuid,
+                    explores,
+                    true,
+                );
+                this.userModel.invalidateSessionUserCache(user.userUuid);
+                const project = await this.projectModel.getSummary(projectUuid);
+                if (!existing) {
+                    try {
+                        await this.schedulerClient.scheduleInitialUsageProcessing(
+                            {
+                                organizationUuid,
+                                projectUuid,
+                                userUuid: user.userUuid,
+                            },
+                        );
+                    } catch {
+                        // Persistence succeeded; the nightly job remains the fallback.
+                        this.logger.error(
+                            'Failed to enqueue initial usage processing',
+                            { organizationUuid, projectUuid },
+                        );
+                    }
+                }
+                return {
+                    projectUuid,
+                    url: `/projects/${project.slug ?? projectUuid}/tables`,
+                    created: !existing,
+                };
+            },
+        );
+    }
+
+    async ensurePlaygroundProject(
+        user: SessionUser,
+        trigger: PlaygroundProjectTrigger = 'invite_expert',
+    ): Promise<EnsurePlaygroundProjectResults> {
+        if (!this.provisionPlaygroundProject) {
+            throw new NotFoundError('Playground projects are not available');
+        }
+        const { organizationUuid } = user;
+        if (!organizationUuid) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'create',
+                subject('Project', {
+                    organizationUuid,
+                    type: ProjectType.DEFAULT,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have permission to create projects in this organization. Please contact your organization admin.",
+                {
+                    requiredPermission: 'create:project',
+                    projectType: ProjectType.DEFAULT,
+                    organizationUuid,
+                },
+            );
+        }
+        return this.provisionPlaygroundProject({
+            user,
+            projectService: this,
+            canViewProject: (project) =>
+                auditedAbility.can(
+                    'view',
+                    subject('Project', {
+                        organizationUuid,
+                        projectUuid: project.projectUuid,
+                        type: project.type,
+                        upstreamProjectUuid:
+                            project.upstreamProjectUuid ?? undefined,
+                        createdByUserUuid: project.createdByUserUuid,
+                    }),
+                ),
+            trigger,
+        });
+    }
+
+    protected async getOnboardingFlow(
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+    ): Promise<OnboardingFlow> {
+        const { enabled } = await this.featureFlagModel.get({
+            user,
+            featureFlagId: FeatureFlags.NewOnboarding,
+        });
+        return enabled ? 'new' : 'legacy';
+    }
+
+    private async provisionDefaultAiAgent(
+        user: SessionUser,
+        projectUuid: string,
+        projectType: ProjectType,
+        provisioningSource?: InternalProvisioningSource,
+    ): Promise<void> {
+        if (projectType === ProjectType.PREVIEW) {
+            return;
+        }
+        // The training project's agent comes with its seeded content (the
+        // walkthroughs name it); a second, default agent would make Ask AI
+        // land on either.
+        if (
+            provisioningSource === 'training' ||
+            provisioningSource === 'analytics'
+        ) {
+            return;
+        }
+
+        const { organizationUuid } = user;
+        if (!organizationUuid) {
+            return;
+        }
+
+        try {
+            // Playgrounds are provisioned alongside a user's own project, so
+            // they never pass the first-project check but still need an agent
+            if (provisioningSource === undefined) {
+                const projects =
+                    await this.projectModel.getAllByOrganizationUuid(
+                        organizationUuid,
+                    );
+                const nonPreviewProjects = projects.filter(
+                    (project) => project.type !== ProjectType.PREVIEW,
+                );
+                if (
+                    nonPreviewProjects.length !== 1 ||
+                    nonPreviewProjects[0].projectUuid !== projectUuid
+                ) {
+                    return;
+                }
+            }
+
+            await this.getAiAgentService?.()?.provisionDefaultAgent(
+                user,
+                projectUuid,
+            );
+        } catch (error) {
+            const errorMessage =
+                error instanceof Error ? error.message : String(error);
+            this.analytics.track({
+                event: 'ai_agent.provisioning_failed',
+                userId: user.userUuid,
+                properties: {
+                    organizationId: organizationUuid,
+                    projectId: projectUuid,
+                    error: errorMessage,
+                },
+            });
+            this.logger.warn(
+                `Failed to provision default AI agent for project ${projectUuid}: ${errorMessage}`,
+            );
+        }
+    }
+
+    private async runPostProjectCreationProvisioning(
+        user: SessionUser,
+        projectUuid: string,
+        projectType: ProjectType,
+        provisioningSource?: InternalProvisioningSource,
+    ): Promise<void> {
+        if (provisioningSource === 'analytics') return;
+        await this.provisionDefaultAiAgent(
+            user,
+            projectUuid,
+            projectType,
+            provisioningSource,
+        );
+
+        try {
+            await this.onProjectCreated?.({
+                user,
+                projectUuid,
+                projectType,
+                provisioningSource,
+            });
+        } catch (error) {
+            // Provisioning failures must not fail project creation
+            Sentry.captureException(error);
+            this.logger.error(
+                `Failed to run post-creation provisioning for project ${projectUuid}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
     }
 
     static getMetricQueryExecutionProperties({
@@ -476,11 +1470,13 @@ export class ProjectService extends BaseService {
         metricQuery: MetricQuery;
         dateZoom: DateZoom | undefined;
         chartUuid: string | undefined;
-        queryTags: Record<string, unknown>;
+        queryTags: Omit<RunQueryTags, 'query_context'>;
         explore: Explore;
         parameters: ParametersValuesMap | undefined;
     }): MetricQueryExecutionProperties {
         return {
+            exploreName: explore.name,
+            dashboardId: queryTags.dashboard_uuid ?? null,
             dimensionsCount: metricQuery.dimensions.length,
             metricsCount: metricQuery.metrics.length,
             filtersCount: countTotalFilterRules(metricQuery.filters),
@@ -555,12 +1551,16 @@ export class ProjectService extends BaseService {
                     metric.formatOptions &&
                     metric.formatOptions.type === CustomFormatType.CUSTOM,
             ).length,
+            periodOverPeriodMetricsCount: (
+                metricQuery.additionalMetrics || []
+            ).filter(
+                (metric) =>
+                    metricQuery.metrics.includes(getItemId(metric)) &&
+                    isPeriodOverPeriodAdditionalMetric(metric),
+            ).length,
             ...countCustomDimensionsInMetricQuery(metricQuery),
             dateZoomGranularity: dateZoom?.granularity || null,
             timezone: metricQuery.timezone,
-            ...(queryTags?.dashboard_uuid
-                ? { dashboardId: queryTags.dashboard_uuid }
-                : {}),
             chartId: chartUuid,
             ...(explore.type === ExploreType.VIRTUAL
                 ? { virtualViewId: explore.name }
@@ -578,6 +1578,7 @@ export class ProjectService extends BaseService {
     private async validateProjectCreationPermissions(
         user: SessionUser,
         data: Pick<CreateProject, 'type' | 'upstreamProjectUuid'>,
+        internalProvisioning?: InternalProvisioning,
     ) {
         if (!data.type) {
             throw new ParameterError('Project type must be provided');
@@ -615,6 +1616,11 @@ export class ProjectService extends BaseService {
                     },
                 );
 
+            case ProjectType.TRAINING:
+                // Only reachable from internal provisioning; see
+                // assertTrainingTypeIsInternal at both creation entry points.
+                return true;
+
             case ProjectType.PREVIEW: {
                 let upstreamProject: Awaited<
                     ReturnType<ProjectModel['get']>
@@ -644,9 +1650,30 @@ export class ProjectService extends BaseService {
                             },
                         );
                     }
+                    if (upstreamProject.provisioningSource === 'analytics') {
+                        throw new ForbiddenError(
+                            'Cannot create a preview from a managed analytics project',
+                        );
+                    }
                     if (upstreamProject.type === ProjectType.PREVIEW) {
                         throw new ForbiddenError(
                             'Cannot create a preview project from a preview project',
+                        );
+                    }
+                    // A learner's own copy of the training project for a
+                    // walkthrough: provisioned internally, so the trainee
+                    // needs no preview-creation scope. See createTrainingPreview.
+                    if (
+                        internalProvisioning?.source === 'training' &&
+                        upstreamProject.type === ProjectType.TRAINING
+                    ) {
+                        return true;
+                    }
+                    // Any other preview of the training project would look
+                    // like a training copy without being one.
+                    if (upstreamProject.type === ProjectType.TRAINING) {
+                        throw new ForbiddenError(
+                            'Previews of the training project are made by starting a walkthrough',
                         );
                     }
                     if (
@@ -659,6 +1686,11 @@ export class ProjectService extends BaseService {
                                 upstreamProjectUuid:
                                     upstreamProject.projectUuid,
                                 type: ProjectType.PREVIEW,
+                                metadata: {
+                                    upstreamProjectUuid:
+                                        upstreamProject.projectUuid,
+                                    upstreamProjectName: upstreamProject.name,
+                                },
                             }),
                         )
                     ) {
@@ -733,21 +1765,28 @@ export class ProjectService extends BaseService {
             ? user.organizationUuid
             : account.organization.organizationUuid;
         const email = user ? user.email : account.user.email;
+        const isServiceAccountPrincipal =
+            account?.isServiceAccount() || !!user?.serviceAccount;
 
-        const userAttributes =
-            await this.userAttributesModel.getAttributeValuesForOrgMember({
-                organizationUuid: organizationUuid || '',
-                userUuid: userId || '',
-            });
-
-        // Service accounts have no email and no row in the `emails` table —
-        // `getPrimaryEmailStatus` would 404. They also have no intrinsic
-        // email attributes to attach.
-        if (account?.isServiceAccount()) {
+        // Service-account principals have no email row, so they have no
+        // intrinsic email attributes to attach.
+        if (isServiceAccountPrincipal || !email) {
+            const userAttributes =
+                await this.userAttributesModel.getAttributeValuesForOrgMember({
+                    organizationUuid: organizationUuid || '',
+                    userUuid: userId || '',
+                });
             return { userAttributes, intrinsicUserAttributes: {} };
         }
 
-        const emailStatus = await this.emailModel.getPrimaryEmailStatus(userId);
+        // Run attribute queries and email status in parallel (independent)
+        const [userAttributes, emailStatus] = await Promise.all([
+            this.userAttributesModel.getAttributeValuesForOrgMember({
+                organizationUuid: organizationUuid || '',
+                userUuid: userId || '',
+            }),
+            this.emailModel.getPrimaryEmailStatus(userId),
+        ]);
         const intrinsicUserAttributes = emailStatus.isVerified
             ? getIntrinsicUserAttributes({ email })
             : {};
@@ -764,209 +1803,6 @@ export class ProjectService extends BaseService {
     credentials and the refresh token is already stored in the credentials (fetched from the org credentials table).
     Otherwise, fetch the refresh token from the user's OpenID table.
     */
-    private async refreshCredentials<T extends CreateWarehouseCredentials>(
-        args: T,
-        userUuid: string,
-    ): Promise<T> {
-        if (
-            args.type === WarehouseTypes.SNOWFLAKE &&
-            args.authenticationType === 'sso'
-        ) {
-            try {
-                const { refreshToken } = args;
-
-                // If we don't have a token, we can't refresh
-                if (!refreshToken) {
-                    throw new Error(
-                        'No refresh token available for Snowflake SSO authentication',
-                    );
-                }
-                this.logger.debug(
-                    `Refreshing snowflake token for user ${userUuid}`,
-                );
-                // If we try to generate access token from token instead of refreshToken
-                // it will throw an error: The request was invalid.
-                const { accessToken, refreshToken: newRefreshToken } =
-                    await UserService.generateSnowflakeAccessToken(
-                        refreshToken,
-                    );
-                return {
-                    ...args,
-                    authenticationType: SnowflakeAuthenticationType.SSO,
-                    token: accessToken,
-                    refreshToken: newRefreshToken,
-                };
-            } catch (e: unknown) {
-                if (e instanceof LightdashError) {
-                    throw e;
-                }
-                this.logger.error(
-                    `Error refreshing snowflake token: ${JSON.stringify(e)}`,
-                );
-
-                let errorMessage = '';
-                try {
-                    // Try to get detailed error message from snowflake refresh token error
-                    const errorDetails = JSON.parse(
-                        (e as { data: string }).data,
-                    ).message;
-                    errorMessage = `Error refreshing snowflake token: ${errorDetails}`;
-                } catch (e2: unknown) {
-                    errorMessage = 'Error refreshing snowflake token';
-                }
-                throw new SnowflakeTokenError(errorMessage);
-            }
-        }
-
-        if (
-            args.type === WarehouseTypes.DATABRICKS &&
-            args.authenticationType === DatabricksAuthenticationType.OAUTH_M2M
-        ) {
-            try {
-                // Try to use stored OAuth credentials first, then fall back to refresh token
-                if (
-                    args.oauthClientId &&
-                    args.oauthClientSecret &&
-                    !args.refreshToken
-                ) {
-                    this.logger.debug(
-                        `Exchanging Databricks OAuth credentials for access token for user ${userUuid}`,
-                    );
-                    const { accessToken, refreshToken } =
-                        await exchangeDatabricksOAuthCredentials(
-                            args.serverHostName,
-                            args.oauthClientId,
-                            args.oauthClientSecret,
-                        );
-                    return {
-                        ...args,
-                        authenticationType:
-                            DatabricksAuthenticationType.OAUTH_M2M,
-                        token: accessToken,
-                        refreshToken,
-                    };
-                }
-
-                const { refreshToken } = args;
-
-                // If we don't have a refresh token, we can't refresh
-                if (!refreshToken) {
-                    throw new Error(
-                        'No refresh token or OAuth credentials available for Databricks OAuth authentication',
-                    );
-                }
-
-                this.logger.debug(
-                    `Refreshing databricks token for user ${userUuid}`,
-                );
-
-                // If the project has an oauthClientId, the token was
-                // obtained with that client (e.g. CLI flow) — use it as-is.
-                // Only fall back to server config when there's no project
-                // client (UI flow stores tokens in user warehouse credentials).
-                let clientId: string;
-                let clientSecret: string | undefined;
-                if (args.oauthClientId) {
-                    clientId = args.oauthClientId;
-                    clientSecret = args.oauthClientSecret;
-                } else if (this.lightdashConfig.auth.databricks.clientId) {
-                    clientId = this.lightdashConfig.auth.databricks.clientId;
-                    clientSecret =
-                        this.lightdashConfig.auth.databricks.clientSecret;
-                } else {
-                    clientId = DATABRICKS_DEFAULT_OAUTH_CLIENT_ID;
-                    clientSecret = undefined;
-                }
-                const { accessToken, refreshToken: newRefreshToken } =
-                    await refreshDatabricksOAuthToken(
-                        args.serverHostName,
-                        clientId,
-                        refreshToken,
-                        clientSecret,
-                    );
-                return {
-                    ...args,
-                    authenticationType: DatabricksAuthenticationType.OAUTH_M2M,
-                    token: accessToken,
-                    refreshToken: newRefreshToken || refreshToken,
-                };
-            } catch (e: unknown) {
-                if (e instanceof LightdashError) {
-                    throw e;
-                }
-                this.logger.error(
-                    `Error refreshing databricks token: ${getErrorMessage(e)}`,
-                );
-                throw new UnexpectedServerError(
-                    'Error refreshing databricks token',
-                );
-            }
-        }
-
-        if (
-            args.type === WarehouseTypes.DATABRICKS &&
-            args.authenticationType === DatabricksAuthenticationType.OAUTH_U2M
-        ) {
-            try {
-                const { refreshToken } = args;
-
-                if (!refreshToken) {
-                    throw new Error(
-                        'No refresh token available for Databricks U2M OAuth authentication',
-                    );
-                }
-
-                this.logger.debug(
-                    `Refreshing databricks U2M OAuth token for user ${userUuid}`,
-                );
-
-                // Resolve OAuth client for token refresh.
-                // U2M credentials store the clientId that obtained the token.
-                // The secret is only in server config (never stored in DB).
-                let clientId: string;
-                let clientSecret: string | undefined;
-                if (args.oauthClientId) {
-                    clientId = args.oauthClientId;
-                } else if (this.lightdashConfig.auth.databricks.clientId) {
-                    clientId = this.lightdashConfig.auth.databricks.clientId;
-                } else {
-                    clientId = DATABRICKS_DEFAULT_OAUTH_CLIENT_ID;
-                }
-
-                if (
-                    clientId === this.lightdashConfig.auth.databricks.clientId
-                ) {
-                    clientSecret =
-                        this.lightdashConfig.auth.databricks.clientSecret;
-                }
-
-                const { accessToken, refreshToken: newRefreshToken } =
-                    await refreshDatabricksOAuthToken(
-                        args.serverHostName,
-                        clientId,
-                        refreshToken,
-                        clientSecret,
-                    );
-
-                return {
-                    ...args,
-                    authenticationType: DatabricksAuthenticationType.OAUTH_U2M,
-                    token: accessToken,
-                    refreshToken: newRefreshToken, // Update in case token was rotated
-                };
-            } catch (e: unknown) {
-                if (e instanceof LightdashError) {
-                    throw e;
-                }
-                const errorMessage = `Error refreshing databricks U2M OAuth token: ${getErrorMessage(e)}`;
-                this.logger.error(errorMessage);
-                throw new DatabricksTokenError(errorMessage);
-            }
-        }
-
-        return args;
-    }
-
     private async refreshCredentialsAndPersistRotation<
         T extends CreateWarehouseCredentials,
     >(
@@ -974,36 +1810,64 @@ export class ProjectService extends BaseService {
         userUuid: string,
         source: RefreshTokenRotationSource,
     ): Promise<T> {
-        const oldRefreshToken = ProjectService.getCredentialsRefreshToken(args);
-
-        const refreshed = await this.refreshCredentials(args, userUuid);
-
-        const newRefreshToken =
-            ProjectService.getCredentialsRefreshToken(refreshed);
-
         if (
-            oldRefreshToken &&
-            newRefreshToken &&
-            newRefreshToken !== oldRefreshToken
+            (args.type === WarehouseTypes.SNOWFLAKE &&
+                args.authenticationType === SnowflakeAuthenticationType.SSO) ||
+            (args.type === WarehouseTypes.DATABRICKS &&
+                (args.authenticationType ===
+                    DatabricksAuthenticationType.OAUTH_U2M ||
+                    args.authenticationType ===
+                        DatabricksAuthenticationType.OAUTH_M2M))
         ) {
-            await this.persistRefreshTokenRotation({
-                source,
-                oldRefreshToken,
-                newRefreshToken,
-            });
+            const selectionSource =
+                ProjectService.getCredentialSelectionSource(source);
+            let projectUuid: string | null = null;
+            if (source.kind === 'project') projectUuid = source.projectUuid;
+            if (source.kind === 'warehouseConnection')
+                projectUuid = source.project.projectUuid;
+            const selection = {
+                connection: args,
+                stored: args,
+                ...selectionSource,
+                context: {
+                    organizationUuid: null,
+                    actor: {
+                        surface: ConnectionSurface.APP,
+                        person: {
+                            userUuid,
+                            isRegisteredUser: true,
+                            isServiceAccount: false,
+                        },
+                        aiClient: null,
+                    },
+                    purpose: 'query',
+                    queryContext: null,
+                    aiAccess: 'enforce',
+                },
+                projectUuid,
+                warehouseConnectionUuid:
+                    source.kind === 'warehouseConnection'
+                        ? source.warehouseConnectionUuid
+                        : null,
+                credentialKind: WarehouseCredentialKind.SHARED,
+                aiPlan: null,
+            } satisfies CredentialSelection<CreateWarehouseCredentials>;
+            const resolved =
+                args.type === WarehouseTypes.SNOWFLAKE
+                    ? await this.snowflakeOAuthCredentialResolver.resolve({
+                          ...selection,
+                          connection: args,
+                          stored: args,
+                      })
+                    : await this.databricksOAuthCredentialResolver.resolve({
+                          ...selection,
+                          connection: args,
+                          stored: args,
+                      });
+            return { ...args, ...resolved.clientCredentials };
         }
 
-        return refreshed;
-    }
-
-    private static getCredentialsRefreshToken(
-        creds: CreateWarehouseCredentials,
-    ): string | undefined {
-        const candidate = (creds as Partial<{ refreshToken: string }>)
-            .refreshToken;
-        return typeof candidate === 'string' && candidate.length > 0
-            ? candidate
-            : undefined;
+        return args;
     }
 
     private static getRotationSourceUuid(
@@ -1016,57 +1880,667 @@ export class ProjectService extends BaseService {
                 return source.organizationWarehouseCredentialsUuid;
             case 'user':
                 return source.userWarehouseCredentialsUuid;
+            case 'warehouseConnection':
+                return source.warehouseConnectionUuid;
             default:
                 return assertUnreachable(source, 'Unknown source kind');
         }
     }
 
-    private async persistRefreshTokenRotation({
-        source,
-        oldRefreshToken,
-        newRefreshToken,
+    protected checkGoogleRefreshToken: CheckGoogleRefreshToken = (keyfile) =>
+        checkGoogleRefreshTokenCached(
+            keyfile,
+            this.lightdashConfig.auth.google,
+        );
+
+    protected recheckGoogleRefreshToken: CheckGoogleRefreshToken = (keyfile) =>
+        recheckGoogleRefreshToken(keyfile, this.lightdashConfig.auth.google);
+
+    private async getSsoPushToPreviews({
+        savedProject,
+        updatedProject,
     }: {
-        source: RefreshTokenRotationSource;
-        oldRefreshToken: string;
-        newRefreshToken: string;
+        savedProject: Pick<
+            Project,
+            'projectUuid' | 'organizationUuid' | 'type'
+        >;
+        updatedProject: UpdateProject;
+    }): Promise<PushToPreview | null> {
+        if (
+            savedProject.type === ProjectType.PREVIEW ||
+            updatedProject.organizationWarehouseCredentialsUuid ||
+            !getBigquerySsoCredentials(updatedProject.warehouseConnection)
+        ) {
+            return null;
+        }
+        return ({ previewCredentials, previousUpstreamCredentials }) =>
+            getPushedPreviewCredentials({
+                previewCredentials,
+                previousUpstreamCredentials,
+                nextUpstreamCredentials: updatedProject.warehouseConnection,
+            });
+    }
+
+    private async updateAndPushSsoCredentialsToPreviews({
+        projectUuid,
+        savedProject,
+        updatedProject,
+        actorUserUuid,
+    }: {
+        projectUuid: string;
+        savedProject: Pick<
+            Project,
+            'projectUuid' | 'organizationUuid' | 'type'
+        >;
+        updatedProject: UpdateProject;
+        actorUserUuid: string | null;
+    }): Promise<void> {
+        const pushToPreview = await this.getSsoPushToPreviews({
+            savedProject,
+            updatedProject,
+        });
+        if (!pushToPreview) {
+            await this.projectModel.update(
+                projectUuid,
+                updatedProject,
+                actorUserUuid,
+            );
+            return;
+        }
+        const push = await this.projectModel.updateAndPushToPreviews(
+            projectUuid,
+            updatedProject,
+            pushToPreview,
+            actorUserUuid,
+        );
+        switch (push.kind) {
+            case 'skipped':
+                return;
+            case 'pushed':
+                if (push.previewProjectUuids.length > 0) {
+                    this.logger.info('Pushed SSO credentials to previews', {
+                        projectUuid,
+                        previewProjectUuids: push.previewProjectUuids,
+                    });
+                }
+                return;
+            case 'failed':
+                this.logger.error(
+                    'Failed to push SSO credentials to previews',
+                    {
+                        projectUuid,
+                        error: getErrorMessage(push.error),
+                    },
+                );
+                return;
+            default:
+                assertUnreachable(push, 'Unknown preview credentials push');
+        }
+    }
+
+    private async recordPreviewCredentialOwnership({
+        previewProjectUuid,
+        upstreamProjectUuid,
+        previewCredentials,
+    }: {
+        previewProjectUuid: string;
+        upstreamProjectUuid: string;
+        previewCredentials: CreateWarehouseCredentials;
     }): Promise<void> {
         try {
-            switch (source.kind) {
-                case 'project':
-                    await this.projectModel.rotateRefreshToken(
-                        source.projectUuid,
-                        oldRefreshToken,
-                        newRefreshToken,
-                    );
-                    break;
-                case 'organization':
-                    await this.organizationWarehouseCredentialsModel.rotateRefreshToken(
-                        source.organizationWarehouseCredentialsUuid,
-                        oldRefreshToken,
-                        newRefreshToken,
-                    );
-                    break;
-                case 'user':
-                    await this.userWarehouseCredentialsModel.rotateRefreshToken(
-                        source.userWarehouseCredentialsUuid,
-                        oldRefreshToken,
-                        newRefreshToken,
-                    );
-                    break;
-                default:
-                    assertUnreachable(
-                        source,
-                        'Unknown OAuth refresh token rotation source',
-                    );
-            }
+            const previewOwnsCredentials = getPreviewOwnsBigquerySsoCredentials(
+                {
+                    previewCredentials,
+                    upstreamCredentials:
+                        await this.projectModel.getWarehouseCredentialsForBinding(
+                            upstreamProjectUuid,
+                            { kind: 'original' },
+                        ),
+                },
+            );
+            if (previewOwnsCredentials === null) return;
+            await this.projectModel.setPreviewOwnsCredentials(
+                previewProjectUuid,
+                previewOwnsCredentials,
+            );
         } catch (error) {
-            // Don't fail the in-flight query: the freshly minted access token is still usable.
-            this.logger.error('Failed to persist rotated OAuth refresh token', {
-                sourceKind: source.kind,
-                sourceUuid: ProjectService.getRotationSourceUuid(source),
+            this.logger.error('Failed to record preview credential ownership', {
+                projectUuid: previewProjectUuid,
+                upstreamProjectUuid,
                 error: getErrorMessage(error),
             });
         }
+    }
+
+    protected async repairStalePreviewSsoCredentials(
+        projectUuid: string,
+        credentials: CreateWarehouseCredentials,
+        checkRefreshToken: CheckGoogleRefreshToken = this
+            .checkGoogleRefreshToken,
+    ): Promise<CreateWarehouseCredentials> {
+        if (!getBigquerySsoCredentials(credentials)) return credentials;
+        const preview = await this.projectModel.getSummary(projectUuid);
+        if (
+            preview.type !== ProjectType.PREVIEW ||
+            !preview.upstreamProjectUuid ||
+            (await this.projectModel.getPreviewOwnsCredentials(projectUuid))
+        ) {
+            return credentials;
+        }
+        const { upstreamProjectUuid } = preview;
+        let upstreamCredentials: CreateWarehouseCredentials;
+        try {
+            upstreamCredentials =
+                await this.projectModel.getWarehouseCredentialsForBinding(
+                    upstreamProjectUuid,
+                    { kind: 'original' },
+                );
+        } catch (error) {
+            this.logger.warn(
+                'Could not load upstream credentials for a preview',
+                {
+                    projectUuid,
+                    upstreamProjectUuid,
+                    error: getErrorMessage(error),
+                },
+            );
+            return credentials;
+        }
+        const repair = await repairStalePreviewBigquerySso({
+            previewCredentials: credentials,
+            upstreamCredentials,
+            checkRefreshToken,
+        });
+        switch (repair.kind) {
+            case 'unchanged':
+                return credentials;
+            case 'expired': {
+                const upstream =
+                    await this.projectModel.getSummary(upstreamProjectUuid);
+                throw new PreviewWarehouseSignInExpiredError({
+                    upstreamProjectUuid,
+                    upstreamProjectName: upstream.name,
+                });
+            }
+            case 'repaired': {
+                const swapped =
+                    await this.projectModel.updateWarehouseCredentialsIf(
+                        projectUuid,
+                        (stored) =>
+                            getBigquerySsoCredentials(stored)?.refreshToken ===
+                            repair.staleRefreshToken
+                                ? {
+                                      ...stored,
+                                      keyfileContents:
+                                          repair.credentials.keyfileContents,
+                                  }
+                                : null,
+                        'token_sync',
+                    );
+                if (!swapped) {
+                    return this.projectModel.getWarehouseCredentialsForBinding(
+                        projectUuid,
+                        { kind: 'original' },
+                    );
+                }
+                this.logger.info(
+                    'Repaired a stale preview SSO credential from its upstream project',
+                    { projectUuid, upstreamProjectUuid },
+                );
+                return copyWarehouseCredentialVersions(
+                    repair.credentials,
+                    credentials,
+                );
+            }
+            default:
+                return assertUnreachable(repair, 'Unknown preview repair');
+        }
+    }
+
+    protected async repairPreviewSsoCredentialsAfterRejection({
+        projectUuid,
+        rejectedCredentials,
+    }: {
+        projectUuid: string;
+        rejectedCredentials: CreateWarehouseCredentials;
+    }): Promise<boolean> {
+        const rejectedRefreshToken =
+            getBigquerySsoCredentials(rejectedCredentials)?.refreshToken;
+        if (!rejectedRefreshToken) {
+            return false;
+        }
+        const { organizationWarehouseCredentialsUuid } =
+            await this.projectModel.getProjectWarehouseConfig(projectUuid);
+        if (organizationWarehouseCredentialsUuid) return false;
+        const storedCredentials =
+            await this.projectModel.getWarehouseCredentialsForBinding(
+                projectUuid,
+                { kind: 'original' },
+            );
+        const repairedCredentials = await this.repairStalePreviewSsoCredentials(
+            projectUuid,
+            storedCredentials,
+            this.recheckGoogleRefreshToken,
+        );
+        const repairedRefreshToken =
+            getBigquerySsoCredentials(repairedCredentials)?.refreshToken;
+        return (
+            repairedRefreshToken !== undefined &&
+            repairedRefreshToken !== rejectedRefreshToken
+        );
+    }
+
+    private async findUserCredentialsForExtraConnection({
+        projectUuid,
+        warehouseConnectionUuid,
+        userUuid,
+        warehouseType,
+        requireUserCredentials,
+        policy,
+    }: {
+        projectUuid: string;
+        warehouseConnectionUuid: string;
+        userUuid: string;
+        warehouseType: WarehouseTypes;
+        requireUserCredentials: boolean;
+        policy: PersonalCredentialPersistencePolicy;
+    }): Promise<UserWarehouseCredentialsWithSecrets | undefined> {
+        const lookup = {
+            userUuid,
+            projectUuid,
+            warehouseConnectionUuid,
+            warehouseType,
+        };
+        let userWarehouseCredentialsUuid =
+            await this.warehouseConnectionModel.findPreferredUserCredentialsUuid(
+                lookup,
+                policy,
+            );
+        if (userWarehouseCredentialsUuid === null && requireUserCredentials) {
+            userWarehouseCredentialsUuid =
+                await this.warehouseConnectionModel.findSoleUnclaimedUserCredentialsUuid(
+                    lookup,
+                );
+            if (userWarehouseCredentialsUuid !== null) {
+                await this.warehouseConnectionModel.upsertUserCredentialsPreference(
+                    {
+                        userUuid,
+                        warehouseConnectionUuid,
+                        userWarehouseCredentialsUuid,
+                    },
+                );
+            }
+        }
+        if (userWarehouseCredentialsUuid === null) {
+            return undefined;
+        }
+        const userWarehouseCredentials =
+            await this.userWarehouseCredentialsModel.getByUuidWithSecrets(
+                userWarehouseCredentialsUuid,
+                undefined,
+                policy,
+            );
+        if (policy.strictPersonalOverlay) return userWarehouseCredentials;
+        const validationError =
+            UserWarehouseCredentialsModel.getQueryTimeValidationError(
+                userWarehouseCredentials.credentials,
+            );
+        if (validationError) {
+            throw validationError;
+        }
+        return userWarehouseCredentials;
+    }
+
+    async getWarehouseSqlBuilderSettings(
+        projectUuid: string,
+        binding: ConnectionBinding,
+    ): Promise<WarehouseSqlBuilderSettings> {
+        const target = await this.projectModel.resolveWarehouseCredentialRead(
+            projectUuid,
+            binding,
+        );
+        if (target.kind === 'original') {
+            return toWarehouseSqlBuilderSettings(
+                await this.projectModel.getWarehouseCredentialsForBinding(
+                    projectUuid,
+                    binding,
+                ),
+            );
+        }
+        return toWarehouseSqlBuilderSettings(
+            await this.warehouseConnectionModel.getCredentials(
+                await this.warehouseConnectionModel.getProject(projectUuid),
+                target.warehouseConnectionUuid,
+            ),
+        );
+    }
+
+    protected async getExtraConnectionWarehouseCredentials({
+        projectUuid,
+        warehouseConnectionUuid,
+        userId,
+        isRegisteredUser,
+        context,
+        querySurface,
+        isServiceAccount = false,
+        serviceAccountUuid,
+        oauthClientId,
+        purpose = 'query',
+    }: {
+        projectUuid: string;
+        warehouseConnectionUuid: string;
+        userId: string;
+        isRegisteredUser: boolean;
+        context?: QueryExecutionContext;
+        querySurface?: QuerySurface;
+        isServiceAccount?: boolean;
+        serviceAccountUuid?: string | null;
+        oauthClientId?: string | null;
+        purpose?: 'query' | 'compile';
+    }): Promise<ResolvedWarehouseCredentials> {
+        const base = await this.loadExtraConnectionCredentialBase({
+            projectUuid,
+            userId,
+            isRegisteredUser,
+            isServiceAccount,
+            context,
+            warehouseConnectionUuid,
+            purpose,
+        });
+        return this.resolveLegacyWarehouseCredentials(base, {
+            serviceAccountUuid,
+            oauthClientId,
+            userId,
+            isRegisteredUser,
+            isServiceAccount,
+            context,
+            querySurface,
+            purpose,
+        });
+    }
+
+    private async loadExtraConnectionCredentialBase({
+        projectUuid,
+        warehouseConnectionUuid,
+        userId,
+        isRegisteredUser,
+        context,
+        isServiceAccount = false,
+        purpose = 'query',
+    }: {
+        projectUuid: string;
+        warehouseConnectionUuid: string;
+        userId: string;
+        isRegisteredUser: boolean;
+        context?: QueryExecutionContext;
+        isServiceAccount?: boolean;
+        purpose?: 'query' | 'compile';
+    }): Promise<WarehouseCredentialBase> {
+        const project =
+            await this.warehouseConnectionModel.getProject(projectUuid);
+        const source =
+            await this.warehouseConnectionModel.getExtraCredentialSource(
+                project,
+                warehouseConnectionUuid,
+            );
+        const originalCredentials =
+            await this.projectModel.getWarehouseCredentialsForProject(
+                projectUuid,
+            );
+        const { organizationWarehouseCredentialsUuid } = source;
+        if (
+            source.credentials.type === WarehouseTypes.DUCKDB &&
+            source.credentials.connectionType === DuckdbConnectionType.ANALYTICS
+        ) {
+            throw new ForbiddenError(
+                'Local analytics cannot run on an extra warehouse connection',
+            );
+        }
+        const credentials = copyWarehouseCredentialVersions(
+            {
+                ...source.credentials,
+                requireUserCredentials:
+                    getExtraConnectionRequireUserCredentials(
+                        originalCredentials,
+                        source,
+                    ),
+            } as CreateWarehouseCredentials,
+            source.credentials,
+        );
+
+        return {
+            kind: 'extra',
+            projectUuid,
+            credentials,
+            organizationWarehouseCredentialsUuid,
+            organizationUuid: project.organizationUuid,
+            warehouseConnectionUuid,
+            connectionRoute: null,
+            project,
+        };
+    }
+
+    private static getCredentialSelectionSource(
+        source: RefreshTokenRotationSource,
+    ): CredentialSelectionSource {
+        return source.kind === 'user'
+            ? {
+                  owner: {
+                      kind: 'user',
+                      uuid: source.userWarehouseCredentialsUuid,
+                      purpose: UserWarehouseCredentialPurpose.DEFAULT,
+                  },
+                  refreshSource: source.refreshSource,
+              }
+            : {
+                  owner: {
+                      kind: source.kind,
+                      uuid: ProjectService.getRotationSourceUuid(source),
+                  },
+              };
+    }
+
+    private async materializeSelectedCredentials(
+        base: WarehouseCredentialBase,
+        context: WarehouseCredentialResolutionContext,
+        credentials: CreateWarehouseCredentials,
+        userUuid: string,
+        source: RefreshTokenRotationSource,
+    ): Promise<CreateWarehouseCredentials> {
+        const selectionSource =
+            ProjectService.getCredentialSelectionSource(source);
+        const materialized =
+            await this.warehouseClientFactory.materializeCredentials(
+                credentials,
+                context,
+                base.projectUuid,
+                base.warehouseConnectionUuid,
+                selectionSource,
+                null,
+                () =>
+                    this.refreshCredentialsAndPersistRotation(
+                        credentials,
+                        userUuid,
+                        source,
+                    ),
+            );
+        return copyWarehouseCredentialVersions(materialized, credentials);
+    }
+
+    private async finishExtraConnectionCredentials(
+        base: Extract<WarehouseCredentialBase, { kind: 'extra' }>,
+        context: WarehouseCredentialResolutionContext,
+    ): Promise<ResolvedWarehouseCredentials> {
+        const { person } = context.actor;
+        if (person === null)
+            throw new ForbiddenError(
+                'Warehouse credentials require a connection person',
+            );
+        const { userUuid: userId, isRegisteredUser, isServiceAccount } = person;
+        const { projectUuid, organizationWarehouseCredentialsUuid } = base;
+        let { credentials } = base;
+        let userWarehouseCredentialsUuid: string | undefined;
+        const { project, warehouseConnectionUuid } = base;
+        const connectionRotationSource: RefreshTokenRotationSource = {
+            kind: 'warehouseConnection',
+            project,
+            warehouseConnectionUuid,
+        };
+
+        if (
+            organizationWarehouseCredentialsUuid &&
+            !credentials.requireUserCredentials
+        ) {
+            credentials = await this.materializeSelectedCredentials(
+                base,
+                context,
+                credentials,
+                userId,
+                { kind: 'organization', organizationWarehouseCredentialsUuid },
+            );
+        }
+
+        if (isServiceAccount && credentials.requireUserCredentials) {
+            this.trackExtraConnectionCredentialsRequired({
+                organizationUuid: project.organizationUuid,
+                projectUuid,
+                warehouseConnectionUuid,
+                warehouseType: credentials.type,
+                userId,
+                reason: 'service_account_requires_personal_credentials',
+            });
+            throw new ForbiddenError(
+                'Service accounts cannot run queries when user credentials are required.',
+            );
+        }
+
+        const shouldFetchUserCredentials =
+            credentials.requireUserCredentials ||
+            allowsOptionalUserCredentials(credentials);
+
+        if (isRegisteredUser) {
+            const policy = shouldFetchUserCredentials
+                ? await resolvePersonalCredentialPolicy(this.featureFlagModel, {
+                      organizationUuid: project.organizationUuid,
+                      userUuid: userId,
+                  })
+                : { strictPersonalOverlay: false };
+            const userWarehouseCredentials = shouldFetchUserCredentials
+                ? await this.findUserCredentialsForExtraConnection({
+                      projectUuid,
+                      warehouseConnectionUuid,
+                      userUuid: userId,
+                      warehouseType: credentials.type,
+                      requireUserCredentials:
+                          credentials.requireUserCredentials === true,
+                      policy,
+                  })
+                : undefined;
+
+            const userCredHost =
+                !policy.strictPersonalOverlay &&
+                userWarehouseCredentials?.credentials.type ===
+                    WarehouseTypes.DATABRICKS &&
+                'serverHostName' in userWarehouseCredentials.credentials
+                    ? normalizeDatabricksHostLenient(
+                          userWarehouseCredentials.credentials.serverHostName,
+                      )
+                    : undefined;
+            const projectHost =
+                !policy.strictPersonalOverlay &&
+                credentials.type === WarehouseTypes.DATABRICKS
+                    ? normalizeDatabricksHostLenient(credentials.serverHostName)
+                    : undefined;
+            const hostMismatch =
+                !policy.strictPersonalOverlay &&
+                userCredHost &&
+                projectHost &&
+                userCredHost !== projectHost;
+
+            if (userWarehouseCredentials && !hostMismatch) {
+                const refreshSource = {
+                    credentials: userWarehouseCredentials.credentials,
+                    fallback: credentials,
+                    personalCredentialPolicy: policy,
+                };
+                credentials = policy.strictPersonalOverlay
+                    ? composePersonalWarehouseCredentials(
+                          credentials,
+                          projectPersonalWarehouseCredentials(
+                              userWarehouseCredentials.credentials,
+                          ),
+                      )
+                    : mergePersonalWarehouseCredentials(
+                          credentials,
+                          userWarehouseCredentials,
+                      );
+                credentials = await this.materializeSelectedCredentials(
+                    base,
+                    context,
+                    credentials,
+                    userId,
+                    {
+                        kind: 'user',
+                        userWarehouseCredentialsUuid:
+                            userWarehouseCredentials.uuid,
+                        refreshSource,
+                    },
+                );
+                userWarehouseCredentialsUuid = userWarehouseCredentials.uuid;
+            } else if (credentials.requireUserCredentials) {
+                this.trackExtraConnectionCredentialsRequired({
+                    organizationUuid: project.organizationUuid,
+                    projectUuid,
+                    warehouseConnectionUuid,
+                    warehouseType: credentials.type,
+                    userId,
+                    reason: hostMismatch
+                        ? 'host_mismatch'
+                        : 'missing_personal_credentials',
+                });
+                if (credentials.type === WarehouseTypes.DATABRICKS) {
+                    throw new DatabricksTokenError(
+                        'Please authenticate to access Databricks',
+                    );
+                }
+                throw new MissingWarehouseCredentialsError(
+                    (await this.warehouseConnectionModel.hasUserCredentialsOfType(
+                        userId,
+                        credentials.type,
+                    ))
+                        ? EXTRA_CONNECTION_SELECT_CREDENTIALS_MESSAGE
+                        : "You don't have warehouse credentials set up for this project. Add them under 'User settings' → 'My warehouse connections', or refresh the page to sign in again.",
+                );
+            } else if (!organizationWarehouseCredentialsUuid) {
+                credentials = await this.materializeSelectedCredentials(
+                    base,
+                    context,
+                    credentials,
+                    userId,
+                    connectionRotationSource,
+                );
+            }
+        } else if (credentials.requireUserCredentials) {
+            throw new ForbiddenError(
+                'Embedded users cannot use personal warehouse credentials',
+            );
+        } else if (!organizationWarehouseCredentialsUuid) {
+            credentials = await this.materializeSelectedCredentials(
+                base,
+                context,
+                credentials,
+                userId,
+                connectionRotationSource,
+            );
+        }
+
+        return copyWarehouseCredentialVersions(
+            {
+                ...credentials,
+                userWarehouseCredentialsUuid,
+            },
+            credentials,
+        );
     }
 
     /*
@@ -1082,7 +2556,20 @@ export class ProjectService extends BaseService {
             warehouseConnection: CreateWarehouseCredentials;
             organizationWarehouseCredentialsUuid?: string;
         },
-    >(args: T, userUuid: string, organizationUuid: string): Promise<T> {
+    >(
+        rawArgs: T,
+        userUuid: string,
+        organizationUuid: string,
+        organizationCredentialRotation: 'persist' | 'ignore' = 'ignore',
+    ): Promise<T> {
+        // Normalize submitted credentials so in-flight connection tests and
+        // compiles never see legacy values that violate the credentials types
+        const args: T = {
+            ...rawArgs,
+            warehouseConnection: normalizeWarehouseCredentials(
+                rawArgs.warehouseConnection,
+            ),
+        };
         // If using organization credentials, load them from the organization table
         const organizationWarehouseCredentialsUuid =
             args.organizationWarehouseCredentialsUuid ||
@@ -1127,9 +2614,44 @@ export class ProjectService extends BaseService {
             this.logger.debug(
                 `Refreshing snowflake warehouse credentials from organization credentials uuid: ${organizationWarehouseCredentialsUuid}`,
             );
-            const credentials = await this.refreshCredentials(
-                mergedWarehouseConnection,
-                userUuid,
+            if (
+                mergedWarehouseConnection.authenticationType !==
+                SnowflakeAuthenticationType.SSO
+            ) {
+                return {
+                    ...args,
+                    warehouseConnection: mergedWarehouseConnection,
+                };
+            }
+            const owner: CredentialOwner = {
+                kind: 'organization',
+                uuid: organizationWarehouseCredentialsUuid,
+            };
+            const resolved =
+                await this.snowflakeOAuthCredentialResolver.refresh(
+                    {
+                        connection: mergedWarehouseConnection,
+                        stored: mergedWarehouseConnection,
+                        owner,
+                        context: connectionContextFromUser(
+                            { userUuid },
+                            { organizationUuid, queryContext: null },
+                        ),
+                        projectUuid: null,
+                        warehouseConnectionUuid: null,
+                        credentialKind: WarehouseCredentialKind.SHARED,
+                        aiPlan: null,
+                    },
+                    {
+                        errorPolicy: 'standard',
+                        legacyOwner:
+                            organizationCredentialRotation === 'persist'
+                                ? owner
+                                : null,
+                    },
+                );
+            const credentials = prepareWarehouseOAuthCredentials(
+                resolved.clientCredentials,
             );
 
             return {
@@ -1142,171 +2664,121 @@ export class ProjectService extends BaseService {
         }
 
         if (
-            (args.warehouseConnection.type === WarehouseTypes.REDSHIFT ||
-                args.warehouseConnection.type === WarehouseTypes.POSTGRES) &&
-            args.warehouseConnection.useSshTunnel
-        ) {
-            const publicKey = args.warehouseConnection.sshTunnelPublicKey || '';
-            const { privateKey } = await this.sshKeyPairModel.get(publicKey);
-            return {
-                ...args,
-                warehouseConnection: {
-                    ...args.warehouseConnection,
-                    sshTunnelPrivateKey: privateKey,
-                },
-            };
-        }
-
-        if (
-            args.warehouseConnection.type === WarehouseTypes.BIGQUERY &&
-            args.warehouseConnection.authenticationType ===
-                BigqueryAuthenticationType.SSO &&
-            args.warehouseConnection.keyfileContents.type !== 'authorized_user'
-        ) {
-            const refreshToken = await this.userModel.getRefreshToken(
-                userUuid,
-                OpenIdIdentityIssuerType.GOOGLE,
-            );
-
-            // Validate refresh token has the right bigquery scopes
-            await UserService.generateGoogleAccessToken(
-                refreshToken,
-                'bigquery',
-            );
-            return {
-                ...args,
-                warehouseConnection: {
-                    ...args.warehouseConnection,
-                    keyfileContents: {
-                        type: 'authorized_user',
-                        client_id:
-                            this.lightdashConfig.auth.google.oauth2ClientId,
-                        client_secret:
-                            this.lightdashConfig.auth.google.oauth2ClientSecret,
-                        refresh_token: refreshToken,
-                    },
-                },
-            };
-        }
-
-        if (
-            args.warehouseConnection.type === WarehouseTypes.SNOWFLAKE &&
-            args.warehouseConnection.authenticationType === 'sso' &&
-            !organizationWarehouseCredentialsUuid
-        ) {
-            const refreshToken = await this.userModel.getRefreshToken(
-                userUuid,
-                OpenIdIdentityIssuerType.SNOWFLAKE,
-            );
-            // Validate refresh token and generate new access token
-            this.logger.debug(
-                `Refreshing snowflake warehouse credentials from user uuid: ${userUuid}`,
-            );
-            const credentials = await this.refreshCredentials(
-                { ...args.warehouseConnection, refreshToken },
-                userUuid,
-            );
-            return {
-                ...args,
-                warehouseConnection: {
-                    ...args.warehouseConnection,
-                    ...credentials,
-                    refreshToken, // Store refresh token from user so we can generate new access tokens later
-                },
-            };
-        }
-
-        if (
-            args.warehouseConnection.type === WarehouseTypes.DATABRICKS &&
-            args.warehouseConnection.authenticationType ===
-                DatabricksAuthenticationType.OAUTH_U2M &&
-            !organizationWarehouseCredentialsUuid
-        ) {
-            // Use refresh token from request body first (e.g. CLI flow).
-            // Otherwise, resolve a host-matching user credential to avoid
-            // cross-workspace refresh token mismatches.
-            let { refreshToken } = args.warehouseConnection;
-            if (!refreshToken) {
-                const matchingCredential =
-                    await this.userWarehouseCredentialsModel.findDatabricksOauthU2mForHostWithSecrets(
-                        userUuid,
-                        args.warehouseConnection.serverHostName,
-                    );
-                if (
-                    matchingCredential?.credentials.type ===
-                        WarehouseTypes.DATABRICKS &&
-                    matchingCredential.credentials.authenticationType ===
-                        DatabricksAuthenticationType.OAUTH_U2M
-                ) {
-                    refreshToken = matchingCredential.credentials.refreshToken;
-                }
-            }
-
-            if (!refreshToken) {
-                throw new NotFoundError(
-                    `No Databricks OAuth credentials found for workspace ${args.warehouseConnection.serverHostName}. Please sign in with Databricks for this workspace and try again.`,
-                );
-            }
-
-            // Validate refresh token and generate new access token
-            this.logger.debug(
-                `Refreshing databricks warehouse credentials from user uuid: ${userUuid}`,
-            );
-            const credentials = await this.refreshCredentials(
-                { ...args.warehouseConnection, refreshToken },
-                userUuid,
-            );
-
-            return {
-                ...args,
-                warehouseConnection: {
-                    ...args.warehouseConnection,
-                    ...credentials,
-                    refreshToken, // Store refresh token from user so we can generate new access tokens later
-                },
-            };
-        }
-
-        if (
-            args.warehouseConnection.type === WarehouseTypes.DATABRICKS &&
-            args.warehouseConnection.authenticationType ===
-                DatabricksAuthenticationType.OAUTH_M2M &&
-            !organizationWarehouseCredentialsUuid
-        ) {
-            this.logger.debug(
-                `Refreshing databricks M2M warehouse credentials from user uuid: ${userUuid}`,
-            );
-            const credentials = await this.refreshCredentials(
+            this.warehouseClientFactory.credentialResolvers.has(
                 args.warehouseConnection,
-                userUuid,
-            );
-            return {
-                ...args,
-                warehouseConnection: {
-                    ...args.warehouseConnection,
-                    ...credentials,
-                },
-            };
+            )
+        ) {
+            const connection = args.warehouseConnection;
+            const validated =
+                await this.warehouseClientFactory.credentialResolvers.validateOnSave(
+                    {
+                        connection,
+                        stored: connection,
+                        owner: null,
+                        context: connectionContextFromUser(
+                            { userUuid },
+                            { organizationUuid, queryContext: null },
+                        ),
+                        projectUuid: null,
+                        warehouseConnectionUuid: null,
+                        credentialKind: WarehouseCredentialKind.SHARED,
+                        aiPlan: null,
+                        intent:
+                            connection.type === WarehouseTypes.SNOWFLAKE ||
+                            (connection.type === WarehouseTypes.BIGQUERY &&
+                                connection.keyfileContents?.type !==
+                                    'authorized_user')
+                                ? { kind: 'linkCurrentPerson', userUuid }
+                                : { kind: 'preserve' },
+                    },
+                );
+            return { ...args, warehouseConnection: validated.connection };
         }
 
         return args;
     }
 
-    // The project-update form sends masked oauthClientId / oauthClientSecret
-    // (placeholder values), so merge them in from the saved project before
-    // _resolveWarehouseClientCredentials runs the M2M token exchange. No-op for
-    // anything that isn't Databricks M2M.
+    private assertCanUseOrganizationWarehouseCredentials(
+        accountOrUser: Account | SessionUser,
+        organizationUuid: string,
+        data: {
+            warehouseConnection?: CreateWarehouseCredentials;
+            organizationWarehouseCredentialsUuid?: string;
+        },
+    ): void {
+        const organizationWarehouseCredentialsUuid =
+            data.organizationWarehouseCredentialsUuid ||
+            (data.warehouseConnection?.type === WarehouseTypes.SNOWFLAKE
+                ? data.warehouseConnection.organizationWarehouseCredentialsUuid
+                : undefined);
+
+        if (!organizationWarehouseCredentialsUuid) {
+            return;
+        }
+
+        const auditedAbility = this.createAuditedAbility(accountOrUser);
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('OrganizationWarehouseCredentials', {
+                    organizationUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'You do not have permission to use these organization warehouse credentials',
+            );
+        }
+    }
+
+    assertCanWriteWarehouseConnection(
+        account: Account,
+        project: Pick<
+            ProjectSummary,
+            'organizationUuid' | 'provisioningSource'
+        >,
+        data: {
+            warehouseConnection?: CreateWarehouseCredentials;
+            organizationWarehouseCredentialsUuid?: string;
+        },
+    ): void {
+        ProjectService.assertConnectionIsNotManagedInternally(project);
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            data.warehouseConnection,
+        );
+        ProjectService.assertPersistableSnowflakeAuthentication(
+            data.warehouseConnection,
+        );
+        ProjectService.assertSupportedBigqueryKeyfile(data.warehouseConnection);
+        this.assertCanUseOrganizationWarehouseCredentials(
+            account,
+            project.organizationUuid,
+            data,
+        );
+    }
+
+    // The project-update form sends masked secrets (placeholder values), so
+    // merge them in from the saved project before
+    // _resolveWarehouseClientCredentials runs the Databricks M2M token
+    // exchange or attaches the SSH tunnel key. No-op for anything else.
     // eslint-disable-next-line class-methods-use-this
-    private mergeMissingDatabricksM2MSecrets<
+    private mergeSavedSecretsForResolution<
         T extends { warehouseConnection: CreateWarehouseCredentials },
     >(
         data: T,
         savedProject: { warehouseConnection?: CreateWarehouseCredentials },
     ): T {
+        const { warehouseConnection } = data;
+        const isDatabricksM2M =
+            warehouseConnection.type === WarehouseTypes.DATABRICKS &&
+            warehouseConnection.authenticationType ===
+                DatabricksAuthenticationType.OAUTH_M2M;
+        const isSshTunnel =
+            (warehouseConnection.type === WarehouseTypes.POSTGRES ||
+                warehouseConnection.type === WarehouseTypes.REDSHIFT) &&
+            warehouseConnection.useSshTunnel === true;
         if (
-            data.warehouseConnection.type === WarehouseTypes.DATABRICKS &&
-            data.warehouseConnection.authenticationType ===
-                DatabricksAuthenticationType.OAUTH_M2M &&
+            (isDatabricksM2M || isSshTunnel) &&
             savedProject.warehouseConnection
         ) {
             return {
@@ -1320,60 +2792,6 @@ export class ProjectService extends BaseService {
         return data;
     }
 
-    // Extra security measure, we remove the "secrets" from the project/org credentials
-    // and let the user override that token/password later on
-    // eslint-disable-next-line class-methods-use-this
-    private clearSecretsFromCredentials(
-        credentials: CreateWarehouseCredentials,
-    ): CreateWarehouseCredentials {
-        switch (credentials.type) {
-            case WarehouseTypes.SNOWFLAKE: {
-                // Remove optional properties for snowflake OAuth
-                const { refreshToken, token, ...rest } = credentials;
-                return rest;
-            }
-            case WarehouseTypes.DATABRICKS: {
-                const { refreshToken, token, personalAccessToken, ...rest } =
-                    credentials;
-                return rest;
-            }
-            case WarehouseTypes.BIGQUERY: {
-                return {
-                    ...credentials,
-                    keyfileContents: {},
-                };
-            }
-            case WarehouseTypes.POSTGRES:
-            case WarehouseTypes.TRINO:
-            case WarehouseTypes.CLICKHOUSE:
-            case WarehouseTypes.REDSHIFT: {
-                return {
-                    ...credentials,
-                    password: '',
-                };
-            }
-            case WarehouseTypes.ATHENA: {
-                return {
-                    ...credentials,
-                    accessKeyId: '',
-                    secretAccessKey: '',
-                };
-            }
-            case WarehouseTypes.DUCKDB: {
-                return {
-                    ...credentials,
-                    token: '',
-                };
-            }
-
-            default:
-                return assertUnreachable(
-                    credentials,
-                    `Unexpected warehouse type`,
-                );
-        }
-    }
-
     // TODO: getWarehouseCredentials could be moved to a client WarehouseClientManager. However, this client shouldn't be using a model. Perhaps this information can be passed as a prop to the client so that other services can use the warehouse client credentials logic?
     /*
         This method is used when the user is making requests to the warehouse
@@ -1381,26 +2799,607 @@ export class ProjectService extends BaseService {
         Then if `requireUserCredentials` flag is enabled, we load the tokens from `userWarehouseCredentials` and replace them with the credentials from the project.
         If `requireUserCredentials` flag is disabled, we just get access token if needed for the warehouse (like Snowflake on SSO).
     */
-    protected async getWarehouseCredentials({
+    protected async getWarehouseCredentials(
+        args: Parameters<
+            ProjectService['getSingleRouteWarehouseCredentials']
+        >[0] & {
+            binding: ConnectionBinding;
+        },
+    ) {
+        const { warehouseCredentials } =
+            await this.getWarehouseCredentialsWithConnection(args);
+        return warehouseCredentials;
+    }
+
+    private resolveLegacyWarehouseCredentials(
+        base: WarehouseCredentialBase,
+        {
+            userId,
+            isRegisteredUser,
+            isServiceAccount = false,
+            serviceAccountUuid,
+            oauthClientId,
+            context = null,
+            purpose = 'query',
+            querySurface,
+        }: {
+            userId: string;
+            isRegisteredUser: boolean;
+            isServiceAccount?: boolean;
+            serviceAccountUuid?: string | null;
+            oauthClientId?: string | null;
+            context?: QueryExecutionContext | null;
+            purpose?: 'query' | 'compile';
+            querySurface?: QuerySurface;
+        },
+    ): Promise<ResolvedWarehouseCredentials> {
+        return this.warehouseClientFactory.resolveLoadedCredentials(base, {
+            organizationUuid: base.organizationUuid,
+            agentIdentity: getContentWriteAgentIdentity({
+                userUuid: userId,
+                organizationUuid: base.organizationUuid,
+            }),
+            actor: {
+                surface:
+                    querySurface === undefined
+                        ? surfaceFromQueryContext(context)
+                        : connectionSurfaceFromQuerySurface(
+                              querySurface,
+                              context,
+                          ),
+                person: {
+                    userUuid: userId,
+                    isRegisteredUser,
+                    isServiceAccount,
+                    serviceAccountUuid: serviceAccountUuid ?? null,
+                    oauthClientId: oauthClientId ?? null,
+                },
+                aiClient: aiClientFromQueryContext(context),
+            },
+            queryContext: context,
+            purpose,
+            aiAccess: 'enforce',
+        });
+    }
+
+    async loadBase(
+        ref: Extract<WarehouseClientRef, { kind: 'binding' }>,
+        context: ConnectionContext,
+    ): Promise<WarehouseCredentialBase> {
+        const { person } = context.actor;
+        if (person === null)
+            throw new ForbiddenError(
+                'Warehouse credentials require a connection person',
+            );
+        const { route, target, originalWarehouseConnectionUuid } =
+            await this.projectModel.resolveWarehouseCredentialReadWithRoute(
+                ref.projectUuid,
+                ref.binding,
+            );
+        const args = {
+            projectUuid: ref.projectUuid,
+            userId: person.userUuid,
+            isRegisteredUser: person.isRegisteredUser,
+            isServiceAccount: person.isServiceAccount,
+            context: context.queryContext ?? undefined,
+        };
+        let base: WarehouseCredentialBase;
+        switch (target.kind) {
+            case 'original':
+                base = await this.loadSingleRouteCredentialBase({
+                    ...args,
+                    preloadedOrgWarehouseCredentialsUuid:
+                        ref.preloadedOrgWarehouseCredentialsUuid,
+                    purpose: context.purpose,
+                });
+                break;
+            case 'extra':
+                base = await this.loadExtraConnectionCredentialBase({
+                    ...args,
+                    warehouseConnectionUuid: target.warehouseConnectionUuid,
+                    purpose: context.purpose,
+                });
+                break;
+            default:
+                return assertUnreachable(target, 'Unknown credential target');
+        }
+        return {
+            ...base,
+            connectionRoute: { route, originalWarehouseConnectionUuid },
+        };
+    }
+
+    async finish(
+        base: WarehouseCredentialBase,
+        context: WarehouseCredentialResolutionContext,
+    ): Promise<ResolvedWarehouseCredentials> {
+        if (context.purpose === 'compile' && base.kind !== 'final') {
+            return this.finishCompileCredentials(base, context);
+        }
+        switch (base.kind) {
+            case 'final':
+                return copyWarehouseCredentialVersions(
+                    {
+                        ...base.credentials,
+                        userWarehouseCredentialsUuid: undefined,
+                    },
+                    base.credentials,
+                );
+            case 'original':
+                return this.finishSingleRouteCredentials(base, context);
+            case 'extra':
+                return this.finishExtraConnectionCredentials(base, context);
+            default:
+                return assertUnreachable(
+                    base,
+                    'Unknown warehouse credential phase',
+                );
+        }
+    }
+
+    private async finishCompileCredentials(
+        base: Exclude<WarehouseCredentialBase, { kind: 'final' }>,
+        context: WarehouseCredentialResolutionContext,
+    ): Promise<ResolvedWarehouseCredentials> {
+        const { person } = context.actor;
+        if (person === null) {
+            throw new ForbiddenError(
+                'Warehouse credentials require a connection person',
+            );
+        }
+        const { projectUuid, organizationWarehouseCredentialsUuid } = base;
+        let { credentials } = base;
+        let source: RefreshTokenRotationSource = {
+            kind: 'project',
+            projectUuid,
+        };
+        if (organizationWarehouseCredentialsUuid) {
+            source = {
+                kind: 'organization',
+                organizationWarehouseCredentialsUuid,
+            };
+        } else if (base.kind === 'extra') {
+            source = {
+                kind: 'warehouseConnection',
+                project: base.project,
+                warehouseConnectionUuid: base.warehouseConnectionUuid,
+            };
+        }
+        let userWarehouseCredentialsUuid: string | undefined;
+
+        if (base.kind === 'original' && !organizationWarehouseCredentialsUuid) {
+            credentials = await this.repairStalePreviewSsoCredentials(
+                projectUuid,
+                credentials,
+            );
+            if (
+                credentials.type === WarehouseTypes.DATABRICKS &&
+                credentials.authenticationType ===
+                    DatabricksAuthenticationType.OAUTH_U2M &&
+                !credentials.refreshToken
+            ) {
+                const policy = await resolvePersonalCredentialPolicy(
+                    this.featureFlagModel,
+                    {
+                        organizationUuid:
+                            base.organizationUuid ??
+                            (await this.projectModel.getSummary(projectUuid))
+                                .organizationUuid,
+                        userUuid: person.userUuid,
+                    },
+                );
+                const userCredentials =
+                    await this.userWarehouseCredentialsModel.findForProjectWithSecrets(
+                        projectUuid,
+                        person.userUuid,
+                        WarehouseTypes.DATABRICKS,
+                        policy,
+                    );
+                if (policy.strictPersonalOverlay && userCredentials) {
+                    const refreshSource = {
+                        credentials: userCredentials.credentials,
+                        fallback: credentials,
+                        personalCredentialPolicy: policy,
+                    };
+                    credentials = composePersonalWarehouseCredentials(
+                        credentials,
+                        projectPersonalWarehouseCredentials(
+                            userCredentials.credentials,
+                        ),
+                    );
+                    userWarehouseCredentialsUuid = userCredentials.uuid;
+                    source = {
+                        kind: 'user',
+                        userWarehouseCredentialsUuid,
+                        refreshSource,
+                    };
+                } else if (
+                    userCredentials?.credentials.type ===
+                        WarehouseTypes.DATABRICKS &&
+                    userCredentials.credentials.authenticationType ===
+                        DatabricksAuthenticationType.OAUTH_U2M &&
+                    userCredentials.credentials.refreshToken
+                ) {
+                    const userHost = normalizeDatabricksHostLenient(
+                        userCredentials.credentials.serverHostName,
+                    );
+                    const projectHost = normalizeDatabricksHostLenient(
+                        credentials.serverHostName,
+                    );
+                    if (userHost && projectHost && userHost !== projectHost) {
+                        throw new DatabricksTokenError(
+                            'Please authenticate to access Databricks for this workspace',
+                        );
+                    }
+                    const refreshSource = {
+                        credentials: userCredentials.credentials,
+                        fallback: credentials,
+                        personalCredentialPolicy: policy,
+                    };
+                    credentials = copyWarehouseCredentialVersions(
+                        {
+                            ...credentials,
+                            refreshToken:
+                                userCredentials.credentials.refreshToken,
+                            oauthClientId:
+                                userCredentials.credentials.oauthClientId ||
+                                credentials.oauthClientId,
+                        },
+                        credentials,
+                        userCredentials.credentials,
+                    );
+                    userWarehouseCredentialsUuid = userCredentials.uuid;
+                    source = {
+                        kind: 'user',
+                        userWarehouseCredentialsUuid,
+                        refreshSource,
+                    };
+                }
+            }
+        }
+        const materialized = await this.materializeSelectedCredentials(
+            base,
+            context,
+            credentials,
+            person.userUuid,
+            source,
+        );
+        return copyWarehouseCredentialVersions(
+            { ...materialized, userWarehouseCredentialsUuid },
+            materialized,
+        );
+    }
+
+    protected async getWarehouseCredentialsWithConnection({
+        binding,
+        ...args
+    }: Parameters<ProjectService['getSingleRouteWarehouseCredentials']>[0] & {
+        binding: ConnectionBinding;
+    }) {
+        const { route, target, originalWarehouseConnectionUuid } =
+            await this.projectModel.resolveWarehouseCredentialReadWithRoute(
+                args.projectUuid,
+                binding,
+            );
+        const connectionRoute: ConnectionRouteWithOriginal = {
+            route,
+            originalWarehouseConnectionUuid,
+        };
+        switch (target.kind) {
+            case 'original': {
+                const resolvedCredentials =
+                    await this.getSingleRouteWarehouseCredentials(args);
+                const { aiPlan, ...warehouseCredentials } = resolvedCredentials;
+                return {
+                    warehouseCredentials: copyWarehouseCredentialVersions(
+                        warehouseCredentials,
+                        resolvedCredentials,
+                    ),
+                    warehouseConnectionUuid: null,
+                    connectionRoute,
+                    aiPlan: aiPlan ?? null,
+                };
+            }
+            case 'extra': {
+                const resolvedCredentials =
+                    await this.getExtraConnectionWarehouseCredentials({
+                        projectUuid: args.projectUuid,
+                        warehouseConnectionUuid: target.warehouseConnectionUuid,
+                        userId: args.userId,
+                        isRegisteredUser: args.isRegisteredUser,
+                        isServiceAccount: args.isServiceAccount,
+                        serviceAccountUuid: args.serviceAccountUuid,
+                        oauthClientId: args.oauthClientId,
+                        context: args.context,
+                        querySurface: args.querySurface,
+                    });
+                const { aiPlan, ...warehouseCredentials } = resolvedCredentials;
+                return {
+                    warehouseCredentials: copyWarehouseCredentialVersions(
+                        warehouseCredentials,
+                        resolvedCredentials,
+                    ),
+                    warehouseConnectionUuid: target.warehouseConnectionUuid,
+                    connectionRoute,
+                    aiPlan: aiPlan ?? null,
+                };
+            }
+            default:
+                return assertUnreachable(target, 'Unknown credential target');
+        }
+    }
+
+    protected async getConnectionAnalyticsProperties({
+        projectUuid,
+        warehouseConnectionUuid,
+        warehouseType,
+    }: {
+        projectUuid: string;
+        warehouseConnectionUuid: string | null;
+        warehouseType: WarehouseTypes | null;
+    }): Promise<{
+        warehouseConnectionId: string | null;
+        connectionKind: 'primary' | 'extra' | null;
+        warehouseType: WarehouseTypes | null;
+        connectionCount: number | null;
+    }> {
+        try {
+            const route = await this.projectModel.getConnectionRoute(
+                projectUuid,
+                {
+                    kind: 'connection',
+                    warehouseConnectionUuid,
+                },
+            );
+            if (route === 'single') {
+                let connectionWarehouseType = warehouseType;
+                if (warehouseType === WarehouseTypes.DUCKDB) {
+                    try {
+                        connectionWarehouseType =
+                            (
+                                await this.warehouseConnectionModel.getProject(
+                                    projectUuid,
+                                )
+                            ).originalWarehouseType ?? warehouseType;
+                    } catch {
+                        connectionWarehouseType = null;
+                    }
+                }
+                return {
+                    warehouseConnectionId: null,
+                    connectionKind: null,
+                    warehouseType: connectionWarehouseType,
+                    connectionCount: 1,
+                };
+            }
+
+            const project =
+                await this.warehouseConnectionModel.getProject(projectUuid);
+            const connections =
+                await this.warehouseConnectionModel.list(project);
+            const connection = warehouseConnectionUuid
+                ? connections.find(
+                      (item) =>
+                          item.warehouseConnectionUuid ===
+                          warehouseConnectionUuid,
+                  )
+                : connections.find((item) => item.isOriginal);
+            let connectionKind: 'primary' | 'extra' | null = null;
+            if (connection) {
+                connectionKind = connection.isOriginal ? 'primary' : 'extra';
+            }
+            return {
+                warehouseConnectionId:
+                    connection?.warehouseConnectionUuid ?? null,
+                connectionKind,
+                warehouseType: connection?.warehouseType ?? warehouseType,
+                connectionCount: connections.length,
+            };
+        } catch (error) {
+            this.logger.warn('Failed to resolve query connection analytics', {
+                error: getErrorMessage(error),
+            });
+            return {
+                warehouseConnectionId: null,
+                connectionKind: null,
+                warehouseType,
+                connectionCount: null,
+            };
+        }
+    }
+
+    protected getQueryConnectionAnalyticsProperties({
+        warehouseConnectionUuid,
+        warehouseType,
+        connectionRoute,
+    }: {
+        warehouseConnectionUuid: string | null | undefined;
+        warehouseType: WarehouseTypes | null;
+        connectionRoute?: ConnectionRouteWithOriginal | null;
+    }) {
+        let connectionKind: 'primary' | 'extra' | null = null;
+        let warehouseConnectionId = warehouseConnectionUuid ?? null;
+        if (warehouseConnectionUuid) {
+            connectionKind = 'extra';
+        } else if (
+            warehouseConnectionUuid === null &&
+            connectionRoute?.route === 'multi'
+        ) {
+            connectionKind = 'primary';
+            warehouseConnectionId =
+                connectionRoute.originalWarehouseConnectionUuid;
+        }
+        return {
+            warehouseConnectionId,
+            connectionKind,
+            warehouseType,
+            connectionCount: null,
+        };
+    }
+
+    private trackExtraConnectionCredentialsRequired({
+        organizationUuid,
+        projectUuid,
+        warehouseConnectionUuid,
+        warehouseType,
+        userId,
+        reason,
+    }: {
+        organizationUuid: string;
+        projectUuid: string;
+        warehouseConnectionUuid: string;
+        warehouseType: WarehouseTypes;
+        userId: string;
+        reason:
+            | 'missing_personal_credentials'
+            | 'host_mismatch'
+            | 'service_account_requires_personal_credentials';
+    }): void {
+        trackSafely(() => {
+            this.analytics.track({
+                userId,
+                event: 'warehouse_connection.credentials_required',
+                properties: {
+                    organizationId: organizationUuid,
+                    projectId: projectUuid,
+                    warehouseConnectionId: warehouseConnectionUuid,
+                    connectionKind: 'extra',
+                    warehouseType,
+                    connectionCount: null,
+                    entryPoint: 'query',
+                    reason,
+                },
+            });
+        });
+    }
+
+    private async getSingleRouteWarehouseCredentials({
         projectUuid,
         userId,
         isRegisteredUser,
+        context,
+        querySurface,
         isServiceAccount = false,
+        serviceAccountUuid,
+        oauthClientId,
+        preloadedOrgWarehouseCredentialsUuid,
     }: {
         projectUuid: string;
         userId: string;
         isRegisteredUser: boolean;
+        context?: QueryExecutionContext;
+        querySurface?: QuerySurface;
         isServiceAccount?: boolean;
-    }) {
-        // First, check if project uses organization-level credentials
-        const project = await this.projectModel.get(projectUuid);
-        const { organizationWarehouseCredentialsUuid } = project;
+        serviceAccountUuid?: string | null;
+        oauthClientId?: string | null;
+        preloadedOrgWarehouseCredentialsUuid?: string | null;
+    }): Promise<ResolvedWarehouseCredentials> {
+        const base = await this.loadSingleRouteCredentialBase({
+            projectUuid,
+            userId,
+            isRegisteredUser,
+            isServiceAccount,
+            context,
+            preloadedOrgWarehouseCredentialsUuid,
+        });
+        return this.resolveLegacyWarehouseCredentials(base, {
+            serviceAccountUuid,
+            oauthClientId,
+            userId,
+            isRegisteredUser,
+            isServiceAccount,
+            context,
+            querySurface,
+        });
+    }
 
-        // Load base credentials from either organization or project table
-        let credentials: CreateWarehouseCredentials =
-            await this.projectModel.getWarehouseCredentialsForProject(
-                projectUuid,
+    private async loadSingleRouteCredentialBase({
+        projectUuid,
+        userId,
+        isRegisteredUser,
+        context,
+        isServiceAccount = false,
+        preloadedOrgWarehouseCredentialsUuid,
+        purpose = 'query',
+    }: {
+        projectUuid: string;
+        userId: string;
+        isRegisteredUser: boolean;
+        context?: QueryExecutionContext;
+        isServiceAccount?: boolean;
+        preloadedOrgWarehouseCredentialsUuid?: string | null;
+        purpose?: ConnectionContext['purpose'];
+    }): Promise<WarehouseCredentialBase> {
+        const organizationWarehouseCredentialsUuid =
+            preloadedOrgWarehouseCredentialsUuid !== undefined
+                ? preloadedOrgWarehouseCredentialsUuid
+                : (
+                      await this.projectModel.getProjectWarehouseConfig(
+                          projectUuid,
+                      )
+                  ).organizationWarehouseCredentialsUuid;
+
+        const credentials: CreateWarehouseCredentials =
+            purpose === 'compile'
+                ? await this.projectModel.getWarehouseCredentialsForProjectUncached(
+                      projectUuid,
+                  )
+                : await this.projectModel.getWarehouseCredentialsForProject(
+                      projectUuid,
+                  );
+
+        if (
+            credentials.type === WarehouseTypes.DUCKDB &&
+            credentials.connectionType === DuckdbConnectionType.ANALYTICS
+        ) {
+            if (!isRegisteredUser)
+                throw new ForbiddenError(
+                    'Managed analytics requires an authenticated organization member',
+                );
+            const project = await this.projectModel.getSummary(projectUuid);
+            const user = await this.userModel.findSessionUserAndOrgByUuid(
+                userId,
+                project.organizationUuid,
             );
+            await this.assertAnalyticsProjectAccess(user, project);
+            return {
+                kind: 'final',
+                projectUuid,
+                credentials,
+                organizationUuid: project.organizationUuid,
+                warehouseConnectionUuid: null,
+                connectionRoute: null,
+            };
+        }
+
+        return {
+            kind: 'original',
+            projectUuid,
+            credentials,
+            organizationWarehouseCredentialsUuid:
+                organizationWarehouseCredentialsUuid ?? null,
+            organizationUuid:
+                context && isAiAccessQueryContext(context)
+                    ? (await this.projectModel.getSummary(projectUuid))
+                          .organizationUuid
+                    : null,
+            warehouseConnectionUuid: null,
+            connectionRoute: null,
+        };
+    }
+
+    private async finishSingleRouteCredentials(
+        base: Extract<WarehouseCredentialBase, { kind: 'original' }>,
+        context: WarehouseCredentialResolutionContext,
+    ): Promise<ResolvedWarehouseCredentials> {
+        const { person } = context.actor;
+        if (person === null)
+            throw new ForbiddenError(
+                'Warehouse credentials require a connection person',
+            );
+        const { userUuid: userId, isRegisteredUser, isServiceAccount } = person;
+        const { projectUuid, organizationWarehouseCredentialsUuid } = base;
+        let { credentials } = base;
         let userWarehouseCredentialsUuid: string | undefined;
 
         if (
@@ -1410,8 +3409,10 @@ export class ProjectService extends BaseService {
             this.logger.debug(
                 `Refreshing warehouse credentials from organization credentials`,
             );
-            credentials = await this.refreshCredentialsAndPersistRotation(
-                credentials, // This credentials are already loaded from organization
+            credentials = await this.materializeSelectedCredentials(
+                base,
+                context,
+                credentials,
                 userId,
                 {
                     kind: 'organization',
@@ -1420,33 +3421,37 @@ export class ProjectService extends BaseService {
             );
         }
 
-        // Service accounts cannot use personal warehouse credentials
         if (isServiceAccount && credentials.requireUserCredentials) {
             throw new ForbiddenError(
                 'Service accounts cannot run queries when user credentials are required.',
             );
         }
 
-        // Check if user has their own credentials for this project's warehouse type
-        // Only fetch user credentials when:
-        // 1. requireUserCredentials is enabled (user credentials are mandatory)
-        // 2. Databricks warehouse (supports optional user OAuth credentials)
         const shouldFetchUserCredentials =
             credentials.requireUserCredentials ||
-            credentials.type === WarehouseTypes.DATABRICKS;
+            allowsOptionalUserCredentials(credentials);
 
         if (isRegisteredUser) {
-            // Fetch user credentials only when needed (for performance)
+            const policy = shouldFetchUserCredentials
+                ? await resolvePersonalCredentialPolicy(this.featureFlagModel, {
+                      organizationUuid:
+                          base.organizationUuid ??
+                          (await this.projectModel.getSummary(projectUuid))
+                              .organizationUuid,
+                      userUuid: userId,
+                  })
+                : { strictPersonalOverlay: false };
             const userWarehouseCredentials = shouldFetchUserCredentials
                 ? await this.userWarehouseCredentialsModel.findForProjectWithSecrets(
                       projectUuid,
                       userId,
                       credentials.type,
+                      policy,
                   )
                 : undefined;
 
-            // Skip user credentials if the serverHostName doesn't match the project
             const userCredHost =
+                !policy.strictPersonalOverlay &&
                 userWarehouseCredentials?.credentials.type ===
                     WarehouseTypes.DATABRICKS &&
                 'serverHostName' in userWarehouseCredentials.credentials
@@ -1455,197 +3460,412 @@ export class ProjectService extends BaseService {
                       )
                     : undefined;
             const projectHost =
+                !policy.strictPersonalOverlay &&
                 credentials.type === WarehouseTypes.DATABRICKS
                     ? normalizeDatabricksHostLenient(credentials.serverHostName)
                     : undefined;
             const hostMismatch =
-                userCredHost && projectHost && userCredHost !== projectHost;
+                !policy.strictPersonalOverlay &&
+                userCredHost &&
+                projectHost &&
+                userCredHost !== projectHost;
 
             if (userWarehouseCredentials && !hostMismatch) {
-                credentials = this.clearSecretsFromCredentials(credentials);
-
-                // User has credentials - use them
-                credentials = {
-                    ...credentials,
-                    ...userWarehouseCredentials.credentials,
-                } as CreateWarehouseCredentials; // force type as typescript doesn't know the types match
+                const refreshSource = {
+                    credentials: userWarehouseCredentials.credentials,
+                    fallback: credentials,
+                    personalCredentialPolicy: policy,
+                };
+                credentials = policy.strictPersonalOverlay
+                    ? composePersonalWarehouseCredentials(
+                          credentials,
+                          projectPersonalWarehouseCredentials(
+                              userWarehouseCredentials.credentials,
+                          ),
+                      )
+                    : mergePersonalWarehouseCredentials(
+                          credentials,
+                          userWarehouseCredentials,
+                      );
 
                 this.logger.debug(
                     `Using user warehouse credentials for user ${userId}`,
                 );
-                credentials = await this.refreshCredentialsAndPersistRotation(
+                credentials = await this.materializeSelectedCredentials(
+                    base,
+                    context,
                     credentials,
                     userId,
                     {
                         kind: 'user',
                         userWarehouseCredentialsUuid:
                             userWarehouseCredentials.uuid,
+                        refreshSource,
                     },
                 );
                 userWarehouseCredentialsUuid = userWarehouseCredentials.uuid;
             } else if (credentials.requireUserCredentials) {
+                this.logger.warn(
+                    `No ${credentials.type} user warehouse credentials found for user ${userId} on project ${projectUuid} (requireUserCredentials enabled, host mismatch: ${!!hostMismatch})`,
+                );
                 if (credentials.type === WarehouseTypes.DATABRICKS) {
                     throw new DatabricksTokenError(
                         'Please authenticate to access Databricks',
                     );
                 }
-                throw new NotFoundError('User warehouse credentials not found');
+                throw new MissingWarehouseCredentialsError(
+                    "You don't have warehouse credentials set up for this project. Add them under 'User settings' → 'My warehouse connections', or refresh the page to sign in again.",
+                );
             } else if (!organizationWarehouseCredentialsUuid) {
-                // No user credentials, no org credentials, refresh project credentials
                 this.logger.debug(
                     `Refreshing warehouse credentials for session user ${userId}`,
                 );
-                credentials = await this.refreshCredentialsAndPersistRotation(
-                    credentials,
+                credentials = await this.materializeSelectedCredentials(
+                    base,
+                    context,
+                    await this.repairStalePreviewSsoCredentials(
+                        projectUuid,
+                        credentials,
+                    ),
                     userId,
                     { kind: 'project', projectUuid },
                 );
             }
         } else if (credentials.requireUserCredentials) {
-            // Embedded users cannot use personal warehouse credentials
             throw new ForbiddenError(
                 'Embedded users cannot use personal warehouse credentials',
             );
         } else if (!organizationWarehouseCredentialsUuid) {
-            // Refresh project credentials for the embed user. Required for auth
-            // types that mint a short-lived token from project-level secrets
-            // (e.g. Databricks oauth_m2m exchanges client_id+secret for a token).
             this.logger.debug(
                 `Refreshing warehouse credentials for embed user ${userId}`,
             );
-            credentials = await this.refreshCredentialsAndPersistRotation(
-                credentials,
+            credentials = await this.materializeSelectedCredentials(
+                base,
+                context,
+                await this.repairStalePreviewSsoCredentials(
+                    projectUuid,
+                    credentials,
+                ),
                 userId,
                 { kind: 'project', projectUuid },
             );
         }
 
-        return {
-            ...credentials,
-            userWarehouseCredentialsUuid,
-        };
-    }
-
-    /**
-     * Resolves warehouse credentials for an embed (anonymous JWT) request.
-     * Same shape as `getWarehouseCredentials` but tailored for embed callers
-     * and exposed as a public method so EmbedService can reuse the refresh path.
-     */
-    async getWarehouseCredentialsForEmbed({
-        projectUuid,
-        account,
-    }: {
-        projectUuid: string;
-        account: AnonymousAccount;
-    }) {
-        return this.getWarehouseCredentials({
-            projectUuid,
-            userId: account.user.id,
-            isRegisteredUser: false,
-        });
-    }
-
-    async _getWarehouseClient(
-        projectUuid: string,
-        credentials: CreateWarehouseCredentials,
-        overrides?: {
-            snowflakeVirtualWarehouse?: string;
-            databricksCompute?: string;
-        },
-    ): Promise<{
-        warehouseClient: WarehouseClient;
-        sshTunnel: SshTunnel<CreateWarehouseCredentials>;
-    }> {
-        Sentry.setTag('warehouse.type', credentials.type);
-        // Setup SSH tunnel for client (user needs to close this)
-        const sshTunnel = new SshTunnel(credentials);
-        const warehouseSshCredentials = await sshTunnel.connect();
-
-        const { snowflakeVirtualWarehouse, databricksCompute } =
-            overrides || {};
-
-        const cacheKey = `${projectUuid}${snowflakeVirtualWarehouse || ''}${
-            databricksCompute || ''
-        }`;
-        // Check cache for existing client (always false if ssh tunnel was connected)
-        const existingClient = this.warehouseClients[cacheKey] as
-            | (typeof this.warehouseClients)[string]
-            | undefined;
-        if (
-            existingClient &&
-            deepEqual(existingClient.credentials, warehouseSshCredentials)
-        ) {
-            // if existing client uses identical credentials, use it
-            return { warehouseClient: existingClient, sshTunnel };
-        }
-        // otherwise create a new client and cache for future use
-        const getSnowflakeWarehouse = (
-            snowflakeCredentials: CreateSnowflakeCredentials,
-        ): string => {
-            if (snowflakeCredentials.override) {
-                this.logger.debug(
-                    `Overriding snowflake warehouse ${snowflakeVirtualWarehouse} with ${snowflakeCredentials.warehouse}`,
-                );
-                return snowflakeCredentials.warehouse;
-            }
-            return snowflakeVirtualWarehouse || snowflakeCredentials.warehouse;
-        };
-
-        const credsType = warehouseSshCredentials.type;
-        let credentialsWithOverrides: CreateWarehouseCredentials;
-
-        switch (credsType) {
-            case WarehouseTypes.SNOWFLAKE:
-                credentialsWithOverrides = {
-                    ...warehouseSshCredentials,
-                    warehouse: getSnowflakeWarehouse(warehouseSshCredentials),
-                };
-                break;
-            case WarehouseTypes.DATABRICKS:
-                const getDatabricksHttpPath = (
-                    databricksCredentials: CreateDatabricksCredentials,
-                ): string => {
-                    if (databricksCredentials.compute) {
-                        return (
-                            databricksCredentials.compute.find(
-                                (compute) => compute.name === databricksCompute,
-                            )?.httpPath ?? databricksCredentials.httpPath
-                        );
-                    }
-                    return databricksCredentials.httpPath;
-                };
-
-                credentialsWithOverrides = {
-                    ...warehouseSshCredentials,
-                    httpPath: getDatabricksHttpPath(warehouseSshCredentials),
-                };
-                break;
-            case WarehouseTypes.REDSHIFT:
-            case WarehouseTypes.POSTGRES:
-            case WarehouseTypes.BIGQUERY:
-            case WarehouseTypes.TRINO:
-            case WarehouseTypes.CLICKHOUSE:
-            case WarehouseTypes.ATHENA:
-            case WarehouseTypes.DUCKDB:
-                credentialsWithOverrides = warehouseSshCredentials;
-                break;
-            default:
-                return assertUnreachable(
-                    credsType,
-                    `Unknown warehouse type: ${credsType}`,
-                );
-        }
-
-        const client = this.projectModel.getWarehouseClientFromCredentials(
-            credentialsWithOverrides,
+        return copyWarehouseCredentialVersions(
+            {
+                ...credentials,
+                userWarehouseCredentialsUuid,
+            },
+            credentials,
         );
-        this.warehouseClients[cacheKey] = client;
-        return { warehouseClient: client, sshTunnel };
+    }
+
+    async getSharedSignInStatus(
+        account: Account,
+        projectUuid: string,
+    ): Promise<SharedSignInStatus | null> {
+        assertIsAccountWithOrg(account);
+        const project =
+            await this.projectModel.getWithSensitiveFields(projectUuid);
+        const ability = this.createAuditedAbility(account);
+        const resource = subject('Project', {
+            organizationUuid: project.organizationUuid,
+            projectUuid: project.projectUuid,
+            upstreamProjectUuid: project.upstreamProjectUuid,
+            type: project.type,
+            createdByUserUuid: project.createdByUserUuid,
+        });
+        if (ability.cannot('view', resource)) throw new ForbiddenError();
+        if (project.organizationWarehouseCredentialsUuid) return null;
+        const credentials = project.warehouseConnection;
+        const signIn = credentials ? getPersonSignIn(credentials) : null;
+        if (!signIn) return null;
+        const {
+            provider,
+            subject: owner,
+            basis,
+        } = (await this.projectModel.getSharedSignInSubjectForToken(
+            projectUuid,
+            signIn.refreshToken,
+        )) ?? { provider: signIn.provider, subject: null, basis: null };
+        const expired =
+            provider === PersonSignInProvider.GOOGLE &&
+            credentials?.type === WarehouseTypes.BIGQUERY
+                ? await this.isGoogleSharedSignInExpired(
+                      credentials.keyfileContents,
+                  )
+                : false;
+        return {
+            provider,
+            subject: owner,
+            subjectBasis: basis,
+            expired,
+            canReconnect:
+                provider === PersonSignInProvider.GOOGLE &&
+                ability.can('update', resource) &&
+                this.canReconnectSharedSignIn(owner, basis, account.user.id),
+        };
+    }
+
+    private canReconnectSharedSignIn(
+        owner: SignInSubject | null,
+        basis: SignInSubjectBasis | null,
+        userUuid: string,
+    ): boolean {
+        return (
+            basis !== SignInSubjectBasis.RECORDED ||
+            owner?.userUuid === userUuid
+        );
+    }
+
+    private async isGoogleSharedSignInExpired(
+        keyfileContents: Record<string, string>,
+    ): Promise<boolean> {
+        try {
+            await new GoogleAuth({
+                credentials: getBigqueryKeyfileCredentials(keyfileContents),
+                scopes: ['https://www.googleapis.com/auth/bigquery'],
+            }).getAccessToken();
+            return false;
+        } catch (error) {
+            return getGoogleOauthTokenError(error)?.error === 'invalid_grant';
+        }
+    }
+
+    async reconnectSharedSignIn(
+        account: Account,
+        projectUuid: string,
+    ): Promise<void> {
+        assertIsAccountWithOrg(account);
+        const project =
+            await this.projectModel.getWithSensitiveFields(projectUuid);
+        const ability = this.createAuditedAbility(account);
+        if (
+            ability.cannot(
+                'update',
+                subject('Project', {
+                    organizationUuid: project.organizationUuid,
+                    projectUuid: project.projectUuid,
+                    upstreamProjectUuid: project.upstreamProjectUuid,
+                    type: project.type,
+                    createdByUserUuid: project.createdByUserUuid,
+                }),
+            )
+        )
+            throw new ForbiddenError();
+        const credentials = project.warehouseConnection;
+        const signIn = credentials ? getPersonSignIn(credentials) : null;
+        if (
+            project.organizationWarehouseCredentialsUuid ||
+            credentials?.type !== WarehouseTypes.BIGQUERY ||
+            signIn?.provider !== PersonSignInProvider.GOOGLE
+        ) {
+            throw new ParameterError(
+                'This project does not use a shared Google sign-in for BigQuery.',
+            );
+        }
+        const owner = await this.projectModel.getSharedSignInSubjectForToken(
+            projectUuid,
+            signIn.refreshToken,
+        );
+        if (
+            !this.canReconnectSharedSignIn(
+                owner?.subject ?? null,
+                owner?.basis ?? null,
+                account.user.id,
+            )
+        ) {
+            throw new ForbiddenError(
+                `Only ${owner?.subject?.name || 'the sign-in owner'} can reconnect this project's sign-in`,
+            );
+        }
+        const newToken = await this.userOAuthGrantsModel
+            .getRefreshToken(account.user.id, OpenIdIdentityIssuerType.GOOGLE)
+            .catch(() => null);
+        if (!newToken || newToken === signIn.refreshToken) {
+            throw new ParameterError(
+                'Sign in with Google did not finish. Try again.',
+            );
+        }
+        const resolved = await this._resolveWarehouseClientCredentials(
+            {
+                warehouseConnection: {
+                    ...credentials,
+                    authenticationType: BigqueryAuthenticationType.SSO,
+                    keyfileContents: {},
+                },
+            },
+            account.user.id,
+            project.organizationUuid,
+        );
+        const resolvedCredentials = resolved.warehouseConnection;
+        if (resolvedCredentials.type !== WarehouseTypes.BIGQUERY) {
+            throw new UnexpectedServerError(
+                'Could not resolve BigQuery sign-in.',
+            );
+        }
+        const pushToPreview = await this.getSsoPushToPreviews({
+            savedProject: project,
+            updatedProject: {
+                name: project.name,
+                dbtConnection: project.dbtConnection,
+                dbtVersion: project.dbtVersion,
+                warehouseConnection: resolvedCredentials,
+            },
+        });
+        const push = await this.projectModel.reconnectSharedSignIn(
+            projectUuid,
+            signIn.refreshToken,
+            owner?.basis === SignInSubjectBasis.RECORDED
+                ? (owner.subject?.userUuid ?? null)
+                : null,
+            resolvedCredentials.keyfileContents,
+            account.user.id,
+            pushToPreview
+                ? (next) =>
+                      ({ previewCredentials, previousUpstreamCredentials }) =>
+                          getPushedPreviewCredentials({
+                              previewCredentials,
+                              previousUpstreamCredentials,
+                              nextUpstreamCredentials: next,
+                          })
+                : null,
+        );
+        if (push.kind === 'failed') {
+            this.logger.error('Failed to push SSO credentials to previews', {
+                projectUuid,
+                error: getErrorMessage(push.error),
+            });
+        }
+    }
+
+    async assertAgentConnectionEffect(
+        projectUuid: string,
+        effect: AgentConnectionTaskEffect,
+    ): Promise<RegisteredAccount | null> {
+        const scope = agentExecutionContext.getStore();
+        if (
+            !scope?.claim?.act.agent_connection_grant &&
+            !scope?.agentConnectionExecution
+        )
+            return null;
+        const execution = normalizeAgentConnectionExecution(
+            scope.agentConnectionExecution,
+        );
+        if (!execution || !this.getAgentConnectionGrantService)
+            throw new ForbiddenError(
+                'This agent connection is no longer available for this operation.',
+            );
+        const { account } =
+            await this.getAgentConnectionGrantService().assertActiveExecution(
+                execution,
+                {
+                    projectUuid,
+                    capabilities: getAgentConnectionEffectCapabilities(
+                        effect,
+                        execution,
+                    ),
+                    recheckOperation: true,
+                },
+            );
+        const project = await this.projectModel.getSummary(projectUuid);
+        const resource =
+            execution.operation.key === 'ProjectController.refresh'
+                ? 'CompileProject'
+                : 'DeployProject';
+        if (
+            project.organizationUuid !== execution.organizationUuid ||
+            this.createAuditedAbility(account).cannot(
+                'manage',
+                subject(resource, { ...project, projectUuid }),
+            )
+        )
+            throw new ForbiddenError();
+        return account;
+    }
+
+    async assertConnectionPreAggregateRefresh(
+        projectUuid: string,
+        explores: (Explore | ExploreError)[] = [],
+    ): Promise<void> {
+        if (!agentExecutionContext.getStore()?.agentConnectionExecution) return;
+        const stored =
+            await this.projectModel.getPreAggregateRefreshSummary(projectUuid);
+        assertPreAggregateRefresh(stored, explores);
+    }
+
+    private getConnectionExploreWriteChecks(
+        projectUuid: string,
+    ):
+        | []
+        | [
+              (
+                  trx: Knex.Transaction,
+                  explores?: (Explore | ExploreError)[],
+              ) => Promise<void>,
+          ] {
+        if (!agentExecutionContext.getStore()?.agentConnectionExecution)
+            return [];
+        return [
+            async (trx, explores = []) => {
+                const stored =
+                    await this.projectModel.getPreAggregateRefreshSummary(
+                        projectUuid,
+                        trx,
+                    );
+                assertPreAggregateRefresh(stored, explores);
+            },
+        ];
+    }
+
+    private getConnectionStagedWriteChecks(
+        projectUuid: string,
+    ): [] | [StagedExploreWriteCheck] {
+        const signal = getCompileShutdownSignal();
+        const checkConnection =
+            !!agentExecutionContext.getStore()?.agentConnectionExecution;
+        if (!checkConnection && !signal) return [];
+        return [
+            async (trx, saveUuid) => {
+                signal?.throwIfAborted();
+                if (!checkConnection) return;
+                const stored =
+                    await this.projectModel.getPreAggregateRefreshSummary(
+                        projectUuid,
+                        trx,
+                    );
+                assertPreAggregateRefresh(stored, []);
+                const incoming =
+                    await this.projectModel.getStagedPreAggregateRefreshSummary(
+                        projectUuid,
+                        saveUuid,
+                        trx,
+                    );
+                assertIncomingPreAggregateRefresh(incoming);
+                signal?.throwIfAborted();
+            },
+        ];
+    }
+
+    private async prepareConnectionExploreStream(
+        projectUuid: string,
+        stream: AsyncIterable<Explore | ExploreError>,
+    ): Promise<AsyncIterable<Explore | ExploreError>> {
+        await this.assertConnectionPreAggregateRefresh(projectUuid);
+        if (connectionCheckedExploreStreams.has(stream)) return stream;
+        const explores: (Explore | ExploreError)[] = [];
+        for await (const explore of stream) explores.push(explore);
+        assertPreAggregateRefresh(EMPTY_PRE_AGGREGATE_REFRESH, explores);
+        const checked = (async function* checkedExplores() {
+            yield* explores;
+        })();
+        connectionCheckedExploreStreams.add(checked);
+        return checked;
     }
 
     private async syncPreAggregateDefinitionsRegistry(
         projectUuid: string,
-    ): Promise<void> {
+    ): Promise<{ changedDefinitionUuids: string[] }> {
         const exploresByUuid =
             await this.projectModel.getAllExploresFromCache(projectUuid);
 
@@ -1693,22 +3913,41 @@ export class ProjectService extends BaseService {
                             return;
                         }
 
+                        // External pre-aggregates are never materialized: null
+                        // metric query + null cron keep every enqueue/cron path away.
+                        const isExternal =
+                            preAggregateDefinition.table !== undefined;
+
                         let materializationMetricQuery = null;
                         let materializationQueryError = null;
+                        let definitionFingerprint = null;
 
-                        try {
-                            materializationMetricQuery =
-                                buildMaterializationMetricQuery({
-                                    sourceExplore,
-                                    preAggregateDef: preAggregateDefinition,
-                                    materializationConfig: {
-                                        maxRows:
-                                            this.lightdashConfig.preAggregates
-                                                .materializationMaxRows,
-                                    },
-                                });
-                        } catch (error) {
-                            materializationQueryError = getErrorMessage(error);
+                        if (!isExternal) {
+                            try {
+                                materializationMetricQuery =
+                                    preAggregateMaterialization.buildMaterializationMetricQuery(
+                                        {
+                                            sourceExplore,
+                                            preAggregateDef:
+                                                preAggregateDefinition,
+                                            materializationConfig: {
+                                                maxRows:
+                                                    this.lightdashConfig
+                                                        .preAggregates
+                                                        .materializationMaxRows,
+                                            },
+                                        },
+                                    );
+                                definitionFingerprint =
+                                    computeMaterializationFingerprint({
+                                        sourceExplore,
+                                        preAggregateDef: preAggregateDefinition,
+                                        materializationMetricQuery,
+                                    });
+                            } catch (error) {
+                                materializationQueryError =
+                                    getErrorMessage(error);
+                            }
                         }
 
                         definitionRows.push({
@@ -1721,27 +3960,47 @@ export class ProjectService extends BaseService {
                                 materializationMetricQuery,
                             materialization_query_error:
                                 materializationQueryError,
-                            refresh_cron:
-                                preAggregateDefinition.refresh?.cron ?? null,
+                            refresh_cron: isExternal
+                                ? null
+                                : (preAggregateDefinition.refresh?.cron ??
+                                  null),
+                            materialize_on_change:
+                                preAggregateDefinition.refresh?.onChange !==
+                                false,
+                            definition_fingerprint: definitionFingerprint,
                         });
                     },
                 );
             },
         );
 
-        await this.preAggregateModel.upsertPreAggregateDefinitions(
-            definitionRows,
-        );
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'compileProject',
+            );
+        const { changedDefinitionUuids, supersededDefinitionUuids } =
+            await this.preAggregateModel.upsertPreAggregateDefinitions(
+                definitionRows,
+            );
 
         const invalidDefinitionsCount = definitionRows.filter(
-            (row) => row.materialization_metric_query === null,
+            (row) => row.materialization_query_error !== null,
         ).length;
         this.logger.info(
             `Upserted ${definitionRows.length} pre-aggregate definition registry row(s) for project ${projectUuid}`,
             {
                 invalidDefinitionsCount,
+                changedDefinitionUuids,
+                supersededDefinitionUuids,
             },
         );
+        if (changedDefinitionUuids.length > 0) {
+            this.logger.info(
+                `${changedDefinitionUuids.length} pre-aggregate definition(s) in project ${projectUuid} changed; superseded ${supersededDefinitionUuids.length} active materialization(s)`,
+            );
+        }
+        return { changedDefinitionUuids };
     }
 
     private async syncAndEnqueuePreAggregateMaterializations(args: {
@@ -1751,7 +4010,15 @@ export class ProjectService extends BaseService {
         skipMaterialization: boolean;
     }): Promise<void> {
         try {
-            await this.syncPreAggregateDefinitionsRegistry(args.projectUuid);
+            if (agentExecutionContext.getStore()?.agentConnectionExecution)
+                await this.assertAgentConnectionEffect(
+                    args.projectUuid,
+                    'compileProject',
+                );
+            const { changedDefinitionUuids } =
+                await this.syncPreAggregateDefinitionsRegistry(
+                    args.projectUuid,
+                );
 
             if (args.skipMaterialization) {
                 this.logger.info(
@@ -1768,41 +4035,92 @@ export class ProjectService extends BaseService {
                 (definition) => definition.materializationMetricQuery !== null,
             );
 
-            if (materializableDefinitions.length > 0) {
-                await Promise.all(
-                    materializableDefinitions.map((definition) =>
-                        this.schedulerClient.materializePreAggregate({
-                            organizationUuid: args.organizationUuid,
-                            projectUuid: args.projectUuid,
-                            userUuid: args.userUuid,
-                            preAggregateDefinitionUuid:
-                                definition.preAggregateDefinitionUuid,
-                            trigger: 'compile',
-                        }),
-                    ),
-                );
-
-                const { schedulerTimezone } = await this.projectModel.get(
-                    args.projectUuid,
-                );
-
-                await this.schedulerClient.schedulePreAggregateCronJobs(
-                    materializableDefinitions
-                        .filter((definition) => definition.refreshCron !== null)
-                        .map((definition) => ({
-                            organizationUuid: args.organizationUuid,
-                            projectUuid: args.projectUuid,
-                            createdByUserUuid: args.userUuid,
-                            preAggregateDefinitionUuid:
-                                definition.preAggregateDefinitionUuid,
-                            refreshCron: definition.refreshCron!,
-                            schedulerTimezone,
-                            preAggExploreName: undefined,
-                        })),
-                    new Date(),
+            // A compile builds a definition that has never completed a
+            // materialization, so a new pre-aggregate is live without waiting
+            // for cron, and one whose definition just changed unless it opted
+            // out with refresh.on_change: false. Everything else is left to
+            // cron or a manual refresh.
+            const changed = new Set(changedDefinitionUuids);
+            const everMaterialized =
+                materializableDefinitions.length > 0
+                    ? await this.preAggregateModel.getDefinitionUuidsEverMaterialized(
+                          args.projectUuid,
+                      )
+                    : new Set<string>();
+            const compileDefinitions = materializableDefinitions.filter(
+                (definition) =>
+                    !everMaterialized.has(
+                        definition.preAggregateDefinitionUuid,
+                    ) ||
+                    (definition.materializeOnChange &&
+                        changed.has(definition.preAggregateDefinitionUuid)),
+            );
+            const skippedCount =
+                materializableDefinitions.length - compileDefinitions.length;
+            if (skippedCount > 0) {
+                this.logger.info(
+                    `Leaving ${skippedCount} pre-aggregate definition(s) in project ${args.projectUuid} to cron or manual refresh on this compile`,
                 );
             }
+
+            if (materializableDefinitions.length > 0) {
+                await Promise.all(
+                    compileDefinitions.map((definition) => {
+                        const enqueue = () =>
+                            this.schedulerClient.materializePreAggregate({
+                                ...captureAgentConnectionTask(
+                                    'materializePreAggregate',
+                                    args,
+                                ),
+                                organizationUuid: args.organizationUuid,
+                                projectUuid: args.projectUuid,
+                                userUuid: args.userUuid,
+                                preAggregateDefinitionUuid:
+                                    definition.preAggregateDefinitionUuid,
+                                trigger: 'compile',
+                            });
+                        return agentExecutionContext.getStore()
+                            ?.agentConnectionExecution
+                            ? this.assertAgentConnectionEffect(
+                                  args.projectUuid,
+                                  'materializePreAggregate',
+                              ).then(enqueue)
+                            : enqueue();
+                    }),
+                );
+
+                if (
+                    !agentExecutionContext.getStore()
+                        ?.agentConnectionExecution &&
+                    !agentExecutionContext.getStore()?.claim?.act
+                        .agent_connection_grant
+                ) {
+                    const { schedulerTimezone } = await this.projectModel.get(
+                        args.projectUuid,
+                    );
+
+                    await this.schedulerClient.schedulePreAggregateCronJobs(
+                        materializableDefinitions
+                            .filter(
+                                (definition) => definition.refreshCron !== null,
+                            )
+                            .map((definition) => ({
+                                organizationUuid: args.organizationUuid,
+                                projectUuid: args.projectUuid,
+                                createdByUserUuid: args.userUuid,
+                                preAggregateDefinitionUuid:
+                                    definition.preAggregateDefinitionUuid,
+                                refreshCron: definition.refreshCron!,
+                                schedulerTimezone,
+                                preAggExploreName: undefined,
+                            })),
+                        new Date(),
+                    );
+                }
+            }
         } catch (error) {
+            if (agentExecutionContext.getStore()?.agentConnectionExecution)
+                throw error;
             this.logger.error(
                 `Failed to sync/enqueue pre-aggregate materializations for project ${args.projectUuid}: ${getErrorMessage(
                     error,
@@ -1811,28 +4129,571 @@ export class ProjectService extends BaseService {
         }
     }
 
-    async saveExploresToCacheAndIndexCatalog(args: {
-        userUuid: string;
-        projectUuid: string;
-        explores: (Explore | ExploreError)[];
-        compilationSource: 'cli_deploy' | 'refresh_dbt' | 'create_project';
-        jobUuid?: string | null;
-        requestMethod?: string | null;
-        projectConfigDefaults?: ProjectDefaults;
-        cliVersion?: string | null;
-    }) {
+    saveExploresToCacheAndIndexCatalog(
+        args: SaveCompiledExploresArgs & {
+            explores: (Explore | ExploreError)[];
+        },
+    ) {
+        return this.saveExploresToCacheAndIndexCatalogWithRefreshCheck(
+            args,
+            true,
+        );
+    }
+
+    private async saveExploresToCacheAndIndexCatalogWithRefreshCheck(
+        args: SaveCompiledExploresArgs & {
+            explores: (Explore | ExploreError)[];
+        },
+        checkRefresh: boolean,
+        hasAdditionalDbtSources: boolean | null = null,
+    ) {
+        const { explores, ...metadata } = args;
+        const hasDbtSources =
+            args.dbtModelNames !== undefined &&
+            (hasAdditionalDbtSources ??
+                (await this.projectDbtSourcesModel.hasSources(
+                    args.projectUuid,
+                )));
+        const dbtModelNames = hasDbtSources ? undefined : args.dbtModelNames;
+        if (
+            checkRefresh &&
+            agentExecutionContext.getStore()?.agentConnectionExecution
+        )
+            await this.assertConnectionPreAggregateRefresh(
+                args.projectUuid,
+                explores,
+            );
+        const result = await this.saveExploresAndIndexCatalog({
+            ...metadata,
+            connectionWarnings: [],
+            saveExplores: async (summary) => {
+                const [beforeWrite] = this.getConnectionExploreWriteChecks(
+                    args.projectUuid,
+                );
+                const writeCheckArgs: [undefined?, ExploreWriteCheck?] =
+                    beforeWrite ? [undefined, beforeWrite] : [];
+                const saved = await this.projectModel.saveExploresToCache(
+                    args.projectUuid,
+                    explores,
+                    args.complete,
+                    dbtModelNames,
+                    ...writeCheckArgs,
+                );
+                explores.forEach((explore) => summary.add(explore));
+                return saved;
+            },
+        });
+        return result.indexCatalogJobUuid;
+    }
+
+    async trackCliSourceDeploy(
+        args: {
+            userUuid: string;
+            projectUuid: string;
+            cliDeploy: CliDeploySelection;
+        },
+        outcome: { status: 'success' } | { status: 'error'; error: unknown },
+    ): Promise<void> {
+        if (args.cliDeploy.sourceUuid === null) return;
+        try {
+            const { organizationUuid } = await this.projectModel.getSummary(
+                args.projectUuid,
+            );
+            const project = await this.warehouseConnectionModel.getProject(
+                args.projectUuid,
+            );
+            const { sourceUuid } = args.cliDeploy;
+            const identity = await this.projectModel.getDbtSourceIdentity(
+                args.projectUuid,
+            );
+            const isPrimary = sourceUuid === identity.dbtSourceUuid;
+            const source = isPrimary
+                ? undefined
+                : (
+                      await this.projectDbtSourcesModel.getSourcesWithBindings(
+                          args.projectUuid,
+                      )
+                  ).find((item) => item.projectDbtSourceUuid === sourceUuid);
+            const connectionAnalytics =
+                await this.getConnectionAnalyticsProperties({
+                    projectUuid: args.projectUuid,
+                    warehouseConnectionUuid:
+                        source?.warehouseConnectionUuid ?? null,
+                    warehouseType: project.originalWarehouseType,
+                });
+            const properties = {
+                organizationId: organizationUuid,
+                projectId: args.projectUuid,
+                ...connectionAnalytics,
+                ...(isPrimary || source
+                    ? undefined
+                    : {
+                          warehouseConnectionId: null,
+                          connectionKind: null,
+                          warehouseType: null,
+                      }),
+                entryPoint: 'cli_source' as const,
+            };
+            if (outcome.status === 'success') {
+                this.analytics.track({
+                    userId: args.userUuid,
+                    event: 'project.deployment_succeeded',
+                    properties: {
+                        ...properties,
+                        reason: null,
+                    },
+                });
+            } else {
+                const message = getErrorMessage(outcome.error);
+                let reason:
+                    | 'source_not_found'
+                    | 'target_mismatch'
+                    | 'incomplete_source'
+                    | 'other' = 'other';
+                if (message.includes('selected dbt source does not belong')) {
+                    reason = 'source_not_found';
+                } else if (message.includes('dbt target compiles against')) {
+                    reason = 'target_mismatch';
+                } else if (message.includes('must send every explore')) {
+                    reason = 'incomplete_source';
+                }
+                this.analytics.track({
+                    userId: args.userUuid,
+                    event: 'project.deployment_failed',
+                    properties: {
+                        ...properties,
+                        reason,
+                    },
+                });
+            }
+        } catch {
+            this.logger.warn('Failed to track CLI source deploy');
+        }
+    }
+
+    async saveDeployExplores(
+        args: SaveCompiledExploresArgs & {
+            explores: (Explore | ExploreError)[];
+            cliDeploy: CliDeploySelection;
+        },
+    ): Promise<string> {
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionPreAggregateRefresh(
+                args.projectUuid,
+                args.explores,
+            );
+        const { cliDeploy, ...deploy } = args;
+        const connectionRoute = await this.projectModel.getConnectionRoute(
+            args.projectUuid,
+            { kind: 'original' },
+        );
+        const hasAdditionalDbtSources =
+            args.complete === true
+                ? await this.projectDbtSourcesModel.hasSources(args.projectUuid)
+                : null;
+        const deployProject =
+            hasAdditionalDbtSources === true
+                ? await this.projectModel.getSummary(args.projectUuid)
+                : null;
+        const previewResolution =
+            deployProject?.type === ProjectType.PREVIEW &&
+            args.dbtModelNames === undefined
+                ? await resolveCliPreviewDeploy(
+                      {
+                          projectModel: this.projectModel,
+                          projectDbtSourcesModel: this.projectDbtSourcesModel,
+                          dbtSourceRefCatalogModel:
+                              this.dbtSourceRefCatalogModel,
+                      },
+                      {
+                          projectUuid: args.projectUuid,
+                          upstreamProjectUuid:
+                              deployProject.upstreamProjectUuid,
+                          explores: args.explores,
+                          sourceUuid: cliDeploy.sourceUuid,
+                      },
+                  )
+                : null;
+        const previewSources = previewResolution?.sourcesByPackage ?? null;
+        const sourceSelection =
+            hasAdditionalDbtSources === true && previewSources === null
+                ? await inferCliDeploySource(
+                      {
+                          projectModel: this.projectModel,
+                          projectDbtSourcesModel: this.projectDbtSourcesModel,
+                          dbtSourceRefCatalogModel:
+                              this.dbtSourceRefCatalogModel,
+                          warehouseConnectionModel:
+                              this.warehouseConnectionModel,
+                      },
+                      {
+                          projectUuid: args.projectUuid,
+                          explores: args.explores,
+                          dbtModelNames: args.dbtModelNames,
+                          cliDeploy,
+                      },
+                  )
+                : null;
+        if (
+            connectionRoute !== 'multi' &&
+            hasAdditionalDbtSources !== true &&
+            !(await this.projectModel.hasExploreNameAllocations(
+                args.projectUuid,
+            ))
+        ) {
+            return this.saveExploresToCacheAndIndexCatalogWithRefreshCheck(
+                deploy,
+                false,
+                hasAdditionalDbtSources,
+            );
+        }
+        if (args.complete !== true) {
+            throw new ParameterError(
+                'A deploy to a project with multiple connections must send every explore of its dbt source',
+            );
+        }
+        const previewSourceUuids = previewResolution?.sourceUuids ?? [];
+        if (
+            previewSources &&
+            previewSourceUuids.length > 1 &&
+            cliDeploy.sourceUuid === null &&
+            cliDeploy.target !== null
+        ) {
+            const targets = await Promise.allSettled(
+                previewSourceUuids.map((sourceUuid) =>
+                    resolveCliDeploySource(
+                        {
+                            projectModel: this.projectModel,
+                            projectDbtSourcesModel: this.projectDbtSourcesModel,
+                            warehouseConnectionModel:
+                                this.warehouseConnectionModel,
+                        },
+                        args.projectUuid,
+                        { ...cliDeploy, sourceUuid },
+                    ),
+                ),
+            );
+            if (!targets.some((target) => target.status === 'fulfilled')) {
+                const failed = targets.find(
+                    (target) => target.status === 'rejected',
+                );
+                if (failed?.status === 'rejected') throw failed.reason;
+            }
+        }
+        let selection = cliDeploy;
+        if (sourceSelection)
+            selection = {
+                ...cliDeploy,
+                sourceUuid: sourceSelection.sourceUuid,
+            };
+        else if (
+            previewSources &&
+            cliDeploy.sourceUuid === null &&
+            previewSourceUuids.length === 1
+        ) {
+            selection = { ...cliDeploy, sourceUuid: previewSourceUuids[0] };
+        }
+        const projectDbtSourceUuid =
+            previewSources &&
+            previewSourceUuids.length > 1 &&
+            cliDeploy.sourceUuid === null
+                ? null
+                : await resolveCliDeploySource(
+                      {
+                          projectModel: this.projectModel,
+                          projectDbtSourcesModel: this.projectDbtSourcesModel,
+                          warehouseConnectionModel:
+                              this.warehouseConnectionModel,
+                      },
+                      args.projectUuid,
+                      selection,
+                  );
+        const { explores: uploadedExplores, ...metadata } = deploy;
+        const uploadedExploreCount = uploadedExplores.length;
+        const explores = sourceSelection?.explores ?? uploadedExplores;
+        const sourceDeploy = previewSources
+            ? await this.multiConnectionCompiler.preparePreviewDeploy({
+                  projectUuid: args.projectUuid,
+                  explores: explores.map(withoutClientBindings),
+                  sourcesByPackage: previewSources,
+                  sourceAliases: previewResolution!.sourceAliases,
+              })
+            : await this.multiConnectionCompiler.prepareSourceDeploy({
+                  projectUuid: args.projectUuid,
+                  projectDbtSourceUuid,
+                  explores: explores.map(withoutClientBindings),
+              });
+        if (sourceDeploy.naming) {
+            const { onPublished } = sourceDeploy.naming;
+            sourceDeploy.naming.onPublished = (published) => {
+                onPublished?.(published);
+                uploadedExplores.splice(
+                    0,
+                    uploadedExplores.length,
+                    ...published,
+                );
+                if (explores !== uploadedExplores)
+                    explores.splice(0, explores.length, ...published);
+            };
+        }
+        const result = await this.saveExploresAndIndexCatalog({
+            ...metadata,
+            connectionWarnings: sourceDeploy.naming?.warnings ?? [],
+            readSavedExploreNames: true,
+            saveExplores: async (summary) => {
+                let writeChecks = this.getConnectionStagedWriteChecks(
+                    args.projectUuid,
+                );
+                if (sourceSelection || previewSources) {
+                    const [checkWrite] = writeChecks;
+                    writeChecks = [
+                        async (trx, saveUuid) => {
+                            await checkWrite?.(trx, saveUuid);
+                            await this.projectModel.assertSourceDeployOwnership(
+                                args.projectUuid,
+                                sourceSelection?.sourceUuid ?? null,
+                                saveUuid,
+                                trx,
+                                previewResolution === null &&
+                                    cliDeploy.sourceUuid !== null,
+                                previewResolution ?? undefined,
+                            );
+                        },
+                    ];
+                }
+                const saved = await this.multiConnectionCompiler.save(
+                    args.projectUuid,
+                    sourceDeploy,
+                    ...writeChecks,
+                );
+                explores.forEach((explore) => summary.add(explore));
+                return saved;
+            },
+        });
+        if (previewSources) {
+            this.logger.info('cli.deploy.preview_sources_inferred', {
+                projectUuid: args.projectUuid,
+                dbtSourceUuids: previewSourceUuids,
+                method: 'preview_package_match',
+                uploadedExploreCount,
+            });
+        }
+        if (sourceSelection) {
+            this.logger.info(
+                sourceSelection.method === 'explicit'
+                    ? 'cli.deploy.source_selected'
+                    : 'cli.deploy.source_inferred',
+                {
+                    projectUuid: args.projectUuid,
+                    dbtSourceUuid: sourceSelection.sourceUuid,
+                    method: sourceSelection.method,
+                    uploadedExploreCount,
+                    droppedExploreCount: sourceSelection.droppedExploreCount,
+                },
+            );
+            if (sourceSelection.droppedExploreCount > 0) {
+                this.logger.warn(
+                    'CLI deploy dropped explores from other dbt sources',
+                    {
+                        projectUuid: args.projectUuid,
+                        dbtSourceUuid: sourceSelection.sourceUuid,
+                        droppedExploreCount:
+                            sourceSelection.droppedExploreCount,
+                    },
+                );
+            }
+        }
+        return result.indexCatalogJobUuid;
+    }
+
+    private async saveExploresKeepingExtraConnections(
+        args: SaveCompiledExploresArgs & {
+            explores: (Explore | ExploreError)[];
+        },
+    ): Promise<void> {
+        const { explores, ...metadata } = args;
+        const warehouseConnectionUuids =
+            await this.warehouseConnectionIdentityModel.getExtraConnectionUuids(
+                args.projectUuid,
+            );
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionPreAggregateRefresh(
+                args.projectUuid,
+                explores,
+            );
+        await this.saveExploresAndIndexCatalog({
+            ...metadata,
+            connectionWarnings: [],
+            saveExplores: async (summary) => {
+                const saved = await this.multiConnectionCompiler.save(
+                    args.projectUuid,
+                    {
+                        exploreStream: (async function* webhookExplores() {
+                            yield* explores;
+                        })(),
+                        bindingOf: () => null,
+                        carry: {
+                            kind: 'connections',
+                            warehouseConnectionUuids,
+                        },
+                        persistArtifacts: async () => {},
+                    },
+                    ...this.getConnectionStagedWriteChecks(args.projectUuid),
+                );
+                explores.forEach((explore) => summary.add(explore));
+                return saved;
+            },
+        });
+    }
+
+    private async saveExploreStreamToCacheAndIndexCatalog(
+        args: Omit<SaveCompiledExploresArgs, 'complete'> & {
+            exploreStream: AsyncIterable<Explore | ExploreError>;
+            onCompiled?: (summary: ExploreCompilationSummary) => void;
+            multiConnection: PreparedMultiConnectionSave | null;
+            exploreNaming?: ExploreNaming;
+        },
+    ) {
+        const {
+            exploreStream: incomingStream,
+            onCompiled,
+            multiConnection: preparedMultiConnection,
+            exploreNaming,
+            connectionWarnings = [],
+            failedDbtSourceUuids = [],
+            ...metadata
+        } = args;
+        const multiConnection =
+            preparedMultiConnection ??
+            (exploreNaming
+                ? {
+                      exploreStream: incomingStream,
+                      bindingOf: () => null,
+                      carry: {
+                          kind: 'connections' as const,
+                          warehouseConnectionUuids: [],
+                          ...(failedDbtSourceUuids.length > 0
+                              ? { dbtSourceUuids: failedDbtSourceUuids }
+                              : {}),
+                      },
+                      naming: exploreNaming,
+                      warnings: exploreNaming.warnings,
+                      persistArtifacts: async () => {},
+                  }
+                : null);
+        const publishedWarnings = [
+            ...connectionWarnings,
+            ...(multiConnection?.warnings ?? []),
+        ];
+        const exploreStream = agentExecutionContext.getStore()
+            ?.agentConnectionExecution
+            ? await this.prepareConnectionExploreStream(
+                  args.projectUuid,
+                  incomingStream,
+              )
+            : incomingStream;
+        const saving = this.saveExploresAndIndexCatalog({
+            ...metadata,
+            complete: true,
+            connectionWarnings: publishedWarnings,
+            saveExplores: async (summary) => {
+                async function* observedExplores() {
+                    for await (const explore of exploreStream) {
+                        if (!multiConnection?.naming)
+                            summary.add(explore, onCompiled !== undefined);
+                        yield explore;
+                    }
+                    if (!multiConnection?.naming) onCompiled?.(summary);
+                }
+                if (multiConnection) {
+                    const saved = await this.multiConnectionCompiler.save(
+                        args.projectUuid,
+                        {
+                            ...multiConnection,
+                            ...(multiConnection.naming
+                                ? {
+                                      naming: {
+                                          ...multiConnection.naming,
+                                          onPublished: (published) => {
+                                              multiConnection.naming?.onPublished?.(
+                                                  published,
+                                              );
+                                              published.forEach((explore) =>
+                                                  summary.add(
+                                                      explore,
+                                                      onCompiled !== undefined,
+                                                  ),
+                                              );
+                                              onCompiled?.(summary);
+                                          },
+                                      },
+                                  }
+                                : {}),
+                            exploreStream: observedExplores(),
+                            ...(agentExecutionContext.getStore()
+                                ?.agentConnectionExecution
+                                ? { persistArtifacts: async () => {} }
+                                : {}),
+                        },
+                        ...this.getConnectionStagedWriteChecks(
+                            args.projectUuid,
+                        ),
+                    );
+                    publishedWarnings.splice(
+                        0,
+                        publishedWarnings.length,
+                        ...connectionWarnings,
+                        ...multiConnection.warnings,
+                    );
+                    return saved;
+                }
+                throwIfCompileAborted();
+                return this.projectModel.saveExploreStreamToCache(
+                    args.projectUuid,
+                    observedExplores(),
+                    this.getConnectionStagedWriteChecks(args.projectUuid)[0],
+                    failedDbtSourceUuids,
+                );
+            },
+        });
+        if (
+            multiConnection &&
+            agentExecutionContext.getStore()?.agentConnectionExecution
+        ) {
+            const result = await saving;
+            await this.assertAgentConnectionEffect(
+                args.projectUuid,
+                'compileProject',
+            );
+            await multiConnection.persistArtifacts({ exploresCommitted: true });
+            return result;
+        }
+        return saving;
+    }
+
+    private async saveExploresAndIndexCatalog(
+        args: SaveCompiledExploresArgs & {
+            saveExplores: (
+                summary: ExploreCompilationSummary,
+            ) => Promise<{ cachedExploreUuids: string[] }>;
+            connectionWarnings: string[];
+            readSavedExploreNames?: boolean;
+        },
+    ) {
         const {
             userUuid,
             projectUuid,
-            explores,
+            saveExplores,
+            connectionWarnings,
             compilationSource,
             jobUuid,
             requestMethod,
             projectConfigDefaults,
             cliVersion,
+            complete,
+            readSavedExploreNames = false,
         } = args;
-        // We delete the explores when saving to cache which cascades to the catalog
-        // So we need to get the current tagged catalog items before deleting the explores (to do a best effort re-tag) and icons
+        const summary = new ExploreCompilationSummary();
         const prevCatalogItemsWithTags =
             await this.catalogModel.getCatalogItemsWithTags(projectUuid, {
                 onlyTagged: true, // We only need the tagged catalog items
@@ -1863,10 +4724,32 @@ export class ProjectService extends BaseService {
             });
         }
 
-        const { cachedExploreUuids } =
-            await this.projectModel.saveExploresToCache(projectUuid, explores);
+        const connectionProject = agentExecutionContext.getStore()
+            ?.agentConnectionExecution
+            ? await this.projectModel.getSummary(projectUuid)
+            : null;
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'compileProject',
+            );
+        throwIfCompileAborted();
+        const { cachedExploreUuids } = await saveExplores(summary);
+        markCompilePublished();
+        const connectionIndexCatalogJob = connectionProject
+            ? await this.schedulerClient.indexCatalog({
+                  projectUuid,
+                  userUuid,
+                  organizationUuid: connectionProject.organizationUuid,
+                  prevCatalogItemsWithTags,
+                  prevCatalogItemsWithIcons,
+                  prevMetricTreeEdges,
+                  prevMetricsTreeNodes,
+              })
+            : null;
         const { organizationUuid } =
-            await this.projectModel.getSummary(projectUuid);
+            connectionProject ??
+            (await this.projectModel.getSummary(projectUuid));
 
         this.logger.info(
             `Saved ${cachedExploreUuids.length} explores to cache for project ${projectUuid}`,
@@ -1877,13 +4760,22 @@ export class ProjectService extends BaseService {
         // "dashboard loaded with stale reference at T2".
         try {
             const NAME_SAMPLE_CAP = 50;
-            const newNames = explores.map((explore) => explore.name);
+            const reconciled = complete || args.dbtModelNames !== undefined;
+            const newNames =
+                args.dbtModelNames !== undefined || readSavedExploreNames
+                    ? await this.projectModel.getCachedExploreNames(projectUuid)
+                    : summary.names;
             const previousNameSet = new Set(previousExploreNames ?? []);
             const newNameSet = new Set(newNames);
-            const removed = (previousExploreNames ?? []).filter(
-                (name) => !newNameSet.has(name),
-            );
+            const removed = reconciled
+                ? (previousExploreNames ?? []).filter(
+                      (name) => !newNameSet.has(name),
+                  )
+                : [];
             const added = newNames.filter((name) => !previousNameSet.has(name));
+            const resultingExploreCount = reconciled
+                ? newNameSet.size
+                : new Set([...(previousExploreNames ?? []), ...newNames]).size;
 
             this.logger.info('compile.completed', {
                 projectUuid,
@@ -1894,7 +4786,7 @@ export class ProjectService extends BaseService {
                 cliVersion: cliVersion ?? null,
                 // null distinguishes "fetch failed" from "no previous explores"
                 previousExploreCount: previousExploreNames?.length ?? null,
-                newExploreCount: newNames.length,
+                newExploreCount: resultingExploreCount,
                 addedExploreCount:
                     previousExploreNames === null ? null : added.length,
                 removedExploreCount:
@@ -1915,7 +4807,10 @@ export class ProjectService extends BaseService {
             });
         }
 
-        const compilationReport = calculateCompilationReport({ explores });
+        const compilationReport = withConnectionWarnings(
+            summary.report,
+            connectionWarnings,
+        );
         const project = await this.projectModel.get(projectUuid);
 
         Logger.info('compile.case_sensitive_resolution', {
@@ -1924,23 +4819,16 @@ export class ProjectService extends BaseService {
             compilationSource,
             cliVersion: cliVersion ?? null,
             projectDefault: projectConfigDefaults?.case_sensitive ?? null,
-            exploreCount: explores.length,
-            exploresWithFlag: explores
-                .filter((e) => e.caseSensitive !== undefined)
-                .map((e) => ({ name: e.name, value: e.caseSensitive })),
-            dimensionsWithFlag: explores.flatMap((e) =>
-                Object.entries(e.tables ?? {}).flatMap(([t, tbl]) =>
-                    Object.values(tbl.dimensions ?? {})
-                        .filter((d) => d.caseSensitive !== undefined)
-                        .map((d) => ({
-                            table: t,
-                            name: d.name,
-                            value: d.caseSensitive,
-                        })),
-                ),
-            ),
+            exploreCount: summary.report.totalExploresCount,
+            exploresWithFlag: summary.caseSensitiveExplores,
+            dimensionsWithFlag: summary.caseSensitiveDimensions,
         });
 
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'compileProject',
+            );
         await this.projectCompileLogModel.insert({
             projectUuid,
             jobUuid: jobUuid ?? null,
@@ -1957,17 +4845,19 @@ export class ProjectService extends BaseService {
             `Inserted compilation log for project ${projectUuid}: ${compilationReport.totalExploresCount} explores, ${compilationReport.errorExploresCount} errors`,
         );
 
-        const indexCatalogJob = await this.schedulerClient.indexCatalog({
-            projectUuid,
-            userUuid,
-            organizationUuid,
-            prevCatalogItemsWithTags,
-            prevCatalogItemsWithIcons,
-            prevMetricTreeEdges,
-            prevMetricsTreeNodes,
-        });
+        const indexCatalogJob =
+            connectionIndexCatalogJob ??
+            (await this.schedulerClient.indexCatalog({
+                projectUuid,
+                userUuid,
+                organizationUuid,
+                prevCatalogItemsWithTags,
+                prevCatalogItemsWithIcons,
+                prevMetricTreeEdges,
+                prevMetricsTreeNodes,
+            }));
 
-        if (this.lightdashConfig.preAggregates.enabled) {
+        if (isPreAggregatesEnabled(this.lightdashConfig)) {
             await this.syncAndEnqueuePreAggregateMaterializations({
                 projectUuid,
                 organizationUuid,
@@ -1976,24 +4866,182 @@ export class ProjectService extends BaseService {
             });
         }
 
-        return indexCatalogJob;
+        return {
+            indexCatalogJobUuid: indexCatalogJob,
+            errorCount: summary.report.errorExploresCount,
+            total: summary.report.totalExploresCount,
+            ...(connectionWarnings.length > 0 ? { connectionWarnings } : {}),
+        };
     }
 
     async getProject(projectUuid: string, account: Account): Promise<Project> {
         const project = await this.projectModel.get(projectUuid);
+        await this.assertAnalyticsProjectAccess(account, project);
+        const auditedAbility = this.createAuditedAbility(account);
+        const projectSubject = subject('Project', {
+            organizationUuid: project.organizationUuid,
+            projectUuid,
+            exploreNames:
+                isJwtUser(account) && account.access.content.type === 'chart'
+                    ? account.access.content.explores
+                    : undefined,
+        });
+        if (auditedAbility.cannot('view', projectSubject)) {
+            throw new ForbiddenError();
+        }
+
+        if (account.isJwtUser()) {
+            return pickEmbedProject(project);
+        }
+
+        if (auditedAbility.cannot('update', projectSubject)) {
+            return {
+                ...project,
+                dbtConnection: omitDbtEnvironment(project.dbtConnection),
+            };
+        }
+
+        return project;
+    }
+
+    async assertAnalyticsProjectAccess(
+        account: Account | SessionUser,
+        project: Pick<
+            Project,
+            'provisioningSource' | 'organizationUuid' | 'projectUuid'
+        >,
+    ): Promise<void> {
+        if (project.provisioningSource !== 'analytics') return;
+        const organizationUuid =
+            'organization' in account
+                ? account.organization.organizationUuid
+                : account.organizationUuid;
+        if (organizationUuid !== project.organizationUuid) {
+            throw new ForbiddenError(
+                'Analytics project belongs to another organization',
+            );
+        }
+        await assertAnalyticsProjectEnabled(
+            this.featureFlagModel,
+            project.organizationUuid,
+        );
+        const ability = this.createAuditedAbility(account);
+        if (
+            ability.cannot(
+                'view',
+                subject('SystemAnalytics', {
+                    organizationUuid: project.organizationUuid,
+                    projectUuid: project.projectUuid,
+                }),
+            ) &&
+            ability.cannot(
+                'manage',
+                subject('Organization', {
+                    organizationUuid: project.organizationUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'Managed analytics requires the View managed analytics permission',
+            );
+        }
+    }
+
+    // Reading analytics does not grant provisioning, content sync or deletion.
+    async assertAnalyticsProjectAdministration(
+        user: SessionUser,
+    ): Promise<void> {
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        await assertAnalyticsProjectEnabled(
+            this.featureFlagModel,
+            user.organizationUuid,
+        );
+        if (
+            this.createAuditedAbility(user).cannot(
+                'manage',
+                subject('Organization', {
+                    organizationUuid: user.organizationUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'Managing analytics requires organization administration access',
+            );
+        }
+    }
+
+    async getMergedManifest(
+        account: Account,
+        projectUuid: string,
+    ): Promise<Buffer> {
+        const project = await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('DeployProject', {
+                    projectUuid,
+                    organizationUuid: project.organizationUuid,
+                    upstreamProjectUuid: project.upstreamProjectUuid,
+                    type: project.type,
+                    createdByUserUuid: project.createdByUserUuid,
+                    metadata: {
+                        projectUuid,
+                        projectName: project.name,
+                    },
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'User does not have permission to deploy to this project',
+            );
+        }
+        return this.projectModel.getMergedManifest(projectUuid);
+    }
+
+    private async getUpstreamProjectUuid(
+        projectUuid: string,
+        account: Account,
+    ): Promise<string> {
+        const { organizationUuid, upstreamProjectUuid } =
+            await this.projectModel.getSummary(projectUuid);
         const auditedAbility = this.createAuditedAbility(account);
         if (
             auditedAbility.cannot(
                 'view',
-                subject('Project', {
-                    organizationUuid: project.organizationUuid,
-                    projectUuid,
-                }),
+                subject('Project', { organizationUuid, projectUuid }),
             )
         ) {
             throw new ForbiddenError();
         }
-        return project;
+        if (!upstreamProjectUuid) {
+            throw new ParameterError(
+                'Project is not a preview and has no upstream project to compare against',
+            );
+        }
+        return upstreamProjectUuid;
+    }
+
+    /**
+     * Field-level diff of a preview against its upstream, computed in SQL over
+     * `catalog_search`. Detects added/removed fields and label changes; misses
+     * SQL-only changes.
+     */
+    async getUpstreamDiff(
+        projectUuid: string,
+        account: Account,
+    ): Promise<ApiUpstreamDiffResults> {
+        const upstreamProjectUuid = await this.getUpstreamProjectUuid(
+            projectUuid,
+            account,
+        );
+        const fields = await this.catalogModel.getUpstreamDiff(
+            projectUuid,
+            upstreamProjectUuid,
+        );
+        return { upstreamProjectUuid, fields };
     }
 
     async getDatabricksOAuthConfigForProject(
@@ -2007,8 +5055,9 @@ export class ProjectService extends BaseService {
     }> {
         const project = await this.getProject(projectUuid, account);
         const credentials =
-            await this.projectModel.getWarehouseCredentialsForProject(
+            await this.projectModel.getWarehouseCredentialsForBinding(
                 projectUuid,
+                { kind: 'original' },
             );
         if (credentials.type !== WarehouseTypes.DATABRICKS) {
             throw new ParameterError(
@@ -2023,18 +5072,143 @@ export class ProjectService extends BaseService {
         };
     }
 
+    private async copyPreviewDbtSources({
+        upstreamProjectUuid,
+        previewProjectUuid,
+        warehouseConnectionUuidMap,
+    }: {
+        upstreamProjectUuid: string;
+        previewProjectUuid: string;
+        warehouseConnectionUuidMap: ReadonlyMap<string, string>;
+    }): Promise<void> {
+        if (
+            (await this.projectModel.getConnectionRoute(upstreamProjectUuid, {
+                kind: 'original',
+            })) === 'multi'
+        ) {
+            await this.projectDbtSourcesModel.copySourcesWithConnectionMap(
+                upstreamProjectUuid,
+                previewProjectUuid,
+                warehouseConnectionUuidMap,
+            );
+            return;
+        }
+        await this.projectDbtSourcesModel.copySources(
+            upstreamProjectUuid,
+            previewProjectUuid,
+        );
+    }
+
+    private async copyConnectionsFromMultiUpstream(
+        upstreamProjectUuid: string,
+        previewProjectUuid: string,
+    ): Promise<WarehouseConnectionMap | null> {
+        if (
+            (await this.projectModel.getConnectionRoute(upstreamProjectUuid, {
+                kind: 'original',
+            })) !== 'multi'
+        ) {
+            return null;
+        }
+        return this.warehouseConnectionIdentityModel.copyConnectionsToPreview(
+            upstreamProjectUuid,
+            previewProjectUuid,
+        );
+    }
+
+    private async getMultiUpstreamExplores(
+        upstreamProjectUuid: string,
+        previewProjectUuid: string,
+    ): Promise<PreparedMultiConnectionSave | null> {
+        if (
+            (await this.projectModel.getConnectionRoute(upstreamProjectUuid, {
+                kind: 'original',
+            })) !== 'multi'
+        ) {
+            return null;
+        }
+        const [connectionMap, upstreamExplores] = await Promise.all([
+            this.warehouseConnectionIdentityModel.getPreviewConnectionMap(
+                upstreamProjectUuid,
+                previewProjectUuid,
+            ),
+            this.warehouseConnectionIdentityModel.getExploresWithBindings(
+                upstreamProjectUuid,
+            ),
+        ]);
+        const bindings = new Map(
+            upstreamExplores.map(({ explore, warehouseConnectionUuid }) => [
+                explore.name,
+                connectionMap.remap(warehouseConnectionUuid),
+            ]),
+        );
+        if (
+            (await this.projectModel.getConnectionRoute(previewProjectUuid, {
+                kind: 'original',
+            })) !== 'multi'
+        ) {
+            return null;
+        }
+        return {
+            exploreStream: (async function* upstreamStream() {
+                yield* upstreamExplores.map(({ explore }) => explore);
+            })(),
+            bindingOf: (exploreName) => bindings.get(exploreName) ?? null,
+            carry: { kind: 'connections', warehouseConnectionUuids: [] },
+            persistArtifacts: async () => {},
+            warnings: [],
+        };
+    }
+
     async createWithoutCompile(
         user: SessionUser,
         data: CreateProjectOptionalCredentials,
         method: RequestMethod,
+        internalProvisioning?: InternalProvisioning,
+        previewCopy:
+            | { mode: 'sync' }
+            | {
+                  mode: 'async';
+                  compile: CopyPreviewContentPayload['compile'];
+              } = { mode: 'sync' },
     ): Promise<ApiCreateProjectResults> {
         if (!isUserWithOrg(user)) {
             throw new ForbiddenError('User is not part of an organization');
         }
 
-        await this.validateProjectCreationPermissions(user, data);
+        ProjectService.assertTrainingTypeIsInternal(
+            data.type,
+            internalProvisioning,
+        );
+        await this.validateProjectCreationPermissions(
+            user,
+            data,
+            internalProvisioning,
+        );
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            data.warehouseConnection,
+            internalProvisioning,
+        );
+        ProjectService.assertPersistableSnowflakeAuthentication(
+            data.warehouseConnection,
+        );
+        ProjectService.assertSupportedBigqueryKeyfile(data.warehouseConnection);
+
+        this.assertCanUseOrganizationWarehouseCredentials(
+            user,
+            user.organizationUuid,
+            data,
+        );
 
         const newProjectData = data;
+        ProjectService.validateDbtEnvironmentVariables(
+            newProjectData.dbtConnection,
+        );
+        newProjectData.dbtConnection =
+            await this.resolveGithubInstallationForSave(
+                newProjectData.dbtConnection,
+                user.organizationUuid,
+            );
 
         // If type preview and has upstream project, we first link the preview to the same organization warehouse credentials (if exists)
         if (
@@ -2053,8 +5227,9 @@ export class ProjectService extends BaseService {
             data.upstreamProjectUuid
         ) {
             newProjectData.warehouseConnection =
-                await this.projectModel.getWarehouseCredentialsForProject(
+                await this.projectModel.getWarehouseCredentialsForBinding(
                     data.upstreamProjectUuid,
+                    { kind: 'original' },
                 );
         } else if (
             newProjectData.type === ProjectType.PREVIEW &&
@@ -2065,8 +5240,9 @@ export class ProjectService extends BaseService {
             // When creating a preview from CLI with credentials, merge with upstream credentials
             // to preserve advanced settings like requireUserCredentials
             const upstreamCredentials =
-                await this.projectModel.getWarehouseCredentialsForProject(
+                await this.projectModel.getWarehouseCredentialsForBinding(
                     data.upstreamProjectUuid,
+                    { kind: 'original' },
                 );
             if (upstreamCredentials) {
                 newProjectData.warehouseConnection = mergeWarehouseCredentials(
@@ -2075,6 +5251,18 @@ export class ProjectService extends BaseService {
                 );
             }
         }
+
+        // Re-check after the copy/merge above: the guard at the top only saw
+        // the credentials the caller sent, and a preview can inherit embedded
+        // ones from its upstream project without ever naming them.
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            newProjectData.warehouseConnection,
+            internalProvisioning,
+        );
+        await this.assertAwsWebIdentityAudienceBelongsTo(
+            newProjectData.warehouseConnection,
+            user.organizationUuid,
+        );
 
         const createProject: CreateProjectOptionalCredentials =
             hasWarehouseCredentials(newProjectData)
@@ -2090,12 +5278,42 @@ export class ProjectService extends BaseService {
                 user.userUuid,
                 user.organizationUuid,
                 createProject,
-                ProjectService.getPreviewExpiresAt(
-                    createProject.type,
-                    createProject.expiresInHours,
-                ),
+                internalProvisioning?.source === 'analytics'
+                    ? null
+                    : await this.getPreviewExpiresAt(
+                          createProject.type,
+                          createProject.upstreamProjectUuid,
+                          createProject.expiresInHours,
+                      ),
+                internalProvisioning?.source,
             );
 
+        if (
+            createProject.type === ProjectType.PREVIEW &&
+            createProject.upstreamProjectUuid
+        ) {
+            const connectionMap = await this.copyConnectionsFromMultiUpstream(
+                createProject.upstreamProjectUuid,
+                projectUuid,
+            );
+            await this.copyPreviewDbtSources({
+                upstreamProjectUuid: createProject.upstreamProjectUuid,
+                previewProjectUuid: projectUuid,
+                warehouseConnectionUuidMap: connectionMap?.uuids ?? new Map(),
+            });
+            if (
+                createProject.warehouseConnection &&
+                !createProject.organizationWarehouseCredentialsUuid
+            ) {
+                await this.recordPreviewCredentialOwnership({
+                    previewProjectUuid: projectUuid,
+                    upstreamProjectUuid: createProject.upstreamProjectUuid,
+                    previewCredentials: createProject.warehouseConnection,
+                });
+            }
+        }
+
+        const onboardingFlow = await this.getOnboardingFlow(user);
         // Do not give this user admin permissions on this new project,
         // as it could be an interactive viewer creating a preview
         // and we don't want to allow users to acces sql runner or leak admin data
@@ -2107,8 +5325,16 @@ export class ProjectService extends BaseService {
                 projectUuid,
                 user,
                 method,
+                onboardingFlow,
             ),
         });
+
+        await this.runPostProjectCreationProvisioning(
+            user,
+            projectUuid,
+            createProject.type,
+            internalProvisioning?.source,
+        );
 
         // For preview projects: if the upstream requires user warehouse credentials
         // and the request includes CLI-obtained tokens, create user warehouse
@@ -2123,6 +5349,13 @@ export class ProjectService extends BaseService {
                 switch (warehouseType) {
                     case WarehouseTypes.DATABRICKS: {
                         if (!warehouseConnection.refreshToken) break;
+                        const policy = await resolvePersonalCredentialPolicy(
+                            this.featureFlagModel,
+                            {
+                                organizationUuid: user.organizationUuid,
+                                userUuid: user.userUuid,
+                            },
+                        );
                         const userWarehouseCredentialsUuid =
                             await this.userWarehouseCredentialsModel.create(
                                 user.userUuid,
@@ -2136,8 +5369,15 @@ export class ProjectService extends BaseService {
                                             warehouseConnection.refreshToken,
                                         oauthClientId:
                                             warehouseConnection.oauthClientId,
+                                        ...(policy.strictPersonalOverlay
+                                            ? {
+                                                  serverHostName:
+                                                      warehouseConnection.serverHostName,
+                                              }
+                                            : {}),
                                     },
                                 },
+                                policy,
                                 projectUuid,
                             );
                         await this.userWarehouseCredentialsModel.upsertUserCredentialsPreference(
@@ -2173,6 +5413,8 @@ export class ProjectService extends BaseService {
         }
 
         let hasContentCopy = false;
+        let contentCopyJobUuid: string | undefined;
+        let accessCopyError: string | undefined;
         let contentCopyError: string | undefined;
 
         if (data.type === ProjectType.PREVIEW && data.upstreamProjectUuid) {
@@ -2181,8 +5423,30 @@ export class ProjectService extends BaseService {
                     data.upstreamProjectUuid,
                     projectUuid,
                 );
+            } catch (e) {
+                Sentry.captureException(e);
+                accessCopyError = getErrorMessage(e);
+                this.logger.error(
+                    `Unable to copy access on preview from ${data.upstreamProjectUuid} to ${projectUuid}`,
+                    {
+                        error: accessCopyError,
+                        stack: e instanceof Error ? e.stack : undefined,
+                        errorData:
+                            e instanceof LightdashError ? e.data : undefined,
+                    },
+                );
+            }
 
-                if (data.copyContent ?? true) {
+            if ((data.copyContent ?? true) && previewCopy.mode === 'async') {
+                if (accessCopyError) {
+                    await this.throwIfPreviewCopyFailed({
+                        project: await this.projectModel.get(projectUuid),
+                        hasContentCopy: false,
+                        accessCopyError,
+                    });
+                }
+            } else if (data.copyContent ?? true) {
+                try {
                     await this.copyContentOnPreview(
                         data.upstreamProjectUuid,
                         projectUuid,
@@ -2190,19 +5454,21 @@ export class ProjectService extends BaseService {
                     );
 
                     hasContentCopy = true;
+                } catch (e) {
+                    Sentry.captureException(e);
+                    contentCopyError = getErrorMessage(e);
+                    this.logger.error(
+                        `Unable to copy content on preview from ${data.upstreamProjectUuid} to ${projectUuid}`,
+                        {
+                            error: contentCopyError,
+                            stack: e instanceof Error ? e.stack : undefined,
+                            errorData:
+                                e instanceof LightdashError
+                                    ? e.data
+                                    : undefined,
+                        },
+                    );
                 }
-            } catch (e) {
-                Sentry.captureException(e);
-                contentCopyError = e instanceof Error ? e.message : String(e);
-                this.logger.error(
-                    `Unable to copy content on preview from ${data.upstreamProjectUuid} to ${projectUuid}`,
-                    {
-                        error: contentCopyError,
-                        stack: e instanceof Error ? e.stack : undefined,
-                        errorData:
-                            e instanceof LightdashError ? e.data : undefined,
-                    },
-                );
             }
         }
 
@@ -2240,10 +5506,63 @@ export class ProjectService extends BaseService {
 
         const project = await this.projectModel.get(projectUuid);
 
+        if (
+            data.type === ProjectType.PREVIEW &&
+            data.upstreamProjectUuid &&
+            (data.copyContent ?? true) &&
+            previewCopy.mode === 'async'
+        ) {
+            contentCopyJobUuid = uuidv4();
+            const payload: CopyPreviewContentPayload = {
+                jobUuid: contentCopyJobUuid,
+                projectUuid,
+                upstreamProjectUuid: data.upstreamProjectUuid,
+                organizationUuid: user.organizationUuid,
+                userUuid: user.userUuid,
+                requestMethod: method,
+                compile: previewCopy.compile,
+            };
+            try {
+                await this.jobModel.create(
+                    {
+                        jobUuid: contentCopyJobUuid,
+                        jobType: JobType.CREATE_PROJECT,
+                        jobStatus: JobStatusType.STARTED,
+                        userUuid: user.userUuid,
+                        // Keep the status readable after a failed preview is deleted.
+                        projectUuid: undefined,
+                        steps: [
+                            { stepType: JobStepType.COPYING_PREVIEW_CONTENT },
+                        ],
+                    },
+                    true,
+                );
+                if (payload.compile) {
+                    await this.jobModel.create(
+                        {
+                            jobUuid: payload.compile.jobUuid,
+                            jobType: JobType.COMPILE_PROJECT,
+                            jobStatus: JobStatusType.STARTED,
+                            userUuid: user.userUuid,
+                            projectUuid,
+                            steps: [{ stepType: JobStepType.COMPILING }],
+                        },
+                        true,
+                    );
+                }
+                await this.schedulerClient.copyPreviewContent(payload);
+            } catch (error) {
+                await this.failPreviewContentCopy(payload, error);
+                throw error;
+            }
+        }
+
         return {
             hasContentCopy,
             project,
+            accessCopyError,
             contentCopyError,
+            ...(contentCopyJobUuid ? { contentCopyJobUuid } : {}),
         };
     }
 
@@ -2256,7 +5575,26 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError('User is not part of an organization');
         }
 
+        ProjectService.assertTrainingTypeIsInternal(data.type);
         await this.validateProjectCreationPermissions(user, data);
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            data.warehouseConnection,
+        );
+        ProjectService.assertPersistableSnowflakeAuthentication(
+            data.warehouseConnection,
+        );
+        ProjectService.assertSupportedBigqueryKeyfile(data.warehouseConnection);
+        await this.assertAwsWebIdentityAudienceBelongsTo(
+            data.warehouseConnection,
+            user.organizationUuid,
+        );
+
+        this.assertCanUseOrganizationWarehouseCredentials(
+            user,
+            user.organizationUuid,
+            data,
+        );
+        ProjectService.validateDbtEnvironmentVariables(data.dbtConnection);
 
         let encryptedData: string;
         try {
@@ -2275,39 +5613,115 @@ export class ProjectService extends BaseService {
             userUuid: user.userUuid,
             steps: [
                 { stepType: JobStepType.TESTING_ADAPTOR },
-                { stepType: JobStepType.COMPILING },
+                ...(data.dbtConnection.type === DbtProjectType.NONE
+                    ? []
+                    : [{ stepType: JobStepType.COMPILING }]),
                 { stepType: JobStepType.CREATING_PROJECT },
             ],
         };
 
         // create legacy job steps that UI expects
-        await this.jobModel.create(job);
-        // schedule job
-        await this.schedulerClient.createProjectWithCompile({
-            createdByUserUuid: user.userUuid,
-            isPreview: data.type === ProjectType.PREVIEW,
-            organizationUuid: user.organizationUuid,
-            requestMethod: method,
-            jobUuid: job.jobUuid,
-            data: encryptedData,
-            userUuid: user.userUuid,
-            projectUuid: undefined,
-        });
+        if (data.type === ProjectType.PREVIEW) {
+            await this.jobModel.create(job, true);
+        } else {
+            await this.reapStaleCreateProjectJobs(user.organizationUuid);
+            const result = await this.jobModel.createProjectJobIfNoActive({
+                job,
+                organizationUuid: user.organizationUuid,
+            });
+            if (!result.isCreated) {
+                if (result.activeJob.userUuid !== user.userUuid) {
+                    throw new ConflictError(
+                        'A project creation is already in progress for the organization',
+                    );
+                }
+                throw new ConflictError(
+                    'A project creation is already in progress',
+                    { jobUuid: result.activeJob.jobUuid },
+                );
+            }
+        }
+        try {
+            await this.schedulerClient.createProjectWithCompile({
+                createdByUserUuid: user.userUuid,
+                isPreview: data.type === ProjectType.PREVIEW,
+                organizationUuid: user.organizationUuid,
+                requestMethod: method,
+                jobUuid: job.jobUuid,
+                data: encryptedData,
+                userUuid: user.userUuid,
+                projectUuid: undefined,
+            });
+        } catch (error) {
+            await this.jobModel.update(job.jobUuid, {
+                jobStatus: JobStatusType.ERROR,
+            });
+            throw error;
+        }
         return { jobUuid: job.jobUuid };
     }
 
-    static PREVIEW_PROJECT_TTL_DAYS = 30;
+    private async reapStaleCreateProjectJobs(
+        organizationUuid: string,
+    ): Promise<void> {
+        const staleJobUuids =
+            await this.jobModel.findStaleCreateProjectJobUuids({
+                organizationUuid,
+                updatedBefore: new Date(
+                    Date.now() -
+                        ProjectService.CREATE_PROJECT_JOB_ENQUEUE_GRACE_MS,
+                ),
+            });
+        const schedulerJobExists = await Promise.all(
+            staleJobUuids.map((jobUuid) =>
+                this.schedulerClient.hasCreateProjectWithCompileJob(jobUuid),
+            ),
+        );
+        await this.jobModel.markCreateProjectJobsAsError(
+            staleJobUuids.filter((_, index) => !schedulerJobExists[index]),
+        );
+    }
 
-    static getPreviewExpiresAt(
+    async getActiveCreateProjectJob(user: SessionUser): Promise<Job | null> {
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+
+        await this.reapStaleCreateProjectJobs(user.organizationUuid);
+        return this.jobModel.findActiveCreateProjectJob({
+            organizationUuid: user.organizationUuid,
+            userUuid: user.userUuid,
+        });
+    }
+
+    static PREVIEW_PROJECT_FALLBACK_TTL_HOURS = 720;
+
+    async getPreviewExpiresAt(
         type: ProjectType,
+        upstreamProjectUuid: string | undefined,
         expiresInHours?: number,
-    ): Date | null {
+    ): Promise<Date | null> {
         if (type !== ProjectType.PREVIEW) return null;
-        const now = new Date();
-        const ttlMs = expiresInHours
-            ? Number(expiresInHours) * 60 * 60 * 1000
-            : ProjectService.PREVIEW_PROJECT_TTL_DAYS * 24 * 60 * 60 * 1000;
-        return new Date(now.getTime() + ttlMs);
+
+        let defaultHours = ProjectService.PREVIEW_PROJECT_FALLBACK_TTL_HOURS;
+        let maxHours: number | null = null;
+        if (upstreamProjectUuid) {
+            const settings =
+                await this.projectModel.getPreviewExpirationSettings(
+                    upstreamProjectUuid,
+                );
+            defaultHours = settings.defaultPreviewExpirationHours;
+            maxHours = settings.maxPreviewExpirationHours;
+        }
+
+        const requestedHours = expiresInHours
+            ? Number(expiresInHours)
+            : defaultHours;
+        const clampedHours =
+            maxHours !== null
+                ? Math.min(requestedHours, maxHours)
+                : requestedHours;
+        return new Date(Date.now() + clampedHours * 60 * 60 * 1000);
     }
 
     static getAnalyticProperties(
@@ -2318,12 +5732,17 @@ export class ProjectService extends BaseService {
         projectUuid: string,
         user: SessionUser,
         method: RequestMethod,
+        onboardingFlow: OnboardingFlow,
     ): ProjectEvent['properties'] {
         const warehouseType = createProject.warehouseConnection?.type;
         const authenticationType =
             warehouseType === WarehouseTypes.BIGQUERY ||
-            warehouseType === WarehouseTypes.SNOWFLAKE
-                ? createProject.warehouseConnection?.authenticationType
+            warehouseType === WarehouseTypes.SNOWFLAKE ||
+            warehouseType === WarehouseTypes.REDSHIFT
+                ? (createProject.warehouseConnection?.authenticationType ??
+                  (warehouseType === WarehouseTypes.REDSHIFT
+                      ? RedshiftAuthenticationType.PASSWORD
+                      : undefined))
                 : undefined;
         return {
             projectName: createProject.name,
@@ -2337,6 +5756,7 @@ export class ProjectService extends BaseService {
             authenticationType,
             requireUserCredentials:
                 createProject.warehouseConnection?.requireUserCredentials,
+            onboardingFlow,
         };
     }
 
@@ -2346,6 +5766,11 @@ export class ProjectService extends BaseService {
         jobUuid: string,
         method: RequestMethod,
     ): Promise<{ projectUuid: string }> {
+        const cleanup: {
+            adapter: ProjectAdapter | null;
+            lease: WarehouseConnectionLease | null;
+            started: boolean;
+        } = { adapter: null, lease: null, started: false };
         try {
             if (!isUserWithOrg(user)) {
                 throw new ForbiddenError('User is not part of an organization');
@@ -2359,95 +5784,193 @@ export class ProjectService extends BaseService {
             await this.jobModel.update(jobUuid, {
                 jobStatus: JobStatusType.RUNNING,
             });
-            const { adapter, sshTunnel } = await this.jobModel.tryJobStep(
+            const { adapter, lease } = await this.jobModel.tryJobStep(
                 jobUuid,
                 JobStepType.TESTING_ADAPTOR,
-                async () => this.testProjectAdapter(createProject, user),
-            );
-
-            const { explores, lightdashProjectConfig } =
-                await this.jobModel.tryJobStep(
-                    jobUuid,
-                    JobStepType.COMPILING,
-                    async () => {
-                        try {
-                            // There's no project yet, so we don't track
-                            const trackingParams = undefined;
-
-                            return {
-                                explores: await adapter.compileAllExplores(
-                                    trackingParams,
-                                    false, // loadSources
-                                    this.lightdashConfig.partialCompilation
-                                        .enabled,
-                                ),
-                                lightdashProjectConfig:
-                                    await adapter.getLightdashProjectConfig(
-                                        trackingParams,
-                                    ),
-                            };
-                        } finally {
-                            await adapter.destroy();
-                            await sshTunnel.disconnect();
-                        }
-                    },
-                );
-
-            const projectUuid = await this.jobModel.tryJobStep(
-                jobUuid,
-                JobStepType.CREATING_PROJECT,
                 async () => {
-                    const newProjectUuid = await this.projectModel.create(
-                        user.userUuid,
-                        user.organizationUuid,
-                        createProject,
-                        ProjectService.getPreviewExpiresAt(
-                            createProject.type,
-                            createProject.expiresInHours,
-                        ),
-                    );
-                    // Give admin user permissions to user who created this project even if he is an admin
-                    if (user.email) {
-                        await this.projectModel.createProjectAccess(
-                            newProjectUuid,
-                            user.email,
-                            ProjectMemberRole.ADMIN,
-                        );
-                    }
-
-                    await this.replaceYamlTags(
+                    const tested = await this.testProjectAdapter(
+                        {
+                            ...createProject,
+                            warehouseConnection: {
+                                kind: 'submitted_resolved',
+                                credentials: createProject.warehouseConnection,
+                            },
+                        },
                         user,
-                        newProjectUuid,
-                        // Create util to generate categories from lightdashProjectConfig - this is used as well in deploy.ts
-                        Object.entries(
-                            lightdashProjectConfig.spotlight?.categories || {},
-                        ).map(([key, category]) => ({
-                            yamlReference: key,
-                            name: category.label,
-                            color: category.color ?? 'gray',
-                        })),
+                        'project_create',
+                        method,
+                        null,
+                        null,
                     );
-                    await this.replaceProjectParameters({
-                        user,
-                        projectUuid: newProjectUuid,
-                        parameters: lightdashProjectConfig.parameters,
-                    });
-                    await this.projectModel.setTableGroups(
-                        newProjectUuid,
-                        lightdashProjectConfig.table_groups,
-                    );
-                    await this.saveExploresToCacheAndIndexCatalog({
-                        userUuid: user.userUuid,
-                        projectUuid: newProjectUuid,
-                        explores,
-                        compilationSource: 'create_project',
-                        jobUuid,
-                        requestMethod: method,
-                        projectConfigDefaults: lightdashProjectConfig.defaults,
-                    });
-                    return newProjectUuid;
+                    cleanup.adapter = tested.adapter;
+                    cleanup.lease = tested.lease;
+                    return tested;
                 },
             );
+
+            const { explores, lightdashProjectConfig, projectContext } =
+                createProject.dbtConnection.type === DbtProjectType.NONE
+                    ? await (async () => {
+                          try {
+                              return {
+                                  explores: [],
+                                  lightdashProjectConfig:
+                                      await adapter.getLightdashProjectConfig(
+                                          undefined,
+                                      ),
+                                  projectContext: [],
+                              };
+                          } finally {
+                              cleanup.started = true;
+                              try {
+                                  await adapter.destroy();
+                              } finally {
+                                  await lease.release();
+                              }
+                          }
+                      })()
+                    : await this.jobModel.tryJobStep(
+                          jobUuid,
+                          JobStepType.COMPILING,
+                          async () => {
+                              try {
+                                  // There's no project yet, so we don't track
+                                  const trackingParams = undefined;
+
+                                  const compiledExplores =
+                                      await adapter.compileAllExplores(
+                                          trackingParams,
+                                          false, // loadSources
+                                          true, // allowPartialCompilation
+                                      );
+                                  const compiledProjectConfig =
+                                      await adapter.getLightdashProjectConfig(
+                                          trackingParams,
+                                      );
+                                  const compiledProjectContext =
+                                      await this.getProjectContextFromAdapter({
+                                          adapter,
+                                          user,
+                                          organizationUuid:
+                                              user.organizationUuid,
+                                      });
+
+                                  return {
+                                      explores: compiledExplores,
+                                      lightdashProjectConfig:
+                                          compiledProjectConfig,
+                                      projectContext: compiledProjectContext,
+                                  };
+                              } finally {
+                                  cleanup.started = true;
+                                  try {
+                                      await adapter.destroy();
+                                  } finally {
+                                      await lease.release();
+                                  }
+                              }
+                          },
+                      );
+
+            const { projectUuid, connectionMap } =
+                await this.jobModel.tryJobStep(
+                    jobUuid,
+                    JobStepType.CREATING_PROJECT,
+                    async () => {
+                        const newProjectUuid = await this.projectModel.create(
+                            user.userUuid,
+                            user.organizationUuid,
+                            createProject,
+                            await this.getPreviewExpiresAt(
+                                createProject.type,
+                                createProject.upstreamProjectUuid,
+                                createProject.expiresInHours,
+                            ),
+                        );
+                        const newConnectionMap =
+                            createProject.upstreamProjectUuid
+                                ? await this.copyConnectionsFromMultiUpstream(
+                                      createProject.upstreamProjectUuid,
+                                      newProjectUuid,
+                                  )
+                                : null;
+                        if (
+                            createProject.upstreamProjectUuid &&
+                            newConnectionMap
+                        ) {
+                            await this.copyPreviewDbtSources({
+                                upstreamProjectUuid:
+                                    createProject.upstreamProjectUuid,
+                                previewProjectUuid: newProjectUuid,
+                                warehouseConnectionUuidMap:
+                                    newConnectionMap.uuids,
+                            });
+                        }
+                        // Give admin user permissions to user who created this project even if he is an admin
+                        if (user.email) {
+                            await this.projectModel.createProjectAccess(
+                                newProjectUuid,
+                                user.email,
+                                ProjectMemberRole.ADMIN,
+                            );
+                        }
+
+                        await this.replaceYamlTagsWithoutPermissionCheck(
+                            user,
+                            user.organizationUuid,
+                            newProjectUuid,
+                            // Create util to generate categories from lightdashProjectConfig - this is used as well in deploy.ts
+                            Object.entries(
+                                lightdashProjectConfig.spotlight?.categories ||
+                                    {},
+                            ).map(([key, category]) => ({
+                                yamlReference: key,
+                                name: category.label,
+                                color: category.color ?? 'gray',
+                            })),
+                        );
+                        if (lightdashProjectConfig.parameters !== undefined) {
+                            await this.replaceProjectParameters({
+                                user,
+                                projectUuid: newProjectUuid,
+                                parameters: lightdashProjectConfig.parameters,
+                            });
+                        }
+                        await this.projectModel.setTableGroups(
+                            newProjectUuid,
+                            lightdashProjectConfig.table_groups,
+                        );
+                        // Mirrors CLI deploy semantics: only overwrite stored
+                        // defaults when the config file defines them
+                        if (lightdashProjectConfig.defaults) {
+                            await this.projectModel.updateProjectDefaults(
+                                newProjectUuid,
+                                lightdashProjectConfig.defaults,
+                            );
+                        }
+                        await this.replaceProjectContext(
+                            newProjectUuid,
+                            projectContext,
+                        );
+                        if (explores.length > 0 && newConnectionMap === null) {
+                            await this.saveExploresToCacheAndIndexCatalog({
+                                userUuid: user.userUuid,
+                                projectUuid: newProjectUuid,
+                                explores,
+                                compilationSource: 'create_project',
+                                jobUuid,
+                                requestMethod: method,
+                                projectConfigDefaults:
+                                    lightdashProjectConfig.defaults,
+                                complete: true,
+                            });
+                        }
+                        return {
+                            projectUuid: newProjectUuid,
+                            connectionMap: newConnectionMap,
+                        };
+                    },
+                );
 
             await this.jobModel.update(jobUuid, {
                 jobStatus: JobStatusType.DONE,
@@ -2455,6 +5978,15 @@ export class ProjectService extends BaseService {
                     projectUuid,
                 },
             });
+            if (connectionMap) {
+                await this.scheduleCompileProject(
+                    user,
+                    projectUuid,
+                    method,
+                    true,
+                );
+            }
+            const onboardingFlow = await this.getOnboardingFlow(user);
             this.analytics.track({
                 event: 'project.created',
                 userId: user.userUuid,
@@ -2463,8 +5995,15 @@ export class ProjectService extends BaseService {
                     projectUuid,
                     user,
                     method,
+                    onboardingFlow,
                 ),
             });
+
+            await this.runPostProjectCreationProvisioning(
+                user,
+                projectUuid,
+                createProject.type,
+            );
 
             return { projectUuid };
         } catch (error) {
@@ -2474,7 +6013,24 @@ export class ProjectService extends BaseService {
             }
             this.logger.error(`Error running background job: ${error}`);
             throw error;
+        } finally {
+            if (!cleanup.started && cleanup.adapter && cleanup.lease) {
+                try {
+                    await cleanup.adapter.destroy();
+                } catch (destroyError) {
+                    this.logger.warn(
+                        'Failed to destroy a project adapter after job step failure',
+                        { error: destroyError },
+                    );
+                } finally {
+                    await cleanup.lease.release();
+                }
+            }
         }
+    }
+
+    async _markInterruptedCompileAsFailed(jobUuid: string, error: string) {
+        await this.jobModel.failRunningJob(jobUuid, error);
     }
 
     async _markJobAsFailed(jobUuid: string) {
@@ -2489,9 +6045,88 @@ export class ProjectService extends BaseService {
         projectUuid: string,
         explores: (Explore | ExploreError)[],
         cliVersion?: string | null,
+        complete?: boolean,
+        dbtModelNames?: string[],
+        cliDeploy: CliDeploySelection = NO_CLI_DEPLOY_SELECTION,
+    ): Promise<ApiDeployExploresResults> {
+        const deployAnalytics = {
+            userUuid: user.userUuid,
+            projectUuid,
+            cliDeploy,
+        };
+        try {
+            const result = await this.setExploresInternal(
+                user,
+                projectUuid,
+                explores,
+                cliVersion,
+                complete,
+                dbtModelNames,
+                cliDeploy,
+            );
+            await this.trackCliSourceDeploy(deployAnalytics, {
+                status: 'success',
+            });
+            return result;
+        } catch (error) {
+            await this.trackCliSourceDeploy(deployAnalytics, {
+                status: 'error',
+                error,
+            });
+            throw error;
+        }
+    }
+
+    async getDeployStartOfWeekByExplore(args: {
+        userUuid: string;
+        organizationUuid: string;
+        projectUuid: string;
+        explores: (Explore | ExploreError)[];
+        sourceUuid: string | null;
+    }): Promise<Map<string, WeekDay | null>> {
+        const withPreAggregates = args.explores.filter(
+            (explore) => explore.preAggregates?.length,
+        );
+        if (withPreAggregates.length === 0) return new Map();
+        const { enabled } = await this.featureFlagModel.get({
+            featureFlagId: FeatureFlags.MixedWarehouseConnections,
+            user: {
+                userUuid: args.userUuid,
+                organizationUuid: args.organizationUuid,
+            },
+        });
+        if (!enabled) return new Map();
+        const entries = await Promise.all(
+            withPreAggregates.map(async (explore) => {
+                const deployStartOfWeek =
+                    await this.projectModel.getDeployStartOfWeek(
+                        args.projectUuid,
+                        explore.name,
+                        args.sourceUuid,
+                    );
+                return deployStartOfWeek.kind === 'extra'
+                    ? [[explore.name, deployStartOfWeek.startOfWeek] as const]
+                    : [];
+            }),
+        );
+        return new Map(entries.flat());
+    }
+
+    private async setExploresInternal(
+        user: SessionUser,
+        projectUuid: string,
+        explores: (Explore | ExploreError)[],
+        cliVersion?: string | null,
+        complete?: boolean,
+        dbtModelNames?: string[],
+        cliDeploy: CliDeploySelection = NO_CLI_DEPLOY_SELECTION,
     ): Promise<ApiDeployExploresResults> {
         const project =
             await this.projectModel.getWithSensitiveFields(projectUuid);
+        if (project.provisioningSource === 'analytics')
+            throw new ForbiddenError(
+                'Internal analytics models are managed by the backend',
+            );
 
         const auditedAbility = this.createAuditedAbility(user);
 
@@ -2503,8 +6138,13 @@ export class ProjectService extends BaseService {
                 subject('DeployProject', {
                     projectUuid,
                     organizationUuid: project.organizationUuid,
+                    upstreamProjectUuid: project.upstreamProjectUuid,
                     type: project.type,
                     createdByUserUuid: project.createdByUserUuid,
+                    metadata: {
+                        createdByUserUuid: project.createdByUserUuid,
+                        type: project.type,
+                    },
                 }),
             )
         ) {
@@ -2513,12 +6153,26 @@ export class ProjectService extends BaseService {
             );
         }
 
+        const preAggregatesEnabled = isPreAggregatesEnabled(
+            this.lightdashConfig,
+        );
+        const startOfWeekByExplore = preAggregatesEnabled
+            ? await this.getDeployStartOfWeekByExplore({
+                  userUuid: user.userUuid,
+                  organizationUuid: project.organizationUuid,
+                  projectUuid,
+                  explores,
+                  sourceUuid: cliDeploy.sourceUuid,
+              })
+            : new Map<string, WeekDay | null>();
         const exploresWithPreAggregates = enhanceExploresForPreAggregates({
             explores,
-            enabled: this.lightdashConfig.preAggregates.enabled,
+            enabled: preAggregatesEnabled,
+            startOfWeek: project.warehouseConnection?.startOfWeek ?? null,
+            startOfWeekByExplore,
         });
 
-        await this.saveExploresToCacheAndIndexCatalog({
+        await this.saveDeployExplores({
             userUuid: user.userUuid,
             projectUuid,
             explores: exploresWithPreAggregates,
@@ -2527,9 +6181,21 @@ export class ProjectService extends BaseService {
             jobUuid: null,
             requestMethod: 'cli',
             cliVersion,
+            complete,
+            dbtModelNames,
+            cliDeploy,
         });
 
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'validateProject',
+            );
         await this.schedulerClient.generateValidation({
+            ...captureAgentConnectionTask('validateProject', {
+                userUuid: user.userUuid,
+                organizationUuid: project.organizationUuid,
+            }),
             userUuid: user.userUuid,
             projectUuid,
             context: 'cli',
@@ -2547,8 +6213,187 @@ export class ProjectService extends BaseService {
     /* When editing a project, most fields are optional
     but if the user switches from one authentication type to another,
     we need to validate the secrets are present */
+    static validateDbtEnvironmentVariables(dbtConnection: DbtProjectConfig) {
+        if (!('environment' in dbtConnection) || !dbtConnection.environment) {
+            return;
+        }
+
+        const keys = new Set<string>();
+        dbtConnection.environment.forEach(({ key }) => {
+            const error = getDbtEnvironmentVariableKeyError(key);
+            if (error) {
+                throw new ParameterError(error);
+            }
+
+            if (key.length === 0) {
+                return;
+            }
+
+            if (keys.has(key)) {
+                throw new ParameterError(
+                    `Environment variable "${key}" is duplicated`,
+                );
+            }
+            keys.add(key);
+        });
+    }
+
+    /**
+     * `TRAINING` projects are created by the training provisioner only. The
+     * public API must never create one, because every org member is granted
+     * the trainee scope set on a project of that type.
+     */
+    /**
+     * Analytics and training projects are provisioned with a connection the
+     * backend owns. For the training project the point is that every org
+     * member, viewers included, gets SQL runner, custom SQL and CSV export on
+     * their own copy of it, and each copy inherits the training project's
+     * connection. Re-pointing it at a real warehouse would hand that access
+     * to everyone, so the connection cannot be changed once provisioned.
+     */
+    private static assertConnectionIsNotManagedInternally(
+        project: Pick<ProjectSummary, 'provisioningSource'>,
+    ): void {
+        if (project.provisioningSource === 'analytics')
+            throw new ForbiddenError(
+                'Internal analytics configuration is managed by the backend',
+            );
+        if (project.provisioningSource === 'training')
+            throw new ForbiddenError(
+                ProjectService.TRAINING_CONNECTION_MANAGED_MESSAGE,
+            );
+    }
+
+    private static readonly TRAINING_CONNECTION_MANAGED_MESSAGE =
+        'The training project keeps the sample data it shipped with; its connection cannot be changed';
+
+    private static assertTrainingTypeIsInternal(
+        type: ProjectType | undefined,
+        internalProvisioning?: InternalProvisioning,
+    ): void {
+        if (
+            type === ProjectType.TRAINING &&
+            internalProvisioning?.source !== 'training'
+        ) {
+            throw new ForbiddenError(
+                'Training projects can only be provisioned internally',
+            );
+        }
+    }
+
+    /** Refuses web identity audiences generated for another organization. */
+    private async assertAwsWebIdentityAudienceBelongsTo(
+        credentials: CreateWarehouseCredentials | undefined,
+        organizationUuid: string,
+    ): Promise<void> {
+        if (!usesAwsWebIdentity(credentials)) return;
+        await this.projectModel.awsWebIdentity.assertAudienceBelongsTo(
+            credentials,
+            organizationUuid,
+        );
+    }
+
+    private static assertEmbeddedCredentialsAreInternal(
+        credentials: CreateWarehouseCredentialsWithOptionalSecrets | undefined,
+        internalProvisioning?: InternalProvisioning,
+    ): void {
+        if (
+            credentials?.type === WarehouseTypes.DUCKDB &&
+            credentials.connectionType === DuckdbConnectionType.ANALYTICS &&
+            internalProvisioning?.source !== 'analytics'
+        ) {
+            throw new ParameterError(
+                'Analytics connections can only be provisioned internally',
+            );
+        }
+        if (
+            credentials?.type === WarehouseTypes.DUCKDB &&
+            credentials.connectionType === DuckdbConnectionType.EMBEDDED &&
+            internalProvisioning === undefined
+        ) {
+            throw new ParameterError(
+                'Embedded DuckDB connections can only be provisioned internally',
+            );
+        }
+    }
+
+    /*
+    Interactive Snowflake authentication types need a browser on every
+    connect, so they cannot be used from headless backend/scheduler runs.
+    External browser is still allowed when `requireUserCredentials` is set,
+    since each user then connects with their own credentials and the
+    project-level authentication type is never used to connect.
+    */
+    private static assertPersistableSnowflakeAuthentication(
+        credentials: CreateWarehouseCredentials | undefined,
+    ): void {
+        if (credentials?.type !== WarehouseTypes.SNOWFLAKE) {
+            return;
+        }
+        if (
+            credentials.authenticationType ===
+            SnowflakeAuthenticationType.OAUTH_AUTHORIZATION_CODE
+        ) {
+            throw new ParameterError(
+                'Snowflake OAuth authorization code authentication is only supported in the CLI and cannot be saved on a project',
+            );
+        }
+        if (
+            credentials.authenticationType ===
+                SnowflakeAuthenticationType.EXTERNAL_BROWSER &&
+            !credentials.requireUserCredentials
+        ) {
+            throw new ParameterError(
+                'Snowflake external browser authentication is only supported in the CLI and cannot be saved on a project',
+            );
+        }
+    }
+
+    /*
+    Checks the BigQuery key file sent with a request. Empty key files are
+    skipped here because saved secrets or the Google sign-in fill them in
+    before validateConfigSecrets runs.
+    */
+    private static assertSupportedBigqueryKeyfile(
+        credentials: CreateWarehouseCredentials | undefined,
+    ): void {
+        if (
+            credentials?.type !== WarehouseTypes.BIGQUERY ||
+            credentials.authenticationType === BigqueryAuthenticationType.ADC
+        ) {
+            return;
+        }
+        const keyfile: unknown = credentials.keyfileContents;
+        if (
+            keyfile === undefined ||
+            keyfile === null ||
+            keyfile === '' ||
+            (typeof keyfile === 'object' && Object.keys(keyfile).length === 0)
+        ) {
+            return;
+        }
+        // SSO key files that are not user credentials are replaced by the
+        // user's Google sign-in.
+        if (
+            credentials.authenticationType === BigqueryAuthenticationType.SSO &&
+            credentials.keyfileContents.type !== 'authorized_user'
+        ) {
+            return;
+        }
+        if (credentials.authenticationType === BigqueryAuthenticationType.SSO) {
+            assertValidPersistedBigquerySsoKeyfile(keyfile);
+        } else {
+            assertValidBigqueryKeyfile(keyfile);
+        }
+    }
+
     validateConfigSecrets(project: UpdateProject) {
         switch (project.warehouseConnection?.type) {
+            case WarehouseTypes.SNOWFLAKE:
+                ProjectService.assertPersistableSnowflakeAuthentication(
+                    project.warehouseConnection,
+                );
+                break;
             case WarehouseTypes.BIGQUERY:
                 const keyFileContents =
                     project.warehouseConnection?.keyfileContents;
@@ -2557,11 +6402,19 @@ export class ProjectService extends BaseService {
                 switch (authenticationType) {
                     case undefined: // Default, for backwards compatibility
                     case BigqueryAuthenticationType.PRIVATE_KEY:
-                        if (keyFileContents?.private_key === undefined) {
+                        // The CLI sends gcloud user logins (dbt `method: oauth`) as an
+                        // authorized_user keyfile without an authentication type.
+                        const hasPrivateKey =
+                            keyFileContents?.private_key !== undefined;
+                        const hasUserRefreshToken =
+                            keyFileContents?.type === 'authorized_user' &&
+                            keyFileContents.refresh_token !== undefined;
+                        if (!hasPrivateKey && !hasUserRefreshToken) {
                             throw new ParameterError(
                                 'Bigquery key file is required for private key authentication',
                             );
                         }
+                        assertValidBigqueryKeyfile(keyFileContents);
                         break;
                     case BigqueryAuthenticationType.SSO:
                         if (keyFileContents?.refresh_token === undefined) {
@@ -2569,6 +6422,7 @@ export class ProjectService extends BaseService {
                                 'Bigquery refresh token is required for SSO authentication',
                             );
                         }
+                        assertValidPersistedBigquerySsoKeyfile(keyFileContents);
                         break;
                     case BigqueryAuthenticationType.ADC:
                         if (keyFileContents) {
@@ -2604,6 +6458,30 @@ export class ProjectService extends BaseService {
                         'Athena access key authentication requires accessKeyId and secretAccessKey',
                     );
                 }
+                if (
+                    athenaAuthenticationType ===
+                    AthenaAuthenticationType.WEB_IDENTITY
+                ) {
+                    if (!project.warehouseConnection.assumeRoleArn) {
+                        throw new ParameterError(
+                            AWS_WEB_IDENTITY_MESSAGES.missingRoleArn,
+                        );
+                    }
+                    if (
+                        !isAwsIamRoleArn(
+                            project.warehouseConnection.assumeRoleArn,
+                        )
+                    ) {
+                        throw new ParameterError(
+                            AWS_WEB_IDENTITY_MESSAGES.invalidRoleArn,
+                        );
+                    }
+                    if (!project.warehouseConnection.webIdentityAudience) {
+                        throw new ParameterError(
+                            AWS_WEB_IDENTITY_MESSAGES.missingAudience,
+                        );
+                    }
+                }
                 break;
             default:
                 break;
@@ -2617,19 +6495,78 @@ export class ProjectService extends BaseService {
         method: RequestMethod,
     ): Promise<{ jobUuid: string }> {
         assertIsAccountWithOrg(account);
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            data.warehouseConnection,
+        );
+        ProjectService.assertSupportedBigqueryKeyfile(data.warehouseConnection);
         const savedProject =
             await this.projectModel.getWithSensitiveFields(projectUuid);
+        ProjectService.assertConnectionIsNotManagedInternally(savedProject);
+        await this.assertAwsWebIdentityAudienceBelongsTo(
+            data.warehouseConnection,
+            savedProject.organizationUuid,
+        );
         const auditedAbility = this.createAuditedAbility(account);
         if (
             auditedAbility.cannot(
                 'update',
                 subject('Project', {
                     organizationUuid: savedProject.organizationUuid,
-                    projectUuid,
+                    projectUuid: savedProject.projectUuid,
+                    upstreamProjectUuid: savedProject.upstreamProjectUuid,
+                    type: savedProject.type,
+                    createdByUserUuid: savedProject.createdByUserUuid,
                 }),
             )
         ) {
             throw new ForbiddenError();
+        }
+        this.assertCanUseOrganizationWarehouseCredentials(
+            account,
+            savedProject.organizationUuid,
+            data,
+        );
+
+        let updateData = data;
+        if (
+            savedProject.type === ProjectType.PREVIEW &&
+            savedProject.upstreamProjectUuid &&
+            (method === RequestMethod.CLI || method === RequestMethod.CLI_CI) &&
+            data.warehouseConnection
+        ) {
+            const upstreamCredentials = await this.projectModel
+                .getWarehouseCredentialsForBinding(
+                    savedProject.upstreamProjectUuid,
+                    { kind: 'original' },
+                )
+                .catch((error) => {
+                    if (error instanceof NotFoundError) return undefined;
+                    throw error;
+                });
+            const refreshedCredentials = savedProject.warehouseConnection
+                ? mergeWarehouseCredentials(
+                      savedProject.warehouseConnection,
+                      data.warehouseConnection,
+                  )
+                : data.warehouseConnection;
+            updateData = {
+                ...data,
+                warehouseConnection: upstreamCredentials
+                    ? mergeWarehouseCredentials(
+                          upstreamCredentials,
+                          refreshedCredentials,
+                      )
+                    : refreshedCredentials,
+            };
+            this.assertCanWriteWarehouseConnection(
+                account,
+                savedProject,
+                updateData,
+            );
+            await this.assertAwsWebIdentityAudienceBelongsTo(
+                updateData.warehouseConnection,
+                savedProject.organizationUuid,
+            );
         }
 
         const job: CreateJob = {
@@ -2646,18 +6583,69 @@ export class ProjectService extends BaseService {
             ],
         };
         const createProject = await this._resolveWarehouseClientCredentials(
-            this.mergeMissingDatabricksM2MSecrets(data, savedProject),
+            this.mergeSavedSecretsForResolution(updateData, savedProject),
             account.user.id,
             savedProject.organizationUuid,
         );
-        const updatedProject = ProjectModel.mergeMissingProjectConfigSecrets(
+        const mergedProject = ProjectModel.mergeMissingProjectConfigSecrets(
             createProject,
             savedProject,
         );
+        const updatedProject = {
+            ...mergedProject,
+            dbtConnection: await this.resolveGithubInstallationForSave(
+                mergedProject.dbtConnection,
+                savedProject.organizationUuid,
+            ),
+        };
 
         this.validateConfigSecrets(updatedProject);
+        ProjectService.validateDbtEnvironmentVariables(
+            updatedProject.dbtConnection,
+        );
 
-        await this.projectModel.update(projectUuid, updatedProject);
+        await this.updateAndPushSsoCredentialsToPreviews({
+            projectUuid,
+            savedProject,
+            updatedProject,
+            actorUserUuid: account.user.id,
+        });
+        if (
+            !isEqual(savedProject.dbtConnection, updatedProject.dbtConnection)
+        ) {
+            const { enabled } = await this.featureFlagModel.get({
+                featureFlagId: FeatureFlags.CrossSourceDbtRefs,
+                user: {
+                    userUuid: account.user.id,
+                    organizationUuid: savedProject.organizationUuid,
+                },
+            });
+            if (enabled) {
+                try {
+                    const identity =
+                        await this.projectModel.getDbtSourceIdentity(
+                            projectUuid,
+                        );
+                    await this.dbtSourceRefCatalogModel.deleteForSource(
+                        projectUuid,
+                        identity.dbtSourceUuid,
+                    );
+                } catch (error) {
+                    logCrossSourceCacheError(error);
+                }
+            }
+        }
+        if (
+            savedProject.type === ProjectType.PREVIEW &&
+            savedProject.upstreamProjectUuid &&
+            !updatedProject.organizationWarehouseCredentialsUuid
+        ) {
+            await this.recordPreviewCredentialOwnership({
+                previewProjectUuid: projectUuid,
+                upstreamProjectUuid: savedProject.upstreamProjectUuid,
+                previewCredentials: updatedProject.warehouseConnection,
+            });
+        }
 
         if (
             savedProject.type !== ProjectType.PREVIEW &&
@@ -2690,30 +6678,60 @@ export class ProjectService extends BaseService {
                 });
         }
 
-        await this.jobModel.create(job);
+        await this.jobModel.create(
+            job,
+            savedProject.type === ProjectType.PREVIEW,
+        );
 
-        if (updatedProject.dbtConnection.type !== DbtProjectType.NONE) {
-            await this.schedulerClient.testAndCompileProject({
-                organizationUuid: account.organization.organizationUuid,
-                createdByUserUuid: account.user.id,
-                projectUuid,
-                requestMethod: method,
-                jobUuid: job.jobUuid,
-                isPreview: savedProject.type === ProjectType.PREVIEW,
-                userUuid: account.user.id,
-            });
-        } else {
-            // Nothing to test and compile, just update the job status
-            await this.jobModel.update(job.jobUuid, {
-                jobStatus: JobStatusType.DONE,
-                jobResults: {
-                    projectUuid,
-                },
-            });
-        }
+        // CLI projects have nothing to compile, but the warehouse connection
+        // (and its SSH tunnel) is still tested by the worker, so "Save and
+        // test" reports a broken tunnel instead of a green save.
+        await this.schedulerClient.testAndCompileProject({
+            organizationUuid: account.organization.organizationUuid,
+            createdByUserUuid: account.user.id,
+            projectUuid,
+            requestMethod: method,
+            jobUuid: job.jobUuid,
+            isPreview: savedProject.type === ProjectType.PREVIEW,
+            userUuid: account.user.id,
+            compilationSource: 'project_connection_form',
+        });
         return {
             jobUuid: job.jobUuid,
         };
+    }
+
+    async updateProjectDetails(
+        projectUuid: string,
+        account: Account,
+        details: UpdateProjectDetails,
+    ): Promise<ProjectSummary> {
+        assertIsAccountWithOrg(account);
+        const updatedDetails = { ...details };
+        if (details.name !== undefined) {
+            const trimmedName = details.name.trim();
+            if (trimmedName.length === 0) {
+                throw new ParameterError('Project name cannot be empty');
+            }
+            updatedDetails.name = trimmedName;
+        }
+        if (Object.keys(updatedDetails).length === 0) {
+            throw new ParameterError('No project details to update');
+        }
+
+        const project = await this.projectModel.getSummary(projectUuid);
+        if (project.provisioningSource === 'analytics')
+            throw new ForbiddenError(
+                'Internal analytics configuration is managed by the backend',
+            );
+        const auditedAbility = this.createAuditedAbility(account);
+        if (auditedAbility.cannot('update', subject('Project', project))) {
+            throw new ForbiddenError();
+        }
+
+        await this.projectModel.updateDetails(projectUuid, updatedDetails);
+
+        return { ...project, ...updatedDetails };
     }
 
     /*
@@ -2727,20 +6745,37 @@ export class ProjectService extends BaseService {
         data: { warehouseConnection: CreateWarehouseCredentials },
     ): Promise<void> {
         assertIsAccountWithOrg(account);
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            data.warehouseConnection,
+        );
+        ProjectService.assertSupportedBigqueryKeyfile(data.warehouseConnection);
         const savedProject =
             await this.projectModel.getWithSensitiveFields(projectUuid);
+        ProjectService.assertConnectionIsNotManagedInternally(savedProject);
+        await this.assertAwsWebIdentityAudienceBelongsTo(
+            data.warehouseConnection,
+            savedProject.organizationUuid,
+        );
         const auditedAbility = this.createAuditedAbility(account);
         if (
             auditedAbility.cannot(
                 'update',
                 subject('Project', {
                     organizationUuid: savedProject.organizationUuid,
-                    projectUuid,
+                    projectUuid: savedProject.projectUuid,
+                    upstreamProjectUuid: savedProject.upstreamProjectUuid,
+                    type: savedProject.type,
+                    createdByUserUuid: savedProject.createdByUserUuid,
                 }),
             )
         ) {
             throw new ForbiddenError();
         }
+        this.assertCanUseOrganizationWarehouseCredentials(
+            account,
+            savedProject.organizationUuid,
+            data,
+        );
 
         const updatedProjectData: UpdateProject = {
             name: savedProject.name,
@@ -2750,7 +6785,7 @@ export class ProjectService extends BaseService {
         };
 
         const resolvedData = await this._resolveWarehouseClientCredentials(
-            this.mergeMissingDatabricksM2MSecrets(
+            this.mergeSavedSecretsForResolution(
                 updatedProjectData,
                 savedProject,
             ),
@@ -2778,7 +6813,23 @@ export class ProjectService extends BaseService {
 
         this.validateConfigSecrets(updatedProject);
 
-        await this.projectModel.update(projectUuid, updatedProject);
+        await this.updateAndPushSsoCredentialsToPreviews({
+            projectUuid,
+            savedProject,
+            updatedProject,
+            actorUserUuid: account.user.id,
+        });
+        if (
+            savedProject.type === ProjectType.PREVIEW &&
+            savedProject.upstreamProjectUuid &&
+            !updatedProject.organizationWarehouseCredentialsUuid
+        ) {
+            await this.recordPreviewCredentialOwnership({
+                previewProjectUuid: projectUuid,
+                upstreamProjectUuid: savedProject.upstreamProjectUuid,
+                previewCredentials: updatedProject.warehouseConnection,
+            });
+        }
 
         if (
             savedProject.type !== ProjectType.PREVIEW &&
@@ -2811,6 +6862,7 @@ export class ProjectService extends BaseService {
         projectUuid: string,
         method: RequestMethod,
         jobUuid: string,
+        compilationSource: CompilationSource = 'refresh_dbt',
     ) {
         const totalStartTime = performance.now();
 
@@ -2820,19 +6872,6 @@ export class ProjectService extends BaseService {
 
         const updatedProject =
             await this.projectModel.getWithSensitiveFields(projectUuid);
-
-        const auditedAbility = this.createAuditedAbility(user);
-        if (
-            auditedAbility.cannot('update', subject('Project', updatedProject))
-        ) {
-            throw new ForbiddenError();
-        }
-
-        if (updatedProject.warehouseConnection === undefined) {
-            throw new Error(
-                `Missing warehouseConnection details on project ${projectUuid}'}`,
-            );
-        }
 
         // This job is the job model we use to compile projects
         // This is not the graphile Job id we use on scheduler
@@ -2860,49 +6899,174 @@ export class ProjectService extends BaseService {
             cacheExplores: { start: 0, end: 0 },
         };
 
+        const cleanup: {
+            adapter: ProjectAdapter | null;
+            lease: WarehouseConnectionLease | null;
+            started: boolean;
+        } = { adapter: null, lease: null, started: false };
         try {
+            const auditedAbility = this.createAuditedAbility(user);
+            if (
+                auditedAbility.cannot(
+                    'update',
+                    subject('Project', updatedProject),
+                )
+            ) {
+                throw new ForbiddenError();
+            }
+
+            if (updatedProject.warehouseConnection === undefined) {
+                throw new Error(
+                    `Missing warehouseConnection details on project ${projectUuid}'}`,
+                );
+            }
+            if (
+                !this.lightdashConfig.warehouseClient
+                    .resolveTestAndCompileCredentials &&
+                !updatedProject.organizationWarehouseCredentialsUuid
+            ) {
+                updatedProject.warehouseConnection =
+                    await this.repairStalePreviewSsoCredentials(
+                        projectUuid,
+                        updatedProject.warehouseConnection,
+                    );
+            }
+
+            const storedCredentials = updatedProject.warehouseConnection;
             await this.jobModel.update(job.jobUuid, {
                 jobStatus: JobStatusType.RUNNING,
             });
+            await this.armCrossSourceCompile(projectUuid, user);
             timings.testAdapter.start = performance.now();
-            const { adapter, sshTunnel } = await this.jobModel.tryJobStep(
+            const {
+                adapter: primaryAdapter,
+                lease,
+                warehouseCredentials,
+                cachedWarehouse,
+                dbtVersionOption,
+                dbtPartialParse,
+                dbtTargetPolicy,
+            } = await this.jobModel.tryJobStep(
                 job.jobUuid,
                 JobStepType.TESTING_ADAPTOR,
-                async () =>
-                    this.testProjectAdapter(
-                        updatedProject as UpdateProject,
+                async () => {
+                    const tested = await this.testProjectAdapter(
+                        {
+                            ...updatedProject,
+                            warehouseConnection: {
+                                kind: 'stored',
+                                projectUuid,
+                                credentials: storedCredentials,
+                            },
+                        },
                         user,
-                    ),
+                        'project_update',
+                        method,
+                        projectUuid,
+                        updatedProject.organizationUuid,
+                    );
+                    cleanup.adapter = tested.adapter;
+                    cleanup.lease = tested.lease;
+                    return tested;
+                },
             );
             timings.testAdapter.end = performance.now();
+            // Source git clones built only to read manifests for the merge.
+            const manifestFetchAdapters: ProjectAdapter[] = [];
             if (updatedProject.dbtConnection.type !== DbtProjectType.NONE) {
-                await this.jobModel.tryJobStep(
+                const compileResult = await this.jobModel.tryJobStep(
                     job.jobUuid,
                     JobStepType.COMPILING,
                     async () => {
+                        // Merge additional dbt sources (flag-gated, N=0
+                        // short-circuit) so "Test & deploy" yields the same
+                        // combined explore set as "Refresh dbt".
+                        let compileAdapter = primaryAdapter;
+                        let stagedMergedManifest: Buffer | undefined;
+                        let connectionWarnings: string[] | undefined;
+                        let failedDbtSourceUuids: string[] | undefined;
+                        let exploreNaming: ExploreNaming | undefined;
+                        let multiConnection: MultiConnectionCompilation | null =
+                            null;
                         try {
                             const trackingParams = {
                                 projectUuid,
                                 organizationUuid: user.organizationUuid,
                                 userUuid: user.userUuid,
+                                jobUuid: job.jobUuid,
                             };
+                            const primary = {
+                                adapter: primaryAdapter,
+                                connection: lease,
+                                warehouseCredentials,
+                                cachedWarehouse,
+                                dbtVersionOption,
+                                dbtPartialParse,
+                                dbtTargetPolicy,
+                            };
+                            if (
+                                (await this.projectModel.getConnectionRoute(
+                                    projectUuid,
+                                    { kind: 'original' },
+                                )) === 'multi'
+                            ) {
+                                multiConnection =
+                                    await this.compileMultiConnectionProject({
+                                        projectUuid,
+                                        jobUuid: job.jobUuid,
+                                        organizationUuid: user.organizationUuid,
+                                        userUuid: user.userUuid,
+                                        primary,
+                                        manifestFetchAdapters,
+                                        trackingParams,
+                                    });
+                                manifestFetchAdapters.push(primaryAdapter);
+                                compileAdapter =
+                                    multiConnection.originalAdapter;
+                            } else {
+                                ({
+                                    adapter: compileAdapter,
+                                    stagedMergedManifest,
+                                    connectionWarnings,
+                                    failedDbtSourceUuids,
+                                    exploreNaming,
+                                } = await this.resolveCompileAdapter({
+                                    projectUuid,
+                                    jobUuid: job.jobUuid,
+                                    organizationUuid: user.organizationUuid,
+                                    userUuid: user.userUuid,
+                                    primary,
+                                    manifestFetchAdapters,
+                                }));
+                            }
                             timings.compileExplores.start = performance.now();
-                            const explores = await adapter.compileAllExplores(
-                                trackingParams,
-                                false, // loadSources
-                                this.lightdashConfig.partialCompilation.enabled,
-                            );
+                            const exploreStream =
+                                multiConnection?.exploreStream ??
+                                (await compileAdapter.prepareExploreStream(
+                                    trackingParams,
+                                    false, // loadSources
+                                    true, // allowPartialCompilation
+                                    exploreNaming !== undefined,
+                                ));
                             timings.compileExplores.end = performance.now();
                             timings.getConfig.start = performance.now();
                             const lightdashProjectConfig =
-                                await adapter.getLightdashProjectConfig(
+                                await compileAdapter.getLightdashProjectConfig(
                                     trackingParams,
                                 );
+                            const projectContext =
+                                await this.getProjectContextFromAdapter({
+                                    adapter: compileAdapter,
+                                    user,
+                                    organizationUuid: user.organizationUuid,
+                                });
                             timings.getConfig.end = performance.now();
 
+                            throwIfCompileAborted();
                             timings.yaml.start = performance.now();
-                            await this.replaceYamlTags(
+                            await this.replaceYamlTagsWithoutPermissionCheck(
                                 user,
+                                user.organizationUuid,
                                 projectUuid,
                                 // TODO: Create util to generate categories from lightdashProjectConfig - this is used as well in deploy.ts
                                 Object.entries(
@@ -2916,46 +7080,107 @@ export class ProjectService extends BaseService {
                             );
                             timings.yaml.end = performance.now();
                             timings.parameters.start = performance.now();
-                            await this.replaceProjectParameters({
-                                user,
-                                projectUuid,
-                                parameters: lightdashProjectConfig.parameters,
-                            });
+                            if (
+                                lightdashProjectConfig.parameters !== undefined
+                            ) {
+                                await this.replaceProjectParameters({
+                                    user,
+                                    projectUuid,
+                                    parameters:
+                                        lightdashProjectConfig.parameters,
+                                });
+                            }
                             await this.projectModel.setTableGroups(
                                 projectUuid,
                                 lightdashProjectConfig.table_groups,
                             );
+                            // Mirrors CLI deploy semantics: only overwrite
+                            // stored defaults when the config file defines them
+                            if (lightdashProjectConfig.defaults) {
+                                await this.projectModel.updateProjectDefaults(
+                                    projectUuid,
+                                    lightdashProjectConfig.defaults,
+                                );
+                            }
+                            await this.replaceProjectContext(
+                                projectUuid,
+                                projectContext,
+                            );
                             timings.parameters.end = performance.now();
                             timings.cacheExplores.start = performance.now();
-                            await this.saveExploresToCacheAndIndexCatalog({
-                                userUuid: user.userUuid,
+                            const result =
+                                await this.saveExploreStreamToCacheAndIndexCatalog(
+                                    {
+                                        userUuid: user.userUuid,
+                                        projectUuid,
+                                        exploreStream,
+                                        multiConnection,
+                                        connectionWarnings,
+                                        failedDbtSourceUuids,
+                                        exploreNaming,
+                                        compilationSource,
+                                        jobUuid: job.jobUuid,
+                                        requestMethod: method,
+                                        projectConfigDefaults:
+                                            lightdashProjectConfig.defaults,
+                                    },
+                                );
+                            await this.persistMergedManifest(
                                 projectUuid,
-                                explores,
-                                compilationSource: 'refresh_dbt',
-                                jobUuid: job.jobUuid,
-                                requestMethod: method,
-                                projectConfigDefaults:
-                                    lightdashProjectConfig.defaults,
-                            });
+                                stagedMergedManifest,
+                            );
                             timings.cacheExplores.end = performance.now();
+
+                            return result;
                         } finally {
-                            await adapter.destroy();
-                            await sshTunnel.disconnect();
+                            cleanup.started = true;
+                            try {
+                                await compileAdapter.destroy();
+                            } finally {
+                                await lease.release();
+                            }
+                            // Clean up the per-source git clones used only to
+                            // read manifests for the merge.
+                            await Promise.all(
+                                manifestFetchAdapters.map((manifestAdapter) =>
+                                    manifestAdapter
+                                        .destroy()
+                                        .catch((destroyError) => {
+                                            this.logger.warn(
+                                                'Failed to destroy a dbt source adapter after manifest merge',
+                                                { error: destroyError },
+                                            );
+                                        }),
+                                ),
+                            );
                         }
                     },
                 );
+                await this.jobModel.update(job.jobUuid, {
+                    jobStatus: JobStatusType.DONE,
+                    jobResults: compileResult,
+                });
+                disarmCompileShutdown();
+            } else {
+                try {
+                    await this.jobModel.update(job.jobUuid, {
+                        jobStatus: JobStatusType.DONE,
+                        jobResults: { projectUuid },
+                    });
+                } finally {
+                    cleanup.started = true;
+                    try {
+                        await primaryAdapter.destroy();
+                    } finally {
+                        await lease.release();
+                    }
+                }
             }
-
-            await this.jobModel.update(job.jobUuid, {
-                jobStatus: JobStatusType.DONE,
-                jobResults: {
-                    projectUuid,
-                },
-            });
             const projectWithWarehouse = {
                 ...updatedProject,
                 warehouseConnection: updatedProject.warehouseConnection,
             };
+            const onboardingFlow = await this.getOnboardingFlow(user);
             this.analytics.track({
                 event: 'project.updated',
                 userId: user.userUuid,
@@ -2964,6 +7189,7 @@ export class ProjectService extends BaseService {
                     projectUuid,
                     user,
                     method,
+                    onboardingFlow,
                 ),
             });
             const totalTime = performance.now() - totalStartTime;
@@ -2994,42 +7220,681 @@ export class ProjectService extends BaseService {
                 },
             );
         } catch (error) {
-            await this.jobModel.setPendingJobsToSkipped(job.jobUuid);
-            await this.jobModel.update(job.jobUuid, {
-                jobStatus: JobStatusType.ERROR,
+            if (error instanceof CompileInterruptedError) {
+                await this._markInterruptedCompileAsFailed(
+                    job.jobUuid,
+                    error.message,
+                );
+            } else {
+                await this.jobModel.setPendingJobsToSkipped(job.jobUuid);
+                await this.jobModel.update(job.jobUuid, {
+                    jobStatus: JobStatusType.ERROR,
+                });
+            }
+            throw error;
+        } finally {
+            if (!cleanup.started && cleanup.adapter && cleanup.lease) {
+                try {
+                    await cleanup.adapter.destroy();
+                } catch (destroyError) {
+                    this.logger.warn(
+                        'Failed to destroy a project adapter after job step failure',
+                        { error: destroyError },
+                    );
+                } finally {
+                    await cleanup.lease.release();
+                }
+            }
+            disarmCompileShutdown();
+        }
+    }
+
+    /**
+     * Resolves the org's GitHub App installation into the connection and
+     * refuses to persist an OAuth connection that has none. Without this,
+     * "OAuth" could be saved with an empty installation id and the adapter
+     * would quietly use whatever PAT was merged back from the previous save
+     * (PROD-11711).
+     */
+    private async resolveGithubInstallationForSave(
+        dbtConnection: DbtProjectConfig,
+        organizationUuid: string | undefined,
+    ): Promise<DbtProjectConfig> {
+        const resolved = await this.resolveDbtConnectionInstallationId(
+            dbtConnection,
+            organizationUuid,
+        );
+        assertGithubInstallationResolved(resolved);
+        return resolved;
+    }
+
+    /**
+     * Looks up the org's current GitHub installation_id and applies it to the
+     * connection (see applyCurrentGithubInstallationId) before building the
+     * adapter.
+     */
+    private async resolveDbtConnectionInstallationId(
+        dbtConnection: DbtProjectConfig,
+        organizationUuid: string | undefined,
+    ): Promise<DbtProjectConfig> {
+        if (
+            dbtConnection.type !== DbtProjectType.GITHUB ||
+            dbtConnection.authorization_method !== 'installation_id' ||
+            !organizationUuid ||
+            !this.githubAppInstallationsModel
+        ) {
+            return dbtConnection;
+        }
+        const currentInstallationId =
+            await this.githubAppInstallationsModel.findInstallationId(
+                organizationUuid,
+            );
+        const resolved = applyCurrentGithubInstallationId(
+            dbtConnection,
+            currentInstallationId,
+        );
+        if (resolved !== dbtConnection) {
+            this.logger.info(
+                'Using current org GitHub installation_id instead of stale project value',
+                { organizationUuid },
+            );
+        }
+        return resolved;
+    }
+
+    private async testProjectAdapter(
+        data: Omit<UpdateProject, 'warehouseConnection'> & {
+            warehouseConnection: TestProjectAdapterCredentials;
+        },
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+        context: 'project_create' | 'project_update',
+        method: RequestMethod,
+        projectUuid: string | null,
+        projectOrganizationUuid: string | null,
+    ): Promise<{
+        adapter: ProjectAdapter;
+        lease: WarehouseConnectionLease;
+        warehouseCredentials: CreateWarehouseCredentials;
+        cachedWarehouse: CachedWarehouse;
+        dbtVersionOption: DbtVersionOption;
+        dbtPartialParse: boolean;
+        dbtTargetPolicy: DbtTargetPolicy;
+    }> {
+        const onboardingFlow = await this.getOnboardingFlow(user);
+        let lease: WarehouseConnectionLease | null = null;
+        let adapter: ProjectAdapter | undefined;
+        try {
+            const organizationUuid =
+                user.organizationUuid ??
+                (projectUuid === null
+                    ? undefined
+                    : (await this.projectModel.getSummary(projectUuid))
+                          .organizationUuid);
+            if (organizationUuid === undefined) {
+                throw new ForbiddenError('User is not part of an organization');
+            }
+            const connectionContext = connectionContextFromUser(
+                { userUuid: user.userUuid },
+                { organizationUuid, queryContext: null, purpose: 'compile' },
+            );
+            const input = data.warehouseConnection;
+            let connectionRef: WarehouseConnectionLeaseRef;
+            switch (input.kind) {
+                case 'submitted_resolved':
+                    connectionRef = {
+                        kind: 'compile',
+                        projectUuid,
+                        credentials: input.credentials,
+                        tunnelOptions: this.connectionTestTunnelOptions(),
+                    };
+                    break;
+                case 'stored':
+                    if (
+                        this.lightdashConfig.warehouseClient
+                            .resolveTestAndCompileCredentials
+                    ) {
+                        const resolution =
+                            await this.warehouseClientFactory.resolveWarehouseCredentials(
+                                {
+                                    kind: 'binding',
+                                    projectUuid: input.projectUuid,
+                                    binding: { kind: 'original' },
+                                },
+                                connectionContext,
+                            );
+                        connectionRef = {
+                            kind: 'compile',
+                            projectUuid: input.projectUuid,
+                            credentials: resolution.warehouseCredentials,
+                            tunnelOptions: this.connectionTestTunnelOptions(),
+                        };
+                    } else {
+                        connectionRef = {
+                            kind: 'bypass',
+                            mode: 'test_and_compile',
+                            projectUuid: input.projectUuid,
+                            credentials: prepareWarehouseOAuthCredentials(
+                                input.credentials,
+                            ),
+                            tunnelOptions: this.connectionTestTunnelOptions(),
+                        };
+                    }
+                    break;
+                default:
+                    return assertUnreachable(
+                        input,
+                        'Unknown test adapter credentials',
+                    );
+            }
+            lease =
+                await this.warehouseClientFactory.acquireWarehouseConnection(
+                    connectionRef,
+                    connectionContext,
+                );
+            const dbtConnection = await this.resolveDbtConnectionInstallationId(
+                data.dbtConnection,
+                user.organizationUuid,
+            );
+            const warehouseCredentials = lease.connectionCredentials;
+            const cachedWarehouse: CachedWarehouse = {
+                warehouseCatalog: undefined,
+                onWarehouseCatalogChange: () => {},
+            };
+            const dbtVersionOption =
+                data.dbtVersion || DefaultSupportedDbtVersion;
+            const dbtPartialParse =
+                projectUuid !== null &&
+                (await this.isDbtPartialParseEnabled(user));
+            const dbtTargetPolicy = await this.getDbtTargetPolicy(
+                projectOrganizationUuid ?? user.organizationUuid,
+            );
+            const resolvedLease = lease;
+            adapter = await projectAdapterFromConfig(
+                dbtConnection,
+                lease.warehouseClient,
+                cachedWarehouse,
+                dbtVersionOption,
+                this.lightdashConfig.dbt.environmentVariableAllowlist,
+                dbtPartialParse && projectUuid !== null
+                    ? getDbtPartialParseBaselinePath({
+                          projectUuid,
+                          dbtSourceUuid: null,
+                      })
+                    : null,
+                {
+                    resolve: () =>
+                        this.warehouseClientFactory.toDbtTarget(
+                            resolvedLease.warehouseCredentials,
+                            warehouseCredentials,
+                            dbtTargetPolicy,
+                        ),
+                    policy: dbtTargetPolicy,
+                },
+                this.analytics,
+            );
+            try {
+                const signal = getCompileShutdownSignal();
+                if (signal) {
+                    const cancellation = new CrossSourceCancellation(signal, {
+                        prepareMs:
+                            this.lightdashConfig.dbt
+                                .crossSourcePrepareTimeoutMs,
+                        lsMs: this.lightdashConfig.dbt.crossSourceLsTimeoutMs,
+                        resolutionMs:
+                            this.lightdashConfig.dbt
+                                .crossSourceResolutionTimeoutMs,
+                    });
+                    try {
+                        await cancellation.run(
+                            'primary',
+                            'prepare',
+                            (prepareSignal) =>
+                                adapter!.prepareDbtSource({
+                                    signal: prepareSignal,
+                                }),
+                        );
+                        await cancellation.run('primary', 'ls', (testSignal) =>
+                            adapter!.test({ signal: testSignal }),
+                        );
+                    } catch (error) {
+                        await cancellation.fail(error);
+                    } finally {
+                        cancellation.dispose();
+                    }
+                } else {
+                    await adapter.test();
+                }
+            } catch (error) {
+                const refs = getMissingDbtNodeReferences(error);
+                if (refs.length === 0) throw error;
+                const { enabled } = await this.featureFlagModel.get({
+                    featureFlagId: FeatureFlags.CrossSourceDbtRefs,
+                    user: {
+                        userUuid: user.userUuid,
+                        organizationUuid:
+                            projectOrganizationUuid ?? organizationUuid,
+                    },
+                });
+                if (!enabled) throw error;
+                this.logger.info('dbt.test.deferredCrossSourceRefs', { refs });
+                await lease.warehouseClient.test();
+            }
+            if (usesAwsWebIdentity(warehouseCredentials)) {
+                await this.projectModel.awsWebIdentity.assertRoleRequiresAudience(
+                    warehouseCredentials,
+                );
+            }
+            this.analytics.track({
+                event: 'warehouse_connection.tested',
+                userId: user.userUuid,
+                properties: {
+                    warehouseType: data.warehouseConnection.credentials.type,
+                    result: 'success',
+                    context,
+                    method,
+                    onboardingFlow,
+                },
             });
+            if (context === 'project_create') {
+                this.analytics.track({
+                    event: 'onboarding.step_completed',
+                    userId: user.userUuid,
+                    properties: {
+                        step: 'warehouse_connected',
+                        stepIndex: 4,
+                        onboardingFlow,
+                        organizationId: user.organizationUuid,
+                    },
+                });
+            }
+            return {
+                adapter,
+                lease,
+                warehouseCredentials,
+                cachedWarehouse,
+                dbtVersionOption,
+                dbtPartialParse,
+                dbtTargetPolicy,
+            };
+        } catch (error) {
+            const errorType =
+                error instanceof Error && error.constructor.name
+                    ? error.constructor.name
+                    : 'UnknownError';
+            this.analytics.track({
+                event: 'warehouse_connection.tested',
+                userId: user.userUuid,
+                properties: {
+                    warehouseType: data.warehouseConnection.credentials.type,
+                    result: 'failure',
+                    errorType,
+                    context,
+                    method,
+                    onboardingFlow,
+                },
+            });
+            Logger.error(`Error testing project adapter: ${error}`);
+            try {
+                await adapter?.destroy();
+            } finally {
+                await lease?.release();
+            }
             throw error;
         }
     }
 
-    private async testProjectAdapter(
-        data: UpdateProject,
-        _user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
-    ): Promise<{
-        adapter: ProjectAdapter;
-        sshTunnel: SshTunnel<CreateWarehouseCredentials>;
-    }> {
-        const sshTunnel = new SshTunnel(data.warehouseConnection);
-        await sshTunnel.connect();
-        const adapter = await projectAdapterFromConfig(
-            data.dbtConnection,
-            sshTunnel.overrideCredentials,
-            {
-                warehouseCatalog: undefined,
-                onWarehouseCatalogChange: () => {},
-            },
-            data.dbtVersion || DefaultSupportedDbtVersion,
-            this.analytics,
-        );
-        try {
-            await adapter.test();
-        } catch (e) {
-            Logger.error(`Error testing project adapter: ${e}`);
-            await adapter.destroy();
-            await sshTunnel.disconnect();
-            throw e;
+    private connectionTestTunnelOptions() {
+        return {
+            staticIp: this.lightdashConfig.staticIp || null,
+            probeForward: true,
+        };
+    }
+
+    /**
+     * Tests warehouse credentials hop by hop without saving them. Secrets the
+     * form does not send are taken from the saved project, as on save.
+     */
+    async testWarehouseConnection(
+        account: RegisteredAccount,
+        projectUuid: string,
+        warehouseConnection: CreateWarehouseCredentialsWithOptionalSecrets,
+    ): Promise<WarehouseConnectionTestResults> {
+        assertIsAccountWithOrg(account);
+        const savedProject =
+            await this.projectModel.getWithSensitiveFields(projectUuid);
+        if (
+            this.createAuditedAbility(account).cannot(
+                'update',
+                subject('Project', {
+                    organizationUuid: savedProject.organizationUuid,
+                    projectUuid: savedProject.projectUuid,
+                    upstreamProjectUuid: savedProject.upstreamProjectUuid,
+                    type: savedProject.type,
+                    createdByUserUuid: savedProject.createdByUserUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
         }
-        return { adapter, sshTunnel };
+        ProjectService.assertEmbeddedCredentialsAreInternal(
+            warehouseConnection,
+        );
+        const merged = savedProject.warehouseConnection
+            ? ProjectModel.mergeMissingWarehouseSecrets(
+                  warehouseConnection,
+                  savedProject.warehouseConnection,
+              )
+            : warehouseConnection;
+        if (isMissingBigqueryKeyfile(merged)) {
+            return buildConnectionTestResults([
+                {
+                    stage: 'database',
+                    status: 'failed',
+                    message:
+                        'No service account key file. Paste the key file, or save the connection with one first.',
+                },
+            ]);
+        }
+        const resolved = await this._resolveWarehouseClientCredentials(
+            { warehouseConnection: fillOmittedSecrets(merged) },
+            account.user.userUuid,
+            savedProject.organizationUuid,
+        );
+        return this.runWarehouseConnectionHops(
+            resolved.warehouseConnection,
+            connectionContextFromAccount(account, {
+                organizationUuid: savedProject.organizationUuid,
+                queryContext: null,
+                purpose: 'query',
+            }),
+        );
+    }
+
+    async testWarehouseConnectionCredentials(
+        account: RegisteredAccount,
+        organizationUuid: string,
+        warehouseConnection: CreateWarehouseCredentials,
+    ): Promise<WarehouseConnectionTestResults> {
+        const { result } = await this.testWarehouseConnectionCredentialsForSave(
+            account,
+            organizationUuid,
+            warehouseConnection,
+        );
+        return result;
+    }
+
+    async testWarehouseConnectionCredentialsForSave(
+        account: RegisteredAccount,
+        organizationUuid: string,
+        warehouseConnection: CreateWarehouseCredentials,
+    ): Promise<{
+        credentials: CreateWarehouseCredentials;
+        result: WarehouseConnectionTestResults;
+    }> {
+        if (isMissingBigqueryKeyfile(warehouseConnection)) {
+            return {
+                credentials: warehouseConnection,
+                result: buildConnectionTestResults([
+                    {
+                        stage: 'database',
+                        status: 'failed',
+                        message:
+                            'No service account key file. Paste the key file, or save the connection with one first.',
+                    },
+                ]),
+            };
+        }
+        const resolved = await this._resolveWarehouseClientCredentials(
+            { warehouseConnection },
+            account.user.userUuid,
+            organizationUuid,
+        );
+        return {
+            credentials: resolved.warehouseConnection,
+            result: await this.runWarehouseConnectionHops(
+                resolved.warehouseConnection,
+                connectionContextFromAccount(account, {
+                    organizationUuid,
+                    queryContext: null,
+                    purpose: 'query',
+                }),
+            ),
+        };
+    }
+
+    private async runWarehouseConnectionHops(
+        credentials: CreateWarehouseCredentials,
+        context: ConnectionContext,
+    ): Promise<WarehouseConnectionTestResults> {
+        const usesTunnel =
+            (credentials.type === WarehouseTypes.POSTGRES ||
+                credentials.type === WarehouseTypes.REDSHIFT) &&
+            !!credentials.useSshTunnel;
+        const tunnelHops = usesTunnel ? tunnelHopsAllOk() : [];
+        const databaseFailure = (error: unknown) =>
+            buildConnectionTestResults([
+                ...tunnelHops,
+                {
+                    stage: 'database',
+                    status: 'failed',
+                    message: getErrorMessage(error),
+                },
+            ]);
+        try {
+            return await this.warehouseClientFactory.withWarehouseClient(
+                {
+                    kind: 'bypass',
+                    mode: 'connection_test',
+                    projectUuid: null,
+                    credentials: prepareWarehouseOAuthCredentials(credentials),
+                    tunnelOptions: this.connectionTestTunnelOptions(),
+                },
+                context,
+                async ({ warehouseClient }) => {
+                    try {
+                        await warehouseClient.test();
+                        if (usesAwsWebIdentity(credentials)) {
+                            await this.projectModel.awsWebIdentity.assertRoleRequiresAudience(
+                                credentials,
+                            );
+                        }
+                        return buildConnectionTestResults([
+                            ...tunnelHops,
+                            { stage: 'database', status: 'ok', message: null },
+                        ]);
+                    } catch (error) {
+                        return databaseFailure(error);
+                    }
+                },
+            );
+        } catch (error) {
+            if (error instanceof WarehouseClientConstructionError) {
+                return databaseFailure(error.originalError);
+            }
+            if (
+                error instanceof SshTunnelError &&
+                isSshTunnelErrorData(error.data)
+            ) {
+                return buildConnectionTestResults([
+                    ...tunnelHopsFailedAt(error.data.stage, error.message),
+                    { stage: 'database', status: 'skipped', message: null },
+                ]);
+            }
+            throw error;
+        }
+    }
+
+    async previewDataTimezone(
+        account: RegisteredAccount,
+        body: DataTimezonePreviewRequest,
+    ): Promise<ApiDataTimezonePreviewResults> {
+        assertIsAccountWithOrg(account);
+        if (
+            !(await this.isTimezoneSupportEnabled({
+                userUuid: account.user.userUuid,
+                organizationUuid: account.organization.organizationUuid,
+            }))
+        ) {
+            throw new ForbiddenError('Timezone support is not enabled');
+        }
+
+        const auditedAbility = this.createAuditedAbility(account);
+
+        // Edit flow sources secrets from storage and overrides only the unsaved
+        // data timezone - the frontend never sends credentials. Create flow uses
+        // the just-typed credentials.
+        let effectiveCredentials: CreateWarehouseCredentials;
+        let projectTimezone = 'UTC';
+        // The organization that owns the connection being previewed.
+        let connectionOrganizationUuid = account.organization.organizationUuid;
+        if (body.mode === 'edit') {
+            const stored = await this.projectModel.getWithSensitiveFields(
+                body.projectUuid,
+            );
+            if (auditedAbility.cannot('update', subject('Project', stored))) {
+                throw new ForbiddenError();
+            }
+            // A switched-but-unsaved warehouse type can't be merged with stored
+            // secrets, so ask for a save rather than failing mid-connect.
+            if (
+                !stored.warehouseConnection ||
+                stored.warehouseConnection.type !== body.warehouseType
+            ) {
+                throw new ParameterError(
+                    'Save the warehouse connection before previewing a different warehouse type.',
+                );
+            }
+            effectiveCredentials = {
+                ...stored.warehouseConnection,
+                dataTimezone: body.dataTimezone ?? undefined,
+            };
+            connectionOrganizationUuid = stored.organizationUuid;
+            projectTimezone = await this.getQueryTimezoneForProject(
+                body.projectUuid,
+            );
+        } else {
+            if (
+                auditedAbility.cannot(
+                    'create',
+                    subject('Project', {
+                        organizationUuid: account.organization.organizationUuid,
+                        type: ProjectType.DEFAULT,
+                    }),
+                )
+            ) {
+                throw new ForbiddenError();
+            }
+            ProjectService.assertEmbeddedCredentialsAreInternal(
+                body.credentials,
+            );
+            effectiveCredentials = body.credentials;
+        }
+
+        // The data timezone is set as the warehouse session timezone (the
+        // client interpolates it raw), so validate it before connecting.
+        const { dataTimezone } = effectiveCredentials;
+        if (dataTimezone && !isValidTimezone(dataTimezone)) {
+            throw new ParameterError('Invalid data timezone');
+        }
+
+        const connectionContext = connectionContextFromAccount(account, {
+            organizationUuid: connectionOrganizationUuid,
+            queryContext: QueryExecutionContext.API,
+        });
+        let warehouseRef: WarehouseClientRef;
+        if (
+            this.lightdashConfig.warehouseClient
+                .resolveTimezonePreviewCredentials
+        ) {
+            if (body.mode === 'edit') {
+                const resolution =
+                    await this.warehouseClientFactory.resolveWarehouseCredentials(
+                        {
+                            kind: 'binding',
+                            projectUuid: body.projectUuid,
+                            binding: { kind: 'original' },
+                        },
+                        connectionContext,
+                    );
+                warehouseRef = {
+                    kind: 'resolved',
+                    projectUuid: body.projectUuid,
+                    credentials: {
+                        ...resolution.warehouseCredentials,
+                        dataTimezone,
+                    },
+                    aiPlan: resolution.aiPlan,
+                    warehouseConnectionUuid: resolution.warehouseConnectionUuid,
+                    connectionRoute: resolution.connectionRoute,
+                    cachePolicy: 'disabled',
+                };
+            } else {
+                this.assertCanUseOrganizationWarehouseCredentials(
+                    account,
+                    connectionOrganizationUuid,
+                    { warehouseConnection: body.credentials },
+                );
+                const { warehouseConnection } =
+                    await this._resolveWarehouseClientCredentials(
+                        { warehouseConnection: body.credentials },
+                        account.user.userUuid,
+                        connectionOrganizationUuid,
+                        'persist',
+                    );
+                warehouseRef = {
+                    kind: 'resolved',
+                    projectUuid: null,
+                    credentials: { ...warehouseConnection, dataTimezone },
+                    aiPlan: null,
+                    warehouseConnectionUuid: null,
+                    connectionRoute: null,
+                    cachePolicy: 'disabled',
+                };
+            }
+        } else {
+            warehouseRef = {
+                kind: 'bypass',
+                mode: 'timezone_preview',
+                projectUuid: body.mode === 'edit' ? body.projectUuid : null,
+                credentials:
+                    prepareWarehouseOAuthCredentials(effectiveCredentials),
+            };
+        }
+        return this.warehouseClientFactory.withWarehouseClient(
+            warehouseRef,
+            connectionContext,
+            async ({ warehouseClient }) => {
+                const adapterType = warehouseClient.getAdapterType();
+                // A fixed wall-clock, read through the session timezone the client
+                // sets from dataTimezone (the third runQuery arg below).
+                const nowWallClock = currentUtcWallClock();
+                const sql = buildDataTimezonePreviewSql(
+                    adapterType,
+                    nowWallClock,
+                );
+                const queryTags: RunQueryTags = withAgentMarkerTag({
+                    organization_uuid: account.organization.organizationUuid,
+                    user_uuid: account.user.userUuid,
+                    query_context: QueryExecutionContext.API,
+                });
+                const { rows } = await warehouseClient.runQuery(
+                    sql,
+                    queryTags,
+                    dataTimezone,
+                );
+                if (rows.length === 0) {
+                    throw new UnexpectedServerError(
+                        'Data timezone preview query returned no rows',
+                    );
+                }
+                return buildDataTimezonePreviewResponse({
+                    row: rows[0],
+                    nowWallClock,
+                    projectTimezone,
+                    dataTimezone,
+                });
+            },
+        );
     }
 
     async delete(projectUuid: string, user: SessionUser): Promise<void> {
@@ -3044,7 +7909,12 @@ export class ProjectService extends BaseService {
                     type: project.type,
                     organizationUuid: project.organizationUuid,
                     projectUuid: project.projectUuid,
+                    upstreamProjectUuid: project.upstreamProjectUuid,
                     createdByUserUuid: project.createdByUserUuid,
+                    metadata: {
+                        createdByUserUuid: project.createdByUserUuid,
+                        type: project.type,
+                    },
                 }),
             )
         ) {
@@ -3053,7 +7923,62 @@ export class ProjectService extends BaseService {
             );
         }
 
-        await this.projectModel.delete(projectUuid);
+        if (project.type === ProjectType.TRAINING) {
+            // Deleting the playground takes every learner's copy with it and
+            // switches Learn off for the org, so it is an org admin's call
+            // (the same permission Enable Learn needs), not a project
+            // admin's.
+            if (
+                auditedAbility.cannot(
+                    'manage',
+                    subject('Organization', {
+                        organizationUuid: project.organizationUuid,
+                    }),
+                )
+            ) {
+                throw new ForbiddenError(
+                    'Only an organization admin can delete the training playground',
+                );
+            }
+            // The copies exist only as sandboxes of this project; without it
+            // they would linger as ordinary previews until they expire.
+            const copies = (
+                await this.projectModel.getAllByOrganizationUuid(
+                    project.organizationUuid,
+                )
+            ).filter(
+                (candidate) =>
+                    candidate.type === ProjectType.PREVIEW &&
+                    candidate.provisioningSource === 'training' &&
+                    candidate.upstreamProjectUuid === projectUuid,
+            );
+            await Promise.all(
+                copies.map((copy) =>
+                    this.deletePreviewAndAppFiles(copy.projectUuid),
+                ),
+            );
+        }
+
+        if (project.provisioningSource === 'playground') {
+            await this.projectModel.deleteContentInBatches(projectUuid);
+            await this.onboardingModel.runInPlaygroundProvisioningLock(
+                project.organizationUuid,
+                async (trx) => {
+                    await this.onboardingModel.getByOrganizationUuid(
+                        project.organizationUuid,
+                        trx,
+                    );
+                    await this.onboardingModel.update(
+                        project.organizationUuid,
+                        { playgroundProjectDeletedAt: new Date() },
+                        trx,
+                    );
+                    await this.projectModel.delete(projectUuid, trx);
+                },
+            );
+        } else {
+            await this.projectModel.delete(projectUuid);
+        }
 
         this.analytics.track({
             event: 'project.deleted',
@@ -3071,7 +7996,10 @@ export class ProjectService extends BaseService {
 
         const results = await Promise.allSettled(
             expiredProjects.map(({ projectUuid }) =>
-                this.projectModel.delete(projectUuid).then(() => {
+                // A preview can carry copied data apps (every training copy
+                // does); deleting the rows alone leaves their bundles in the
+                // bucket for good.
+                this.deletePreviewAndAppFiles(projectUuid).then(() => {
                     this.logger.info(
                         `Deleted expired preview project: ${projectUuid}`,
                     );
@@ -3091,13 +8019,15 @@ export class ProjectService extends BaseService {
         return results.filter((r) => r.status === 'fulfilled').length;
     }
 
-    private async buildAdapter(
+    private async prepareCompileAdapter(
         projectUuid: string,
         user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
-    ): Promise<{
-        sshTunnel: SshTunnel<CreateWarehouseCredentials>;
-        adapter: ProjectAdapter;
-    }> {
+    ) {
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'compileProject',
+            );
         const project =
             await this.projectModel.getWithSensitiveFields(projectUuid);
         if (!project.warehouseConnection) {
@@ -3105,355 +8035,1575 @@ export class ProjectService extends BaseService {
                 'Warehouse credentials must be provided to connect to your dbt project',
             );
         }
+        const warehouseCredentials = this.lightdashConfig.warehouseClient
+            .resolveCompileCredentials
+            ? (
+                  await this.warehouseClientFactory.resolveWarehouseCredentials(
+                      {
+                          kind: 'binding',
+                          projectUuid,
+                          binding: { kind: 'original' },
+                      },
+                      connectionContextFromUser(
+                          { userUuid: user.userUuid },
+                          {
+                              organizationUuid: project.organizationUuid,
+                              queryContext: null,
+                              purpose: 'compile',
+                          },
+                      ),
+                  )
+              ).warehouseCredentials
+            : await this.prepareLegacyCompileCredentials(project, user);
         const cachedWarehouseCatalog =
             await this.projectModel.getWarehouseFromCache(projectUuid);
 
-        if (
-            project.warehouseConnection.type === WarehouseTypes.SNOWFLAKE &&
-            project.warehouseConnection.authenticationType === 'sso' &&
-            project.warehouseConnection.refreshToken
-        ) {
-            this.logger.debug(
-                `Refreshing snowflake warehouse credentials from refresh token on buildAdapter`,
+        const dbtConnection = await this.resolveDbtConnectionInstallationId(
+            project.dbtConnection,
+            user.organizationUuid,
+        );
+
+        const cachedWarehouse: CachedWarehouse = {
+            warehouseCatalog: cachedWarehouseCatalog,
+            onWarehouseCatalogChange: async (warehouseCatalog) => {
+                await this.projectModel.saveWarehouseToCache(
+                    projectUuid,
+                    warehouseCatalog,
+                );
+            },
+        };
+        const dbtVersionOption =
+            project.dbtVersion || DefaultSupportedDbtVersion;
+        const dbtPartialParse = await this.isDbtPartialParseEnabled(user);
+        return {
+            project,
+            dbtConnection,
+            warehouseCredentials,
+            cachedWarehouse,
+            dbtVersionOption,
+            dbtPartialParse,
+        };
+    }
+
+    private async prepareLegacyCompileCredentials(
+        project: Awaited<ReturnType<ProjectModel['getWithSensitiveFields']>>,
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+    ): Promise<CreateWarehouseCredentials> {
+        const { projectUuid } = project;
+        if (!project.warehouseConnection) {
+            throw new MissingWarehouseCredentialsError(
+                'Warehouse credentials must be provided to connect to your dbt project',
             );
-            const oldRefreshToken = project.warehouseConnection.refreshToken;
-            const { accessToken, refreshToken: newRefreshToken } =
-                await UserService.generateSnowflakeAccessToken(oldRefreshToken);
-            project.warehouseConnection.token = accessToken;
-            project.warehouseConnection.refreshToken = newRefreshToken;
-            if (newRefreshToken !== oldRefreshToken) {
-                await this.persistRefreshTokenRotation({
-                    source: { kind: 'project', projectUuid },
-                    oldRefreshToken,
-                    newRefreshToken,
-                });
-            }
+        }
+        let { warehouseConnection } = project;
+        if (!project.organizationWarehouseCredentialsUuid) {
+            warehouseConnection = await this.repairStalePreviewSsoCredentials(
+                projectUuid,
+                warehouseConnection,
+            );
+        }
+        if (
+            warehouseConnection.type === WarehouseTypes.SNOWFLAKE &&
+            warehouseConnection.authenticationType === 'sso' &&
+            warehouseConnection.refreshToken
+        ) {
+            const owner: CredentialOwner =
+                project.organizationWarehouseCredentialsUuid
+                    ? {
+                          kind: 'organization',
+                          uuid: project.organizationWarehouseCredentialsUuid,
+                      }
+                    : { kind: 'project', uuid: projectUuid };
+            const resolved =
+                await this.snowflakeOAuthCredentialResolver.refresh(
+                    {
+                        connection: warehouseConnection,
+                        stored: warehouseConnection,
+                        owner,
+                        context: connectionContextFromUser(user, {
+                            organizationUuid: project.organizationUuid,
+                            queryContext: null,
+                            purpose: 'compile',
+                        }),
+                        projectUuid,
+                        warehouseConnectionUuid: null,
+                        credentialKind: WarehouseCredentialKind.COMPILE,
+                        aiPlan: null,
+                    },
+                    {
+                        errorPolicy: 'raw',
+                        legacyOwner: { kind: 'project', uuid: projectUuid },
+                    },
+                );
+            warehouseConnection = prepareWarehouseOAuthCredentials(
+                resolved.clientCredentials,
+            );
         }
 
         if (
-            project.warehouseConnection.type === WarehouseTypes.DATABRICKS &&
-            project.warehouseConnection.authenticationType ===
-                DatabricksAuthenticationType.OAUTH_M2M
+            warehouseConnection.type === WarehouseTypes.DATABRICKS &&
+            (warehouseConnection.authenticationType ===
+                DatabricksAuthenticationType.OAUTH_M2M ||
+                warehouseConnection.authenticationType ===
+                    DatabricksAuthenticationType.OAUTH_U2M)
         ) {
-            // If we have OAuth credentials but no refresh token, exchange them for tokens
+            let selectionSource: CredentialSelectionSource = {
+                owner: project.organizationWarehouseCredentialsUuid
+                    ? {
+                          kind: 'organization',
+                          uuid: project.organizationWarehouseCredentialsUuid,
+                      }
+                    : { kind: 'project', uuid: projectUuid },
+            };
+            let selected = warehouseConnection;
             if (
-                project.warehouseConnection.oauthClientId &&
-                project.warehouseConnection.oauthClientSecret &&
-                !project.warehouseConnection.refreshToken
+                selected.authenticationType ===
+                    DatabricksAuthenticationType.OAUTH_U2M &&
+                !selected.refreshToken
             ) {
-                this.logger.debug(
-                    `Exchanging Databricks OAuth credentials for access token on buildAdapter`,
+                const policy = await resolvePersonalCredentialPolicy(
+                    this.featureFlagModel,
+                    {
+                        organizationUuid: project.organizationUuid,
+                        userUuid: user.userUuid,
+                    },
                 );
-                const { accessToken, refreshToken } =
-                    await exchangeDatabricksOAuthCredentials(
-                        project.warehouseConnection.serverHostName,
-                        project.warehouseConnection.oauthClientId,
-                        project.warehouseConnection.oauthClientSecret,
-                    );
-                project.warehouseConnection.token = accessToken;
-                if (refreshToken) {
-                    project.warehouseConnection.refreshToken = refreshToken;
-                    // Note: refresh token will be persisted when project credentials are next saved
-                }
-            } else if (project.warehouseConnection.refreshToken) {
-                // If we have a refresh token, use it to get a fresh access token
-                this.logger.debug(
-                    `Refreshing databricks warehouse credentials from refresh token on buildAdapter`,
-                );
-                let clientId: string;
-                let clientSecret: string | undefined;
-                if (project.warehouseConnection.oauthClientId) {
-                    clientId = project.warehouseConnection.oauthClientId;
-                    clientSecret =
-                        project.warehouseConnection.oauthClientSecret;
-                } else if (this.lightdashConfig.auth.databricks.clientId) {
-                    clientId = this.lightdashConfig.auth.databricks.clientId;
-                    clientSecret =
-                        this.lightdashConfig.auth.databricks.clientSecret;
-                } else {
-                    clientId = DATABRICKS_DEFAULT_OAUTH_CLIENT_ID;
-                    clientSecret = undefined;
-                }
-                const { accessToken, refreshToken } =
-                    await refreshDatabricksOAuthToken(
-                        project.warehouseConnection.serverHostName,
-                        clientId,
-                        project.warehouseConnection.refreshToken,
-                        clientSecret,
-                    );
-                project.warehouseConnection.token = accessToken;
-                project.warehouseConnection.refreshToken = refreshToken;
-            }
-        }
-
-        if (
-            project.warehouseConnection.type === WarehouseTypes.DATABRICKS &&
-            project.warehouseConnection.authenticationType ===
-                DatabricksAuthenticationType.OAUTH_U2M
-        ) {
-            // For U2M OAuth, resolve refresh token from user credentials if not on project
-            let u2mRefreshToken =
-                project.warehouseConnection.refreshToken ?? undefined;
-
-            let userCredOauthClientId: string | undefined;
-            if (!u2mRefreshToken) {
                 const userCreds =
                     await this.userWarehouseCredentialsModel.findForProjectWithSecrets(
                         projectUuid,
                         user.userUuid,
                         WarehouseTypes.DATABRICKS,
+                        policy,
                     );
-                if (
+                if (policy.strictPersonalOverlay && userCreds) {
+                    const refreshSource = {
+                        credentials: userCreds.credentials,
+                        fallback: selected,
+                        personalCredentialPolicy: policy,
+                    };
+                    const composed = composePersonalWarehouseCredentials(
+                        selected,
+                        projectPersonalWarehouseCredentials(
+                            userCreds.credentials,
+                        ),
+                    );
+                    if (composed.type !== WarehouseTypes.DATABRICKS)
+                        throw new ParameterError(
+                            'Personal warehouse credentials do not match this connection.',
+                        );
+                    selected = composed;
+                    selectionSource = {
+                        owner: {
+                            kind: 'user',
+                            uuid: userCreds.uuid,
+                            purpose: UserWarehouseCredentialPurpose.DEFAULT,
+                        },
+                        refreshSource,
+                    };
+                } else if (
                     userCreds?.credentials.type === WarehouseTypes.DATABRICKS &&
                     userCreds.credentials.authenticationType ===
                         DatabricksAuthenticationType.OAUTH_U2M &&
                     userCreds.credentials.refreshToken
                 ) {
-                    u2mRefreshToken = userCreds.credentials.refreshToken;
-                    userCredOauthClientId = userCreds.credentials.oauthClientId;
-                }
-            }
-
-            if (u2mRefreshToken) {
-                this.logger.debug(
-                    `Refreshing databricks U2M OAuth token from refresh token on buildAdapter`,
-                );
-                // Resolve client: user cred → project → server config → default
-                let clientId: string;
-                let clientSecret: string | undefined;
-                const storedClientId =
-                    userCredOauthClientId ||
-                    project.warehouseConnection.oauthClientId;
-                if (storedClientId) {
-                    clientId = storedClientId;
-                } else if (this.lightdashConfig.auth.databricks.clientId) {
-                    clientId = this.lightdashConfig.auth.databricks.clientId;
-                } else {
-                    clientId = DATABRICKS_DEFAULT_OAUTH_CLIENT_ID;
-                }
-
-                if (
-                    clientId === this.lightdashConfig.auth.databricks.clientId
-                ) {
-                    clientSecret =
-                        this.lightdashConfig.auth.databricks.clientSecret;
-                }
-
-                const { accessToken, refreshToken } =
-                    await refreshDatabricksOAuthToken(
-                        project.warehouseConnection.serverHostName,
-                        clientId,
-                        u2mRefreshToken,
-                        clientSecret,
-                    );
-                project.warehouseConnection.token = accessToken;
-                project.warehouseConnection.refreshToken = refreshToken;
-            }
-        }
-
-        const sshTunnel = new SshTunnel(project.warehouseConnection);
-        await sshTunnel.connect();
-
-        const adapter = await projectAdapterFromConfig(
-            project.dbtConnection,
-            sshTunnel.overrideCredentials,
-            {
-                warehouseCatalog: cachedWarehouseCatalog,
-                onWarehouseCatalogChange: async (warehouseCatalog) => {
-                    await this.projectModel.saveWarehouseToCache(
-                        projectUuid,
-                        warehouseCatalog,
-                    );
-                },
-            },
-            project.dbtVersion || DefaultSupportedDbtVersion,
-            this.analytics,
-        );
-        return { adapter, sshTunnel };
-    }
-
-    static updateExploreWithDateZoom(
-        explore: Explore,
-        metricQuery: MetricQuery,
-        warehouseSqlBuilder: WarehouseSqlBuilder,
-        availableParameters: string[],
-        dateZoom?: DateZoom,
-    ): {
-        explore: Explore;
-        dateZoomApplied: boolean;
-        dateZoomTargetFieldId?: string;
-    } {
-        if (dateZoom?.granularity) {
-            const allDimensionsMap = getAllDimensionsMap(explore);
-            const timeDimensionsMap = getTimeDimensionsMap(explore);
-
-            let timeOrDateDimension = dateZoom?.xAxisFieldId;
-
-            if (!timeOrDateDimension) {
-                timeOrDateDimension = metricQuery.dimensions.find(
-                    (dimension) =>
-                        !!resolveToBaseTimeDimension(
-                            dimension,
-                            allDimensionsMap,
-                            timeDimensionsMap,
-                        ),
-                );
-            }
-
-            if (timeOrDateDimension) {
-                const dimToOverride = allDimensionsMap[timeOrDateDimension];
-                const baseTimeDimension = resolveToBaseTimeDimension(
-                    timeOrDateDimension,
-                    allDimensionsMap,
-                    timeDimensionsMap,
-                );
-
-                if (!baseTimeDimension) {
-                    return { explore, dateZoomApplied: false };
-                }
-
-                // Skip sub-day zoom for DATE-only dimensions (no time component)
-                if (
-                    baseTimeDimension.type === DimensionType.DATE &&
-                    isStandardDateGranularity(dateZoom.granularity) &&
-                    isSubDayGranularity(dateZoom.granularity)
-                ) {
-                    return { explore, dateZoomApplied: false };
-                }
-
-                if (!isStandardDateGranularity(dateZoom.granularity)) {
-                    // Custom granularity: find the pre-compiled dimension
-                    const customDimName = `${baseTimeDimension.name}_${dateZoom.granularity}`;
-                    const customDim = Object.values(explore.tables).reduce<
-                        CompiledDimension | undefined
-                    >(
-                        (found, t) => found ?? t.dimensions[customDimName],
-                        undefined,
-                    );
-
-                    if (customDim) {
-                        const dimWithCustomOverride: CompiledDimension = {
-                            ...customDim,
-                            name: dimToOverride.name,
-                        };
-                        return {
-                            explore: replaceDimensionInExplore(
-                                explore,
-                                dimWithCustomOverride,
-                            ),
-                            dateZoomApplied: true,
-                            dateZoomTargetFieldId: timeOrDateDimension,
-                        };
-                    }
-                    // Custom granularity not found — return unchanged explore
-                } else {
-                    // Standard granularity: existing logic
-                    const dimWithGranularityOverride =
-                        createDimensionWithGranularity(
-                            dimToOverride.name,
-                            baseTimeDimension,
-                            explore,
-                            warehouseSqlBuilder,
-                            dateZoom.granularity,
-                            availableParameters,
-                        );
-                    return {
-                        explore: replaceDimensionInExplore(
-                            explore,
-                            dimWithGranularityOverride,
-                        ),
-                        dateZoomApplied: true,
-                        dateZoomTargetFieldId: timeOrDateDimension,
+                    const refreshSource = {
+                        credentials: userCreds.credentials,
+                        fallback: selected,
+                        personalCredentialPolicy: policy,
+                    };
+                    selected = {
+                        ...selected,
+                        refreshToken: userCreds.credentials.refreshToken,
+                        oauthClientId:
+                            userCreds.credentials.oauthClientId ||
+                            selected.oauthClientId,
+                    };
+                    selectionSource = {
+                        owner: {
+                            kind: 'user',
+                            uuid: userCreds.uuid,
+                            purpose: UserWarehouseCredentialPurpose.DEFAULT,
+                        },
+                        refreshSource,
                     };
                 }
             }
+            if (
+                selected.refreshToken ||
+                (selected.authenticationType ===
+                    DatabricksAuthenticationType.OAUTH_M2M &&
+                    selected.oauthClientId &&
+                    selected.oauthClientSecret)
+            ) {
+                const resolved =
+                    await this.databricksOAuthCredentialResolver.refresh(
+                        {
+                            connection: selected,
+                            stored: selected,
+                            ...selectionSource,
+                            context: connectionContextFromUser(user, {
+                                organizationUuid: project.organizationUuid,
+                                queryContext: null,
+                                purpose: 'compile',
+                            }),
+                            projectUuid,
+                            warehouseConnectionUuid: null,
+                            credentialKind: WarehouseCredentialKind.COMPILE,
+                            aiPlan: null,
+                        },
+                        {
+                            errorPolicy: 'raw',
+                            legacyOwner: null,
+                            refreshTokenFallback: 'response',
+                        },
+                    );
+                warehouseConnection = {
+                    ...warehouseConnection,
+                    token: resolved.clientCredentials.token,
+                    refreshToken: resolved.clientCredentials.refreshToken,
+                };
+            }
         }
-        return { explore, dateZoomApplied: false };
+
+        return prepareWarehouseOAuthCredentials(warehouseConnection);
     }
 
-    static async _compileQuery({
-        metricQuery,
-        explore,
-        warehouseSqlBuilder,
-        intrinsicUserAttributes,
-        userAttributes,
-        timezone,
-        dateZoom,
-        parameters,
-        availableParameterDefinitions,
-        pivotConfiguration,
-        pivotDimensions,
-        continueOnError,
-        useTimezoneAwareDateTrunc,
-        columnTimezone,
-        applyDateZoomToFilters,
-    }: {
-        metricQuery: MetricQuery;
-        explore: Explore;
-        warehouseSqlBuilder: WarehouseSqlBuilder;
-        intrinsicUserAttributes: IntrinsicUserAttributes;
-        userAttributes: UserAttributeValueMap;
-        timezone: string;
-        dateZoom?: DateZoom;
-        parameters?: ParametersValuesMap;
-        availableParameterDefinitions: ParameterDefinitions;
-        pivotConfiguration?: PivotConfiguration;
-        pivotDimensions?: string[];
-        continueOnError?: boolean;
-        useTimezoneAwareDateTrunc?: boolean;
-        columnTimezone?: string;
-        /**
-         * When true, WHERE filter rules targeting the date-zoom dimension are
-         * compiled against the zoom-rewritten SQL (e.g. DATE_TRUNC('MONTH', ...)).
-         * Only safe on the underlying-data path where filters are solely click-filters.
-         */
-        applyDateZoomToFilters?: boolean;
-    }): Promise<CompiledQuery> {
-        const availableParameters = Object.keys(availableParameterDefinitions);
-
+    private async withCompileAdapter<T>(
+        projectUuid: string,
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+        fn: (primary: {
+            adapter: ProjectAdapter;
+            connection: ScopedWarehouseConnection;
+            warehouseCredentials: CreateWarehouseCredentials;
+            cachedWarehouse: CachedWarehouse;
+            dbtVersionOption: DbtVersionOption;
+            dbtPartialParse: boolean;
+            dbtTargetPolicy: DbtTargetPolicy;
+        }) => Promise<T>,
+        manifestFetchAdapters: ProjectAdapter[],
+    ): Promise<T> {
         const {
-            explore: exploreWithOverride,
-            dateZoomApplied,
-            dateZoomTargetFieldId,
-        } = ProjectService.updateExploreWithDateZoom(
-            explore,
-            metricQuery,
-            warehouseSqlBuilder,
-            availableParameters,
-            dateZoom,
+            project,
+            dbtConnection,
+            warehouseCredentials,
+            cachedWarehouse,
+            dbtVersionOption,
+            dbtPartialParse,
+        } = await this.prepareCompileAdapter(projectUuid, user);
+        await this.armCrossSourceCompile(projectUuid, user);
+        const dbtTargetPolicy = await this.getDbtTargetPolicy(
+            project.organizationUuid,
+        );
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'compileProject',
+            );
+        return this.warehouseClientFactory.withWarehouseClient(
+            { kind: 'compile', projectUuid, credentials: warehouseCredentials },
+            connectionContextFromUser(
+                { userUuid: user.userUuid },
+                {
+                    organizationUuid: project.organizationUuid,
+                    queryContext: null,
+                    purpose: 'compile',
+                },
+            ),
+            async (connection) => {
+                const adapter = await projectAdapterFromConfig(
+                    dbtConnection,
+                    connection.warehouseClient,
+                    cachedWarehouse,
+                    dbtVersionOption,
+                    this.lightdashConfig.dbt.environmentVariableAllowlist,
+                    dbtPartialParse
+                        ? getDbtPartialParseBaselinePath({
+                              projectUuid,
+                              dbtSourceUuid: null,
+                          })
+                        : null,
+                    {
+                        resolve: () =>
+                            this.warehouseClientFactory.toDbtTarget(
+                                connection.warehouseCredentials,
+                                connection.connectionCredentials,
+                                dbtTargetPolicy,
+                            ),
+                        policy: dbtTargetPolicy,
+                    },
+                    this.analytics,
+                );
+                try {
+                    return await fn({
+                        adapter,
+                        connection,
+                        warehouseCredentials: connection.connectionCredentials,
+                        cachedWarehouse,
+                        dbtVersionOption,
+                        dbtPartialParse,
+                        dbtTargetPolicy,
+                    });
+                } finally {
+                    await this.destroyPrimaryCompileAdapter(
+                        adapter,
+                        manifestFetchAdapters,
+                    );
+                }
+            },
+        );
+    }
+
+    private async destroyPrimaryCompileAdapter(
+        adapter: ProjectAdapter,
+        manifestFetchAdapters: ProjectAdapter[],
+    ): Promise<void> {
+        try {
+            await adapter.destroy();
+        } catch (error) {
+            if (!manifestFetchAdapters.includes(adapter)) throw error;
+            this.logger.warn(
+                'Failed to destroy a dbt source adapter after manifest merge',
+                { error },
+            );
+        }
+    }
+
+    /**
+     * Build an adapter for an additional dbt source, reusing the project's already
+     * resolved warehouse setup (so we don't re-resolve and re-rotate credentials per
+     * source). Used only to read the source's manifest, not to compile. The source
+     * compiles against its own database and schema when it has them: its models can
+     * live elsewhere in the same warehouse, and the project's location would resolve
+     * every one of them to a table holding different data or none.
+     */
+    private async buildSourceAdapter(
+        dbtConnection: DbtProjectConfig,
+        warehouseLocation: WarehouseLocation,
+        organizationUuid: string | undefined,
+        shared: {
+            warehouseCredentials: CreateWarehouseCredentials;
+            cachedWarehouse: CachedWarehouse;
+            dbtVersionOption: DbtVersionOption;
+            connection: ScopedWarehouseConnection;
+        },
+        partialParseBaselinePath: string | null,
+        dbtTargetPolicy: DbtTargetPolicy,
+    ): Promise<ProjectAdapter> {
+        const resolvedConnection =
+            await this.resolveDbtConnectionInstallationId(
+                dbtConnection,
+                organizationUuid,
+            );
+        const warehouseCredentials = applyWarehouseLocation(
+            shared.connection.connectionCredentials,
+            warehouseLocation,
+        );
+        return projectAdapterFromConfig(
+            resolvedConnection,
+            shared.connection.deriveClient(warehouseCredentials),
+            shared.cachedWarehouse,
+            shared.dbtVersionOption,
+            this.lightdashConfig.dbt.environmentVariableAllowlist,
+            partialParseBaselinePath,
+            {
+                resolve: () =>
+                    this.warehouseClientFactory.toDbtTarget(
+                        shared.connection.warehouseCredentials,
+                        warehouseCredentials,
+                        dbtTargetPolicy,
+                    ),
+                policy: dbtTargetPolicy,
+            },
+            this.analytics,
+        );
+    }
+
+    private async getDbtTargetPolicy(
+        organizationUuid: string | undefined,
+    ): Promise<DbtTargetPolicy> {
+        if (organizationUuid === undefined)
+            throw new ForbiddenError(
+                'Project organization is required to run dbt.',
+            );
+        const { enabled } = await this.featureFlagModel.get({
+            user: { organizationUuid },
+            featureFlagId: FeatureFlags.DbtExplicitCredentials,
+        });
+        return { explicitCredentials: enabled };
+    }
+
+    private async isDbtPartialParseEnabled(
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+    ): Promise<boolean> {
+        const { enabled } = await this.featureFlagModel.get({
+            featureFlagId: FeatureFlags.DbtPartialParse,
+            user: {
+                userUuid: user.userUuid,
+                organizationUuid: user.organizationUuid,
+            },
+        });
+        return enabled;
+    }
+
+    /**
+     * Formats collisions where two sources use the same manifest unique_id,
+     * identifying shared dbt project names when model ids reveal them.
+     */
+    private static formatManifestCollisionsError(
+        collisions: ManifestCollision[],
+    ): string {
+        const MAX_COLLISIONS_IN_ERROR = 10;
+        const shown = collisions.slice(0, MAX_COLLISIONS_IN_ERROR);
+        const remainder = collisions.length - shown.length;
+        const details = shown
+            .map(
+                (c) =>
+                    `${c.section === 'nodes' ? 'Model' : 'Entry'} "${
+                        c.key
+                    }" is defined in both "${c.winningSource}" and "${
+                        c.supersededSource
+                    }"`,
+            )
+            .join('; ');
+        const packageNames = collisions.map(
+            (collision) => collision.key.match(/^[^.]+\.([^.]+)\./)?.[1],
+        );
+        const sharedPackageNames = [
+            ...new Set(packageNames.filter((name) => name !== undefined)),
+        ].sort();
+        const allCollisionsIdentifyPackages =
+            packageNames.length > 0 &&
+            packageNames.every((name) => name !== undefined);
+
+        if (allCollisionsIdentifyPackages) {
+            const formatQuotedList = (values: string[]) => {
+                const shownValues = values.slice(0, MAX_COLLISIONS_IN_ERROR);
+                const quotedValues = shownValues.map((value) => `"${value}"`);
+                const formattedValues =
+                    quotedValues.length <= 2
+                        ? quotedValues.join(' and ')
+                        : `${quotedValues.slice(0, -1).join(', ')}, and ${
+                              quotedValues.at(-1) ?? ''
+                          }`;
+                const omittedValues = values.length - shownValues.length;
+                return omittedValues > 0
+                    ? `${formattedValues} and ${omittedValues} more`
+                    : formattedValues;
+            };
+            const sourceNames = [
+                ...new Set(
+                    collisions.flatMap((collision) => [
+                        collision.winningSource,
+                        collision.supersededSource,
+                    ]),
+                ),
+            ].sort();
+
+            return (
+                `The dbt sources ${formatQuotedList(
+                    sourceNames,
+                )} use the same dbt project name${
+                    sharedPackageNames.length === 1 ? '' : 's'
+                } ${formatQuotedList(
+                    sharedPackageNames,
+                )}. Change the name: value in one repository's dbt_project.yml and deploy again. ` +
+                `${details}${remainder > 0 ? `; and ${remainder} more` : ''}.`
+            );
+        }
+
+        return (
+            `Merging dbt sources found ${collisions.length} naming collision${
+                collisions.length === 1 ? '' : 's'
+            }: ${details}${remainder > 0 ? `; and ${remainder} more` : ''}. ` +
+            `Rename or remove the duplicate(s) before deploying.`
+        );
+    }
+
+    private async stageMergedManifest(
+        projectUuid: string,
+        manifest: DbtManifest,
+    ): Promise<Buffer | undefined> {
+        try {
+            return await gzipAsync(
+                JSON.stringify(projectMergedManifest(manifest)),
+            );
+        } catch (error) {
+            this.logger.warn(
+                `Failed to serialize merged dbt manifest for project ${projectUuid}: ${getErrorMessage(error)}`,
+            );
+            return undefined;
+        }
+    }
+
+    private readonly sourceRefCatalogConfirmations = new WeakMap<
+        Buffer,
+        CrossSourceCatalogCache
+    >();
+
+    private async persistMergedManifest(
+        projectUuid: string,
+        stagedMergedManifest: Buffer | undefined,
+    ): Promise<void> {
+        if (!stagedMergedManifest) {
+            return;
+        }
+        try {
+            await this.projectModel.upsertMergedManifest(
+                projectUuid,
+                stagedMergedManifest,
+            );
+            await this.sourceRefCatalogConfirmations
+                .get(stagedMergedManifest)
+                ?.confirm();
+        } catch (error) {
+            this.logger.warn(
+                `Failed to persist merged dbt manifest for project ${projectUuid}: ${getErrorMessage(error)}`,
+            );
+        }
+    }
+
+    private async deleteMergedManifestBestEffort(
+        projectUuid: string,
+        afterCompile = false,
+    ): Promise<void> {
+        if (
+            agentExecutionContext.getStore()?.agentConnectionExecution &&
+            !afterCompile
+        )
+            return;
+        try {
+            await this.projectModel.deleteMergedManifest(projectUuid);
+        } catch (error) {
+            this.logger.warn(
+                `Failed to delete merged dbt manifest for project ${projectUuid}: ${getErrorMessage(error)}`,
+            );
+        }
+    }
+
+    private logDbtSourceFetched({
+        event,
+        projectUuid,
+        jobUuid,
+        sourceName,
+        durationMs,
+        manifest,
+        selectedModelIds,
+        timings,
+    }: {
+        event: 'dbt.compile.sourceFetched' | 'dbt.compile.primarySourceFetched';
+        projectUuid: string;
+        jobUuid: string | null;
+        sourceName: string;
+        durationMs: number;
+        manifest: DbtManifest;
+        selectedModelIds: string[] | undefined;
+        timings: DbtManifestFetchTimings;
+    }): void {
+        const modelCount = Object.values(manifest.nodes).filter(
+            (node) => node.resource_type === 'model',
+        ).length;
+        this.logger.info(
+            `${event} projectUuid=${projectUuid} sourceName=${sourceName} durationMs=${durationMs} models=${modelCount} gitRefreshMs=${
+                timings.gitRefreshMs ?? 'none'
+            } depsMs=${timings.depsMs ?? 'none'} manifestMs=${
+                timings.manifestMs
+            }`,
+            {
+                event,
+                projectUuid,
+                jobUuid,
+                sourceName,
+                durationMs,
+                modelCount,
+                selectedModelCount: selectedModelIds?.length ?? null,
+                gitRefreshMs: timings.gitRefreshMs,
+                depsMs: timings.depsMs,
+                manifestMs: timings.manifestMs,
+            },
+        );
+    }
+
+    private async armCrossSourceCompile(
+        projectUuid: string,
+        user: Pick<SessionUser, 'userUuid' | 'organizationUuid'>,
+    ): Promise<void> {
+        const { enabled } = await this.featureFlagModel.get({
+            featureFlagId: FeatureFlags.CrossSourceDbtRefs,
+            user,
+        });
+        if (!enabled) return;
+        const sources =
+            await this.projectDbtSourcesModel.getSources(projectUuid);
+        if (sources.length > 0) armCompileShutdown();
+    }
+
+    private static async scanAdapter(
+        adapter: ProjectAdapter,
+        options?: { signal?: AbortSignal },
+    ) {
+        const { projectDir } = await adapter.prepareDbtSource(options);
+        return projectDir === null ? null : scanDbtProject(projectDir);
+    }
+
+    /**
+     * Merge the primary source's manifest with every additional source's manifest
+     * into one combined manifest, then return a MANIFEST adapter over it so a single
+     * compile produces the union of all sources' explores with cross-source refs
+     * resolved. Bare model-name collisions are qualified during compilation.
+     * Identical manifest unique_ids still fail because qualification happens after
+     * merging, when one of those entries has already been dropped. Source adapters
+     * are pushed onto `manifestFetchAdapters` for the caller to destroy.
+     */
+    private async buildMergedManifestAdapter({
+        projectUuid,
+        organizationUuid,
+        userUuid,
+        primary,
+        sources,
+        manifestFetchAdapters,
+        jobUuid,
+    }: {
+        projectUuid: string;
+        organizationUuid: string | undefined;
+        userUuid: string;
+        jobUuid?: string;
+        primary: {
+            adapter: ProjectAdapter;
+            connection: ScopedWarehouseConnection;
+            warehouseCredentials: CreateWarehouseCredentials;
+            cachedWarehouse: CachedWarehouse;
+            dbtVersionOption: DbtVersionOption;
+            dbtPartialParse: boolean;
+            dbtTargetPolicy: DbtTargetPolicy;
+        };
+        sources: ProjectDbtSource[];
+        manifestFetchAdapters: ProjectAdapter[];
+    }): Promise<ResolvedCompileAdapter> {
+        const shared = {
+            warehouseCredentials: primary.warehouseCredentials,
+            cachedWarehouse: primary.cachedWarehouse,
+            dbtVersionOption: primary.dbtVersionOption,
+            connection: primary.connection,
+        };
+
+        // The primary git adapter is only read for its manifest here; the merged
+        // MANIFEST adapter is what compiles, so destroy the primary clone in finally.
+        manifestFetchAdapters.push(primary.adapter);
+
+        const compilableSources = sources.filter(
+            (
+                source,
+            ): source is ProjectDbtSource & {
+                dbtConnection: DbtProjectConfig;
+            } => source.dbtConnection !== null,
+        );
+        sources
+            .filter(
+                (source) =>
+                    source.dbtConnection === null && !source.hasCredentialError,
+            )
+            .forEach((source) => {
+                this.logger.warn(
+                    `Skipping dbt source "${source.name}" (${source.projectDbtSourceUuid}) — it has no dbt connection configured`,
+                );
+            });
+
+        const identity =
+            await this.projectModel.getDbtSourceIdentity(projectUuid);
+
+        const isolation = new SourceFailureIsolation(
+            this.projectModel,
+            projectUuid,
+            identity.dbtSourceUuid,
+            async (warning) => {
+                if (jobUuid)
+                    await this.jobModel.appendJobStepWarning(
+                        jobUuid,
+                        JobStepType.COMPILING,
+                        warning,
+                    );
+            },
         );
 
-        const compiledMetricQuery = compileMetricQuery({
-            explore: exploreWithOverride,
-            metricQuery,
-            warehouseSqlBuilder,
-            availableParameters,
-        });
-
-        const queryBuilder = new MetricQueryBuilder({
-            explore: exploreWithOverride,
-            compiledMetricQuery,
-            warehouseSqlBuilder,
-            intrinsicUserAttributes,
-            userAttributes,
-            timezone,
-            parameters,
-            parameterDefinitions: availableParameterDefinitions,
-            pivotConfiguration,
-            pivotDimensions,
-            continueOnError,
-            originalExplore: dateZoom ? explore : undefined,
-            dateZoomFilterTargetFieldId:
-                applyDateZoomToFilters && dateZoomApplied
-                    ? dateZoomTargetFieldId
-                    : undefined,
-            useTimezoneAwareDateTrunc,
-            columnTimezone,
-        });
-
-        return wrapSentryTransactionSync('QueryBuilder.buildQuery', {}, () =>
-            queryBuilder.compileQuery(),
+        await Promise.all(
+            sources
+                .filter(
+                    (source) =>
+                        source.hasCredentialError &&
+                        source.dbtConnection === null,
+                )
+                .map((source) =>
+                    isolation.skip(
+                        source.projectDbtSourceUuid,
+                        source.name,
+                        new ParameterError(
+                            'The stored dbt credentials could not be decrypted.',
+                        ),
+                        'prepare',
+                    ),
+                ),
         );
+
+        const concurrencyDecision = resolveDbtSourceFetchConcurrency(
+            this.lightdashConfig.dbt.sourceFetchConcurrency,
+            undefined,
+            this.lightdashConfig.dbt,
+        );
+        const diskPool = new DbtSourceDiskPool(concurrencyDecision.chosen);
+        // The default log format renders the message and drops metadata, so the decisive
+        // values ride in both. Typed fields stay for instances on the json format.
+        this.logger.info(
+            `dbt.compile.sourceFetchStart projectUuid=${projectUuid} sources=${
+                compilableSources.length
+            } concurrency=${concurrencyDecision.chosen} cores=${
+                concurrencyDecision.availableParallelism
+            } memoryDerivedLimit=${
+                concurrencyDecision.memoryDerivedLimit ?? 'none'
+            } envOverride=${concurrencyDecision.override ?? 'none'} diskAvailableBytes=${concurrencyDecision.diskAvailableBytes ?? 'unknown'} diskBudgetSource=${concurrencyDecision.diskBudgetSource} diskDerivedLimit=${concurrencyDecision.diskDerivedLimit ?? 'none'} diskEvictions=0 diskRecreations=0`,
+            {
+                event: 'dbt.compile.sourceFetchStart',
+                projectUuid,
+                jobUuid: jobUuid ?? null,
+                sourceCount: compilableSources.length,
+                concurrency: concurrencyDecision.chosen,
+                envOverride: concurrencyDecision.override ?? null,
+                availableParallelism: concurrencyDecision.availableParallelism,
+                constrainedMemoryBytes:
+                    concurrencyDecision.constrainedMemoryBytes ?? null,
+                memoryDerivedLimit: concurrencyDecision.memoryDerivedLimit,
+                diskAvailableBytes: concurrencyDecision.diskAvailableBytes,
+                diskBudgetSource: concurrencyDecision.diskBudgetSource,
+                diskDerivedLimit: concurrencyDecision.diskDerivedLimit,
+                ...diskPool.stats,
+                nodeHeapLimitBytes: v8.getHeapStatistics().heap_size_limit,
+            },
+        );
+
+        const { enabled: crossSourceRefsEnabled } =
+            await this.featureFlagModel.get({
+                featureFlagId: FeatureFlags.CrossSourceDbtRefs,
+                user: { userUuid, organizationUuid },
+            });
+        const activeFetches = new Set<Promise<DbtManifestFetchResult>>();
+        const sourceAdapterBuilds = new Set<Promise<ProjectAdapter>>();
+        const logFetched = async (
+            event:
+                | 'dbt.compile.primarySourceFetched'
+                | 'dbt.compile.sourceFetched',
+            sourceName: string,
+            fetchManifest: () => Promise<DbtManifestFetchResult>,
+        ): Promise<DbtManifestFetchResult> => {
+            const startedAt = Date.now();
+            const manifestFetch = fetchManifest();
+            activeFetches.add(manifestFetch);
+            let result: DbtManifestFetchResult;
+            try {
+                result = await manifestFetch;
+            } finally {
+                activeFetches.delete(manifestFetch);
+            }
+            this.logDbtSourceFetched({
+                event,
+                projectUuid,
+                jobUuid: jobUuid ?? null,
+                sourceName,
+                durationMs: Date.now() - startedAt,
+                manifest: result.manifest,
+                selectedModelIds: result.selectedModelIds,
+                timings: result.timings,
+            });
+            return result;
+        };
+        const catalogCache = crossSourceRefsEnabled
+            ? new CrossSourceCatalogCache(
+                  this.dbtSourceRefCatalogModel,
+                  projectUuid,
+                  'original',
+                  resolveDbtVersion(primary.dbtVersionOption),
+                  jobUuid ?? null,
+              )
+            : null;
+        const cachedCatalogs = await catalogCache?.load([
+            { key: identity.dbtSourceName, uuid: identity.dbtSourceUuid },
+            ...compilableSources.map((source) => ({
+                key: source.name,
+                uuid: source.projectDbtSourceUuid,
+            })),
+        ]);
+        const sourceFetchStartedAt = Date.now();
+        const resolution = await resolveCrossSourceManifests<{
+            name: string;
+            precedence: number;
+            uuid: string;
+        }>({
+            enabled: crossSourceRefsEnabled,
+            signal: armCompileShutdown(),
+            onSourceFailure: async (task, error, phase) => {
+                const skipped = await isolation.skip(
+                    task.context.uuid,
+                    task.key,
+                    error,
+                    phase,
+                );
+                if (skipped) catalogCache?.discard(task.context.uuid);
+                return skipped;
+            },
+            onSourceFinal: async (task) => {
+                if (task.context.uuid === identity.dbtSourceUuid) {
+                    await primary.adapter.releaseDisk({ keepProject: true });
+                } else {
+                    await diskPool.release(task.context.uuid);
+                }
+            },
+            ...(crossSourceRefsEnabled
+                ? {
+                      signal: armCompileShutdown(),
+                      maxPasses: this.lightdashConfig.dbt.crossSourceMaxPasses,
+                      cache: cachedCatalogs,
+                      onSourceResolved: async ({
+                          task,
+                          nodes,
+                          projectName,
+                          referencedProjects,
+                      }) =>
+                          catalogCache!.resolved(
+                              task.context.uuid,
+                              nodes,
+                              projectName,
+                              referencedProjects,
+                          ),
+                      timeouts: {
+                          prepareMs:
+                              this.lightdashConfig.dbt
+                                  .crossSourcePrepareTimeoutMs,
+                          lsMs: this.lightdashConfig.dbt.crossSourceLsTimeoutMs,
+                          resolutionMs:
+                              this.lightdashConfig.dbt
+                                  .crossSourceResolutionTimeoutMs,
+                      },
+                  }
+                : {}),
+            concurrency: concurrencyDecision.chosen,
+            tasks: [
+                {
+                    prepare: (options) =>
+                        ProjectService.scanAdapter(primary.adapter, options),
+                    key: identity.dbtSourceName,
+                    context: {
+                        name: identity.dbtSourceName,
+                        precedence: 0,
+                        uuid: identity.dbtSourceUuid,
+                    },
+                    fetch: (options: DbtManifestFetchOptions) =>
+                        logFetched(
+                            'dbt.compile.primarySourceFetched',
+                            identity.dbtSourceName,
+                            async () => {
+                                try {
+                                    const result =
+                                        await primary.adapter.getDbtManifest(
+                                            options,
+                                        );
+                                    if (!crossSourceRefsEnabled)
+                                        await primary.adapter.releaseDisk({
+                                            keepProject: true,
+                                        });
+                                    return result;
+                                } catch (error) {
+                                    throw withCrossSourceRefsHint(
+                                        error,
+                                        crossSourceRefsEnabled,
+                                    );
+                                }
+                            },
+                        ),
+                },
+                ...compilableSources.map((source) => {
+                    let adapter: ProjectAdapter | null = null;
+                    const repoSuffix =
+                        'repository' in source.dbtConnection &&
+                        source.dbtConnection.repository
+                            ? ` (${source.dbtConnection.repository})`
+                            : '';
+                    const getAdapter = async (): Promise<ProjectAdapter> => {
+                        if (source.hasCredentialError)
+                            throw new ParameterError(
+                                'The stored dbt credentials could not be decrypted.',
+                            );
+                        if (adapter === null) {
+                            try {
+                                const build = this.buildSourceAdapter(
+                                    source.dbtConnection,
+                                    source.warehouseLocation,
+                                    organizationUuid,
+                                    shared,
+                                    primary.dbtPartialParse
+                                        ? getDbtPartialParseBaselinePath({
+                                              projectUuid,
+                                              dbtSourceUuid:
+                                                  source.projectDbtSourceUuid,
+                                          })
+                                        : null,
+                                    primary.dbtTargetPolicy,
+                                );
+                                sourceAdapterBuilds.add(build);
+                                try {
+                                    adapter = await build;
+                                } finally {
+                                    sourceAdapterBuilds.delete(build);
+                                }
+                                manifestFetchAdapters.push(adapter);
+                            } catch (error) {
+                                throw new DbtSourceError(
+                                    `Failed to connect dbt source "${source.name}"${repoSuffix}: ${getErrorMessage(error)}`,
+                                    error,
+                                );
+                            }
+                        }
+                        return adapter!;
+                    };
+                    const withDisk = <R>(
+                        operation: () => Promise<R>,
+                        signal?: AbortSignal,
+                    ) =>
+                        diskPool.run(
+                            source.projectDbtSourceUuid,
+                            getAdapter,
+                            operation,
+                            signal,
+                        );
+                    return {
+                        withDisk,
+                        prepareFetch: async (options: {
+                            signal: AbortSignal;
+                        }) =>
+                            ProjectService.scanAdapter(
+                                await getAdapter(),
+                                options,
+                            ),
+                        prepare: async (options?: { signal?: AbortSignal }) => {
+                            try {
+                                return await withDisk(
+                                    async () =>
+                                        ProjectService.scanAdapter(
+                                            await getAdapter(),
+                                            options,
+                                        ),
+                                    options?.signal,
+                                );
+                            } catch (error) {
+                                throw new DbtSourceError(
+                                    `Failed to load dbt source "${source.name}"${repoSuffix}: ${getErrorMessage(error)}`,
+                                    error,
+                                );
+                            }
+                        },
+                        key: source.name,
+                        context: {
+                            name: source.name,
+                            precedence: source.precedence,
+                            uuid: source.projectDbtSourceUuid,
+                        },
+                        fetch: (options: DbtManifestFetchOptions) =>
+                            logFetched(
+                                'dbt.compile.sourceFetched',
+                                source.name,
+                                async () => {
+                                    const sourceAdapter = await getAdapter();
+                                    try {
+                                        const result =
+                                            await sourceAdapter.getDbtManifest(
+                                                options,
+                                            );
+                                        validateDbtSourceManifest(
+                                            result.manifest,
+                                        );
+                                        if (!crossSourceRefsEnabled)
+                                            await sourceAdapter.releaseDisk();
+                                        return result;
+                                    } catch (error) {
+                                        const hinted = withCrossSourceRefsHint(
+                                            error,
+                                            crossSourceRefsEnabled,
+                                        );
+                                        throw new DbtSourceError(
+                                            `Failed to load dbt source "${source.name}"${repoSuffix}: ${getErrorMessage(hinted)}`,
+                                            hinted,
+                                        );
+                                    }
+                                },
+                            ),
+                    };
+                }),
+            ],
+        }).catch(async (error: unknown) => {
+            const cleanup = (async () => {
+                await Promise.allSettled([
+                    ...activeFetches,
+                    ...sourceAdapterBuilds,
+                ]);
+                await Promise.allSettled(
+                    manifestFetchAdapters.map((adapter) =>
+                        adapter.releaseDisk(),
+                    ),
+                );
+            })();
+            if (crossSourceRefsEnabled) {
+                await waitForDbtSourceCleanup(cleanup);
+                this.logger.info(
+                    `dbt.compile.crossSourceRefsResolved diskEvictions=${diskPool.stats.diskEvictions} diskRecreations=${diskPool.stats.diskRecreations} status=failed`,
+                    {
+                        event: 'dbt.compile.crossSourceRefsResolved',
+                        projectUuid,
+                        ...diskPool.stats,
+                        status: 'failed',
+                    },
+                );
+            } else await cleanup;
+            throw error;
+        });
+        if (crossSourceRefsEnabled) {
+            this.logger.info(
+                `dbt.compile.crossSourceRefsResolved diskEvictions=${diskPool.stats.diskEvictions} diskRecreations=${diskPool.stats.diskRecreations}`,
+                {
+                    ...diskPool.stats,
+                    event: 'dbt.compile.crossSourceRefsResolved',
+                    projectUuid,
+                    rounds: resolution.rounds,
+                    passes: resolution.passes,
+                    stubs: resolution.stubs,
+                    contradictions: resolution.contradictions,
+                    sourceTimings: resolution.sources,
+                    cacheRowsLoaded: catalogCache?.rowsLoaded ?? 0,
+                    cacheRowsWritten: catalogCache?.rowsWritten ?? 0,
+                    scannedEdges: resolution.scan.known,
+                    firstAttemptInjected: resolution.firstAttemptInjected,
+                    dbtLsRuns: resolution.attempts,
+                    preflightWarnings: resolution.preflightWarnings,
+                    timeouts: {
+                        prepareMs:
+                            this.lightdashConfig.dbt
+                                .crossSourcePrepareTimeoutMs,
+                        lsMs: this.lightdashConfig.dbt.crossSourceLsTimeoutMs,
+                        resolutionMs:
+                            this.lightdashConfig.dbt
+                                .crossSourceResolutionTimeoutMs,
+                    },
+                    sources: resolution.results.map(
+                        ({ task, injectedFrom }) => ({
+                            name: task.key,
+                            injectedFrom,
+                            injectedStubs:
+                                resolution.sources?.find(
+                                    (source) => source.key === task.key,
+                                )?.injectedStubs ?? 0,
+                        }),
+                    ),
+                },
+            );
+        }
+        const fetched = resolution.results.map(({ task, result }) => {
+            const { manifest, selectedModelIds } = result;
+            const selectedManifest = manifestWithCompilationSelection(
+                manifest,
+                selectedModelIds,
+            );
+            return {
+                name: task.context.name,
+                precedence: task.context.precedence,
+                selectedModelIds,
+                manifest: {
+                    ...selectedManifest,
+                    nodes: Object.fromEntries(
+                        Object.entries(selectedManifest.nodes).map(
+                            ([id, node]) => [
+                                id,
+                                node.resource_type === 'model' ||
+                                node.resource_type === 'seed'
+                                    ? {
+                                          ...node,
+                                          lightdash_source_uuid:
+                                              task.context.uuid,
+                                      }
+                                    : node,
+                            ],
+                        ),
+                    ),
+                },
+            };
+        });
+        const sourceFetchDurationMs = Date.now() - sourceFetchStartedAt;
+        const memoryAfterFetch = process.memoryUsage();
+        this.logger.info(
+            `dbt.compile.sourceFetchComplete projectUuid=${projectUuid} sources=${
+                compilableSources.length
+            } concurrency=${
+                concurrencyDecision.chosen
+            } durationMs=${sourceFetchDurationMs} nodeRssMb=${Math.round(
+                memoryAfterFetch.rss / 1024 / 1024,
+            )}`,
+            {
+                event: 'dbt.compile.sourceFetchComplete',
+                projectUuid,
+                jobUuid: jobUuid ?? null,
+                sourceCount: compilableSources.length,
+                concurrency: concurrencyDecision.chosen,
+                durationMs: sourceFetchDurationMs,
+                nodeRssBytes: memoryAfterFetch.rss,
+                nodeHeapUsedBytes: memoryAfterFetch.heapUsed,
+            },
+        );
+
+        const manifestSources: ManifestSource[] = fetched.map((b) => ({
+            name: b.name,
+            precedence: b.precedence,
+            manifest: b.manifest,
+        }));
+
+        const { manifest: mergedManifest, collisions } =
+            combineManifestSources(manifestSources);
+
+        // One line that says whether type attachment is a factor for this project: the cost is
+        // quadratic in models per warehouse schema, and nothing today reports how they spread.
+        const modelsBySchema = new Map<string, number>();
+        let mergedColumnCount = 0;
+        Object.values(mergedManifest.nodes).forEach((node) => {
+            if (node.resource_type !== 'model' && node.resource_type !== 'seed')
+                return;
+            const model = node as DbtRawModelNode;
+            const pair = `${model.database}.${model.schema}`;
+            modelsBySchema.set(pair, (modelsBySchema.get(pair) ?? 0) + 1);
+            mergedColumnCount += Object.keys(model.columns ?? {}).length;
+        });
+        this.logger.info(
+            `dbt.compile.mergedManifestShape projectUuid=${projectUuid} sources=${
+                manifestSources.length
+            } models=${[...modelsBySchema.values()].reduce(
+                (sum, count) => sum + count,
+                0,
+            )} columns=${mergedColumnCount} distinctSchemas=${
+                modelsBySchema.size
+            }`,
+            {
+                event: 'dbt.compile.mergedManifestShape',
+                projectUuid,
+                jobUuid: jobUuid ?? null,
+                sourceCount: manifestSources.length,
+                modelsPerSource: manifestSources.map((source) => ({
+                    sourceName: source.name,
+                    models: Object.values(source.manifest.nodes).filter(
+                        (node) =>
+                            node.resource_type === 'model' ||
+                            node.resource_type === 'seed',
+                    ).length,
+                })),
+                totalModels: [...modelsBySchema.values()].reduce(
+                    (sum, count) => sum + count,
+                    0,
+                ),
+                totalColumns: mergedColumnCount,
+                distinctSchemaCount: modelsBySchema.size,
+                schemaPairs: [...modelsBySchema.entries()]
+                    .map(([databaseSchema, models]) => ({
+                        databaseSchema,
+                        models,
+                    }))
+                    .sort((a, b) => b.models - a.models)
+                    .slice(0, 20),
+                collisions: collisions.length,
+            },
+        );
+        if (collisions.length > 0) {
+            this.logger.warn(
+                `Merged ${manifestSources.length} dbt sources for project ${projectUuid} with ${collisions.length} name collision(s)`,
+                { projectUuid, collisions },
+            );
+            throw new ParameterError(
+                ProjectService.formatManifestCollisionsError(collisions),
+            );
+        }
+
+        const sourceSelections = fetched.map(
+            ({ manifest, selectedModelIds }) => ({
+                manifest,
+                selectedModelIds,
+            }),
+        );
+        // Selector-less sources contribute every model when any source uses a selector.
+        const selectedModelIds = sourceSelections.every(
+            (source) => source.selectedModelIds === undefined,
+        )
+            ? undefined
+            : Array.from(
+                  new Set(
+                      sourceSelections.flatMap((source) =>
+                          source.selectedModelIds === undefined
+                              ? getCompiledModels(
+                                    getModelsFromManifest(source.manifest),
+                                )
+                                    .filter(
+                                        (model) =>
+                                            model.resource_type === 'model',
+                                    )
+                                    .map((model) => model.unique_id)
+                              : source.selectedModelIds,
+                      ),
+                  ),
+              );
+
+        const stagedMergedManifest = await this.stageMergedManifest(
+            projectUuid,
+            mergedManifest,
+        );
+        if (stagedMergedManifest && catalogCache)
+            this.sourceRefCatalogConfirmations.set(
+                stagedMergedManifest,
+                catalogCache,
+            );
+
+        return {
+            adapter: await projectAdapterFromConfig(
+                {
+                    type: DbtProjectType.MANIFEST,
+                    parsedManifest: mergedManifest,
+                    hideRefreshButton: true,
+                },
+                shared.connection.deriveClient(
+                    shared.connection.connectionCredentials,
+                ),
+                shared.cachedWarehouse,
+                shared.dbtVersionOption,
+                this.lightdashConfig.dbt.environmentVariableAllowlist,
+                null,
+                null,
+                this.analytics,
+                // Keep the primary source's lightdash.config.yml / project_context.yml
+                // (spotlight categories, table_groups, parameters, AI context). The
+                // primary clone is alive until the caller destroys manifestFetchAdapters
+                // after compile, so the merged adapter can read these during compile.
+                {
+                    projectDir: primary.adapter.dbtProjectDir,
+                    selectedModelIds,
+                },
+            ),
+            stagedMergedManifest,
+            connectionWarnings: [...resolution.warnings, ...isolation.warnings],
+            failedDbtSourceUuids: isolation.failedSourceUuids,
+            exploreNaming: {
+                mode: 'refresh',
+                warnings: [],
+                refreshedSourceUuids: resolution.results.map(
+                    ({ task }) => task.context.uuid,
+                ),
+                models: getModelsFromManifest(mergedManifest).map((model) => ({
+                    sourceUuid: model.lightdash_source_uuid ?? null,
+                    sourceName: model.lightdash_source_name ?? null,
+                    packageName: model.package_name,
+                    uniqueId: model.unique_id,
+                    version: model.version,
+                    latestVersion: model.latest_version,
+                    modelName: model.name,
+                })),
+            },
+        };
+    }
+
+    private async compileMultiConnectionProject({
+        projectUuid,
+        organizationUuid,
+        userUuid,
+        primary,
+        manifestFetchAdapters,
+        trackingParams,
+        jobUuid,
+    }: {
+        projectUuid: string;
+        organizationUuid: string | undefined;
+        userUuid: string;
+        jobUuid?: string;
+        primary: {
+            adapter: ProjectAdapter;
+            connection: ScopedWarehouseConnection;
+            warehouseCredentials: CreateWarehouseCredentials;
+            cachedWarehouse: CachedWarehouse;
+            dbtVersionOption: DbtVersionOption;
+            dbtPartialParse: boolean;
+            dbtTargetPolicy: DbtTargetPolicy;
+        };
+        manifestFetchAdapters: ProjectAdapter[];
+        trackingParams: TrackingParams;
+    }): Promise<MultiConnectionCompilation> {
+        const { enabled: crossSourceRefsEnabled } =
+            await this.featureFlagModel.get({
+                featureFlagId: FeatureFlags.CrossSourceDbtRefs,
+                user: { userUuid, organizationUuid },
+            });
+        const { enabled: mixedWarehouseConnectionsEnabled } =
+            await this.featureFlagModel.get({
+                featureFlagId: FeatureFlags.MixedWarehouseConnections,
+                user: { userUuid, organizationUuid },
+            });
+        const sourceAdapters = new Map<string, ProjectAdapter>();
+        const sourceAdapterBuilds = new Set<Promise<ProjectAdapter>>();
+        const compileContext = connectionContextFromUser(
+            { userUuid },
+            {
+                organizationUuid:
+                    organizationUuid ??
+                    (await this.projectModel.getSummary(projectUuid))
+                        .organizationUuid,
+                queryContext: null,
+                purpose: 'compile',
+            },
+        );
+        const getSourceAdapter = async (
+            source: CompilableDbtSource,
+            warehouseCredentials: CreateWarehouseCredentials,
+            connection: ScopedWarehouseConnection,
+        ): Promise<ProjectAdapter> => {
+            let sourceAdapter = sourceAdapters.get(source.projectDbtSourceUuid);
+            if (!sourceAdapter) {
+                const build = this.buildSourceAdapter(
+                    source.dbtConnection,
+                    source.warehouseLocation,
+                    organizationUuid,
+                    {
+                        warehouseCredentials,
+                        connection,
+                        cachedWarehouse: primary.cachedWarehouse,
+                        dbtVersionOption: primary.dbtVersionOption,
+                    },
+                    primary.dbtPartialParse
+                        ? getDbtPartialParseBaselinePath({
+                              projectUuid,
+                              dbtSourceUuid: source.projectDbtSourceUuid,
+                          })
+                        : null,
+                    primary.dbtTargetPolicy,
+                );
+                sourceAdapterBuilds.add(build);
+                try {
+                    sourceAdapter = await build;
+                } finally {
+                    sourceAdapterBuilds.delete(build);
+                }
+                sourceAdapters.set(source.projectDbtSourceUuid, sourceAdapter);
+                manifestFetchAdapters.push(sourceAdapter);
+            }
+            return sourceAdapter;
+        };
+        const concurrencyDecision = resolveDbtSourceFetchConcurrency(
+            this.lightdashConfig.dbt.sourceFetchConcurrency,
+            undefined,
+            this.lightdashConfig.dbt,
+        );
+        const diskPool = new DbtSourceDiskPool(concurrencyDecision.chosen);
+        this.logger.info(
+            `dbt.compile.sourceFetchStart projectUuid=${projectUuid} concurrency=${concurrencyDecision.chosen} diskAvailableBytes=${concurrencyDecision.diskAvailableBytes ?? 'unknown'} diskBudgetSource=${concurrencyDecision.diskBudgetSource} diskDerivedLimit=${concurrencyDecision.diskDerivedLimit ?? 'none'} diskEvictions=0 diskRecreations=0`,
+            {
+                event: 'dbt.compile.sourceFetchStart',
+                projectUuid,
+                ...concurrencyDecision,
+                ...diskPool.stats,
+            },
+        );
+        const primaryManifest = crossSourceRefsEnabled
+            ? null
+            : await primary.adapter.getDbtManifest();
+        return this.multiConnectionCompiler.compile({
+            onSourceWarning: async (warning) => {
+                if (jobUuid)
+                    await this.jobModel.appendJobStepWarning(
+                        jobUuid,
+                        JobStepType.COMPILING,
+                        warning,
+                    );
+            },
+            projectUuid,
+            concurrency: concurrencyDecision.chosen,
+            diskStats: diskPool.stats,
+            releaseAllSourceDisk: async () => {
+                const cleanup = (async () => {
+                    await Promise.allSettled([...sourceAdapterBuilds]);
+                    await Promise.allSettled(
+                        [primary.adapter, ...sourceAdapters.values()].map(
+                            (adapter) => adapter.releaseDisk(),
+                        ),
+                    );
+                })();
+                if (crossSourceRefsEnabled)
+                    await waitForDbtSourceCleanup(cleanup);
+                else await cleanup;
+            },
+            withSourceDisk: (
+                source,
+                credentials,
+                connection,
+                operation,
+                signal,
+            ) =>
+                diskPool.run(
+                    source.projectDbtSourceUuid,
+                    () => getSourceAdapter(source, credentials, connection),
+                    operation,
+                    signal,
+                ),
+            releaseSourceDisk: (source) =>
+                crossSourceRefsEnabled
+                    ? diskPool.release(source.projectDbtSourceUuid)
+                    : (sourceAdapters
+                          .get(source.projectDbtSourceUuid)
+                          ?.releaseDisk() ?? Promise.resolve()),
+            prepareSourceFetch: async (
+                source,
+                credentials,
+                connection,
+                options,
+            ) =>
+                ProjectService.scanAdapter(
+                    await getSourceAdapter(source, credentials, connection),
+                    options,
+                ),
+            primary: {
+                releaseDisk: () =>
+                    primary.adapter.releaseDisk({ keepProject: true }),
+                prepare: (options) =>
+                    ProjectService.scanAdapter(primary.adapter, options),
+                fetchManifest: async (options) =>
+                    primaryManifest ?? primary.adapter.getDbtManifest(options),
+                connection: primary.connection,
+                dbtProjectDir: primary.adapter.dbtProjectDir,
+                warehouseCredentials: primary.warehouseCredentials,
+                cachedWarehouse: primary.cachedWarehouse,
+            },
+            context: compileContext,
+            dbtVersion: resolveDbtVersion(primary.dbtVersionOption),
+            crossSourceRefsEnabled,
+            mixedWarehouseConnectionsEnabled,
+            ...(crossSourceRefsEnabled
+                ? {
+                      crossSourceMaxPasses:
+                          this.lightdashConfig.dbt.crossSourceMaxPasses,
+                      compileJobUuid: jobUuid ?? null,
+                      crossSourceTimeouts: {
+                          prepareMs:
+                              this.lightdashConfig.dbt
+                                  .crossSourcePrepareTimeoutMs,
+                          lsMs: this.lightdashConfig.dbt.crossSourceLsTimeoutMs,
+                          resolutionMs:
+                              this.lightdashConfig.dbt
+                                  .crossSourceResolutionTimeoutMs,
+                      },
+                  }
+                : {}),
+            prepareSourceManifest: async (
+                source,
+                credentials,
+                connection,
+                options,
+            ) =>
+                diskPool.run(
+                    source.projectDbtSourceUuid,
+                    () => getSourceAdapter(source, credentials, connection),
+                    (adapter) => ProjectService.scanAdapter(adapter, options),
+                    options?.signal,
+                ),
+            fetchSourceManifest: async (
+                source,
+                credentials,
+                connection,
+                options,
+            ) =>
+                (
+                    await getSourceAdapter(source, credentials, connection)
+                ).getDbtManifest(options),
+            ...(agentExecutionContext.getStore()?.agentConnectionExecution
+                ? {
+                      beforeLoadExtraCredentials: async () => {
+                          await this.assertAgentConnectionEffect(
+                              projectUuid,
+                              'compileProject',
+                          );
+                      },
+                  }
+                : {}),
+            loadExtraCredentials: async (warehouseConnectionUuid) => {
+                const { userWarehouseCredentialsUuid, ...credentials } =
+                    await this.getExtraConnectionWarehouseCredentials({
+                        projectUuid,
+                        warehouseConnectionUuid,
+                        userId: userUuid,
+                        isRegisteredUser: true,
+                        purpose: 'compile',
+                    });
+                return credentials;
+            },
+            trackingParams,
+            analytics: this.analytics,
+        });
+    }
+
+    private async resolveCompileAdapter({
+        projectUuid,
+        organizationUuid,
+        userUuid,
+        primary,
+        manifestFetchAdapters,
+        onDbtSourceCount,
+        jobUuid,
+    }: {
+        projectUuid: string;
+        organizationUuid: string | undefined;
+        userUuid: string;
+        jobUuid?: string;
+        primary: {
+            adapter: ProjectAdapter;
+            connection: ScopedWarehouseConnection;
+            warehouseCredentials: CreateWarehouseCredentials;
+            cachedWarehouse: CachedWarehouse;
+            dbtVersionOption: DbtVersionOption;
+            dbtPartialParse: boolean;
+            dbtTargetPolicy: DbtTargetPolicy;
+        };
+        manifestFetchAdapters: ProjectAdapter[];
+        onDbtSourceCount?: (dbtSourceCount: number) => void;
+    }): Promise<ResolvedCompileAdapter> {
+        const existingNaming = async (): Promise<ExploreNaming | undefined> => {
+            if (
+                !(await this.projectModel.hasExploreNameAllocations(
+                    projectUuid,
+                ))
+            )
+                return undefined;
+            const identity =
+                await this.projectModel.getDbtSourceIdentity(projectUuid);
+            return {
+                mode: 'refresh',
+                warnings: [],
+                models: [],
+                refreshedSourceUuids: [identity.dbtSourceUuid],
+            };
+        };
+        const sources =
+            await this.projectDbtSourcesModel.getSources(projectUuid);
+        if (sources.length === 0) {
+            await this.deleteMergedManifestBestEffort(projectUuid);
+            onDbtSourceCount?.(1);
+            return {
+                adapter: primary.adapter,
+                exploreNaming: await existingNaming(),
+            };
+        }
+        onDbtSourceCount?.(sources.length + 1);
+        return this.buildMergedManifestAdapter({
+            projectUuid,
+            organizationUuid,
+            userUuid,
+            primary,
+            sources,
+            manifestFetchAdapters,
+            jobUuid,
+        });
     }
 
     /**
@@ -3465,15 +9615,406 @@ export class ProjectService extends BaseService {
     protected async getAvailableParameters(
         projectUuid: string,
         explore: Explore,
+        preloadedProjectParameters?: DbProjectParameter[],
     ): Promise<ParameterDefinitions> {
         const projectParameters =
-            await this.projectParametersModel.find(projectUuid);
+            preloadedProjectParameters ??
+            (await this.projectParametersModel.find(projectUuid));
 
         return getAvailableParameterDefinitions(projectParameters, explore);
     }
 
+    /**
+     * The set of raw SQL definitions of every modelled dimension and metric in an
+     * explore. A custom metric whose SQL equals one of these is the ordinary
+     * (viewer-available) custom-metric feature, not injected SQL.
+     */
+    private async getExploreFieldSqlKeys(
+        account: Account,
+        projectUuid: string,
+        exploreName: string,
+    ): Promise<{ explore: Explore; fieldSqlKeys: Set<string> }> {
+        const explore = await this.getExplore(
+            account,
+            projectUuid,
+            exploreName,
+        );
+        const fieldSqlKeys = new Set<string>();
+        for (const table of Object.values(explore.tables)) {
+            for (const dimension of Object.values(table.dimensions)) {
+                fieldSqlKeys.add(
+                    getCustomSqlFieldKey({
+                        table: table.name,
+                        sql: `\${${table.name}.${dimension.name}}`,
+                    }),
+                );
+                if (dimension.sql) {
+                    fieldSqlKeys.add(
+                        getCustomSqlFieldKey({
+                            table: table.name,
+                            sql: dimension.sql,
+                        }),
+                    );
+                }
+            }
+            for (const metric of Object.values(table.metrics)) {
+                if (metric.sql) {
+                    fieldSqlKeys.add(
+                        getCustomSqlFieldKey({
+                            table: table.name,
+                            sql: metric.sql,
+                        }),
+                    );
+                }
+            }
+        }
+        return { explore, fieldSqlKeys };
+    }
+
+    public async assertAgentCustomSqlAuthorizedForQuery({
+        account,
+        projectUuid,
+        exploreName,
+        metricQuery,
+    }: {
+        account: Account;
+        projectUuid: UUID;
+        exploreName: string;
+        metricQuery: Pick<
+            MetricQuery,
+            'tableCalculations' | 'customDimensions' | 'additionalMetrics'
+        >;
+    }): Promise<NonNullable<MetricQuery['additionalMetrics']> | null> {
+        const sqlTableCalculations = (
+            metricQuery.tableCalculations ?? []
+        ).filter(isSqlTableCalculation);
+        const sqlCustomDimensions = (metricQuery.customDimensions ?? []).filter(
+            isCustomSqlDimension,
+        );
+        const additionalMetrics = metricQuery.additionalMetrics ?? [];
+        const grant =
+            account.authentication.type === 'oauth'
+                ? account.authentication.agentConnectionGrant
+                : null;
+        const needsGrantSqlCheck =
+            grant != null &&
+            !grantAllowsCapabilities(
+                grant,
+                [projectUuid],
+                [AgentCapability.RawSql],
+            );
+        let unmodelledAdditionalMetrics: typeof additionalMetrics | null = null;
+        if (needsGrantSqlCheck) {
+            if (additionalMetrics.length > 0) {
+                const { explore, fieldSqlKeys } =
+                    await this.getExploreFieldSqlKeys(
+                        account,
+                        projectUuid,
+                        exploreName,
+                    );
+                unmodelledAdditionalMetrics = resolveAdditionalMetricsSql(
+                    additionalMetrics,
+                    explore.tables,
+                ).filter(
+                    (metric) => !fieldSqlKeys.has(getCustomSqlFieldKey(metric)),
+                );
+            }
+            if (
+                sqlTableCalculations.length > 0 ||
+                sqlCustomDimensions.length > 0 ||
+                (unmodelledAdditionalMetrics?.length ?? 0) > 0
+            )
+                throw new ForbiddenError(
+                    'This agent connection is not approved for Raw SQL.',
+                );
+        }
+
+        return unmodelledAdditionalMetrics;
+    }
+
+    /**
+     * Custom SQL table calculations, custom SQL dimensions, and custom metrics are
+     * authoring features gated behind manage:CustomSqlTableCalculations (table
+     * calculations) or manage:CustomFields (dimensions and metrics). The ad-hoc
+     * query and compile endpoints accept a client-supplied metric query, so
+     * without this check a user denied those scopes could still run arbitrary
+     * warehouse SQL by embedding it in tableCalculations[].sql,
+     * customDimensions[].sql, or additionalMetrics[].sql, bypassing the semantic
+     * layer.
+     *
+     * Custom metrics are a viewer-available feature: a metric whose SQL is exactly
+     * a modelled field's definition (the only shape the UI produces, plus
+     * period-over-period metrics) is always allowed without a scope. Only a metric
+     * with hand-authored SQL is gated like a custom SQL dimension.
+     *
+     * A caller who lacks the scope may still run SQL that is byte-identical to SQL
+     * already persisted in a saved chart they can view (same project + explore), so
+     * editors can re-run and filter existing saved charts in Explore edit mode
+     * without gaining authoring rights. That general exemption is only granted to
+     * registered users. Embedded Explore has a narrower path: it may use only the
+     * current SQL from the exact saved chart it was opened from, after the backend
+     * verifies that the chart is part of the dashboard (or standalone chart)
+     * authorized by the JWT.
+     */
+    protected async assertCustomSqlAuthorizedForQuery({
+        account,
+        projectUuid,
+        organizationUuid,
+        exploreName,
+        metricQuery,
+        dataAppPreviewToken,
+        customSqlProvenanceChartUuid,
+    }: {
+        account: Account;
+        projectUuid: UUID;
+        organizationUuid: string;
+        exploreName: string;
+        metricQuery: Pick<
+            MetricQuery,
+            'tableCalculations' | 'customDimensions' | 'additionalMetrics'
+        >;
+        dataAppPreviewToken?: string;
+        customSqlProvenanceChartUuid?: UUID;
+    }): Promise<void> {
+        const sqlTableCalculations = (
+            metricQuery.tableCalculations ?? []
+        ).filter(isSqlTableCalculation);
+        const sqlCustomDimensions = (metricQuery.customDimensions ?? []).filter(
+            isCustomSqlDimension,
+        );
+        const additionalMetrics = metricQuery.additionalMetrics ?? [];
+        if (
+            sqlTableCalculations.length === 0 &&
+            sqlCustomDimensions.length === 0 &&
+            additionalMetrics.length === 0
+        ) {
+            return;
+        }
+
+        const unmodelledAdditionalMetrics =
+            await this.assertAgentCustomSqlAuthorizedForQuery({
+                account,
+                projectUuid,
+                exploreName,
+                metricQuery,
+            });
+
+        const auditedAbility = this.createAuditedAbility(account);
+        const canAuthorTableCalculations = auditedAbility.can(
+            'manage',
+            subject('CustomSqlTableCalculations', {
+                organizationUuid,
+                projectUuid,
+            }),
+        );
+        const canAuthorCustomFields = auditedAbility.can(
+            'manage',
+            subject('CustomFields', { organizationUuid, projectUuid }),
+        );
+
+        const tableCalculationsToAuthorize = canAuthorTableCalculations
+            ? []
+            : sqlTableCalculations;
+        const customDimensionsToAuthorize = canAuthorCustomFields
+            ? []
+            : sqlCustomDimensions;
+        // Custom metrics that are a plain modelled-field reference are always
+        // allowed; only hand-authored SQL needs the scope or a provenance match.
+        let additionalMetricsToAuthorize: typeof additionalMetrics = [];
+        if (additionalMetrics.length > 0 && !canAuthorCustomFields) {
+            if (unmodelledAdditionalMetrics !== null) {
+                additionalMetricsToAuthorize = unmodelledAdditionalMetrics;
+            } else {
+                const { explore, fieldSqlKeys } =
+                    await this.getExploreFieldSqlKeys(
+                        account,
+                        projectUuid,
+                        exploreName,
+                    );
+                additionalMetricsToAuthorize = resolveAdditionalMetricsSql(
+                    additionalMetrics,
+                    explore.tables,
+                ).filter(
+                    (metric) => !fieldSqlKeys.has(getCustomSqlFieldKey(metric)),
+                );
+            }
+        }
+        if (
+            tableCalculationsToAuthorize.length === 0 &&
+            customDimensionsToAuthorize.length === 0 &&
+            additionalMetricsToAuthorize.length === 0
+        ) {
+            return;
+        }
+
+        let viewableTableCalculationSqls = new Set<string>();
+        let viewableCustomDimensionKeys = new Set<string>();
+        let viewableAdditionalMetricKeys = new Set<string>();
+        // The provenance exemption trusts saved-chart SQL the caller can view.
+        if (account.isRegisteredUser()) {
+            const provenance =
+                await this.savedChartModel.findCustomSqlProvenance({
+                    projectUuid,
+                    exploreName,
+                    tableCalculationSqls: tableCalculationsToAuthorize.map(
+                        (tc) => tc.sql,
+                    ),
+                    customSqlDimensions: customDimensionsToAuthorize.map(
+                        (cd) => ({ sql: cd.sql, table: cd.table }),
+                    ),
+                    additionalMetrics: additionalMetricsToAuthorize.map(
+                        (metric) => ({ sql: metric.sql, table: metric.table }),
+                    ),
+                });
+
+            const candidateSpaceUuids = [
+                ...new Set([
+                    ...provenance.tableCalculations.map((r) => r.spaceUuid),
+                    ...provenance.customSqlDimensions.map((r) => r.spaceUuid),
+                    ...provenance.additionalMetrics.map((r) => r.spaceUuid),
+                ]),
+            ];
+            const viewableSpaceUuids = new Set<string>();
+            if (candidateSpaceUuids.length > 0) {
+                const resolvedSpaceContexts =
+                    await this.spacePermissionService.resolveAccessBatch(
+                        account.user.id,
+                        candidateSpaceUuids.map((spaceUuid) => ({
+                            type: 'space',
+                            spaceUuid,
+                        })),
+                    );
+                const spaceContexts = resolvedSpaceContexts.flatMap(
+                    ({ target, context }) =>
+                        context ? [[target.spaceUuid, context] as const] : [],
+                );
+                const accessResults = auditedAbility.canBulk(
+                    'view',
+                    spaceContexts.map(([spaceUuid, context]) =>
+                        subject('Space', {
+                            ...context,
+                            metadata: { spaceUuid },
+                        }),
+                    ),
+                );
+                spaceContexts.forEach(([spaceUuid], index) => {
+                    if (accessResults[index]) viewableSpaceUuids.add(spaceUuid);
+                });
+            }
+
+            viewableTableCalculationSqls = new Set(
+                provenance.tableCalculations
+                    .filter((r) => viewableSpaceUuids.has(r.spaceUuid))
+                    .map((r) => r.sql),
+            );
+            viewableCustomDimensionKeys = new Set(
+                provenance.customSqlDimensions
+                    .filter((r) => viewableSpaceUuids.has(r.spaceUuid))
+                    .map(getCustomSqlFieldKey),
+            );
+            viewableAdditionalMetricKeys = new Set(
+                provenance.additionalMetrics
+                    .filter((r) => viewableSpaceUuids.has(r.spaceUuid))
+                    .map(getCustomSqlFieldKey),
+            );
+
+            const appProvenance = dataAppPreviewToken
+                ? await this.getDataAppCustomSqlProvenance({
+                      account,
+                      projectUuid,
+                      organizationUuid,
+                      exploreName,
+                      previewToken: dataAppPreviewToken,
+                  })
+                : undefined;
+            for (const sql of appProvenance?.tableCalculations ?? []) {
+                viewableTableCalculationSqls.add(sql);
+            }
+            for (const key of appProvenance?.customDimensions ?? []) {
+                viewableCustomDimensionKeys.add(key);
+            }
+            for (const key of appProvenance?.additionalMetrics ?? []) {
+                viewableAdditionalMetricKeys.add(key);
+            }
+        } else if (
+            isJwtUser(account) &&
+            customSqlProvenanceChartUuid !== undefined
+        ) {
+            await this.permissionsService.checkEmbedPermissions(
+                account,
+                customSqlProvenanceChartUuid,
+            );
+            const provenance =
+                await this.savedChartModel.getCustomSqlProvenanceForChart({
+                    projectUuid,
+                    savedChartUuid: customSqlProvenanceChartUuid,
+                });
+
+            if (provenance.exploreName === exploreName) {
+                viewableTableCalculationSqls = new Set(
+                    provenance.tableCalculations.map((tc) => tc.sql),
+                );
+                viewableCustomDimensionKeys = new Set(
+                    provenance.customSqlDimensions.map(getCustomSqlFieldKey),
+                );
+                viewableAdditionalMetricKeys = new Set(
+                    provenance.additionalMetrics.map(getCustomSqlFieldKey),
+                );
+            }
+        }
+
+        if (
+            tableCalculationsToAuthorize.some(
+                (tc) => !viewableTableCalculationSqls.has(tc.sql),
+            )
+        ) {
+            throw new ForbiddenError(
+                'User cannot run queries with custom SQL table calculations',
+            );
+        }
+        if (
+            customDimensionsToAuthorize.some(
+                (cd) =>
+                    !viewableCustomDimensionKeys.has(getCustomSqlFieldKey(cd)),
+            ) ||
+            additionalMetricsToAuthorize.some(
+                (metric) =>
+                    !viewableAdditionalMetricKeys.has(
+                        getCustomSqlFieldKey(metric),
+                    ),
+            )
+        ) {
+            throw new CustomSqlQueryForbiddenError(
+                'User cannot run queries with custom SQL fields',
+            );
+        }
+    }
+
+    async compileQueryForResponse(args: {
+        account: Account;
+        body: MetricQuery & {
+            parameters?: ParametersValuesMap;
+            pivotConfiguration?: PivotConfiguration;
+        };
+        projectUuid: string;
+        exploreName: string;
+        usePreAggregateCache?: boolean;
+    }): Promise<ApiCompiledQueryResults> {
+        const { parameterReferences, query, pivotQuery } =
+            await this.compileQuery(args);
+        if (this.cannotViewEmbedCompiledSql(args.account, args.projectUuid)) {
+            return { query: '', parameterReferences };
+        }
+        return {
+            query,
+            parameterReferences,
+            ...(pivotQuery && { pivotQuery }),
+        };
+    }
+
     async compileQuery(
         args: {
+            documentQueryContext?: DocumentQueryContext;
             account: Account;
             // ! TODO: we need to fix this type
             body: MetricQuery & {
@@ -3483,6 +10024,12 @@ export class ProjectService extends BaseService {
             };
             projectUuid: string;
             usePreAggregateCache?: boolean;
+            /**
+             * Compile without ORDER BY / LIMIT, for embedding as a CTE body
+             * in an outer statement (a merge) that orders and limits once.
+             */
+            asCteBody?: boolean;
+            userAttributeOverrides?: UserAttributeValueMap;
         } & ({ exploreName: string } | { explore: Explore }),
     ) {
         const {
@@ -3513,6 +10060,32 @@ export class ProjectService extends BaseService {
             'explore' in args
                 ? args.explore
                 : await this.getExplore(account, projectUuid, args.exploreName);
+        auditMetricQueryAttributeAccess({
+            account,
+            projectUuid,
+            explore: sourceExplore,
+            metricQuery,
+        });
+
+        // Authorize custom SQL against the explore the query actually runs on
+        // (the resolved source explore), not the client-supplied
+        // metricQuery.exploreName, which may differ.
+        if (args.documentQueryContext) {
+            args.documentQueryContext.assertMetricQuery(
+                account,
+                projectUuid,
+                metricQuery,
+                parameters,
+            );
+        } else {
+            await this.assertCustomSqlAuthorizedForQuery({
+                account,
+                projectUuid,
+                organizationUuid,
+                exploreName: sourceExplore.name,
+                metricQuery,
+            });
+        }
 
         // Pre-aggregate routing: compile against the pre-agg explore when cache is enabled and there's a match
         let explore = sourceExplore;
@@ -3540,19 +10113,21 @@ export class ProjectService extends BaseService {
             }
         }
 
-        // Get warehouse credentials to build the SQL builder (no full connection needed for compilation)
-        const warehouseCredentials =
-            await this.projectModel.getWarehouseCredentialsForProject(
-                projectUuid,
-            );
-
-        const warehouseSqlBuilder = warehouseSqlBuilderFromType(
-            warehouseCredentials.type,
-            warehouseCredentials.startOfWeek,
+        const sqlBuilderSettings = await this.getWarehouseSqlBuilderSettings(
+            projectUuid,
+            { kind: 'explore', exploreName: sourceExplore.name },
         );
 
-        const { userAttributes, intrinsicUserAttributes } =
+        const warehouseSqlBuilder = warehouseSqlBuilderFromType(
+            sqlBuilderSettings.type,
+            sqlBuilderSettings.startOfWeek,
+        );
+
+        const { userAttributes: baseUserAttributes, intrinsicUserAttributes } =
             await this.getUserAttributes({ account });
+        const userAttributes = args.userAttributeOverrides
+            ? { ...baseUserAttributes, ...args.userAttributeOverrides }
+            : baseUserAttributes;
 
         const availableParameterDefinitions = await this.getAvailableParameters(
             projectUuid,
@@ -3568,46 +10143,46 @@ export class ProjectService extends BaseService {
 
         const projectTimezone =
             await this.getQueryTimezoneForProject(projectUuid);
-        const timezone = resolveQueryTimezone(
+        const timezone = resolveQueryTimezone({
+            sessionTimezone: null,
             metricQuery,
             projectTimezone,
-            getAccountUserTimezone(account),
-        );
+            userTimezone: getAccountUserTimezone(account),
+        });
         const useTimezoneAwareDateTrunc = await this.isTimezoneSupportEnabled({
             userUuid: account.user.id,
             organizationUuid: account.organization.organizationUuid,
         });
 
-        const compiledQuery = await ProjectService._compileQuery({
-            metricQuery,
-            explore,
-            warehouseSqlBuilder,
-            intrinsicUserAttributes,
-            userAttributes,
-            timezone,
-            parameters: combinedParameters,
-            availableParameterDefinitions,
-            pivotConfiguration,
-            pivotDimensions,
-            continueOnError: true, // Return SQL even with compilation errors for debugging
-            useTimezoneAwareDateTrunc,
-            columnTimezone: getColumnTimezone(warehouseCredentials),
-        });
-
-        // Generate pivot query if pivot configuration is provided
-        let pivotQuery: string | undefined;
-        if (pivotConfiguration) {
-            const pivotQueryBuilder = new PivotQueryBuilder(
-                compiledQuery.query,
-                pivotConfiguration,
+        const queryComposer = new QueryComposer(
+            { metricQuery, pivotConfiguration, asCteBody: args.asCteBody },
+            {
+                explore,
                 warehouseSqlBuilder,
-                metricQuery.limit,
-                compiledQuery.fields,
-            );
-            pivotQuery = pivotQueryBuilder.toSql({
-                columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
-            });
-        }
+                intrinsicUserAttributes,
+                userAttributes,
+                timezone,
+                availableParameterDefinitions,
+                parameters: combinedParameters,
+                dateZoom: undefined,
+                pivotDimensions,
+                pivotItemsMap: undefined,
+                continueOnError: true, // Return SQL even with compilation errors for debugging
+                useTimezoneAwareDateTrunc,
+                columnTimezone: sqlBuilderSettings.columnTimezone,
+                dataTimezone: sqlBuilderSettings.dataTimezone ?? undefined,
+                applyDateZoomToFilters: undefined,
+            },
+        );
+
+        const compiledQuery = queryComposer.compile();
+
+        // Include pivot query only when a pivot configuration was provided
+        const pivotQuery = pivotConfiguration
+            ? queryComposer.getSql({
+                  columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
+              })
+            : undefined;
 
         return {
             ...compiledQuery,
@@ -3619,6 +10194,991 @@ export class ProjectService extends BaseService {
             }),
             // Include pivot query if pivot configuration was provided
             ...(pivotQuery && { pivotQuery }),
+        };
+    }
+
+    /**
+     * Field metadata for every field a join key names, so the validator can
+     * tell whether the two sides are actually comparable.
+     */
+    protected getMergeJoinFieldTypes(
+        mergeQuery: MergeQuery,
+        itemMapBySourceId: Record<string, ItemsMap>,
+    ): MergeFieldTypes {
+        const fieldTypes: MergeFieldTypes = {};
+        mergeQuery.joinKey.forEach((part) => {
+            Object.entries(part.fieldIdBySourceId).forEach(
+                ([sourceId, fieldId]) => {
+                    const dimension = itemMapBySourceId[sourceId]?.[fieldId];
+                    if (
+                        !dimension ||
+                        (!isDimension(dimension) &&
+                            !isCustomDimension(dimension))
+                    )
+                        return;
+                    fieldTypes[sourceId] ??= {};
+                    fieldTypes[sourceId][fieldId] = {
+                        type: convertItemTypeToDimensionType(dimension),
+                        timeInterval: isDimension(dimension)
+                            ? (dimension.timeInterval ?? null)
+                            : null,
+                        timestampDomain: isDimension(dimension)
+                            ? dimension.timestampDomain
+                            : undefined,
+                    };
+                },
+            );
+        });
+        return fieldTypes;
+    }
+
+    /**
+     * Metadata backing a merge result source: the stored fields and the
+     * metric query that produced them. The base service has no query-history
+     * access, so merges over existing results are only compilable through
+     * services that override this (AsyncQueryService).
+     */
+    // eslint-disable-next-line class-methods-use-this
+    protected async getMergeResultSourceMetadata(
+        _account: Account,
+        _projectUuid: string,
+        _queryUuid: string,
+    ): Promise<{ metricQuery: MetricQuery; fields: ItemsMap }> {
+        throw new ParameterError(
+            'Merging existing query results is not available on this endpoint',
+        );
+    }
+
+    /**
+     * Join-key field metadata straight from a merge query, for callers that
+     * need the key types without the full compile (the compose execution
+     * path derives dialect-specific null placeholders from them).
+     */
+    protected async getMergeFieldTypesForQuery(
+        account: Account,
+        projectUuid: string,
+        mergeQuery: MergeQuery,
+    ): Promise<MergeFieldTypes> {
+        const itemMapBySourceId = Object.fromEntries(
+            await Promise.all(
+                mergeQuery.sources.map(async (source) => {
+                    if (isMergeResultSource(source)) {
+                        const stored = await this.getMergeResultSourceMetadata(
+                            account,
+                            projectUuid,
+                            source.queryUuid,
+                        );
+                        return [source.id, stored.fields] as const;
+                    }
+                    const explore = await this.getExplore(
+                        account,
+                        projectUuid,
+                        source.metricQuery.exploreName,
+                    );
+                    return [
+                        source.id,
+                        getItemMap(
+                            explore,
+                            source.metricQuery.additionalMetrics,
+                            source.metricQuery.tableCalculations,
+                            source.metricQuery.customDimensions,
+                        ),
+                    ] as const;
+                }),
+            ),
+        );
+        return this.getMergeJoinFieldTypes(mergeQuery, itemMapBySourceId);
+    }
+
+    /**
+     * Table calculations whose value depends on the query's whole row set.
+     * Merging changes that row set, so they cannot be carried across it: a
+     * running total would be frozen at its pre-merge value and a pivot-function
+     * calc compiles to a literal null column.
+     */
+    /**
+     * A join key may name a dimension of the source's explore that the query
+     * does not select: the leg groups by it, so the join has the column, and
+     * the merged result shows it once, as the key. Only the explore's own
+     * dimensions qualify; a custom dimension exists only where the query
+     * defines it, and a key the explore lacks is left for the validator.
+     */
+    private static selectJoinKeyDimensions(
+        source: MergeQueryMetricSource,
+        joinKey: MergeJoinKeyPart[],
+        itemMap: ItemsMap,
+    ): MetricQuery {
+        const missing = joinKey.flatMap((part) => {
+            const fieldId = part.fieldIdBySourceId[source.id];
+            if (
+                fieldId === undefined ||
+                source.metricQuery.dimensions.includes(fieldId)
+            ) {
+                return [];
+            }
+            const item = itemMap[fieldId];
+            return item && isDimension(item) ? [fieldId] : [];
+        });
+        if (missing.length === 0) return source.metricQuery;
+        return {
+            ...source.metricQuery,
+            dimensions: [
+                ...source.metricQuery.dimensions,
+                ...missing.filter((id, index) => missing.indexOf(id) === index),
+            ],
+        };
+    }
+
+    private static getUnsupportedTableCalculations(
+        source: MergeQueryMetricSource,
+    ): string[] {
+        return source.metricQuery.tableCalculations
+            .filter((calculation) => {
+                const sql = isSqlTableCalculation(calculation)
+                    ? calculation.sql
+                    : undefined;
+                if (sql === undefined) {
+                    // Template and formula calcs are not row-set safe to carry.
+                    return true;
+                }
+                const functions = parseTableCalculationFunctions(sql);
+                return functions.length > 0 || WINDOW_CLAUSE_PATTERN.test(sql);
+            })
+            .map((calculation) => calculation.name);
+    }
+
+    /**
+     * Compiles a merge of several metric queries into one warehouse statement.
+     *
+     * Compilation only — the caller runs the returned SQL through the normal
+     * SQL execution path, so the merge does not duplicate limits, caching or
+     * result handling. Validation errors are returned rather than thrown: the
+     * explorer shows them against the offending query row.
+     */
+    async compileMergeQuery(args: {
+        documentQueryContext?: DocumentQueryContext;
+        account: Account;
+        projectUuid: string;
+        mergeQuery: MergeQuery;
+        /** One map for every source: sides of one question share their values. */
+        parameters?: ParametersValuesMap;
+        userAttributeOverrides?: UserAttributeValueMap;
+    }): Promise<ApiCompiledMergeQueryResults> {
+        const {
+            account,
+            projectUuid,
+            mergeQuery,
+            parameters,
+            userAttributeOverrides,
+        } = args;
+
+        args.documentQueryContext?.assertMergeQuery(
+            account,
+            projectUuid,
+            mergeQuery,
+            parameters,
+        );
+
+        // One metadata load feeds validation, output typing and display
+        // labels. Metric sources resolve through their explore (query-defined
+        // fields join the same item map, so custom dimensions and metrics
+        // follow the canonical lookup path); result sources resolve structure
+        // and fields from the stored query metadata, after which validation
+        // and typing treat both alike.
+        const resolutionErrors: MergeQueryError[] = [];
+        const maybeResolvedSources = await Promise.all(
+            mergeQuery.sources.map(async (source) => {
+                if (isMergeResultSource(source)) {
+                    try {
+                        const stored = await this.getMergeResultSourceMetadata(
+                            account,
+                            projectUuid,
+                            source.queryUuid,
+                        );
+                        return {
+                            id: source.id,
+                            metricQuery: stored.metricQuery,
+                            itemMap: stored.fields,
+                            explore: null,
+                        };
+                    } catch (e) {
+                        // Access denial surfaces as the same 403 that fetching the results would
+                        if (e instanceof ForbiddenError) throw e;
+                        resolutionErrors.push({
+                            kind: MergeQueryErrorKind.RESULT_SOURCE_UNAVAILABLE,
+                            sourceId: source.id,
+                            fieldIds: [],
+                            message: `Query "${source.id}" cannot back a merge: ${getErrorMessage(
+                                e,
+                            )}`,
+                        });
+                        return null;
+                    }
+                }
+                const explore = await this.getExplore(
+                    account,
+                    projectUuid,
+                    source.metricQuery.exploreName,
+                );
+                const itemMap = getItemMap(
+                    explore,
+                    source.metricQuery.additionalMetrics,
+                    source.metricQuery.tableCalculations,
+                    source.metricQuery.customDimensions,
+                );
+                return {
+                    id: source.id,
+                    metricQuery: ProjectService.selectJoinKeyDimensions(
+                        source,
+                        mergeQuery.joinKey,
+                        itemMap,
+                    ),
+                    itemMap,
+                    explore,
+                };
+            }),
+        );
+        if (resolutionErrors.length > 0) {
+            return {
+                sql: null,
+                coreSql: null,
+                typedColumns: null,
+                terminalWrapper: null,
+                sorts: [],
+                columns: null,
+                fields: [],
+                itemsMap: {},
+                fieldOrigins: {},
+                parameterReferences: [],
+                usedParametersValues: {},
+                fieldIdByColumn: {},
+                legs: [],
+                requiresCompose: false,
+                errors: resolutionErrors,
+            };
+        }
+        const resolvedSources = maybeResolvedSources.filter(
+            (source): source is NonNullable<typeof source> => source !== null,
+        );
+        const resolvedMetricQueryBySourceId = Object.fromEntries(
+            resolvedSources.map((source) => [source.id, source.metricQuery]),
+        );
+        const repeatValuesBySourceId = Object.fromEntries(
+            mergeQuery.sources.map((source) => [
+                source.id,
+                source.repeatValues === true,
+            ]),
+        );
+        const exploreBySourceId = Object.fromEntries(
+            resolvedSources.map((source) => [source.id, source.explore]),
+        );
+        const itemMapBySourceId = Object.fromEntries(
+            resolvedSources.map((source) => [source.id, source.itemMap]),
+        );
+        // The resolved form: every source metric-query-shaped, so the checks
+        // a result source defers from the shared validator run here.
+        const resolvedMergeQuery: MergeQuery = {
+            ...mergeQuery,
+            sources: resolvedSources.map(({ id, metricQuery }) => ({
+                id,
+                metricQuery,
+                ...(repeatValuesBySourceId[id] ? { repeatValues: true } : {}),
+            })),
+        };
+        const fieldTypes = this.getMergeJoinFieldTypes(
+            resolvedMergeQuery,
+            itemMapBySourceId,
+        );
+
+        const errors = [
+            ...validateMergeQuery(resolvedMergeQuery, fieldTypes),
+            // Result sources are exempt: their calculations already ran, so
+            // the merged row carries materialized values, not re-compiled SQL.
+            ...mergeQuery.sources
+                .filter(isMergeMetricSource)
+                .flatMap((source) => {
+                    const unsupported =
+                        ProjectService.getUnsupportedTableCalculations(source);
+                    return unsupported.length === 0
+                        ? []
+                        : [
+                              {
+                                  kind: MergeQueryErrorKind.UNSUPPORTED_TABLE_CALCULATION,
+                                  sourceId: source.id,
+                                  fieldIds: unsupported,
+                                  message: `Query "${source.id}" uses ${unsupported.join(
+                                      ', ',
+                                  )}, which depend on the rows of that query alone. Merging changes those rows, so the value cannot be carried across the join.`,
+                              },
+                          ];
+                }),
+        ];
+        if (errors.length > 0) {
+            return {
+                sql: null,
+                coreSql: null,
+                typedColumns: null,
+                terminalWrapper: null,
+                sorts: [],
+                columns: null,
+                fields: [],
+                itemsMap: {},
+                fieldOrigins: {},
+                parameterReferences: [],
+                usedParametersValues: {},
+                fieldIdByColumn: {},
+                legs: [],
+                requiresCompose: false,
+                errors,
+            };
+        }
+
+        // Merge SQL calculations pass the custom SQL gate; formulas compile
+        // against the known merged columns and need no custom-SQL permission.
+        // Each source's own calculations are gated by that source's compile.
+        const mergeSqlTableCalculations = mergeQuery.tableCalculations.filter(
+            (calculation) => !calculation.formula,
+        );
+        if (
+            mergeSqlTableCalculations.length > 0 &&
+            !args.documentQueryContext
+        ) {
+            const { organizationUuid } =
+                await this.projectModel.getSummary(projectUuid);
+            await this.assertCustomSqlAuthorizedForQuery({
+                account,
+                projectUuid,
+                organizationUuid,
+                exploreName: resolvedSources[0].metricQuery.exploreName,
+                metricQuery: {
+                    tableCalculations: mergeSqlTableCalculations,
+                    customDimensions: [],
+                    additionalMetrics: [],
+                },
+            });
+        }
+
+        // Each leg runs whole: the merged statement sorts and limits, and a
+        // side is never silently truncated below the source row cap
+        const sourceRowCap = this.lightdashConfig.query.maxLimit;
+
+        const sources = await Promise.all(
+            mergeQuery.sources.map(async (source) => {
+                const resolvedMetricQuery: MetricQuery =
+                    resolvedMetricQueryBySourceId[source.id];
+                // A dimension that is not a join key reaches the compile
+                // only when every other source repeats its values; the leg
+                // groups by it, so it is a column of every merged row.
+                const valueColumns = [
+                    ...getUnaccountedDimensions(
+                        { id: source.id, metricQuery: resolvedMetricQuery },
+                        mergeQuery.joinKey,
+                    ),
+                    ...resolvedMetricQuery.metrics,
+                    ...resolvedMetricQuery.tableCalculations.map(
+                        (calculation) => calculation.name,
+                    ),
+                ];
+                const originBySourceColumn = Object.fromEntries(
+                    valueColumns.map((column) => [column, { fieldId: column }]),
+                );
+
+                // A result source is already materialized: it contributes
+                // columns and rows, never SQL
+                if (isMergeResultSource(source)) {
+                    return {
+                        id: source.id,
+                        sql: null,
+                        metricQuery: null,
+                        valueColumns,
+                        missingParameters: [],
+                        parameterReferences: [],
+                        usedParametersValues: {},
+                        originBySourceColumn,
+                    };
+                }
+
+                // Each metric source compiles exactly as it would on its own,
+                // so a merged query inherits the same access rules, required
+                // filters and parameter handling as the query it was built
+                // from. This is the statement the leg runs: whole, at the
+                // source row cap, unsorted.
+                const compiled = await this.compileQuery({
+                    documentQueryContext: args.documentQueryContext,
+                    account,
+                    projectUuid,
+                    exploreName: resolvedMetricQuery.exploreName,
+                    body: {
+                        ...resolvedMetricQuery,
+                        sorts: [],
+                        limit: sourceRowCap,
+                        parameters,
+                    },
+                    userAttributeOverrides,
+                    usePreAggregateCache: false,
+                });
+                // The single-query path refuses to run with an unvalued
+                // parameter; the compile-for-embedding path only warns.
+                // Carry the gap so the merge refuses the same way instead
+                // of shipping a literal placeholder to the warehouse.
+                // A compiled metric query aliases every output column by field
+                // id, so the field ids are the column names — value columns
+                // need no special case for custom dimensions or metrics.
+                return {
+                    id: source.id,
+                    sql: compiled.query,
+                    metricQuery: resolvedMetricQuery,
+                    valueColumns,
+                    missingParameters: Array.from(
+                        compiled.missingParameterReferences,
+                    ),
+                    parameterReferences: Array.from(
+                        compiled.parameterReferences,
+                    ),
+                    usedParametersValues: compiled.usedParameters,
+                    originBySourceColumn,
+                };
+            }),
+        );
+
+        const parameterErrors: MergeQueryError[] = sources.flatMap((source) =>
+            source.missingParameters.length === 0
+                ? []
+                : [
+                      {
+                          kind: MergeQueryErrorKind.MISSING_PARAMETERS,
+                          sourceId: source.id,
+                          fieldIds: source.missingParameters,
+                          message: `Query "${source.id}" is missing values for: ${source.missingParameters.join(
+                              ', ',
+                          )}. Supply them with the merge, or set parameter defaults.`,
+                      },
+                  ],
+        );
+        const parameterReferences = Array.from(
+            new Set(sources.flatMap((source) => source.parameterReferences)),
+        );
+        const usedParametersValues = Object.assign(
+            {},
+            ...sources.map((source) => source.usedParametersValues),
+        );
+        const legs: MergeCompiledLeg[] = sources.map((source) => ({
+            sourceId: source.id,
+            sql: source.sql,
+            metricQuery: source.metricQuery,
+        }));
+        if (parameterErrors.length > 0) {
+            return {
+                sql: null,
+                coreSql: null,
+                typedColumns: null,
+                terminalWrapper: null,
+                sorts: [],
+                columns: null,
+                fields: [],
+                itemsMap: {},
+                fieldOrigins: {},
+                parameterReferences,
+                usedParametersValues,
+                fieldIdByColumn: {},
+                legs: [],
+                requiresCompose: false,
+                errors: parameterErrors,
+            };
+        }
+
+        // The join, in the compose engine's dialect over the legs' results.
+        // Clamped like any other query: the merged statement is the one
+        // that actually returns rows, so the instance row cap applies to it
+        // rather than to the queries it was assembled from.
+        const { builder: mergeQueryBuilder } = createComposeMergeQueryBuilder({
+            sources: sources.map((source) => ({
+                id: source.id,
+                valueColumns: source.valueColumns,
+            })),
+            joinKey: mergeQuery.joinKey,
+            joinType: mergeQuery.joinType,
+            tableCalculations: mergeQuery.tableCalculations,
+            fieldTypes,
+            limit: Math.min(mergeQuery.limit, sourceRowCap),
+        });
+
+        // Resolve calculation references against the columns the merge
+        // actually produces. A pre-pivoted source replaces one metric column
+        // with one per value, so this is the only place the real names exist.
+        const columns = mergeQueryBuilder.getColumns();
+        const availableReferences = [
+            ...columns.joinKeyColumns,
+            ...Object.entries(columns.valueColumnBySourceColumn).flatMap(
+                ([sourceId, bySourceColumn]) =>
+                    Object.keys(bySourceColumn).map(
+                        (sourceColumn) => `${sourceId}.${sourceColumn}`,
+                    ),
+            ),
+        ];
+        const availableFormulaReferences = [
+            ...columns.joinKeyColumns.map((column) =>
+                getItemId({ table: MERGE_TABLE_NAME, name: column }),
+            ),
+            ...Object.entries(columns.valueColumnBySourceColumn).flatMap(
+                ([sourceId, bySourceColumn]) =>
+                    Object.keys(bySourceColumn).map((sourceColumn) =>
+                        getItemId({ table: sourceId, name: sourceColumn }),
+                    ),
+            ),
+        ];
+        const referenceErrors = mergeQuery.tableCalculations.flatMap(
+            (calculation) => {
+                let references: string[];
+                try {
+                    references = calculation.formula
+                        ? extractColumnRefs(parseFormula(calculation.formula))
+                        : [
+                              ...calculation.sql.matchAll(
+                                  mergeCalculationReferencePattern,
+                              ),
+                          ].map((match) => match[1]);
+                } catch (error) {
+                    return [
+                        {
+                            kind: MergeQueryErrorKind.UNRESOLVED_CALCULATION_REFERENCE,
+                            sourceId: null,
+                            fieldIds: [],
+                            message: `Calculation "${calculation.name}" has an invalid formula: ${getErrorMessage(
+                                error,
+                            )}`,
+                        },
+                    ];
+                }
+                const available = calculation.formula
+                    ? availableFormulaReferences
+                    : availableReferences;
+                const unresolved = references.filter(
+                    (reference) => !available.includes(reference),
+                );
+                return unresolved.length === 0
+                    ? []
+                    : [
+                          {
+                              kind: MergeQueryErrorKind.UNRESOLVED_CALCULATION_REFERENCE,
+                              sourceId: null,
+                              fieldIds: unresolved,
+                              message: `Calculation "${calculation.name}" references ${unresolved.join(
+                                  ', ',
+                              )}. The merged result has: ${available.join(
+                                  ', ',
+                              )}.`,
+                          },
+                      ];
+            },
+        );
+        if (referenceErrors.length > 0) {
+            return {
+                sql: null,
+                coreSql: null,
+                typedColumns: null,
+                terminalWrapper: null,
+                sorts: [],
+                columns: null,
+                fields: [],
+                itemsMap: {},
+                fieldOrigins: {},
+                parameterReferences,
+                usedParametersValues,
+                fieldIdByColumn: {},
+                legs: [],
+                requiresCompose: false,
+                errors: referenceErrors,
+            };
+        }
+
+        // Describe every merged column well enough to be selected, sorted and
+        // formatted. Labels come from the field each column originated in;
+        // a widened column also carries the value it holds, since one metric
+        // becomes several columns and the name alone cannot say which is which.
+        const metricQueryBySourceId = resolvedMetricQueryBySourceId;
+
+        // Custom dimensions and additional metrics are defined on the query
+        // rather than the explore, so a lookup that only walks the explore
+        // mis-types every one of them as a string dimension.
+        const mergedLabel = (
+            origin: Field | AdditionalMetric | CustomDimension | undefined,
+        ): string | undefined => {
+            if (!origin) return undefined;
+            return isCustomDimension(origin) ? origin.name : origin.label;
+        };
+
+        const findField = (
+            sourceId: string,
+            fieldId: string,
+        ): Field | AdditionalMetric | CustomDimension | undefined => {
+            const item = itemMapBySourceId[sourceId]?.[fieldId];
+            return item && (isField(item) || isCustomDimension(item))
+                ? item
+                : undefined;
+        };
+
+        const joinKeyFields: MergeQueryField[] = mergeQuery.joinKey.map(
+            (part) => {
+                const [sourceId, fieldId] =
+                    Object.entries(part.fieldIdBySourceId)[0] ?? [];
+                const field =
+                    sourceId && fieldId
+                        ? findField(sourceId, fieldId)
+                        : undefined;
+                return {
+                    column: part.name,
+                    label: mergedLabel(field) ?? part.name,
+                    kind: 'dimension' as const,
+                    type: field
+                        ? convertItemTypeToDimensionType(field)
+                        : DimensionType.STRING,
+                    sourceId: null,
+                    sourceFieldId: null,
+                };
+            },
+        );
+
+        const originBySourceId = Object.fromEntries(
+            sources.map((source) => [source.id, source.originBySourceColumn]),
+        );
+
+        const valueFields: MergeQueryField[] = Object.entries(
+            columns.valueColumnBySourceColumn,
+        ).flatMap(([sourceId, bySourceColumn]) =>
+            Object.entries(bySourceColumn).map(
+                ([sourceColumn, mergedColumn]) => {
+                    const origin = originBySourceId[sourceId]?.[sourceColumn];
+                    const field = origin
+                        ? findField(sourceId, origin.fieldId)
+                        : undefined;
+                    return {
+                        column: mergedColumn,
+                        label:
+                            mergedLabel(field) ??
+                            origin?.fieldId ??
+                            sourceColumn,
+                        kind: (field && isMetric(field)
+                            ? 'metric'
+                            : 'dimension') as 'dimension' | 'metric',
+                        type: field
+                            ? convertItemTypeToDimensionType(field)
+                            : DimensionType.STRING,
+                        sourceId,
+                        sourceFieldId: origin?.fieldId ?? null,
+                    };
+                },
+            ),
+        );
+
+        const calculationFields: MergeQueryField[] =
+            mergeQuery.tableCalculations.map((calculation) => ({
+                column: calculation.name,
+                label: calculation.displayName,
+                kind: 'metric' as const,
+                type: 'number',
+                sourceId: null,
+                sourceFieldId: null,
+            }));
+
+        // Present every merged column as an ordinary field. Downstream code
+        // looks fields up by `getItemId`, so the items map is keyed by it and
+        // the warehouse alias is kept only as the way back to the column.
+        const sourceIndexById = Object.fromEntries(
+            mergeQuery.sources.map((source, index) => [source.id, index]),
+        );
+
+        const mergedItem = (itemArgs: {
+            table: string;
+            tableLabel: string;
+            name: string;
+            label: string;
+            origin: Field | AdditionalMetric | CustomDimension | undefined;
+            /** Used when there is no origin field to read a type from. */
+            fallback:
+                | { fieldType: FieldType.METRIC; type: MetricType }
+                | { fieldType: FieldType.DIMENSION; type: DimensionType };
+        }): ItemsMap[string] => {
+            const { table, tableLabel, name, label, origin, fallback } =
+                itemArgs;
+            const field =
+                origin && !isCustomDimension(origin) ? origin : undefined;
+            const shared = {
+                name,
+                label,
+                table,
+                tableLabel,
+                // The column already exists in a compiled statement, so
+                // nothing has to compile it again. This is a display
+                // identity, not a query fragment.
+                sql: '',
+                hidden: false,
+                description: field?.description,
+                format: field?.format,
+                compact: field?.compact,
+                round: field?.round,
+                urls: field && isField(field) ? field.urls : undefined,
+            };
+            if (origin && (isMetric(origin) || isAdditionalMetric(origin))) {
+                return {
+                    ...shared,
+                    fieldType: FieldType.METRIC,
+                    type: origin.type,
+                    formatOptions: origin.formatOptions,
+                };
+            }
+            if (origin && isDimension(origin)) {
+                return {
+                    ...shared,
+                    fieldType: FieldType.DIMENSION,
+                    type: origin.type,
+                };
+            }
+            return { ...shared, ...fallback };
+        };
+
+        const joinKeyEntries: MergeItemEntry[] = mergeQuery.joinKey.map(
+            (part) => {
+                const [sourceId, fieldId] =
+                    Object.entries(part.fieldIdBySourceId)[0] ?? [];
+                const origin =
+                    sourceId && fieldId
+                        ? findField(sourceId, fieldId)
+                        : undefined;
+                return {
+                    column: part.name,
+                    // The key's own name is stable for the life of the key, so
+                    // renaming it for display never rewrites the field id a
+                    // saved chart config refers to.
+                    item: mergedItem({
+                        table: MERGE_TABLE_NAME,
+                        tableLabel: 'Merged',
+                        name: part.name,
+                        label: mergedLabel(origin) ?? part.name,
+                        origin,
+                        fallback: {
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                        },
+                    }),
+                    origin: {
+                        kind: 'joinKey',
+                        fieldIdBySourceId: part.fieldIdBySourceId,
+                    },
+                };
+            },
+        );
+
+        // Headers say where a column came from, not which slot it rode in:
+        // the explore's label, unless both sides use the same explore and the
+        // slot is the only thing telling them apart.
+        const exploreLabels = mergeQuery.sources.map(
+            (source) =>
+                exploreBySourceId[source.id]?.label ??
+                resolvedMetricQueryBySourceId[source.id].exploreName,
+        );
+        const labelsCollide =
+            new Set(exploreLabels).size < exploreLabels.length;
+        const sourceTableLabel = (sourceId: string) => {
+            const sourceIndex = sourceIndexById[sourceId] ?? 0;
+            const exploreLabel = exploreLabels[sourceIndex];
+            return labelsCollide
+                ? `${exploreLabel} (${getMergeSourceTableLabel(sourceIndex)})`
+                : exploreLabel;
+        };
+
+        const valueEntries: MergeItemEntry[] = valueFields.flatMap((field) => {
+            const { sourceId, sourceFieldId } = field;
+            if (!sourceId || !sourceFieldId) return [];
+            const origin = findField(sourceId, sourceFieldId);
+            return [
+                {
+                    column: field.column,
+                    item: mergedItem({
+                        // Attributed to the query it came from, so two sources
+                        // of the same explore cannot collide.
+                        table: sourceId,
+                        tableLabel: sourceTableLabel(sourceId),
+                        // The origin field id, not its bare name: within one
+                        // query two joined tables can both expose a `status`.
+                        name: sourceFieldId,
+                        label: field.label,
+                        origin,
+                        fallback: {
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                        },
+                    }),
+                    origin: {
+                        kind: 'source',
+                        sourceId,
+                        sourceFieldId,
+                    },
+                },
+            ];
+        });
+
+        const calculationEntries: MergeItemEntry[] =
+            mergeQuery.tableCalculations.map((calculation) => ({
+                column: calculation.name,
+                item: {
+                    ...mergedItem({
+                        table: MERGE_TABLE_NAME,
+                        tableLabel: 'Merged',
+                        name: calculation.name,
+                        label: calculation.displayName,
+                        origin: undefined,
+                        fallback: {
+                            fieldType: FieldType.METRIC,
+                            type: MetricType.NUMBER,
+                        },
+                    }),
+                    formatOptions: calculation.format,
+                },
+                origin: { kind: 'tableCalculation' },
+            }));
+
+        const mergeEntries = [
+            ...joinKeyEntries,
+            ...valueEntries,
+            ...calculationEntries,
+        ];
+        const { itemsMap, fieldOrigins, fieldIdByColumn } =
+            buildMergeItems(mergeEntries);
+
+        // The output contract's typed field list: every core column with an
+        // accurate value type, in the order the statement returns them. A
+        // column whose type cannot be resolved is refused — a guessed
+        // "string" poisons filters, formatting and re-aggregation over
+        // everything built on the merged result.
+        const findSourceTableCalculation = (sourceId: string, name: string) =>
+            metricQueryBySourceId[sourceId]?.tableCalculations.find(
+                (calculation) => calculation.name === name,
+            );
+        const typeErrors: MergeQueryError[] = [];
+        const typedColumns: MergeTypedColumn[] = mergeEntries.map((entry) => {
+            const reference = fieldIdByColumn[entry.column];
+            const resolvedType = (): DimensionType | null => {
+                switch (entry.origin.kind) {
+                    case 'joinKey': {
+                        const part = mergeQuery.joinKey.find(
+                            (candidate) => candidate.name === entry.column,
+                        );
+                        const meta = Object.entries(
+                            part?.fieldIdBySourceId ?? {},
+                        )
+                            .map(
+                                ([sourceId, fieldId]) =>
+                                    fieldTypes[sourceId]?.[fieldId],
+                            )
+                            .find((candidate) => candidate !== undefined);
+                        return meta?.type ?? null;
+                    }
+                    case 'source': {
+                        const { sourceId, sourceFieldId } = entry.origin;
+                        const origin =
+                            findField(sourceId, sourceFieldId) ??
+                            findSourceTableCalculation(sourceId, sourceFieldId);
+                        return origin
+                            ? convertItemTypeToDimensionType(origin)
+                            : null;
+                    }
+                    case 'tableCalculation':
+                        // Declared, not guessed: a merge calculation is
+                        // arithmetic over the merged row.
+                        return DimensionType.NUMBER;
+                    default:
+                        return assertUnreachable(
+                            entry.origin,
+                            'Unknown merge field origin',
+                        );
+                }
+            };
+            const type = resolvedType();
+            if (type === null) {
+                typeErrors.push({
+                    kind: MergeQueryErrorKind.UNRESOLVED_COLUMN_TYPE,
+                    sourceId:
+                        entry.origin.kind === 'source'
+                            ? entry.origin.sourceId
+                            : null,
+                    fieldIds:
+                        entry.origin.kind === 'source'
+                            ? [entry.origin.sourceFieldId]
+                            : [reference],
+                    message: `The type of "${reference}" cannot be resolved from the field it came from, so the merged column cannot be described.`,
+                });
+            }
+            return {
+                reference,
+                type: type ?? DimensionType.STRING,
+                origin: entry.origin,
+            };
+        });
+        if (typeErrors.length > 0) {
+            return {
+                sql: null,
+                coreSql: null,
+                typedColumns: null,
+                terminalWrapper: null,
+                sorts: [],
+                columns: null,
+                fields: [],
+                itemsMap: {},
+                fieldOrigins: {},
+                parameterReferences,
+                usedParametersValues,
+                fieldIdByColumn: {},
+                legs: [],
+                requiresCompose: false,
+                errors: typeErrors,
+            };
+        }
+
+        // Named by field id, so results are keyed by the same ids the
+        // items map is keyed by and every lookup downstream resolves
+        const coreSql = mergeQueryBuilder.toCoreSql(fieldIdByColumn);
+        const columnByFieldId = Object.fromEntries(
+            Object.entries(fieldIdByColumn).map(([column, fieldId]) => [
+                fieldId,
+                column,
+            ]),
+        );
+        // Null placement is stated per sort so the compose engine keeps the
+        // rows the project warehouse would keep under a limit. A merge over
+        // result sources alone has no explore to read the warehouse from.
+        const sorts = placeMergeSortNulls(
+            resolveMergeSorts(mergeQuery.sorts, Object.values(fieldIdByColumn)),
+            resolvedSources.find((source) => source.explore !== null)?.explore
+                ?.targetDatabase ?? SupportedDbtAdapter.DUCKDB,
+        );
+        const terminalWrapper = mergeQueryBuilder.buildTerminalWrapper(
+            fieldIdByColumn,
+            sorts.map(({ fieldId, descending, nullsFirst }) => ({
+                column: columnByFieldId[fieldId],
+                descending,
+                nullsFirst: nullsFirst ?? false,
+            })),
+        );
+
+        return {
+            sql: applyMergeTerminalWrapper(coreSql, terminalWrapper),
+            legs,
+            coreSql,
+            typedColumns,
+            terminalWrapper,
+            sorts,
+            columns,
+            // The guard column is not data and is deliberately absent from
+            // fields: callers act on it, they do not display it.
+            fields: [...joinKeyFields, ...valueFields, ...calculationFields],
+            itemsMap,
+            fieldOrigins,
+            parameterReferences,
+            usedParametersValues,
+            fieldIdByColumn,
+            requiresCompose: false,
+            errors: [],
         };
     }
 
@@ -3639,7 +11199,11 @@ export class ProjectService extends BaseService {
         if (
             auditedAbility.cannot(
                 'view',
-                subject('Project', { organizationUuid, projectUuid }),
+                subject('Project', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { exploreName },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -3651,14 +11215,14 @@ export class ProjectService extends BaseService {
             exploreName,
         );
 
-        const warehouseCredentials =
-            await this.projectModel.getWarehouseCredentialsForProject(
-                projectUuid,
-            );
+        const sqlBuilderSettings = await this.getWarehouseSqlBuilderSettings(
+            projectUuid,
+            { kind: 'explore', exploreName },
+        );
 
         const warehouseSqlBuilder = warehouseSqlBuilderFromType(
-            warehouseCredentials.type,
-            warehouseCredentials.startOfWeek,
+            sqlBuilderSettings.type,
+            sqlBuilderSettings.startOfWeek,
         );
 
         const queryWithFormula: MetricQuery = {
@@ -3704,20 +11268,23 @@ export class ProjectService extends BaseService {
         metricQuery: MetricQuery;
         usePreAggregateCache: boolean;
     }): Promise<PreAggregateCheckResult> {
-        if (!this.lightdashConfig.preAggregates.enabled) {
-            throw new ForbiddenError('Pre-aggregates are not enabled');
-        }
-
         const { account, projectUuid, exploreName, metricQuery } = args;
 
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
+        if (!isPreAggregatesEnabled(this.lightdashConfig)) {
+            throw new ForbiddenError('Pre-aggregates are not enabled');
+        }
 
         const auditedAbility = this.createAuditedAbility(account);
         if (
             auditedAbility.cannot(
                 'view',
-                subject('Project', { organizationUuid, projectUuid }),
+                subject('Project', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { exploreName },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -3763,19 +11330,25 @@ export class ProjectService extends BaseService {
         try {
             await this.getExplore(account, projectUuid, preAggExploreName);
 
-            const activeMaterialization =
-                await this.preAggregateModel.getActiveMaterialization(
-                    projectUuid,
-                    preAggExploreName,
-                );
+            // External pre-aggregates serve from their external table; no materialization required
+            const matchedDefinition = sourceExplore.preAggregates?.find(
+                (def) => def.name === matchResult.preAggregateName,
+            );
+            if (matchedDefinition?.table === undefined) {
+                const activeMaterialization =
+                    await this.preAggregateModel.getActiveMaterialization(
+                        projectUuid,
+                        preAggExploreName,
+                    );
 
-            if (!activeMaterialization) {
-                return {
-                    hit: false,
-                    reason: {
-                        reason: PreAggregateMissReason.NO_ACTIVE_MATERIALIZATION,
-                    },
-                };
+                if (!activeMaterialization) {
+                    return {
+                        hit: false,
+                        reason: {
+                            reason: PreAggregateMissReason.NO_ACTIVE_MATERIALIZATION,
+                        },
+                    };
+                }
             }
 
             return {
@@ -3811,6 +11384,7 @@ export class ProjectService extends BaseService {
         }
     }
 
+    /** @deprecated Only used by the deprecated runUnderlyingDataQuery endpoint; use AsyncQueryService.executeAsyncUnderlyingDataQuery instead. */
     async runUnderlyingDataQuery(
         account: Account,
         metricQuery: MetricQuery,
@@ -3827,19 +11401,23 @@ export class ProjectService extends BaseService {
         if (
             auditedAbility.cannot(
                 'view',
-                subject('UnderlyingData', { organizationUuid, projectUuid }),
+                subject('UnderlyingData', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { exploreName },
+                }),
             )
         ) {
             throw new ForbiddenError();
         }
 
-        const queryTags: RunQueryTags = {
+        const queryTags: RunQueryTags = withAgentMarkerTag({
             ...this.getUserQueryTags(account),
             organization_uuid: organizationUuid,
             project_uuid: projectUuid,
             explore_name: exploreName,
             query_context: context,
-        };
+        });
 
         return this.runQueryAndFormatRows({
             account,
@@ -3875,10 +11453,12 @@ export class ProjectService extends BaseService {
         const { organizationUuid, projectUuid } = savedChart;
 
         const [spaceCtx, explore] = await Promise.all([
-            this.spacePermissionService.getSpaceAccessContext(
-                account.user.id,
-                savedChart.spaceUuid,
-            ),
+            this.spacePermissionService.resolveAccess(account.user.id, {
+                type: 'chart',
+                chartUuid: savedChart.uuid,
+                dashboardUuid: savedChart.dashboardUuid,
+                spaceUuid: savedChart.spaceUuid,
+            }),
             this.getExplore(
                 account,
                 projectUuid,
@@ -3907,6 +11487,7 @@ export class ProjectService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { chartUuid, versionUuid },
                 }),
             )
         ) {
@@ -3915,14 +11496,14 @@ export class ProjectService extends BaseService {
 
         const { metricQuery } = savedChart;
 
-        const queryTags: RunQueryTags = {
+        const queryTags: RunQueryTags = withAgentMarkerTag({
             ...this.getUserQueryTags(account),
             organization_uuid: organizationUuid,
             project_uuid: projectUuid,
             chart_uuid: chartUuid,
             explore_name: savedChart.tableName,
             query_context: context,
-        };
+        });
 
         const { cacheMetadata, rows, fields } =
             await this.runQueryAndFormatRows({
@@ -3946,6 +11527,7 @@ export class ProjectService extends BaseService {
         };
     }
 
+    /** @deprecated Only used by the deprecated chart-and-results endpoint; use AsyncQueryService.executeAsyncDashboardChartQuery instead. */
     async getChartAndResults({
         account,
         chartUuid,
@@ -3973,10 +11555,12 @@ export class ProjectService extends BaseService {
         const { organizationUuid, projectUuid } = savedChart;
 
         const [spaceCtx, explore] = await Promise.all([
-            this.spacePermissionService.getSpaceAccessContext(
-                account.user.id,
-                savedChart.spaceUuid,
-            ),
+            this.spacePermissionService.resolveAccess(account.user.id, {
+                type: 'chart',
+                chartUuid: savedChart.uuid,
+                dashboardUuid: savedChart.dashboardUuid,
+                spaceUuid: savedChart.spaceUuid,
+            }),
             this.getExplore(
                 account,
                 projectUuid,
@@ -4006,6 +11590,7 @@ export class ProjectService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { chartUuid, dashboardUuid },
                 }),
             )
         ) {
@@ -4015,9 +11600,10 @@ export class ProjectService extends BaseService {
         await this.analyticsModel.addChartViewEvent(
             savedChart.uuid,
             account.user.id,
+            dashboardUuid ? { source: 'dashboard', dashboardUuid } : undefined,
         );
 
-        const availableFieldIds = getAvailableFilterFieldIds(explore);
+        const availableFieldIds = getExecutableFilterFieldIds(explore);
         const appliedDashboardFilters = {
             dimensions: getDashboardFilterRulesForTables(
                 availableFieldIds,
@@ -4045,7 +11631,7 @@ export class ProjectService extends BaseService {
                     : savedChart.metricQuery.sorts,
         };
 
-        const queryTags: RunQueryTags = {
+        const queryTags: RunQueryTags = withAgentMarkerTag({
             ...this.getUserQueryTags(account),
             organization_uuid: organizationUuid,
             project_uuid: projectUuid,
@@ -4053,7 +11639,7 @@ export class ProjectService extends BaseService {
             dashboard_uuid: dashboardUuid,
             explore_name: explore.name,
             query_context: context,
-        };
+        });
 
         const exploreDimensions = getDimensions(explore);
 
@@ -4146,13 +11732,13 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
-        const queryTags: RunQueryTags = {
+        const queryTags: RunQueryTags = withAgentMarkerTag({
             ...this.getUserQueryTags(account),
             organization_uuid: organizationUuid,
             project_uuid: projectUuid,
             explore_name: exploreName,
             query_context: context,
-        };
+        });
 
         const explore = await this.getExplore(
             account,
@@ -4209,20 +11795,25 @@ export class ProjectService extends BaseService {
                     validExplore ??
                     (await this.getExplore(account, projectUuid, exploreName));
 
-                const { rows, cacheMetadata, fields } =
-                    await this.runMetricQuery({
-                        account,
-                        metricQuery,
-                        projectUuid,
-                        exploreName,
-                        csvLimit,
-                        context,
-                        queryTags,
-                        invalidateCache,
-                        explore,
-                        dateZoom,
-                        chartUuid,
-                    });
+                const {
+                    rows,
+                    cacheMetadata,
+                    fields,
+                    displayTimezone,
+                    warehouseType,
+                } = await this.runMetricQuery({
+                    account,
+                    metricQuery,
+                    projectUuid,
+                    exploreName,
+                    csvLimit,
+                    context,
+                    queryTags,
+                    invalidateCache,
+                    explore,
+                    dateZoom,
+                    chartUuid,
+                });
                 span.setAttribute('rows', rows.length);
 
                 this.logger.info(
@@ -4230,33 +11821,14 @@ export class ProjectService extends BaseService {
                         Object.keys(rows?.[0] || {}).length
                     } columns with querytags ${JSON.stringify(queryTags)}`,
                 );
-                const { warehouseConnection } =
-                    await this.projectModel.getWithSensitiveFields(projectUuid);
-                if (warehouseConnection) {
-                    span.setAttribute('warehouse', warehouseConnection?.type);
-                }
-
-                const projectTimezone =
-                    await this.getQueryTimezoneForProject(projectUuid);
-                const resolvedTimezone = resolveQueryTimezone(
-                    metricQuery,
-                    projectTimezone,
-                    getAccountUserTimezone(account),
-                );
-                const isTimezoneEnabled = await this.isTimezoneSupportEnabled({
-                    userUuid: account.user.id,
-                    organizationUuid: account.organization.organizationUuid,
-                });
-                const displayTimezone = isTimezoneEnabled
-                    ? resolvedTimezone
-                    : undefined;
+                span.setAttribute('warehouse', warehouseType);
 
                 // If there are more than 500 rows, we need to format them in a background job
                 const formattedRows = await wrapSentryTransaction<ResultRow[]>(
                     'ProjectService.runQueryAndFormatRows.formatRows',
                     {
                         rows: rows.length,
-                        warehouse: warehouseConnection?.type,
+                        warehouse: warehouseType,
                     },
                     async (formatRowsSpan) => {
                         const useWorker = rows.length > 500;
@@ -4323,11 +11895,15 @@ export class ProjectService extends BaseService {
         warehouseClient,
         query,
         metricQuery,
+        resolvedTimezone,
         queryTags,
         invalidateCache,
+        bypassResultsCache = false,
+        resultProducer = null,
     }: {
         projectUuid: string;
         userUuid: string | null;
+        resolvedTimezone: string;
         user: Pick<
             LightdashUser,
             'userUuid' | 'organizationUuid' | 'organizationName'
@@ -4338,6 +11914,8 @@ export class ProjectService extends BaseService {
         metricQuery: MetricQuery;
         queryTags: Omit<RunQueryTags, 'query_context'>; // We already have context in the context parameter
         invalidateCache?: boolean;
+        bypassResultsCache?: boolean;
+        resultProducer?: QueryResultProducer | null;
     }): Promise<{
         rows: Record<string, AnyType>[];
         cacheMetadata: CacheMetadata;
@@ -4346,9 +11924,35 @@ export class ProjectService extends BaseService {
             'ProjectService.getResultsFromCacheOrWarehouse',
             {},
             async (span) => {
-                const hashParts = [projectUuid, userUuid, query];
-                if (metricQuery.timezone) hashParts.push(metricQuery.timezone);
-                const queryHash = buildCacheHash(hashParts);
+                // Key on the resolved timezone (not the raw setting) so the
+                // cache reflects project/user fallbacks and invalidates when the
+                // project timezone changes.
+                const hashParts = [
+                    projectUuid,
+                    userUuid,
+                    query,
+                    resolvedTimezone,
+                ];
+                const { enabled: identityEnabled } =
+                    await this.featureFlagModel.get({
+                        user,
+                        featureFlagId: FeatureFlags.AgentIdentity,
+                    });
+                const bypassCache =
+                    bypassResultsCache ||
+                    (identityEnabled &&
+                        (!user.organizationUuid ||
+                            resultProducer === null ||
+                            resultProducer.agentIdentity !== null));
+                const queryHash = buildCacheHash(
+                    hashParts,
+                    identityEnabled && resultProducer && user.organizationUuid
+                        ? {
+                              organizationUuid: user.organizationUuid,
+                              producer: resultProducer,
+                          }
+                        : null,
+                );
 
                 span.setAttribute('queryHash', queryHash);
                 span.setAttribute('cacheHit', false);
@@ -4359,18 +11963,24 @@ export class ProjectService extends BaseService {
                         featureFlagId: FeatureFlags.ResultsCacheEnabled,
                     });
 
-                if (resultsCacheEnabled && !invalidateCache) {
+                if (resultsCacheEnabled && !bypassCache && !invalidateCache) {
                     const cacheEntryMetadata = await this.s3CacheClient
                         .getResultsMetadata(queryHash)
                         .catch((e) => undefined); // ignore since error is tracked in fileStorageClient
+                    const isCacheEntryFresh = async () => {
+                        if (!cacheEntryMetadata?.LastModified) return false;
+                        const cacheTtlSeconds =
+                            await this.projectModel.getEffectiveResultsCacheTtlSeconds(
+                                projectUuid,
+                            );
+                        return (
+                            Date.now() -
+                                cacheEntryMetadata.LastModified.getTime() <
+                            cacheTtlSeconds * 1000
+                        );
+                    };
 
-                    if (
-                        cacheEntryMetadata?.LastModified &&
-                        new Date().getTime() -
-                            cacheEntryMetadata.LastModified.getTime() <
-                            this.lightdashConfig.results.cacheStateTimeSeconds *
-                                1000
-                    ) {
+                    if (await isCacheEntryFresh()) {
                         this.logger.debug(
                             `Getting data from cache, key: ${queryHash}`,
                         );
@@ -4383,15 +11993,31 @@ export class ProjectService extends BaseService {
                             await cacheEntry.Body?.transformToString();
                         if (stringResults) {
                             try {
-                                span.setAttribute('cacheHit', true);
-                                return {
-                                    rows: JSON.parse(stringResults).rows,
-                                    cacheMetadata: {
-                                        cacheHit: true,
-                                        cacheUpdatedTime:
-                                            cacheEntryMetadata?.LastModified,
-                                    },
-                                };
+                                const cached = JSON.parse(stringResults);
+                                if (
+                                    !identityEnabled ||
+                                    (resultProducer &&
+                                        cached.resultProducer &&
+                                        cached.resultProducer.agentIdentity ===
+                                            null &&
+                                        isSameResultProducer(
+                                            cached.resultProducer,
+                                            resultProducer,
+                                        ))
+                                ) {
+                                    span.setAttribute('cacheHit', true);
+                                    return {
+                                        rows: (identityEnabled
+                                            ? cached.payload
+                                            : cached
+                                        ).rows,
+                                        cacheMetadata: {
+                                            cacheHit: true,
+                                            cacheUpdatedTime:
+                                                cacheEntryMetadata?.LastModified,
+                                        },
+                                    };
+                                }
                             } catch (e) {
                                 this.logger.error(
                                     'Error parsing cache results:',
@@ -4444,12 +12070,16 @@ export class ProjectService extends BaseService {
                     },
                 );
 
-                if (resultsCacheEnabled) {
+                if (resultsCacheEnabled && !bypassCache) {
                     this.logger.debug(
                         `Writing data to cache with key ${queryHash}`,
                     );
                     const buffer = Buffer.from(
-                        JSON.stringify(warehouseResults),
+                        JSON.stringify(
+                            identityEnabled
+                                ? { resultProducer, payload: warehouseResults }
+                                : warehouseResults,
+                        ),
                     );
                     // fire and forget
                     this.s3CacheClient
@@ -4497,6 +12127,8 @@ export class ProjectService extends BaseService {
         rows: Record<string, AnyType>[];
         cacheMetadata: CacheMetadata;
         fields: ItemsMap;
+        displayTimezone: string | undefined;
+        warehouseType: WarehouseTypes;
     }> {
         return wrapSentryTransaction(
             'ProjectService.runMetricQuery',
@@ -4516,17 +12148,33 @@ export class ProjectService extends BaseService {
                             subject('Project', {
                                 organizationUuid,
                                 projectUuid,
+                                metadata: { chartUuid, exploreName },
                             }),
                         )
                     ) {
                         throw new ForbiddenError();
                     }
 
+                    await this.assertCustomSqlAuthorizedForQuery({
+                        account,
+                        projectUuid,
+                        organizationUuid,
+                        exploreName,
+                        metricQuery,
+                    });
+
+                    const { maxLimit, csvCellsLimit } =
+                        await resolveOrganizationExportLimits(
+                            this.organizationSettingsModel,
+                            this.lightdashConfig.query,
+                            organizationUuid,
+                        );
+
                     const metricQueryWithLimit = applyMetricQueryLimit(
                         metricQuery,
                         csvLimit,
-                        this.lightdashConfig.query?.csvCellsLimit,
-                        this.lightdashConfig.query?.maxLimit,
+                        csvCellsLimit,
+                        maxLimit,
                     );
 
                     const explore =
@@ -4536,160 +12184,266 @@ export class ProjectService extends BaseService {
                             projectUuid,
                             exploreName,
                         ));
+                    auditMetricQueryAttributeAccess({
+                        account,
+                        projectUuid,
+                        explore,
+                        metricQuery: metricQueryWithLimit,
+                    });
 
-                    const warehouseCredentials =
-                        await this.getWarehouseCredentials({
+                    return await this.warehouseClientFactory.withWarehouseClient(
+                        {
+                            kind: 'binding',
                             projectUuid,
-                            userId: account.user.id,
-                            isRegisteredUser: account.isRegisteredUser(),
-                            isServiceAccount: account.isServiceAccount(),
-                        });
-                    const { warehouseClient, sshTunnel } =
-                        await this._getWarehouseClient(
-                            projectUuid,
-                            warehouseCredentials,
-                            {
+                            binding: { kind: 'explore', exploreName },
+                            overrides: {
                                 snowflakeVirtualWarehouse: explore.warehouse,
                                 databricksCompute: explore.databricksCompute,
                             },
-                        );
-
-                    const { userAttributes, intrinsicUserAttributes } =
-                        await this.getUserAttributes({
-                            account,
-                        });
-
-                    const mergedUserAttributes = userAttributeOverrides
-                        ? {
-                              ...userAttributes,
-                              ...userAttributeOverrides,
-                          }
-                        : userAttributes;
-
-                    const availableParameterDefinitions =
-                        await this.getAvailableParameters(projectUuid, explore);
-
-                    const projectTimezone =
-                        await this.getQueryTimezoneForProject(projectUuid);
-                    const timezone = resolveQueryTimezone(
-                        metricQueryWithLimit,
-                        projectTimezone,
-                        getAccountUserTimezone(account),
-                    );
-                    const useTimezoneAwareDateTrunc =
-                        await this.isTimezoneSupportEnabled({
-                            userUuid: account.user.id,
-                            organizationUuid:
-                                account.organization.organizationUuid,
-                        });
-
-                    const fullQuery = await ProjectService._compileQuery({
-                        metricQuery: metricQueryWithLimit,
-                        explore,
-                        warehouseSqlBuilder: warehouseClient,
-                        intrinsicUserAttributes,
-                        userAttributes: mergedUserAttributes,
-                        timezone,
-                        dateZoom,
-                        parameters,
-                        availableParameterDefinitions,
-                        pivotDimensions: metricQueryWithLimit.pivotDimensions,
-                        useTimezoneAwareDateTrunc,
-                        columnTimezone: getColumnTimezone(
-                            warehouseClient.credentials,
-                        ),
-                    });
-
-                    const { query } = fullQuery;
-
-                    const resolvedMetricOverrides =
-                        getMetricOverridesWithPopInheritance(metricQuery);
-
-                    const fieldsWithOverrides: ItemsMap = Object.fromEntries(
-                        Object.entries(fullQuery.fields).map(([key, value]) => {
-                            // Check for metric or dimension overrides. PoP
-                            // metric overrides are inherited from their base
-                            // metric by the shared util above.
-                            const override =
-                                resolvedMetricOverrides[key] ||
-                                metricQuery.dimensionOverrides?.[key];
-                            if (override) {
-                                return [
-                                    key,
-                                    {
-                                        ...value,
-                                        ...override,
-                                    },
-                                ];
-                            }
-                            return [key, value];
-                        }),
-                    );
-
-                    const onboardingRecord =
-                        await this.onboardingModel.getByOrganizationUuid(
-                            account.organization.organizationUuid,
-                        );
-                    if (!onboardingRecord.ranQueryAt) {
-                        await this.onboardingModel.update(
-                            account.organization.organizationUuid,
-                            {
-                                ranQueryAt: new Date(),
-                            },
-                        );
-                    }
-
-                    this.analytics.trackAccount(account, {
-                        event: 'query.executed',
-                        properties: {
-                            organizationId: organizationUuid,
-                            projectId: projectUuid,
-                            context,
-                            ...ProjectService.getMetricQueryExecutionProperties(
-                                {
-                                    metricQuery: metricQueryWithLimit,
-                                    queryTags,
-                                    chartUuid,
-                                    dateZoom,
-                                    explore,
-                                    parameters,
-                                },
-                            ),
                         },
-                    });
-                    this.logger.debug(
-                        `Fetch query results from cache or warehouse`,
-                    );
-                    span.setAttribute('generatedSql', query);
-
-                    span.setAttribute('lightdash.projectUuid', projectUuid);
-                    span.setAttribute(
-                        'warehouse.type',
-                        warehouseClient.credentials.type,
-                    );
-                    const userUuid = getCacheUserUuid(
-                        warehouseCredentials,
-                        account.user.id,
-                    );
-                    const { rows, cacheMetadata } =
-                        await this.getResultsFromCacheOrWarehouse({
-                            projectUuid,
-                            userUuid,
-                            user: {
-                                userUuid: account.user.id,
-                                organizationUuid:
-                                    account.organization.organizationUuid,
-                                organizationName: account.organization.name,
-                            },
-                            context,
+                        connectionContextFromAccount(account, {
+                            organizationUuid,
+                            queryContext: context,
+                        }),
+                        async ({
+                            aiPlan,
                             warehouseClient,
-                            metricQuery: metricQueryWithLimit,
-                            query,
-                            queryTags,
-                            invalidateCache,
-                        });
-                    await sshTunnel.disconnect();
-                    return { rows, cacheMetadata, fields: fieldsWithOverrides };
+                            warehouseCredentials,
+                            warehouseConnectionUuid,
+                            connectionRoute,
+                        }) => {
+                            const { userAttributes, intrinsicUserAttributes } =
+                                await this.getUserAttributes({
+                                    account,
+                                });
+
+                            const mergedUserAttributes = userAttributeOverrides
+                                ? {
+                                      ...userAttributes,
+                                      ...userAttributeOverrides,
+                                  }
+                                : userAttributes;
+
+                            const availableParameterDefinitions =
+                                await this.getAvailableParameters(
+                                    projectUuid,
+                                    explore,
+                                );
+
+                            const projectTimezone =
+                                await this.getQueryTimezoneForProject(
+                                    projectUuid,
+                                );
+                            const timezone = resolveQueryTimezone({
+                                sessionTimezone: null,
+                                metricQuery: metricQueryWithLimit,
+                                projectTimezone,
+                                userTimezone: getAccountUserTimezone(account),
+                            });
+                            const useTimezoneAwareDateTrunc =
+                                await this.isTimezoneSupportEnabled({
+                                    userUuid: account.user.id,
+                                    organizationUuid:
+                                        account.organization.organizationUuid,
+                                });
+
+                            const fullQuery = new QueryComposer(
+                                { metricQuery: metricQueryWithLimit },
+                                {
+                                    explore,
+                                    warehouseSqlBuilder: warehouseClient,
+                                    intrinsicUserAttributes,
+                                    userAttributes: mergedUserAttributes,
+                                    timezone,
+                                    dateZoom,
+                                    parameters,
+                                    availableParameterDefinitions,
+                                    pivotDimensions:
+                                        metricQueryWithLimit.pivotDimensions,
+                                    useTimezoneAwareDateTrunc,
+                                    columnTimezone: getColumnTimezone(
+                                        warehouseClient.credentials,
+                                    ),
+                                    dataTimezone:
+                                        warehouseClient.credentials
+                                            .dataTimezone,
+                                },
+                            ).compile();
+
+                            const { query } = fullQuery;
+
+                            const resolvedMetricOverrides =
+                                getMetricOverridesWithPopInheritance(
+                                    metricQuery,
+                                );
+
+                            const fieldsWithOverrides: ItemsMap =
+                                Object.fromEntries(
+                                    Object.entries(fullQuery.fields).map(
+                                        ([key, value]) => {
+                                            // Check for metric or dimension overrides. PoP
+                                            // metric overrides are inherited from their base
+                                            // metric by the shared util above.
+                                            const override =
+                                                resolvedMetricOverrides[key] ||
+                                                metricQuery
+                                                    .dimensionOverrides?.[key];
+                                            const formatOptions =
+                                                override?.formatOptions;
+                                            if (formatOptions) {
+                                                return [
+                                                    key,
+                                                    {
+                                                        ...value,
+                                                        ...getFieldFormatOverrideProps(
+                                                            formatOptions,
+                                                        ),
+                                                    },
+                                                ];
+                                            }
+                                            return [key, value];
+                                        },
+                                    ),
+                                );
+
+                            const onboardingFlow = await this.getOnboardingFlow(
+                                {
+                                    userUuid: account.user.id,
+                                    organizationUuid:
+                                        account.organization.organizationUuid,
+                                },
+                            );
+                            const onboardingRecord =
+                                await this.onboardingModel.getByOrganizationUuid(
+                                    account.organization.organizationUuid,
+                                );
+                            if (!onboardingRecord.ranQueryAt) {
+                                await this.onboardingModel.update(
+                                    account.organization.organizationUuid,
+                                    {
+                                        ranQueryAt: new Date(),
+                                    },
+                                );
+                                this.analytics.trackAccount(account, {
+                                    event: 'onboarding.step_completed',
+                                    properties: {
+                                        step: 'first_query',
+                                        stepIndex: 5,
+                                        onboardingFlow,
+                                        organizationId:
+                                            account.organization
+                                                .organizationUuid,
+                                    },
+                                });
+                            }
+
+                            this.analytics.trackAccount(account, {
+                                event: 'query.executed',
+                                properties: {
+                                    inheritedFromProjectUuid:
+                                        aiPlan?.identity ===
+                                        'ai_service_account'
+                                            ? aiPlan.inheritedFromProjectUuid
+                                            : null,
+                                    ...this.getQueryConnectionAnalyticsProperties(
+                                        {
+                                            warehouseConnectionUuid,
+                                            warehouseType:
+                                                warehouseCredentials.type,
+                                            connectionRoute,
+                                        },
+                                    ),
+                                    organizationId: organizationUuid,
+                                    projectId: projectUuid,
+                                    context,
+                                    onboardingFlow,
+                                    ...ProjectService.getMetricQueryExecutionProperties(
+                                        {
+                                            metricQuery: metricQueryWithLimit,
+                                            queryTags,
+                                            chartUuid,
+                                            dateZoom,
+                                            explore,
+                                            parameters,
+                                        },
+                                    ),
+                                },
+                            });
+                            this.logger.debug(
+                                `Fetch query results from cache or warehouse`,
+                            );
+                            span.setAttribute('generatedSql', query);
+
+                            span.setAttribute(
+                                'lightdash.projectUuid',
+                                projectUuid,
+                            );
+                            span.setAttribute(
+                                'warehouse.type',
+                                warehouseClient.credentials.type,
+                            );
+                            const userUuid = getCacheUserUuid(
+                                warehouseCredentials,
+                                account.user.id,
+                            );
+                            const { rows, cacheMetadata } =
+                                await this.getResultsFromCacheOrWarehouse({
+                                    projectUuid,
+                                    userUuid,
+                                    user: {
+                                        userUuid: account.user.id,
+                                        organizationUuid:
+                                            account.organization
+                                                .organizationUuid,
+                                        organizationName:
+                                            account.organization.name,
+                                    },
+                                    context,
+                                    warehouseClient,
+                                    metricQuery: metricQueryWithLimit,
+                                    resolvedTimezone: timezone,
+                                    query,
+                                    queryTags,
+                                    invalidateCache,
+                                    resultProducer:
+                                        WarehouseClientFactory.getResultProducer(
+                                            {
+                                                warehouseCredentials,
+                                                warehouseConnectionUuid,
+                                                aiPlan: aiPlan ?? null,
+                                            },
+                                            account.user.id,
+                                            buildQueryAgentIdentity(
+                                                account,
+                                                context,
+                                                null,
+                                            ),
+                                            getResultEntitlementFingerprint(
+                                                {
+                                                    userAttributes:
+                                                        mergedUserAttributes,
+                                                    intrinsicUserAttributes,
+                                                },
+                                                explore,
+                                                metricQueryWithLimit,
+                                            ),
+                                            account.authentication.type,
+                                        ),
+                                    bypassResultsCache:
+                                        aiPlan?.identity ===
+                                        'ai_service_account',
+                                });
+                            return {
+                                rows,
+                                cacheMetadata,
+                                fields: fieldsWithOverrides,
+                                displayTimezone: useTimezoneAwareDateTrunc
+                                    ? timezone
+                                    : undefined,
+                                warehouseType: warehouseClient.credentials.type,
+                            };
+                        },
+                    );
                 } catch (e) {
                     span.setStatus({
                         code: 2, // ERROR
@@ -4703,12 +12457,54 @@ export class ProjectService extends BaseService {
         );
     }
 
+    async runAgentMarkerProbe(
+        account: Account,
+        projectUuid: string,
+        warehouseConnectionUuid: string | null,
+        sql: string,
+    ): Promise<Record<string, unknown>[]> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        if (
+            this.createAuditedAbility(account).cannot(
+                'manage',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        )
+            throw new ForbiddenError();
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'binding',
+                projectUuid,
+                binding: { kind: 'connection', warehouseConnectionUuid },
+            },
+            connectionContextFromAccount(account, {
+                organizationUuid,
+                queryContext: QueryExecutionContext.AI,
+                aiAccess: 'diagnostic',
+            }),
+            async ({ warehouseClient, aiPlan }) => {
+                const { rows } = await warehouseClient.runQuery(
+                    sql,
+                    withAgentMarkerTag({
+                        ...aiPlan?.audit.queryTags,
+                        query_context: QueryExecutionContext.AI,
+                        user_uuid: account.user.id,
+                        organization_uuid: organizationUuid,
+                    }),
+                );
+                return rows;
+            },
+        );
+    }
+
     async runSqlQuery(
         user: SessionUser,
         projectUuid: string,
         sql: string,
+        binding: ConnectionBinding,
     ): Promise<ApiSqlQueryResults> {
-        const { organizationUuid } =
+        const { organizationUuid, provisioningSource } =
             await this.projectModel.getSummary(projectUuid);
 
         const auditedAbility = this.createAuditedAbility(user);
@@ -4721,40 +12517,74 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
-        this.analytics.track({
-            userId: user.userUuid,
-            event: 'query.executed',
-            properties: {
-                organizationId: organizationUuid,
-                projectId: projectUuid,
-                context: QueryExecutionContext.SQL_RUNNER,
-                usingStreaming: false,
+        if (provisioningSource === 'analytics') {
+            throw new ForbiddenError(
+                'SQL Runner is unavailable for managed analytics projects',
+            );
+        }
+
+        return this.warehouseClientFactory.withWarehouseClient(
+            { kind: 'binding', projectUuid, binding },
+            connectionContextFromUser(
+                { userUuid: user.userUuid, isRegisteredUser: true },
+                { organizationUuid, queryContext: null },
+            ),
+            async ({
+                aiPlan,
+                warehouseClient,
+                warehouseCredentials,
+                warehouseConnectionUuid,
+                connectionRoute,
+            }) => {
+                const connectionAnalytics =
+                    this.getQueryConnectionAnalyticsProperties({
+                        warehouseConnectionUuid,
+                        warehouseType: warehouseCredentials.type,
+                        connectionRoute,
+                    });
+                this.analytics.track({
+                    userId: user.userUuid,
+                    event: 'query.executed',
+                    properties: {
+                        inheritedFromProjectUuid:
+                            aiPlan?.identity === 'ai_service_account'
+                                ? aiPlan.inheritedFromProjectUuid
+                                : null,
+                        ...connectionAnalytics,
+                        organizationId: organizationUuid,
+                        projectId: projectUuid,
+                        context: QueryExecutionContext.SQL_RUNNER,
+                        usingStreaming: false,
+                        onboardingFlow: await this.getOnboardingFlow(user),
+                    },
+                });
+
+                this.logger.debug(`Run query against warehouse`);
+                const queryTags: RunQueryTags = withAgentMarkerTag({
+                    organization_uuid: organizationUuid,
+                    user_uuid: user.userUuid,
+                    query_context: QueryExecutionContext.SQL_RUNNER,
+                });
+
+                const { maxLimit } = await resolveOrganizationExportLimits(
+                    this.organizationSettingsModel,
+                    this.lightdashConfig.query,
+                    organizationUuid,
+                );
+
+                // enforce limit for current SQL queries as it may crash server. We are working on a new SQL runner that supports streaming
+                const cteWithLimit = applyLimitToSqlQuery({
+                    sqlQuery: sql,
+                    limit: maxLimit,
+                });
+
+                const results = await warehouseClient.runQuery(
+                    cteWithLimit,
+                    queryTags,
+                );
+                return results;
             },
-        });
-        const { warehouseClient, sshTunnel } = await this._getWarehouseClient(
-            projectUuid,
-            await this.getWarehouseCredentials({
-                projectUuid,
-                userId: user.userUuid,
-                isRegisteredUser: true,
-            }),
         );
-        this.logger.debug(`Run query against warehouse`);
-        const queryTags: RunQueryTags = {
-            organization_uuid: organizationUuid,
-            user_uuid: user.userUuid,
-            query_context: QueryExecutionContext.SQL_RUNNER,
-        };
-
-        // enforce limit for current SQL queries as it may crash server. We are working on a new SQL runner that supports streaming
-        const cteWithLimit = applyLimitToSqlQuery({
-            sqlQuery: sql,
-            limit: this.lightdashConfig.query.maxLimit,
-        });
-
-        const results = await warehouseClient.runQuery(cteWithLimit, queryTags);
-        await sshTunnel.disconnect();
-        return results;
     }
 
     // TODO: consider removing this method in milestone #212
@@ -4766,6 +12596,7 @@ export class ProjectService extends BaseService {
         limit,
         sqlChartUuid,
         context,
+        authMethod = null,
     }: SqlRunnerPayload): Promise<{
         fileUrl: string;
         columns: VizColumn[];
@@ -4775,65 +12606,127 @@ export class ProjectService extends BaseService {
 
         const query = applyLimitToSqlQuery({ sqlQuery: sql, limit });
 
-        this.analytics.track({
-            userId: userUuid,
-            event: 'query.executed',
-            properties: {
-                organizationId: organizationUuid,
-                projectId: projectUuid,
-                context: context as QueryExecutionContext,
-                sqlChartId: sqlChartUuid,
-                usingStreaming: true,
-            },
-        });
-        const { warehouseClient, sshTunnel } = await this._getWarehouseClient(
-            projectUuid,
-            await this.getWarehouseCredentials({
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'binding',
                 projectUuid,
-                userId: userUuid,
-                isRegisteredUser: true,
-            }),
-        );
-        this.logger.debug(`Stream query against warehouse`);
-        const queryTags: RunQueryTags = {
-            organization_uuid: organizationUuid,
-            user_uuid: userUuid,
-            query_context: context,
-        };
-
-        const columns: VizColumn[] = [];
-
-        const fileUrl = await this.downloadFileModel.streamFunction(
-            this.fileStorageClient,
-        )(
-            `${this.lightdashConfig.siteUrl}/api/v1/projects/${projectUuid}/sqlRunner/results`,
-            async (writer) => {
-                await warehouseClient.streamQuery(
-                    query,
-                    async ({ rows, fields }) => {
-                        if (!columns.length) {
-                            // Get column types from first row of results
-                            columns.push(
-                                ...Object.keys(fields).map((fieldName) => ({
-                                    reference: fieldName,
-                                    type: fields[fieldName].type,
-                                })),
-                            );
-                        }
-
-                        rows.forEach(writer);
+                binding: { kind: 'connection', warehouseConnectionUuid: null },
+            },
+            connectionContextFromUser(
+                { userUuid, isRegisteredUser: true },
+                { organizationUuid, queryContext: context },
+            ),
+            async ({
+                aiPlan,
+                warehouseClient,
+                warehouseCredentials,
+                warehouseConnectionUuid,
+                connectionRoute,
+            }) => {
+                const connectionAnalytics =
+                    this.getQueryConnectionAnalyticsProperties({
+                        warehouseConnectionUuid,
+                        warehouseType: warehouseCredentials.type,
+                        connectionRoute,
+                    });
+                this.analytics.track({
+                    userId: userUuid,
+                    event: 'query.executed',
+                    properties: {
+                        inheritedFromProjectUuid:
+                            aiPlan?.identity === 'ai_service_account'
+                                ? aiPlan.inheritedFromProjectUuid
+                                : null,
+                        ...connectionAnalytics,
+                        organizationId: organizationUuid,
+                        projectId: projectUuid,
+                        context,
+                        sqlChartId: sqlChartUuid,
+                        usingStreaming: true,
+                        onboardingFlow: await this.getOnboardingFlow({
+                            userUuid,
+                            organizationUuid,
+                        }),
                     },
-                    {
-                        tags: queryTags,
+                });
+
+                this.logger.debug(`Stream query against warehouse`);
+                const queryTags: RunQueryTags = withAgentMarkerTag({
+                    organization_uuid: organizationUuid,
+                    user_uuid: userUuid,
+                    query_context: context,
+                });
+
+                const columns: VizColumn[] = [];
+
+                const { enabled: identityEnabled } =
+                    await this.featureFlagModel.get({
+                        user: { userUuid, organizationUuid },
+                        featureFlagId: FeatureFlags.AgentIdentity,
+                    });
+                const resultEntitlementFingerprint = identityEnabled
+                    ? getResultEntitlementFingerprint(
+                          await this.getUserAttributes({
+                              user: await this.userModel.findSessionUserAndOrgByUuid(
+                                  userUuid,
+                                  organizationUuid,
+                              ),
+                          }),
+                      )
+                    : null;
+                const fileUrl = await this.downloadFileModel.streamFunction(
+                    this.fileStorageClient,
+                    projectUuid,
+                    identityEnabled
+                        ? {
+                              version: 1,
+                              userUuid,
+                              organizationUuid,
+                              projectUuid,
+                              resultProducer:
+                                  WarehouseClientFactory.getResultProducer(
+                                      {
+                                          warehouseCredentials,
+                                          warehouseConnectionUuid,
+                                          aiPlan: aiPlan ?? null,
+                                      },
+                                      userUuid,
+                                      null,
+                                      resultEntitlementFingerprint,
+                                      authMethod,
+                                  ),
+                          }
+                        : null,
+                )(
+                    `${this.lightdashConfig.siteUrl}/api/v1/projects/${projectUuid}/sqlRunner/results`,
+                    async (writer) => {
+                        await warehouseClient.streamQuery(
+                            query,
+                            async ({ rows, fields }) => {
+                                if (!columns.length) {
+                                    // Get column types from first row of results
+                                    columns.push(
+                                        ...Object.keys(fields).map(
+                                            (fieldName) => ({
+                                                reference: fieldName,
+                                                type: fields[fieldName].type,
+                                            }),
+                                        ),
+                                    );
+                                }
+
+                                rows.forEach(writer);
+                            },
+                            {
+                                tags: queryTags,
+                            },
+                        );
                     },
                 );
+
+                return { fileUrl, columns };
             },
-            this.fileStorageClient,
         );
-
-        await sshTunnel.disconnect();
-
-        return { fileUrl, columns };
     }
 
     async pivotQueryWorkerTask({
@@ -4847,6 +12740,7 @@ export class ProjectService extends BaseService {
         valuesColumns,
         groupByColumns,
         sortBy,
+        authMethod = null,
     }: SqlRunnerPivotQueryPayload): Promise<
         Omit<PivotChartData, 'results' | 'columns'>
     > {
@@ -4857,190 +12751,271 @@ export class ProjectService extends BaseService {
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
 
-        const warehouseCredentials = await this.getWarehouseCredentials({
-            projectUuid,
-            userId: userUuid,
-            isRegisteredUser: true,
-        });
-
-        this.analytics.track({
-            userId: userUuid,
-            event: 'query.executed',
-            properties: {
-                organizationId: organizationUuid,
-                projectId: projectUuid,
-                context: context as QueryExecutionContext,
-                sqlChartId: sqlChartUuid,
-                usingStreaming: true,
-            },
-        });
-        const { warehouseClient, sshTunnel } = await this._getWarehouseClient(
-            projectUuid,
-            warehouseCredentials,
-        );
-
-        // Apply limit and pivot to the SQL query
-        const pivotQueryBuilder = new PivotQueryBuilder(
-            sql,
+        return this.warehouseClientFactory.withWarehouseClient(
             {
-                indexColumn: indexColumns,
-                valuesColumns,
-                groupByColumns,
-                sortBy,
+                kind: 'binding',
+                projectUuid,
+                binding: sqlChartUuid
+                    ? { kind: 'sqlChart', savedSqlUuid: sqlChartUuid }
+                    : { kind: 'connection', warehouseConnectionUuid: null },
             },
-            warehouseClient,
-            limit,
-        );
+            connectionContextFromUser(
+                { userUuid, isRegisteredUser: true },
+                { organizationUuid, queryContext: context },
+            ),
+            async ({
+                aiPlan,
+                warehouseClient,
+                warehouseCredentials,
+                warehouseConnectionUuid,
+                connectionRoute,
+            }) => {
+                this.analytics.track({
+                    userId: userUuid,
+                    event: 'query.executed',
+                    properties: {
+                        inheritedFromProjectUuid:
+                            aiPlan?.identity === 'ai_service_account'
+                                ? aiPlan.inheritedFromProjectUuid
+                                : null,
+                        ...this.getQueryConnectionAnalyticsProperties({
+                            warehouseConnectionUuid,
+                            warehouseType: warehouseCredentials.type,
+                            connectionRoute,
+                        }),
+                        organizationId: organizationUuid,
+                        projectId: projectUuid,
+                        context,
+                        sqlChartId: sqlChartUuid,
+                        usingStreaming: true,
+                        onboardingFlow: await this.getOnboardingFlow({
+                            userUuid,
+                            organizationUuid,
+                        }),
+                    },
+                });
 
-        const pivotedSql = pivotQueryBuilder.toSql({
-            columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
-        });
+                // Apply limit and pivot to the SQL query
+                const pivotQueryBuilder = new PivotQueryBuilder(
+                    sql,
+                    {
+                        indexColumn: indexColumns,
+                        valuesColumns,
+                        groupByColumns,
+                        sortBy,
+                    },
+                    warehouseClient,
+                    limit,
+                );
 
-        this.logger.debug(`Stream query against warehouse`);
-        const queryTags: RunQueryTags = {
-            organization_uuid: organizationUuid,
-            user_uuid: userUuid,
-            query_context: context,
-        };
+                const pivotedSql = pivotQueryBuilder.toSql({
+                    columnLimit: this.lightdashConfig.pivotTable.maxColumnLimit,
+                });
 
-        const columns: VizColumn[] = [];
-        let currentRowIndex = 0;
-        let currentTransformedRow: ResultRow | undefined;
-        const valuesColumnData = new Map<string, PivotValuesColumn>();
+                this.logger.debug(`Stream query against warehouse`);
+                const queryTags: RunQueryTags = withAgentMarkerTag({
+                    organization_uuid: organizationUuid,
+                    user_uuid: userUuid,
+                    query_context: context,
+                });
 
-        let columnCount: undefined | number;
+                const columns: VizColumn[] = [];
+                let currentRowIndex = 0;
+                let currentTransformedRow: ResultRow | undefined;
+                const valuesColumnData = new Map<string, PivotValuesColumn>();
 
-        const fileUrl = await this.downloadFileModel.streamFunction(
-            this.fileStorageClient,
-        )(
-            `${this.lightdashConfig.siteUrl}/api/v1/projects/${projectUuid}/sqlRunner/results`,
-            async (writer) => {
-                try {
-                    await warehouseClient.streamQuery(
-                        pivotedSql,
-                        async ({ rows, fields }) => {
-                            if ('total_columns' in rows[0]) {
-                                columnCount = rows[0].total_columns;
-                            }
-                            if (
-                                !groupByColumns ||
-                                groupByColumns.length === 0
-                            ) {
-                                rows.forEach(writer);
-                                return;
-                            }
+                let columnCount: undefined | number;
 
-                            // columns appears unused
-                            if (!columns.length) {
-                                // Get column types from first row of results
-                                columns.push(
-                                    ...Object.keys(fields).map((fieldName) => ({
-                                        reference: fieldName,
-                                        type: fields[fieldName].type,
-                                    })),
-                                );
-                            }
-
-                            rows.forEach((row) => {
-                                // Write rows to file in order of row_index. This is so that we can pivot the data later
-                                if (currentRowIndex !== row.row_index) {
-                                    if (currentTransformedRow) {
-                                        writer(currentTransformedRow);
+                const { enabled: identityEnabled } =
+                    await this.featureFlagModel.get({
+                        user: { userUuid, organizationUuid },
+                        featureFlagId: FeatureFlags.AgentIdentity,
+                    });
+                const resultEntitlementFingerprint = identityEnabled
+                    ? getResultEntitlementFingerprint(
+                          await this.getUserAttributes({
+                              user: await this.userModel.findSessionUserAndOrgByUuid(
+                                  userUuid,
+                                  organizationUuid,
+                              ),
+                          }),
+                      )
+                    : null;
+                const fileUrl = await this.downloadFileModel.streamFunction(
+                    this.fileStorageClient,
+                    projectUuid,
+                    identityEnabled
+                        ? {
+                              version: 1,
+                              userUuid,
+                              organizationUuid,
+                              projectUuid,
+                              resultProducer:
+                                  WarehouseClientFactory.getResultProducer(
+                                      {
+                                          warehouseCredentials,
+                                          warehouseConnectionUuid,
+                                          aiPlan: aiPlan ?? null,
+                                      },
+                                      userUuid,
+                                      null,
+                                      resultEntitlementFingerprint,
+                                      authMethod,
+                                  ),
+                          }
+                        : null,
+                )(
+                    `${this.lightdashConfig.siteUrl}/api/v1/projects/${projectUuid}/sqlRunner/results`,
+                    async (writer) => {
+                        try {
+                            await warehouseClient.streamQuery(
+                                pivotedSql,
+                                async ({ rows, fields }) => {
+                                    if ('total_columns' in rows[0]) {
+                                        columnCount = rows[0].total_columns;
+                                    }
+                                    if (
+                                        !groupByColumns ||
+                                        groupByColumns.length === 0
+                                    ) {
+                                        rows.forEach(writer);
+                                        return;
                                     }
 
-                                    currentTransformedRow =
-                                        indexColumns.reduce<ResultRow>(
-                                            (acc, indexCol) => {
-                                                acc[indexCol.reference] =
-                                                    row[indexCol.reference];
-                                                return acc;
-                                            },
-                                            {},
+                                    // columns appears unused
+                                    if (!columns.length) {
+                                        // Get column types from first row of results
+                                        columns.push(
+                                            ...Object.keys(fields).map(
+                                                (fieldName) => ({
+                                                    reference: fieldName,
+                                                    type: fields[fieldName]
+                                                        .type,
+                                                }),
+                                            ),
                                         );
+                                    }
 
-                                    currentRowIndex = row.row_index;
-                                }
-                                // Suffix the value column with the group by columns to avoid collisions.
-                                // E.g. if we have a row with the value 1 and the group by columns are ['a', 'b'],
-                                // then the value column will be 'value_1_a_b'
-                                const valueSuffix = groupByColumns
-                                    ?.map((col) => row[col.reference])
-                                    .join('_');
-                                valuesColumns.forEach((col) => {
-                                    const valueColumnReference = `${col.reference}_${col.aggregation}_${valueSuffix}`;
-                                    valuesColumnData.set(valueColumnReference, {
-                                        referenceField: col.reference, // The original y field name
-                                        pivotColumnName: valueColumnReference, // The pivoted y field name and agg eg amount_avg_false
-                                        aggregation: col.aggregation,
-                                        pivotValues: groupByColumns?.map(
-                                            (c) => ({
-                                                referenceField: c.reference,
-                                                value: row[c.reference],
-                                            }),
-                                        ),
+                                    rows.forEach((row) => {
+                                        // Write rows to file in order of row_index. This is so that we can pivot the data later
+                                        if (currentRowIndex !== row.row_index) {
+                                            if (currentTransformedRow) {
+                                                writer(currentTransformedRow);
+                                            }
+
+                                            currentTransformedRow =
+                                                indexColumns.reduce<ResultRow>(
+                                                    (acc, indexCol) => {
+                                                        acc[
+                                                            indexCol.reference
+                                                        ] =
+                                                            row[
+                                                                indexCol.reference
+                                                            ];
+                                                        return acc;
+                                                    },
+                                                    {},
+                                                );
+
+                                            currentRowIndex = row.row_index;
+                                        }
+                                        // Suffix the value column with the group by columns to avoid collisions.
+                                        // E.g. if we have a row with the value 1 and the group by columns are ['a', 'b'],
+                                        // then the value column will be 'value_1_a_b'
+                                        const valueSuffix = groupByColumns
+                                            ?.map((col) => row[col.reference])
+                                            .join('_');
+                                        valuesColumns.forEach((col) => {
+                                            const valueColumnReference = `${col.reference}_${col.aggregation}_${valueSuffix}`;
+                                            valuesColumnData.set(
+                                                valueColumnReference,
+                                                {
+                                                    referenceField:
+                                                        col.reference, // The original y field name
+                                                    pivotColumnName:
+                                                        valueColumnReference, // The pivoted y field name and agg eg amount_avg_false
+                                                    aggregation:
+                                                        col.aggregation,
+                                                    pivotValues:
+                                                        groupByColumns?.map(
+                                                            (c) => ({
+                                                                referenceField:
+                                                                    c.reference,
+                                                                value: row[
+                                                                    c.reference
+                                                                ],
+                                                            }),
+                                                        ),
+                                                },
+                                            );
+                                            currentTransformedRow =
+                                                currentTransformedRow ?? {};
+                                            currentTransformedRow[
+                                                valueColumnReference
+                                            ] =
+                                                row[
+                                                    `${col.reference}_${col.aggregation}`
+                                                ];
+                                        });
                                     });
-                                    currentTransformedRow =
-                                        currentTransformedRow ?? {};
-                                    currentTransformedRow[
-                                        valueColumnReference
-                                    ] =
-                                        row[
-                                            `${col.reference}_${col.aggregation}`
-                                        ];
-                                });
-                            });
-                        },
-                        {
-                            tags: queryTags,
-                        },
-                    );
-                } catch (error) {
-                    this.logger.error(
-                        `Error running pivot query: ${error}\nSQL: ${pivotedSql}`,
-                    );
-                    throw error;
-                }
-                // Write the last row
-                if (currentTransformedRow) {
-                    writer(currentTransformedRow);
-                }
+                                },
+                                {
+                                    tags: queryTags,
+                                },
+                            );
+                        } catch (error) {
+                            this.logger.error(
+                                `Error running pivot query: ${error}\nSQL: ${pivotedSql}`,
+                            );
+                            throw error;
+                        }
+                        // Write the last row
+                        if (currentTransformedRow) {
+                            writer(currentTransformedRow);
+                        }
+                    },
+                );
+
+                const processedColumns =
+                    groupByColumns && groupByColumns.length > 0
+                        ? Array.from(valuesColumnData.values())
+                        : valuesColumns.map((col) => ({
+                              referenceField: col.reference,
+                              pivotColumnName: `${col.reference}_${col.aggregation}`,
+                              aggregation: col.aggregation,
+                              pivotValues: [],
+                          }));
+
+                return {
+                    queryUuid: undefined,
+                    fileUrl,
+                    valuesColumns: processedColumns,
+                    indexColumn: indexColumns,
+                    columnCount: Number(columnCount) || undefined,
+                };
             },
-            this.fileStorageClient,
         );
-
-        await sshTunnel.disconnect();
-
-        const processedColumns =
-            groupByColumns && groupByColumns.length > 0
-                ? Array.from(valuesColumnData.values())
-                : valuesColumns.map((col) => ({
-                      referenceField: col.reference,
-                      pivotColumnName: `${col.reference}_${col.aggregation}`,
-                      aggregation: col.aggregation,
-                      pivotValues: [],
-                  }));
-
-        return {
-            queryUuid: undefined,
-            fileUrl,
-            valuesColumns: processedColumns,
-            indexColumn: indexColumns,
-            columnCount: Number(columnCount) || undefined,
-        };
     }
 
+    /** @deprecated Only used by the deprecated SQL runner results endpoint; use AsyncQueryService.getAsyncQueryResults instead. */
     async getFileStream(
         user: SessionUser,
         projectUuid: string,
         fileId: string,
+        authenticatedAccount: RegisteredAccount | null = null,
     ): Promise<Readable> {
-        const { organizationUuid } =
-            await this.projectModel.getSummary(projectUuid);
+        const project = await this.projectModel.getSummary(projectUuid);
+        await this.assertAnalyticsProjectAccess(user, project);
+        const { organizationUuid } = project;
         const auditedAbility = this.createAuditedAbility(user);
         if (
             auditedAbility.cannot(
                 'view',
-                subject('Project', { organizationUuid, projectUuid }),
+                subject('Project', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { fileId },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -5048,11 +13023,149 @@ export class ProjectService extends BaseService {
 
         const downloadFile =
             await this.downloadFileModel.getDownloadFile(fileId);
+        if (downloadFile.projectUuid !== projectUuid) {
+            throw new NotFoundError('Cannot find file');
+        }
+        const { enabled: identityEnabled } = await this.featureFlagModel.get({
+            user: { userUuid: user.userUuid, organizationUuid },
+            featureFlagId: FeatureFlags.AgentIdentity,
+        });
+        if (identityEnabled) {
+            const provenance = await this.downloadFileModel.getProvenance(
+                downloadFile,
+                this.fileStorageClient,
+            );
+            if (!provenance) {
+                throw new ForbiddenError(
+                    'These results are not compatible with your current access. Run the query again.',
+                );
+            }
+            if (
+                provenance.organizationUuid !== organizationUuid ||
+                provenance.projectUuid !== projectUuid
+            ) {
+                throw new ForbiddenError();
+            }
+            let currentUser = await this.userModel.findSessionUserAndOrgByUuid(
+                user.userUuid,
+                organizationUuid,
+            );
+            if (user.serviceAccount) {
+                const serviceAccount =
+                    await this.userModel.findServiceAccountByUserUuid(
+                        user.userUuid,
+                    );
+                if (
+                    !serviceAccount ||
+                    serviceAccount.uuid !== user.serviceAccount.uuid ||
+                    serviceAccount.organizationUuid !== organizationUuid ||
+                    (serviceAccount.expiresAt &&
+                        serviceAccount.expiresAt <= new Date())
+                )
+                    throw new ForbiddenError();
+                currentUser = { ...currentUser, serviceAccount };
+            }
+            await this.assertAnalyticsProjectAccess(currentUser, project);
+            if (
+                this.createAuditedAbility(currentUser).cannot(
+                    'view',
+                    subject('Project', { organizationUuid, projectUuid }),
+                )
+            ) {
+                throw new ForbiddenError();
+            }
+            const refreshedAccount = currentUser.serviceAccount
+                ? fromServiceAccount(currentUser, '')
+                : fromSession(currentUser);
+            const account: Account = authenticatedAccount
+                ? {
+                      ...authenticatedAccount,
+                      user: {
+                          ...authenticatedAccount.user,
+                          email: currentUser.email,
+                          ability: refreshedAccount.user.ability,
+                          abilityRules: refreshedAccount.user.abilityRules,
+                      },
+                  }
+                : refreshedAccount;
+            const reader = buildResultReader(account);
+            const controls = await this.getUserAttributes({ account });
+            const entitlementFingerprint =
+                getResultEntitlementFingerprintForms(controls);
+            if (
+                !matchesResultEntitlementFingerprint(
+                    provenance.resultProducer.entitlementFingerprint ?? null,
+                    entitlementFingerprint,
+                )
+            )
+                throw new ForbiddenError(
+                    'These results are not compatible with your current access. Run the query again.',
+                );
+            if (
+                this.lightdashConfig.ai.agentResultIdentityCheckEnabled !==
+                false
+            ) {
+                const connection =
+                    await this.warehouseClientFactory.resolveWarehouseCredentials(
+                        {
+                            kind: 'binding',
+                            projectUuid,
+                            binding: {
+                                kind: 'connection',
+                                warehouseConnectionUuid:
+                                    provenance.resultProducer
+                                        .warehouseConnectionUuid,
+                            },
+                        },
+                        connectionContextFromAccount(account, {
+                            organizationUuid,
+                            queryContext:
+                                reader.kind === 'agent'
+                                    ? QueryExecutionContext.AI
+                                    : null,
+                            surface:
+                                reader.kind === 'agent'
+                                    ? connectionSurfaceFromAgentSurface(
+                                          reader.claim.act.surface,
+                                      )
+                                    : undefined,
+                            agentActor:
+                                reader.kind === 'agent'
+                                    ? {
+                                          surface: reader.claim.act.surface,
+                                          clientId: reader.claim.act.client_id,
+                                      }
+                                    : undefined,
+                        }),
+                    );
+                const producer = WarehouseClientFactory.getResultProducer(
+                    connection,
+                    user.userUuid,
+                    reader.kind === 'agent' ? reader.claim : null,
+                    entitlementFingerprint.current,
+                    account.authentication.type,
+                );
+                if (
+                    !isSameResultProducerOwner(
+                        provenance.resultProducer,
+                        producer,
+                    ) ||
+                    !isSameResultReader(provenance.resultProducer, reader)
+                )
+                    throw new ForbiddenError(
+                        'These results are not compatible with your current access. Run the query again.',
+                    );
+            }
+        }
         switch (downloadFile.type) {
             case DownloadFileType.JSONL:
                 return fs.createReadStream(downloadFile.path);
             case DownloadFileType.S3_JSONL:
-                return this.fileStorageClient.getFileStream(downloadFile.path);
+                return (
+                    await this.fileStorageClient.getFileStream(
+                        downloadFile.path,
+                    )
+                ).stream;
             default:
                 throw new ParameterError('File is not a valid JSONL file');
         }
@@ -5060,45 +13173,67 @@ export class ProjectService extends BaseService {
 
     // Note: can't be private method as it is used in EE
     async _getFieldValuesMetricQuery({
+        account,
         projectUuid,
         table,
         initialFieldId,
         search,
         limit,
         filters,
+        organizationUuid: organizationUuidArg,
+        userAttributes,
+        authorizeInitialExplore,
     }: {
+        account: Account;
         projectUuid: string;
         table: string;
         initialFieldId: string;
         search: string;
-        limit: number;
+        limit: unknown;
         filters: AndFilterGroup | undefined;
+        organizationUuid?: string;
+        userAttributes: UserAttributeValueMap;
+        authorizeInitialExplore?: (explore: Explore) => void;
     }) {
+        const { organizationUuid } = organizationUuidArg
+            ? { organizationUuid: organizationUuidArg }
+            : await this.projectModel.getSummary(projectUuid);
+        const { maxLimit } = await resolveOrganizationExportLimits(
+            this.organizationSettingsModel,
+            this.lightdashConfig.query,
+            organizationUuid,
+        );
         return getFieldValuesMetricQuery({
+            account,
             projectUuid,
             table,
             initialFieldId,
             search,
             limit,
-            maxLimit: this.lightdashConfig.query.maxLimit,
+            maxLimit,
             filters,
             exploreResolver: this.projectModel,
+            userAttributes,
+            authorizeInitialExplore,
         });
     }
 
     async searchFieldUniqueValues(
-        user: SessionUser,
+        account: Account,
         projectUuid: string,
         table: string,
         initialFieldId: string,
         search: string,
-        limit: number,
+        limit: unknown,
         filters: AndFilterGroup | undefined,
         forceRefresh: boolean = false,
         parameters?: ParametersValuesMap,
         userAttributeOverrides?: UserAttributeValueMap, // EXPERIMENTAL: used to override user attributes for MCP
         context: QueryExecutionContext = QueryExecutionContext.FILTER_AUTOCOMPLETE,
+        querySurface?: QuerySurface,
     ) {
+        assertRegisteredAccount(account);
+        const user = toSessionUser(account);
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
 
@@ -5112,32 +13247,8 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
-        const { metricQuery, explore, field } =
-            await this._getFieldValuesMetricQuery({
-                projectUuid,
-                table,
-                initialFieldId,
-                search,
-                limit,
-                filters,
-            });
-
-        const warehouseCredentials = await this.getWarehouseCredentials({
-            projectUuid,
-            userId: user.userUuid,
-            isRegisteredUser: true,
-        });
-        const { warehouseClient, sshTunnel } = await this._getWarehouseClient(
-            projectUuid,
-            warehouseCredentials,
-            {
-                snowflakeVirtualWarehouse: explore.warehouse,
-                databricksCompute: explore.databricksCompute,
-            },
-        );
         const { userAttributes, intrinsicUserAttributes } =
             await this.getUserAttributes({ user });
-
         const mergedUserAttributes = userAttributeOverrides
             ? {
                   ...userAttributes,
@@ -5145,321 +13256,586 @@ export class ProjectService extends BaseService {
               }
             : userAttributes;
 
-        const availableParameterDefinitions = await this.getAvailableParameters(
-            projectUuid,
-            explore,
-        );
-
-        // Combine request parameters with defaults from parameter definitions
-        const combinedParameters = await this.combineParameters(
-            projectUuid,
-            explore,
-            parameters,
-        );
-
-        const projectTimezone =
-            await this.getQueryTimezoneForProject(projectUuid);
-        const timezone = resolveQueryTimezone(
-            metricQuery,
-            projectTimezone,
-            user.timezone,
-        );
-        const useTimezoneAwareDateTrunc =
-            await this.isTimezoneSupportEnabled(user);
-
-        const { query } = await ProjectService._compileQuery({
-            metricQuery,
-            explore,
-            warehouseSqlBuilder: warehouseClient,
-            intrinsicUserAttributes,
-            userAttributes: mergedUserAttributes,
-            timezone,
-            parameters: combinedParameters,
-            availableParameterDefinitions,
-            useTimezoneAwareDateTrunc,
-            columnTimezone: getColumnTimezone(warehouseClient.credentials),
-        });
-
-        const isUserCacheEnabled =
-            this.lightdashConfig.results.autocompleteEnabled && !!user.userUuid;
-
-        const userUuid = getCacheUserUuid(warehouseCredentials, user.userUuid);
-
-        const hashParts = [projectUuid, userUuid, 'cache_autocomplete', query];
-        if (metricQuery.timezone) hashParts.push(metricQuery.timezone);
-        const queryHash = buildCacheHash(hashParts);
-
-        if (!forceRefresh && isUserCacheEnabled) {
-            const stringResults = await this.s3CacheClient
-                .getIfFresh(
-                    queryHash,
-                    this.lightdashConfig.results.cacheStateTimeSeconds,
-                )
-                .catch(() => undefined);
-            if (stringResults) {
-                try {
-                    await sshTunnel.disconnect();
-                    return JSON.parse(stringResults);
-                } catch (e) {
-                    this.logger.error(
-                        'Error parsing autocomplete cache results:',
-                        e,
-                    );
-                }
-            }
-        }
-
-        const queryTags: RunQueryTags = {
-            organization_uuid: organizationUuid,
-            user_uuid: user.userUuid,
-            project_uuid: projectUuid,
-            explore_name: explore.name,
-            query_context: context,
-        };
-
-        const { rows } = await warehouseClient.runQuery(query, queryTags);
-        const allResults: Set<string | number | boolean> = new Set();
-        for (const row of rows) {
-            const value = row[getItemId(field)];
-            if (value !== null && value !== undefined) {
-                allResults.add(value);
-            }
-        }
-
-        if (isUserCacheEnabled) {
-            const searchResults = {
+        const { metricQuery, explore, field, labelFieldId, staticResults } =
+            await this._getFieldValuesMetricQuery({
+                account,
+                projectUuid,
+                table,
+                initialFieldId,
                 search,
-                results: Array.from(allResults),
+                limit,
+                filters,
+                organizationUuid,
+                userAttributes: mergedUserAttributes,
+            });
+
+        // The field's config turns warehouse fetching off: serve curated
+        // values (empty when none) instead of running a distinct-value scan.
+        if (staticResults) {
+            this.analytics.track({
+                event: 'field_value.search',
+                userId: user.userUuid,
+                properties: {
+                    projectId: projectUuid,
+                    fieldId: getItemId(field),
+                    searchCharCount: search.length,
+                    resultsCount: staticResults.length,
+                    searchLimit: metricQuery.limit,
+                },
+            });
+            return {
+                search,
+                results: staticResults.map(({ value }) => value),
+                resultsWithLabels: staticResults.map(({ value, label }) => ({
+                    value,
+                    label: label ?? value,
+                })),
                 refreshedAt: new Date(),
-                cached: true,
+                cached: false,
             };
-            const buffer = Buffer.from(JSON.stringify(searchResults));
-            this.s3CacheClient
-                .uploadResults(queryHash, buffer, queryTags)
-                .catch(() => undefined);
         }
 
-        await sshTunnel.disconnect();
+        const [
+            availableParameterDefinitions,
+            combinedParameters,
+            projectTimezone,
+            useTimezoneAwareDateTrunc,
+        ] = await Promise.all([
+            this.getAvailableParameters(projectUuid, explore),
+            this.combineParameters(projectUuid, explore, parameters),
+            this.getQueryTimezoneForProject(projectUuid),
+            this.isTimezoneSupportEnabled(user),
+        ]);
 
-        const resultsArray = Array.from(allResults);
-
-        this.analytics.track({
-            event: 'field_value.search',
-            userId: user.userUuid,
-            properties: {
-                projectId: projectUuid,
-                fieldId: getItemId(field),
-                searchCharCount: search.length,
-                resultsCount: resultsArray.length,
-                searchLimit: limit,
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'binding',
+                projectUuid,
+                binding: { kind: 'explore', exploreName: explore.name },
+                overrides: {
+                    snowflakeVirtualWarehouse: explore.warehouse,
+                    databricksCompute: explore.databricksCompute,
+                },
             },
-        });
+            connectionContextFromUser(
+                { userUuid: user.userUuid, isRegisteredUser: true },
+                {
+                    organizationUuid,
+                    queryContext: context,
+                    surface:
+                        querySurface === undefined
+                            ? undefined
+                            : connectionSurfaceFromQuerySurface(
+                                  querySurface,
+                                  context,
+                              ),
+                },
+            ),
+            async ({
+                warehouseClient,
+                warehouseCredentials,
+                warehouseConnectionUuid,
+                aiPlan,
+            }) => {
+                const timezone = resolveQueryTimezone({
+                    sessionTimezone: null,
+                    metricQuery,
+                    projectTimezone,
+                    userTimezone: user.timezone,
+                });
 
-        return {
-            search,
-            results: resultsArray,
-            refreshedAt: new Date(),
-            cached: false,
-        };
+                const { query } = new QueryComposer(
+                    { metricQuery },
+                    {
+                        explore,
+                        warehouseSqlBuilder: warehouseClient,
+                        intrinsicUserAttributes,
+                        userAttributes: mergedUserAttributes,
+                        timezone,
+                        parameters: combinedParameters,
+                        availableParameterDefinitions,
+                        useTimezoneAwareDateTrunc,
+                        columnTimezone: getColumnTimezone(
+                            warehouseClient.credentials,
+                        ),
+                    },
+                ).compile();
+
+                const { enabled: skipAiAccessCache } = isAiAccessQueryContext(
+                    context,
+                )
+                    ? await this.featureFlagModel.get({
+                          user: { userUuid: user.userUuid, organizationUuid },
+                          featureFlagId: FeatureFlags.AiAccessSkipResultsCache,
+                      })
+                    : { enabled: false };
+                const { enabled: identityEnabled } =
+                    await this.featureFlagModel.get({
+                        user: { userUuid: user.userUuid, organizationUuid },
+                        featureFlagId: FeatureFlags.AgentIdentity,
+                    });
+                const resultProducer = WarehouseClientFactory.getResultProducer(
+                    {
+                        warehouseCredentials,
+                        warehouseConnectionUuid,
+                        aiPlan: aiPlan ?? null,
+                    },
+                    user.userUuid,
+                    buildQueryAgentIdentity(
+                        account,
+                        context,
+                        querySurface ?? null,
+                    ),
+                    getResultEntitlementFingerprint(
+                        {
+                            userAttributes: mergedUserAttributes,
+                            intrinsicUserAttributes,
+                        },
+                        explore,
+                        metricQuery,
+                    ),
+                    account.authentication.type,
+                );
+                const isUserCacheEnabled =
+                    this.lightdashConfig.results.autocompleteEnabled &&
+                    !!user.userUuid &&
+                    !skipAiAccessCache &&
+                    (!identityEnabled ||
+                        resultProducer.agentIdentity === null) &&
+                    getAiExecutionCredentialUuid(aiPlan ?? null) === null;
+
+                const userUuid = getCacheUserUuid(
+                    warehouseCredentials,
+                    user.userUuid,
+                );
+
+                const hashParts = [
+                    projectUuid,
+                    userUuid,
+                    'cache_autocomplete',
+                    query,
+                    timezone,
+                ];
+                const queryHash = buildCacheHash(
+                    hashParts,
+                    identityEnabled
+                        ? { organizationUuid, producer: resultProducer }
+                        : null,
+                );
+
+                if (!forceRefresh && isUserCacheEnabled) {
+                    const stringResults = await this.s3CacheClient
+                        .getIfFresh(
+                            queryHash,
+                            this.lightdashConfig.results.cacheStateTimeSeconds,
+                        )
+                        .catch(() => undefined);
+                    if (stringResults) {
+                        try {
+                            const cached = JSON.parse(stringResults);
+                            if (!identityEnabled) return cached;
+                            if (
+                                cached.payload &&
+                                cached.resultProducer &&
+                                cached.resultProducer.agentIdentity === null &&
+                                isSameResultProducer(
+                                    cached.resultProducer,
+                                    resultProducer,
+                                )
+                            ) {
+                                return cached.payload;
+                            }
+                        } catch (e) {
+                            this.logger.error(
+                                'Error parsing autocomplete cache results:',
+                                e,
+                            );
+                        }
+                    }
+                }
+
+                const queryTags: RunQueryTags = withAgentMarkerTag({
+                    organization_uuid: organizationUuid,
+                    user_uuid: user.userUuid,
+                    project_uuid: projectUuid,
+                    explore_name: explore.name,
+                    query_context: context,
+                });
+
+                const { rows } = await warehouseClient.runQuery(
+                    query,
+                    queryTags,
+                );
+                const valueFieldId = getItemId(field);
+                const allResults: Set<string | number | boolean> = new Set();
+                const resultsWithLabels: FilterAutocompleteValue[] = [];
+                const seenLabeledValues = new Set<string>();
+                for (const row of rows) {
+                    const value = row[valueFieldId];
+                    if (value !== null && value !== undefined) {
+                        allResults.add(value);
+                        if (labelFieldId) {
+                            const valueKey = String(value);
+                            if (!seenLabeledValues.has(valueKey)) {
+                                seenLabeledValues.add(valueKey);
+                                const rawLabel = row[labelFieldId];
+                                resultsWithLabels.push({
+                                    value: valueKey,
+                                    label:
+                                        rawLabel !== null &&
+                                        rawLabel !== undefined
+                                            ? String(rawLabel)
+                                            : valueKey,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                const resultsArray = Array.from(allResults);
+
+                if (isUserCacheEnabled) {
+                    const searchResults = {
+                        search,
+                        results: resultsArray,
+                        ...(labelFieldId ? { resultsWithLabels } : {}),
+                        refreshedAt: new Date(),
+                        cached: true,
+                    };
+                    const buffer = Buffer.from(
+                        JSON.stringify(
+                            identityEnabled
+                                ? { resultProducer, payload: searchResults }
+                                : searchResults,
+                        ),
+                    );
+                    this.s3CacheClient
+                        .uploadResults(queryHash, buffer, queryTags)
+                        .catch(() => undefined);
+                }
+
+                this.analytics.track({
+                    event: 'field_value.search',
+                    userId: user.userUuid,
+                    properties: {
+                        projectId: projectUuid,
+                        fieldId: valueFieldId,
+                        searchCharCount: search.length,
+                        resultsCount: resultsArray.length,
+                        searchLimit: metricQuery.limit,
+                    },
+                });
+
+                return {
+                    search,
+                    results: resultsArray,
+                    ...(labelFieldId ? { resultsWithLabels } : {}),
+                    refreshedAt: new Date(),
+                    cached: false,
+                };
+            },
+        );
     }
 
-    private async refreshTablesAndProjectConfig(
+    private async getProjectContextFromAdapter({
+        adapter,
+        user,
+        organizationUuid,
+    }: {
+        adapter: ProjectAdapter;
+        user: Pick<SessionUser, 'userUuid'> &
+            Partial<Pick<SessionUser, 'organizationName'>>;
+        organizationUuid: string;
+    }): Promise<ProjectContextEntry[] | undefined> {
+        if (!this.projectContextModel) {
+            return undefined;
+        }
+
+        const enabled = this.isProjectContextEnabled
+            ? await this.isProjectContextEnabled({ user, organizationUuid })
+            : false;
+        if (!enabled) {
+            return undefined;
+        }
+        return adapter.getProjectContext();
+    }
+
+    private async replaceProjectContext(
+        projectUuid: string,
+        entries: ProjectContextEntry[] | undefined,
+    ): Promise<void> {
+        if (!this.projectContextModel || entries === undefined) {
+            return;
+        }
+        await this.projectContextModel.replaceEntriesForProject(
+            projectUuid,
+            entries,
+        );
+    }
+
+    private async refreshTablesAndProjectConfig<T>(
         user: Pick<SessionUser, 'userUuid'>,
         projectUuid: string,
         requestMethod: RequestMethod,
-    ): Promise<{
-        explores: (Explore | ExploreError)[];
-        lightdashProjectConfig: LightdashProjectConfig;
-    }> {
+        jobUuid: string | undefined,
+        consumePrepared: (prepared: PreparedExploreStream) => Promise<T>,
+    ): Promise<T> {
+        const consume = agentExecutionContext.getStore()
+            ?.agentConnectionExecution
+            ? async (prepared: PreparedExploreStream) => {
+                  const exploreStream =
+                      await this.prepareConnectionExploreStream(
+                          projectUuid,
+                          prepared.exploreStream,
+                      );
+                  if (
+                      agentExecutionContext.getStore()?.agentConnectionExecution
+                  )
+                      await this.assertAgentConnectionEffect(
+                          projectUuid,
+                          'compileProject',
+                      );
+                  return consumePrepared({ ...prepared, exploreStream });
+              }
+            : consumePrepared;
         // Checks that project exists
         const project = await this.projectModel.get(projectUuid);
 
+        // A preview of a CLI/NONE project has no dbt files to compile from.
+        // Reuse the upstream project's already-compiled explores and config
+        // so the preview mirrors the main project.
+        if (
+            project.dbtConnection.type === DbtProjectType.NONE &&
+            project.upstreamProjectUuid
+        ) {
+            const { upstreamProjectUuid } = project;
+            const multiUpstreamExplores = await this.getMultiUpstreamExplores(
+                upstreamProjectUuid,
+                projectUuid,
+            );
+            const [
+                upstreamExplores,
+                upstreamProject,
+                upstreamParameters,
+                upstreamTableGroups,
+            ] = await Promise.all([
+                this.projectModel.getAllExploresFromCache(upstreamProjectUuid),
+                this.projectModel.get(upstreamProjectUuid),
+                this.projectParametersModel.find(upstreamProjectUuid),
+                this.projectModel.getTableGroups(upstreamProjectUuid),
+            ]);
+            return consume({
+                exploreStream:
+                    multiUpstreamExplores?.exploreStream ??
+                    (async function* upstreamStream() {
+                        yield* Object.values(upstreamExplores);
+                    })(),
+                lightdashProjectConfig: {
+                    spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+                    parameters: Object.fromEntries(
+                        upstreamParameters.map(({ name, config }) => [
+                            name,
+                            config,
+                        ]),
+                    ),
+                    table_groups: upstreamTableGroups,
+                    defaults: upstreamProject.projectDefaults,
+                },
+                projectContext: undefined,
+                multiConnection: multiUpstreamExplores,
+            });
+        }
+
         // Force refresh adapter (refetch git repos, check for changed credentials, etc.)
         // Might want to cache parts of this in future if slow
-        const { adapter, sshTunnel } = await this.buildAdapter(
-            projectUuid,
-            user,
-        );
-        const packages = await adapter.getDbtPackages();
+        // Adapters built only to read a source's manifest (git clones); destroyed in finally.
+        const manifestFetchAdapters: ProjectAdapter[] = [];
+        let primaryAdapter: ProjectAdapter | null = null;
         try {
-            const trackingParams = {
+            return await this.withCompileAdapter(
                 projectUuid,
-                organizationUuid: project.organizationUuid,
-                userUuid: user.userUuid,
-            };
-            const explores = await adapter.compileAllExplores(
-                trackingParams,
-                false, // loadSources
-                this.lightdashConfig.partialCompilation.enabled,
-            );
-            this.analytics.track({
-                event: 'project.compiled',
-                userId: user.userUuid,
-                properties: {
-                    requestMethod,
-                    projectId: projectUuid,
-                    projectName: project.name,
-                    projectType: project.dbtConnection.type,
-                    warehouseType: project.warehouseConnection?.type,
-                    modelsCount: explores.length,
-                    modelsWithErrorsCount:
-                        explores.filter(isExploreError).length,
-                    modelsWithGroupLabelCount: explores.filter(
-                        ({ groupLabel }) => !!groupLabel,
-                    ).length,
-                    metricsCount: explores.reduce<number>((acc, explore) => {
-                        if (!isExploreError(explore)) {
-                            return acc + getMetrics(explore).length;
+                user,
+                async (buildResult) => {
+                    primaryAdapter = buildResult.adapter;
+                    let { adapter } = buildResult;
+                    try {
+                        // Multiple dbt sources: merge every source's manifest into one before
+                        // compiling, so cross-source ref()/joins resolve and the explore set is
+                        // the union of all sources. A project with zero registered sources runs
+                        // the unchanged single-source path (N=0 short-circuit / regression firewall).
+                        let dbtSourceCount = 1;
+                        let stagedMergedManifest: Buffer | undefined;
+                        let connectionWarnings: string[] | undefined;
+                        let failedDbtSourceUuids: string[] | undefined;
+                        let exploreNaming: ExploreNaming | undefined;
+                        const trackingParams = {
+                            projectUuid,
+                            organizationUuid: project.organizationUuid,
+                            userUuid: user.userUuid,
+                            jobUuid,
+                        };
+                        let multiConnection: MultiConnectionCompilation | null =
+                            null;
+                        if (
+                            (await this.projectModel.getConnectionRoute(
+                                projectUuid,
+                                {
+                                    kind: 'original',
+                                },
+                            )) === 'multi'
+                        ) {
+                            multiConnection =
+                                await this.compileMultiConnectionProject({
+                                    projectUuid,
+                                    jobUuid,
+                                    organizationUuid: project.organizationUuid,
+                                    userUuid: user.userUuid,
+                                    primary: buildResult,
+                                    manifestFetchAdapters,
+                                    trackingParams,
+                                });
+                            manifestFetchAdapters.push(adapter);
+                            adapter = multiConnection.originalAdapter;
+                            dbtSourceCount =
+                                (
+                                    await this.projectDbtSourcesModel.getSources(
+                                        projectUuid,
+                                    )
+                                ).length + 1;
+                        } else {
+                            ({
+                                adapter,
+                                stagedMergedManifest,
+                                connectionWarnings,
+                                failedDbtSourceUuids,
+                                exploreNaming,
+                            } = await this.resolveCompileAdapter({
+                                projectUuid,
+                                jobUuid,
+                                organizationUuid: project.organizationUuid,
+                                userUuid: user.userUuid,
+                                primary: buildResult,
+                                manifestFetchAdapters,
+                                onDbtSourceCount: (count) => {
+                                    dbtSourceCount = count;
+                                },
+                            }));
                         }
-                        return acc;
-                    }, 0),
-                    packagesCount: packages
-                        ? Object.keys(packages).length
-                        : undefined,
-                    roundCount: explores.reduce<number>((acc, explore) => {
-                        if (!isExploreError(explore)) {
-                            return (
-                                acc +
-                                getMetrics(explore).filter(
-                                    ({ round }) => round !== undefined,
-                                ).length +
-                                getDimensions(explore).filter(
-                                    ({ round }) => round !== undefined,
-                                ).length
+                        const packages = await adapter.getDbtPackages();
+                        const exploreStream =
+                            multiConnection?.exploreStream ??
+                            (await adapter.prepareExploreStream(
+                                trackingParams,
+                                false, // loadSources
+                                true, // allowPartialCompilation
+                                exploreNaming !== undefined,
+                            ));
+                        const lightdashProjectConfig =
+                            await adapter.getLightdashProjectConfig(
+                                trackingParams,
                             );
-                        }
-                        return acc;
-                    }, 0),
-                    urlsCount: explores.reduce<number>((acc, explore) => {
-                        if (!isExploreError(explore)) {
-                            return (
-                                acc +
-                                getFields(explore)
-                                    .map((field) => (field.urls || []).length)
-                                    .reduce((a, b) => a + b, 0)
-                            );
-                        }
-                        return acc;
-                    }, 0),
-                    formattedFieldsCount: explores.reduce<number>(
-                        (acc, explore) => {
-                            try {
-                                if (!isExploreError(explore)) {
-                                    const filteredExplore = {
-                                        ...explore,
-                                        tables: {
-                                            [explore.baseTable]:
-                                                explore.tables[
-                                                    explore.baseTable
-                                                ],
-                                        },
-                                    };
+                        const projectContext =
+                            await this.getProjectContextFromAdapter({
+                                adapter,
+                                user,
+                                organizationUuid: project.organizationUuid,
+                            });
+                        const onCompiled = (
+                            summary: ExploreCompilationSummary,
+                        ) => {
+                            this.analytics.track({
+                                event: 'project.compiled',
+                                userId: user.userUuid,
+                                properties: {
+                                    requestMethod,
+                                    projectId: projectUuid,
+                                    projectName: project.name,
+                                    projectType: project.dbtConnection.type,
+                                    warehouseType:
+                                        project.warehouseConnection?.type,
+                                    ...summary.analytics,
+                                    hasProjectContext:
+                                        (projectContext?.length ?? 0) > 0,
+                                    packagesCount: packages
+                                        ? Object.keys(packages).length
+                                        : undefined,
+                                    dbtSourceCount,
+                                },
+                            });
+                        };
 
-                                    return (
-                                        acc +
-                                        getFields(filteredExplore).filter(
-                                            ({ format }) =>
-                                                format !== undefined,
-                                        ).length
-                                    );
-                                }
-                            } catch (e) {
-                                this.logger.error(
-                                    `Unable to reduce formattedFieldsCount. ${e}`,
-                                );
-                            }
-                            return acc;
-                        },
-                        0,
-                    ),
-                    modelsWithSqlFiltersCount: explores.reduce<number>(
-                        (acc, explore) => {
-                            if (
-                                explore.tables &&
-                                explore.baseTable &&
-                                explore.tables[explore.baseTable].sqlWhere !==
-                                    undefined
-                            )
-                                return acc + 1;
-                            return acc;
-                        },
-                        0,
-                    ),
-                    columnAccessFiltersCount: explores.reduce<number>(
-                        (acc, explore) => {
-                            if (!isExploreError(explore)) {
-                                return (
-                                    acc +
-                                    getDimensions(explore).filter(
-                                        ({ requiredAttributes }) =>
-                                            requiredAttributes !== undefined,
-                                    ).length
-                                );
-                            }
-                            return acc;
-                        },
-                        0,
-                    ),
-                    additionalDimensionsCount: explores.reduce<number>(
-                        (acc, explore) => {
-                            if (!isExploreError(explore)) {
-                                return (
-                                    acc +
-                                    Object.values(
-                                        explore.tables[explore.baseTable]
-                                            .dimensions,
-                                    ).filter(
-                                        (field) => field.isAdditionalDimension,
-                                    ).length
-                                );
-                            }
-                            return acc;
-                        },
-                        0,
-                    ),
+                        return await consume({
+                            exploreStream,
+                            lightdashProjectConfig,
+                            projectContext,
+                            stagedMergedManifest,
+                            connectionWarnings,
+                            failedDbtSourceUuids,
+                            exploreNaming,
+                            onCompiled,
+                            multiConnection,
+                        });
+                    } catch (e) {
+                        if (!(e instanceof LightdashError)) {
+                            Sentry.captureException(e);
+                        }
+                        this.logger.error(
+                            `Failed to compile all explores:${e instanceof Error ? e.stack : e}`,
+                        );
+                        const errorResponse =
+                            e instanceof Error
+                                ? errorHandler(e)
+                                : new UnexpectedServerError(
+                                      `Unknown error during refreshAllTables: ${typeof e}`,
+                                  );
+                        this.analytics.track({
+                            event: 'project.error',
+                            userId: user.userUuid,
+                            properties: {
+                                requestMethod,
+                                projectId: projectUuid,
+                                name: errorResponse.name,
+                                statusCode: errorResponse.statusCode,
+                                projectType: project.dbtConnection.type,
+                                warehouseType:
+                                    project.warehouseConnection?.type,
+                            },
+                        });
+                        throw errorResponse;
+                    } finally {
+                        if (adapter !== buildResult.adapter)
+                            await adapter.destroy();
+                    }
                 },
-            });
-
-            const lightdashProjectConfig =
-                await adapter.getLightdashProjectConfig(trackingParams);
-
-            return { explores, lightdashProjectConfig };
-        } catch (e) {
-            if (!(e instanceof LightdashError)) {
-                Sentry.captureException(e);
-            }
-            this.logger.error(
-                `Failed to compile all explores:${
-                    e instanceof Error ? e.stack : e
-                }`,
+                manifestFetchAdapters,
             );
-            const errorResponse =
-                e instanceof Error
-                    ? errorHandler(e)
-                    : new UnexpectedServerError(
-                          `Unknown error during refreshAllTables: ${typeof e}`,
-                      );
-            this.analytics.track({
-                event: 'project.error',
-                userId: user.userUuid,
-                properties: {
-                    requestMethod,
-                    projectId: projectUuid,
-                    name: errorResponse.name,
-                    statusCode: errorResponse.statusCode,
-                    projectType: project.dbtConnection.type,
-                    warehouseType: project.warehouseConnection?.type,
-                },
-            });
-            throw errorResponse;
         } finally {
-            await adapter.destroy();
-            await sshTunnel.disconnect();
+            // Clean up the per-source git clones used only to read manifests.
+            await Promise.all(
+                manifestFetchAdapters
+                    .filter(
+                        (manifestAdapter) => manifestAdapter !== primaryAdapter,
+                    )
+                    .map((manifestAdapter) =>
+                        manifestAdapter.destroy().catch((destroyError) => {
+                            this.logger.warn(
+                                'Failed to destroy a dbt source adapter after manifest merge',
+                                { error: destroyError },
+                            );
+                        }),
+                    ),
+            );
         }
     }
 
     async getJobStatus(jobUuid: string, user: SessionUser): Promise<Job> {
         const job = await this.jobModel.get(jobUuid);
+        const isOwnPreviewCopyJob =
+            job.userUuid === user.userUuid &&
+            job.jobType === JobType.CREATE_PROJECT &&
+            job.steps.some(
+                (step) => step.stepType === JobStepType.COPYING_PREVIEW_CONTENT,
+            );
 
         const auditedAbility = this.createAuditedAbility(user);
         if (job.projectUuid) {
@@ -5472,12 +13848,14 @@ export class ProjectService extends BaseService {
                     subject('Project', {
                         organizationUuid,
                         projectUuid: job.projectUuid,
+                        metadata: { jobUuid },
                     }),
                 )
             ) {
                 throw new NotFoundError(`Cannot find job`);
             }
         } else if (
+            !isOwnPreviewCopyJob &&
             auditedAbility.cannot(
                 'view',
                 subject('Job', {
@@ -5517,6 +13895,9 @@ export class ProjectService extends BaseService {
         ) {
             throw new ForbiddenError();
         }
+        if (!isPreAggregatesEnabled(this.lightdashConfig)) {
+            throw new ForbiddenError('Pre-aggregates are not enabled');
+        }
 
         return { organizationUuid };
     }
@@ -5547,7 +13928,9 @@ export class ProjectService extends BaseService {
 
         preAggregateDefinitions
             .filter(
-                (definition) => definition.materializationMetricQuery === null,
+                (definition) =>
+                    definition.materializationMetricQuery === null &&
+                    definition.preAggregateDefinition.table === undefined,
             )
             .forEach((definition) => {
                 this.logger.warn(
@@ -5606,6 +13989,12 @@ export class ProjectService extends BaseService {
             );
         }
 
+        if (preAggregateDefinition.preAggregateDefinition.table) {
+            throw new ParameterError(
+                `Pre-aggregate "${preAggregateDefinitionName}" is external and is never materialized`,
+            );
+        }
+
         if (!preAggregateDefinition.materializationMetricQuery) {
             throw new ParameterError(
                 `Pre-aggregate definition "${preAggregateDefinitionName}" cannot be materialized: ${
@@ -5634,6 +14023,9 @@ export class ProjectService extends BaseService {
         projectUuid: string,
         requestMethod: RequestMethod,
         skipPermissionCheck: boolean = false,
+        validateAfterCompile: boolean = false,
+        syncContentAfterCompile: boolean = false,
+        existingJobUuid?: string,
     ): Promise<{ jobUuid: string }> {
         const { organizationUuid, type } =
             await this.projectModel.getSummary(projectUuid);
@@ -5656,19 +14048,42 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionPreAggregateRefresh(projectUuid);
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertAgentConnectionEffect(
+                projectUuid,
+                'compileProject',
+            );
+        const connectionTask = captureAgentConnectionTask('compileProject', {
+            userUuid: user.userUuid,
+            organizationUuid,
+        });
+        const syncContent = connectionTask.agentConnectionExecution
+            ? false
+            : syncContentAfterCompile;
+
         // This job is the job model we use to compile projects
         // This is not the graphile Job id we use on scheduler
         // TODO: remove this old job method and replace with scheduler log details
         const job: CreateJob = {
-            jobUuid: uuidv4(),
+            jobUuid: existingJobUuid ?? uuidv4(),
             jobType: JobType.COMPILE_PROJECT,
             jobStatus: JobStatusType.STARTED,
             userUuid: user.userUuid,
             projectUuid,
-            steps: [{ stepType: JobStepType.COMPILING }],
+            steps: [
+                { stepType: JobStepType.COMPILING },
+                ...(syncContent
+                    ? [{ stepType: JobStepType.SYNCING_CONTENT }]
+                    : []),
+            ],
         };
 
-        await this.jobModel.create(job);
+        // Preview creation reserves a pending compile job before queuing content copy.
+        if (!existingJobUuid) {
+            await this.jobModel.create(job, type === ProjectType.PREVIEW);
+        }
 
         await this.schedulerClient.compileProject({
             createdByUserUuid: user.userUuid,
@@ -5677,18 +14092,32 @@ export class ProjectService extends BaseService {
             requestMethod,
             jobUuid: job.jobUuid,
             isPreview: type === ProjectType.PREVIEW,
+            validateAfterCompile,
+            syncContentAfterCompile: syncContent,
+            ...connectionTask,
             userUuid: user.userUuid,
         });
 
         return { jobUuid: job.jobUuid };
     }
 
+    // afterCompile runs as its own job step inside the project lock, before
+    // the job is marked done, so callers polling the job see the whole run
     async compileProject(
         user: SessionUser,
         projectUuid: string,
         requestMethod: RequestMethod,
         jobUuid: string,
+        afterCompile?: { stepType: JobStepType; run: () => Promise<void> },
     ) {
+        if (agentExecutionContext.getStore()?.agentConnectionExecution) {
+            try {
+                await this.assertConnectionPreAggregateRefresh(projectUuid);
+            } catch (error) {
+                await this._markJobAsFailed(jobUuid);
+                throw error;
+            }
+        }
         const totalStartTime = performance.now();
 
         const { organizationUuid } =
@@ -5707,6 +14136,13 @@ export class ProjectService extends BaseService {
                 }),
             )
         ) {
+            await this._markJobAsFailed(jobUuid).catch((e) => {
+                this.logger.error(
+                    `Failed to mark compile job as failed: ${
+                        e instanceof Error ? e.stack : e
+                    }`,
+                );
+            });
             throw new ForbiddenError();
         }
 
@@ -5719,12 +14155,37 @@ export class ProjectService extends BaseService {
             steps: [{ stepType: JobStepType.COMPILING }],
         };
 
+        let connectionFailure: unknown = null;
         const onLockFailed = async () => {
+            connectionFailure = new ForbiddenError(
+                'The project compilation did not run',
+            );
+            const holder = await this.projectModel
+                .getProjectLockHolder(projectUuid)
+                .catch(() => null);
+            const heldFor = holder
+                ? ` The compile holding it started ${Math.round(
+                      holder.heldForSeconds / 60,
+                  )} minutes ago.`
+                : '';
+            this.logger.warn(
+                `dbt.compile.lockBlocked projectUuid=${projectUuid} jobUuid=${
+                    job.jobUuid
+                } lockHeldForSeconds=${holder?.heldForSeconds ?? 'unknown'}`,
+                {
+                    event: 'dbt.compile.lockBlocked',
+                    projectUuid,
+                    jobUuid: job.jobUuid,
+                    lockHeldForSeconds: holder?.heldForSeconds ?? null,
+                    lockHolderBackendPid: holder?.backendPid ?? null,
+                    lockHolderApplicationName: holder?.applicationName ?? null,
+                },
+            );
             await this.jobModel.updateJobStep(
                 job.jobUuid,
                 JobStepStatusType.ERROR,
                 JobStepType.COMPILING,
-                'Compilation is already in progress for this project',
+                `Compilation is already in progress for this project.${heldFor}`,
             );
         };
 
@@ -5734,87 +14195,241 @@ export class ProjectService extends BaseService {
             cacheExplores: { start: 0, end: 0 },
         };
 
+        let compileFailed = false;
+        // Called from both catches. The inner one marks the job ERROR and does not rethrow, so
+        // a failure inside the compiling step never reaches the outer catch, and that is the
+        // common case: a bad dbt connection, a dbt error, a warehouse error, a merge failure.
+        const recordCompileFailure = (e: unknown) => {
+            compileFailed = true;
+            connectionFailure = e;
+            if (!(e instanceof LightdashError)) {
+                Sentry.captureException(e);
+            }
+            // The default log format renders the message only and drops metadata, so the
+            // decisive numbers ride in the message too. Typed fields stay for json format.
+            this.logger.error(
+                `dbt.compile.failed projectUuid=${projectUuid} jobUuid=${
+                    job.jobUuid
+                } elapsedMs=${Math.round(
+                    performance.now() - totalStartTime,
+                )} error=${getErrorMessage(e)}`,
+                {
+                    event: 'dbt.compile.failed',
+                    projectUuid,
+                    jobUuid: job.jobUuid,
+                    organizationUuid,
+                    error: getErrorMessage(e),
+                    stack: e instanceof Error ? e.stack : undefined,
+                    elapsedMs: performance.now() - totalStartTime,
+                    sections: {
+                        yamlMs: timings.yaml.end - timings.yaml.start,
+                        parametersMs:
+                            timings.parameters.end - timings.parameters.start,
+                        cacheExploresMs:
+                            timings.cacheExplores.end -
+                            timings.cacheExplores.start,
+                    },
+                },
+            );
+        };
+
         const onLockAcquired = async () => {
             try {
                 await this.jobModel.update(job.jobUuid, {
                     jobStatus: JobStatusType.RUNNING,
                 });
-                const indexCatalogJobUuid = await this.jobModel.tryJobStep(
+                const compileResult = await this.jobModel.tryJobStep(
                     job.jobUuid,
                     JobStepType.COMPILING,
-                    async () => {
-                        const { explores, lightdashProjectConfig } =
-                            await this.refreshTablesAndProjectConfig(
-                                user,
-                                projectUuid,
-                                requestMethod,
-                            );
-
-                        timings.yaml.start = performance.now();
-                        await this.replaceYamlTags(
+                    async () =>
+                        this.refreshTablesAndProjectConfig(
                             user,
                             projectUuid,
-                            // TODO: Create util to generate categories from lightdashProjectConfig - this is used as well in deploy.ts
-                            Object.entries(
-                                lightdashProjectConfig.spotlight?.categories ||
-                                    {},
-                            ).map(([key, category]) => ({
-                                yamlReference: key,
-                                name: category.label,
-                                color: category.color ?? 'gray',
-                            })),
-                        );
-                        timings.yaml.end = performance.now();
-                        timings.parameters.start = performance.now();
-                        await this.replaceProjectParameters({
-                            user,
-                            projectUuid,
-                            parameters: lightdashProjectConfig.parameters,
-                        });
-                        await this.projectModel.setTableGroups(
-                            projectUuid,
-                            lightdashProjectConfig.table_groups,
-                        );
-                        timings.parameters.end = performance.now();
-                        timings.cacheExplores.start = performance.now();
-                        const result = this.saveExploresToCacheAndIndexCatalog({
-                            userUuid: user.userUuid,
-                            projectUuid,
-                            explores,
-                            compilationSource: 'refresh_dbt',
-                            jobUuid: job.jobUuid,
                             requestMethod,
-                            projectConfigDefaults:
-                                lightdashProjectConfig.defaults,
-                        });
-                        timings.cacheExplores.end = performance.now();
+                            job.jobUuid,
+                            async ({
+                                exploreStream,
+                                lightdashProjectConfig,
+                                projectContext,
+                                stagedMergedManifest,
+                                connectionWarnings,
+                                failedDbtSourceUuids,
+                                exploreNaming,
+                                onCompiled,
+                                multiConnection,
+                            }) => {
+                                throwIfCompileAborted();
+                                timings.yaml.start = performance.now();
+                                if (
+                                    agentExecutionContext.getStore()
+                                        ?.agentConnectionExecution
+                                )
+                                    await this.assertAgentConnectionEffect(
+                                        projectUuid,
+                                        'compileProject',
+                                    );
+                                await this.replaceYamlTagsWithoutPermissionCheck(
+                                    user,
+                                    organizationUuid,
+                                    projectUuid,
+                                    // TODO: Create util to generate categories from lightdashProjectConfig - this is used as well in deploy.ts
+                                    Object.entries(
+                                        lightdashProjectConfig.spotlight
+                                            ?.categories || {},
+                                    ).map(([key, category]) => ({
+                                        yamlReference: key,
+                                        name: category.label,
+                                        color: category.color ?? 'gray',
+                                    })),
+                                );
+                                timings.yaml.end = performance.now();
+                                timings.parameters.start = performance.now();
+                                if (
+                                    agentExecutionContext.getStore()
+                                        ?.agentConnectionExecution
+                                )
+                                    await this.assertAgentConnectionEffect(
+                                        projectUuid,
+                                        'compileProject',
+                                    );
+                                if (
+                                    lightdashProjectConfig.parameters !==
+                                    undefined
+                                ) {
+                                    await this.replaceProjectParameters({
+                                        user,
+                                        projectUuid,
+                                        parameters:
+                                            lightdashProjectConfig.parameters,
+                                    });
+                                }
+                                if (
+                                    agentExecutionContext.getStore()
+                                        ?.agentConnectionExecution
+                                )
+                                    await this.assertAgentConnectionEffect(
+                                        projectUuid,
+                                        'compileProject',
+                                    );
+                                await this.projectModel.setTableGroups(
+                                    projectUuid,
+                                    lightdashProjectConfig.table_groups,
+                                );
+                                // Mirrors CLI deploy semantics: only overwrite stored
+                                // defaults when the config file defines them
+                                if (lightdashProjectConfig.defaults) {
+                                    if (
+                                        agentExecutionContext.getStore()
+                                            ?.agentConnectionExecution
+                                    )
+                                        await this.assertAgentConnectionEffect(
+                                            projectUuid,
+                                            'compileProject',
+                                        );
+                                    await this.projectModel.updateProjectDefaults(
+                                        projectUuid,
+                                        lightdashProjectConfig.defaults,
+                                    );
+                                }
+                                if (
+                                    agentExecutionContext.getStore()
+                                        ?.agentConnectionExecution
+                                )
+                                    await this.assertAgentConnectionEffect(
+                                        projectUuid,
+                                        'compileProject',
+                                    );
+                                await this.replaceProjectContext(
+                                    projectUuid,
+                                    projectContext,
+                                );
+                                timings.parameters.end = performance.now();
+                                timings.cacheExplores.start = performance.now();
+                                const result =
+                                    await this.saveExploreStreamToCacheAndIndexCatalog(
+                                        {
+                                            userUuid: user.userUuid,
+                                            projectUuid,
+                                            exploreStream,
+                                            onCompiled,
+                                            multiConnection,
+                                            connectionWarnings,
+                                            failedDbtSourceUuids,
+                                            exploreNaming,
+                                            compilationSource: 'refresh_dbt',
+                                            jobUuid: job.jobUuid,
+                                            requestMethod,
+                                            projectConfigDefaults:
+                                                lightdashProjectConfig.defaults,
+                                        },
+                                    );
+                                if (
+                                    agentExecutionContext.getStore()
+                                        ?.agentConnectionExecution
+                                )
+                                    await this.assertAgentConnectionEffect(
+                                        projectUuid,
+                                        'compileProject',
+                                    );
+                                if (
+                                    !multiConnection &&
+                                    stagedMergedManifest === undefined &&
+                                    agentExecutionContext.getStore()
+                                        ?.agentConnectionExecution
+                                ) {
+                                    await this.deleteMergedManifestBestEffort(
+                                        projectUuid,
+                                        true,
+                                    );
+                                }
+                                await this.persistMergedManifest(
+                                    projectUuid,
+                                    stagedMergedManifest,
+                                );
+                                timings.cacheExplores.end = performance.now();
 
-                        return result;
-                    },
+                                return result;
+                            },
+                        ),
                 );
 
+                if (afterCompile) {
+                    await this.jobModel.tryJobStep(
+                        job.jobUuid,
+                        afterCompile.stepType,
+                        afterCompile.run,
+                    );
+                }
+
+                if (agentExecutionContext.getStore()?.agentConnectionExecution)
+                    await this.assertAgentConnectionEffect(
+                        projectUuid,
+                        'compileProject',
+                    );
                 await this.jobModel.update(job.jobUuid, {
                     jobStatus: JobStatusType.DONE,
-                    jobResults: {
-                        indexCatalogJobUuid,
-                    },
+                    jobResults: compileResult,
                 });
+                disarmCompileShutdown();
             } catch (e) {
-                await this.jobModel.update(job.jobUuid, {
-                    jobStatus: JobStatusType.ERROR,
-                });
+                recordCompileFailure(e);
+                if (e instanceof CompileInterruptedError) {
+                    await this._markInterruptedCompileAsFailed(
+                        job.jobUuid,
+                        e.message,
+                    );
+                } else {
+                    await this.jobModel.update(job.jobUuid, {
+                        jobStatus: JobStatusType.ERROR,
+                    });
+                }
+            } finally {
+                disarmCompileShutdown();
             }
         };
         await this.projectModel
             .tryAcquireProjectLock(projectUuid, onLockAcquired, onLockFailed)
-            .catch((e) => {
-                if (!(e instanceof LightdashError)) {
-                    Sentry.captureException(e);
-                }
-                this.logger.error(
-                    `Background job failed:${e instanceof Error ? e.stack : e}`,
-                );
-            });
+            .catch(recordCompileFailure);
         const totalTime = performance.now() - totalStartTime;
         const durationYaml = timings.yaml.end - timings.yaml.start;
         const durationParameters =
@@ -5823,8 +14438,17 @@ export class ProjectService extends BaseService {
             timings.cacheExplores.end - timings.cacheExplores.start;
 
         this.logger.info(
-            `compileProject completed in ${totalTime.toFixed(2)}`,
+            `compileProject ${
+                compileFailed ? 'failed after' : 'completed in'
+            } ${totalTime.toFixed(2)}ms projectUuid=${projectUuid} jobUuid=${
+                job.jobUuid
+            }`,
             {
+                event: compileFailed
+                    ? 'dbt.compile.end.failed'
+                    : 'dbt.compile.end.ok',
+                projectUuid,
+                jobUuid: job.jobUuid,
                 totalTimeMs: totalTime,
                 sections: {
                     yamlMs: durationYaml.toFixed(2),
@@ -5833,6 +14457,12 @@ export class ProjectService extends BaseService {
                 },
             },
         );
+        if (
+            connectionFailure instanceof CompileInterruptedError ||
+            (connectionFailure !== null &&
+                agentExecutionContext.getStore()?.agentConnectionExecution)
+        )
+            throw connectionFailure;
     }
 
     private async getExploreSummaries(
@@ -5873,16 +14503,17 @@ export class ProjectService extends BaseService {
             }
 
             // Add valid explore summary (databaseName and schemaName are required for non-error explores)
-            return [...acc, summaryExplore];
+            acc.push(summaryExplore);
+            return acc;
         }, []);
     }
 
-    private canViewPreAggregateExplores(
+    private async canViewPreAggregateExplores(
         account: Account,
         organizationUuid: string,
         projectUuid: string,
-    ): boolean {
-        if (!this.lightdashConfig.preAggregates.enabled) {
+    ): Promise<boolean> {
+        if (!isPreAggregatesEnabled(this.lightdashConfig)) {
             return false;
         }
 
@@ -5903,8 +14534,9 @@ export class ProjectService extends BaseService {
         includeErrors: boolean = true,
         includePreAggregates: boolean = false,
     ): Promise<SummaryExplore[]> {
-        const { organizationUuid } =
-            await this.projectModel.getSummary(projectUuid);
+        const project = await this.projectModel.getSummary(projectUuid);
+        await this.assertAnalyticsProjectAccess(account, project);
+        const { organizationUuid } = project;
 
         const auditedAbility = this.createAuditedAbility(account);
         if (
@@ -5924,11 +14556,11 @@ export class ProjectService extends BaseService {
         );
         const shouldIncludePreAggregateExplores =
             includePreAggregates &&
-            this.canViewPreAggregateExplores(
+            (await this.canViewPreAggregateExplores(
                 account,
                 organizationUuid,
                 projectUuid,
-            );
+            ));
         const visibleExploreSummaries = shouldIncludePreAggregateExplores
             ? allExploreSummaries
             : allExploreSummaries.filter(
@@ -5943,7 +14575,7 @@ export class ProjectService extends BaseService {
                 return visibleExploreSummaries.filter(
                     (explore) =>
                         hasIntersection(explore.tags || [], value || []) ||
-                        explore.type === ExploreType.VIRTUAL || // Custom explores/Virtual views are included by default
+                        isUserManagedExplore(explore) || // User-managed explores (virtual views, external source tables) are included by default
                         (shouldIncludePreAggregateExplores &&
                             explore.type === ExploreType.PRE_AGGREGATE),
                 );
@@ -5952,7 +14584,7 @@ export class ProjectService extends BaseService {
                 return visibleExploreSummaries.filter(
                     (explore) =>
                         (value || []).includes(explore.name) ||
-                        explore.type === ExploreType.VIRTUAL || // Custom explores/Virtual views are included by default
+                        isUserManagedExplore(explore) || // User-managed explores (virtual views, external source tables) are included by default
                         (shouldIncludePreAggregateExplores &&
                             explore.type === ExploreType.PRE_AGGREGATE),
                 );
@@ -5969,34 +14601,116 @@ export class ProjectService extends BaseService {
         organizationUuid?: string,
         includeUnfilteredTables: boolean = true,
     ): Promise<Explore> {
-        return Sentry.startSpan(
+        const { explore } = await this.getExploreWithUserAccessControls(
+            account,
+            projectUuid,
+            exploreName,
+            organizationUuid,
+            includeUnfilteredTables,
+        );
+        return explore;
+    }
+
+    async getExploreResponse(
+        account: Account,
+        projectUuid: string,
+        exploreName: string,
+    ): Promise<ApiExploreResults> {
+        const explore = await this.getExplore(
+            account,
+            projectUuid,
+            exploreName,
+            undefined,
+            false,
+        );
+        const [warehouseConnectionUuid, settings, target] = await Promise.all([
+            this.projectModel.getExploreWarehouseConnectionUuid(
+                projectUuid,
+                exploreName,
+            ),
+            this.getWarehouseSqlBuilderSettings(projectUuid, {
+                kind: 'explore',
+                exploreName,
+            }),
+            this.projectModel.resolveWarehouseCredentialRead(projectUuid, {
+                kind: 'explore',
+                exploreName,
+            }),
+        ]);
+        return {
+            ...(this.cannotViewEmbedCompiledSql(account, projectUuid)
+                ? redactExploreSql(explore)
+                : explore),
+            warehouseConnectionUuid,
+            warehouseConnection: {
+                warehouseConnectionUuid:
+                    target.kind === 'extra'
+                        ? target.warehouseConnectionUuid
+                        : null,
+                warehouseType:
+                    explore.type === ExploreType.EXTERNAL_SOURCE
+                        ? WarehouseTypes.DUCKDB
+                        : settings.type,
+                startOfWeek: settings.startOfWeek,
+            },
+        };
+    }
+
+    async getExploreWithUserAccessControls(
+        account: Account,
+        projectUuid: string,
+        exploreName: string,
+        organizationUuid?: string,
+        includeUnfilteredTables: boolean = true,
+        userAttributeOverrides?: UserAttributeValueMap,
+    ): Promise<{ explore: Explore; userAccessControls: UserAccessControls }> {
+        await this.assertAnalyticsProjectAccess(
+            account,
+            await this.projectModel.getSummary(projectUuid),
+        );
+        return traceSpan(
             {
                 op: 'ProjectService.getExplore',
                 name: 'ProjectService.getExplore',
             },
             async () => {
-                const exploresMap = await this.findExplores({
-                    account,
-                    projectUuid,
-                    exploreNames: [exploreName],
-                    organizationUuid,
-                });
+                const { explores: exploresMap, userAccessControls } =
+                    await this.findExploresWithUserAccessControls({
+                        account,
+                        projectUuid,
+                        exploreNames: [exploreName],
+                        organizationUuid,
+                        userAttributeOverrides,
+                    });
                 const explore = exploresMap[exploreName];
 
                 if (!explore) {
+                    const candidateExploreNames =
+                        await this.projectModel.findExploreSplitCandidates(
+                            projectUuid,
+                            exploreName,
+                        );
+                    if (candidateExploreNames.length >= 2) {
+                        throw new ExploreSplitError(
+                            exploreName,
+                            candidateExploreNames,
+                        );
+                    }
                     throw new NotFoundError(
                         `Explore "${exploreName}" does not exist.`,
                     );
                 }
                 if (isExploreError(explore)) {
                     throw new NotFoundError(
-                        `Explore "${exploreName}" has an error.`,
+                        `Explore "${exploreName}" has an error: ${explore.errors
+                            .map((error) => error.message)
+                            .join(', ')}`,
                     );
                 }
-                if (includeUnfilteredTables) {
-                    return explore;
-                }
-                return { ...explore, unfilteredTables: undefined };
+                const finalExplore = includeUnfilteredTables
+                    ? explore
+                    : { ...explore, unfilteredTables: undefined };
+                return { explore: finalExplore, userAccessControls };
             },
         );
     }
@@ -6012,7 +14726,32 @@ export class ProjectService extends BaseService {
         exploreNames: string[];
         organizationUuid?: string;
     }): Promise<Record<string, Explore | ExploreError>> {
-        return Sentry.startSpan(
+        const { explores } = await this.findExploresWithUserAccessControls({
+            account,
+            projectUuid,
+            exploreNames,
+            organizationUuid,
+        });
+        return explores;
+    }
+
+    async findExploresWithUserAccessControls({
+        account,
+        projectUuid,
+        exploreNames,
+        organizationUuid,
+        userAttributeOverrides,
+    }: {
+        account: Account;
+        projectUuid: string;
+        exploreNames: string[];
+        organizationUuid?: string;
+        userAttributeOverrides?: UserAttributeValueMap;
+    }): Promise<{
+        explores: Record<string, Explore | ExploreError>;
+        userAccessControls: UserAccessControls;
+    }> {
+        return traceSpan(
             {
                 op: 'ProjectService.findExplores',
                 name: 'ProjectService.findExplores',
@@ -6035,6 +14774,7 @@ export class ProjectService extends BaseService {
                         subject('Project', {
                             organizationUuid: project.organizationUuid,
                             projectUuid,
+                            metadata: { exploreNames },
                         }),
                     ) &&
                     auditedAbility.cannot(
@@ -6043,29 +14783,36 @@ export class ProjectService extends BaseService {
                             organizationUuid: project.organizationUuid,
                             projectUuid,
                             exploreNames,
+                            metadata: { exploreNames },
                         }),
                     );
 
                 if (isForbidden) {
                     throw new ForbiddenError();
                 }
-                const explores = await this.projectModel.findExploresFromCache(
-                    projectUuid,
-                    'name',
-                    exploreNames,
-                );
+                const [explores, baseUserAccessControls] = await Promise.all([
+                    this.projectModel.findExploresFromCache(
+                        projectUuid,
+                        'name',
+                        exploreNames,
+                    ),
+                    this.getUserAttributes({ account }),
+                ]);
+                const userAccessControls = {
+                    ...baseUserAccessControls,
+                    userAttributes: mergeUserAttributes(
+                        baseUserAccessControls.userAttributes,
+                        userAttributeOverrides,
+                    ),
+                };
                 const canViewPreAggregateExplores =
-                    this.canViewPreAggregateExplores(
+                    await this.canViewPreAggregateExplores(
                         account,
                         project.organizationUuid,
                         projectUuid,
                     );
 
-                const { userAttributes } = await this.getUserAttributes({
-                    account,
-                });
-
-                return Object.values(explores).reduce<
+                const filteredExplores = Object.values(explores).reduce<
                     Record<string, Explore | ExploreError>
                 >((acc, explore) => {
                     if (
@@ -6082,14 +14829,31 @@ export class ProjectService extends BaseService {
                         if (!shouldFilterExplore) {
                             acc[explore.name] = explore;
                         } else {
-                            acc[explore.name] = getFilteredExplore(
+                            acc[explore.name] = auditAndFilterExplore({
+                                account,
+                                projectUuid,
                                 explore,
-                                userAttributes,
+                                userAttributes:
+                                    userAccessControls.userAttributes,
+                            });
+                        }
+                    }
+                    if (!isExploreError(explore)) {
+                        const filtered = acc[explore.name];
+                        if (filtered && !isExploreError(filtered)) {
+                            this.unfilteredExploreSnapshots.set(
+                                filtered,
+                                explore,
                             );
                         }
                     }
                     return acc;
                 }, {});
+
+                return {
+                    explores: filteredExplores,
+                    userAccessControls,
+                };
             },
         );
     }
@@ -6109,14 +14873,31 @@ export class ProjectService extends BaseService {
         ) {
             throw new ForbiddenError();
         }
-        const cachedExplores = await this.projectModel.findExploresFromCache(
-            projectUuid,
-            'name',
+        const catalogReadContext = newExploreCacheReadContext(
+            'catalog',
+            undefined,
+        );
+        const { result: cachedExplores } = await measureTime(
+            async () => {
+                const explores =
+                    await this.projectModel.findExploreTableSummariesFromCache(
+                        projectUuid,
+                        undefined,
+                        catalogReadContext,
+                    );
+                Object.assign(catalogReadContext, {
+                    ...summarizeExploreCacheRead(explores),
+                });
+                return explores;
+            },
+            'ProjectService.getCatalog.cachedExploreRead',
+            this.logger,
+            catalogReadContext,
         );
         const explores = Object.values(cachedExplores);
 
         return (explores || []).reduce<ProjectCatalog>((acc, explore) => {
-            if (!isExploreError(explore)) {
+            if (!('errors' in explore)) {
                 Object.values(explore.tables).forEach(
                     ({ database, schema, name, description, sqlTable }) => {
                         acc[database] = acc[database] || {};
@@ -6164,10 +14945,76 @@ export class ProjectService extends BaseService {
             case WarehouseTypes.ATHENA:
                 return credentials.database; // Athena uses database as catalog name
             case WarehouseTypes.DUCKDB:
+                if (
+                    credentials.connectionType ===
+                    DuckdbConnectionType.ANALYTICS
+                ) {
+                    return 'memory';
+                }
+                if (
+                    credentials.connectionType === DuckdbConnectionType.DUCKLAKE
+                ) {
+                    return credentials.catalogAlias ?? 'ducklake';
+                }
+                if (
+                    credentials.connectionType === DuckdbConnectionType.EMBEDDED
+                ) {
+                    return credentials.dataset;
+                }
                 return credentials.database;
             default:
                 return assertUnreachable(credentials, 'Unknown warehouse type');
         }
+    }
+
+    private async assertConnectionDiscovery(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<void> {
+        const scope = agentExecutionContext.getStore();
+        if (
+            !scope?.claim?.act.agent_connection_grant &&
+            !scope?.agentConnectionExecution
+        )
+            return;
+        const execution = normalizeAgentConnectionExecution(
+            scope.agentConnectionExecution,
+        );
+        if (
+            !execution ||
+            !this.getAgentConnectionGrantService ||
+            execution.subjectUserUuid !== user.userUuid ||
+            execution.organizationUuid !== user.organizationUuid ||
+            execution.grantUuid !==
+                scope.claim?.act.agent_connection_grant?.grantUuid ||
+            execution.revision !==
+                scope.claim?.act.agent_connection_grant?.revision
+        )
+            throw new ForbiddenError(
+                'This agent connection is no longer available for this operation.',
+            );
+        const { account } =
+            await this.getAgentConnectionGrantService().assertActiveExecution(
+                execution,
+                {
+                    projectUuid,
+                    capabilities: [
+                        AgentCapability.ReadDiscover,
+                        AgentCapability.RawSql,
+                    ],
+                    recheckOperation: true,
+                },
+            );
+        if (
+            this.createAuditedAbility(account).cannot(
+                'manage',
+                subject('SqlRunner', {
+                    projectUuid,
+                    organizationUuid: execution.organizationUuid,
+                }),
+            )
+        )
+            throw new ForbiddenError();
     }
 
     async populateWarehouseTablesCache(
@@ -6186,46 +15033,61 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
-        const credentials = await this.getWarehouseCredentials({
-            projectUuid,
-            userId: user.userUuid,
-            isRegisteredUser: true,
-        });
-
-        const { warehouseClient, sshTunnel } = await this._getWarehouseClient(
-            projectUuid,
-            credentials,
-        );
-
-        const warehouseTables = await warehouseClient.getAllTables();
-
-        const catalog = WarehouseAvailableTablesModel.toWarehouseCatalog(
-            warehouseTables.map((t) => ({
-                ...t,
-                partition_column: t.partitionColumn || null,
-            })),
-        );
-
-        if (credentials.userWarehouseCredentialsUuid) {
-            await this.warehouseAvailableTablesModel.createAvailableTablesForUserWarehouseCredentials(
-                credentials.userWarehouseCredentialsUuid,
-                warehouseTables,
-            );
-        } else {
-            await this.warehouseAvailableTablesModel.createAvailableTablesForProjectWarehouseCredentials(
+        if (
+            agentExecutionContext.getStore()?.claim?.act
+                .agent_connection_grant ||
+            agentExecutionContext.getStore()?.agentConnectionExecution
+        ) {
+            return this.getWarehouseTables(
+                user,
                 projectUuid,
-                warehouseTables,
+                QueryExecutionContext.SQL_RUNNER,
             );
         }
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'binding',
+                projectUuid,
+                binding: { kind: 'connection', warehouseConnectionUuid: null },
+            },
+            connectionContextFromUser(
+                { userUuid: user.userUuid, isRegisteredUser: true },
+                { organizationUuid, queryContext: null },
+            ),
+            async ({ warehouseClient, warehouseCredentials: credentials }) => {
+                const warehouseTables = await warehouseClient.getAllTables();
 
-        await sshTunnel.disconnect();
+                const catalog =
+                    WarehouseAvailableTablesModel.toWarehouseCatalog(
+                        warehouseTables.map((t) => ({
+                            ...t,
+                            partition_column: t.partitionColumn || null,
+                            table_type: t.tableType,
+                        })),
+                    );
 
-        return catalog;
+                if (credentials.userWarehouseCredentialsUuid) {
+                    await this.warehouseAvailableTablesModel.createAvailableTablesForUserWarehouseCredentials(
+                        credentials.userWarehouseCredentialsUuid,
+                        warehouseTables,
+                    );
+                } else {
+                    await this.warehouseAvailableTablesModel.createAvailableTablesForProjectWarehouseCredentials(
+                        projectUuid,
+                        warehouseTables,
+                    );
+                }
+
+                return catalog;
+            },
+        );
     }
 
     async getWarehouseTables(
         user: SessionUser,
         projectUuid: string,
+        context?: QueryExecutionContext,
+        querySurface?: QuerySurface,
     ): Promise<WarehouseTablesCatalog> {
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
@@ -6239,11 +15101,71 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
-        const credentials = await this.getWarehouseCredentials({
-            projectUuid,
-            userId: user.userUuid,
-            isRegisteredUser: true,
-        });
+        const bound = Boolean(
+            agentExecutionContext.getStore()?.claim?.act
+                .agent_connection_grant ||
+            agentExecutionContext.getStore()?.agentConnectionExecution,
+        );
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionDiscovery(user, projectUuid);
+        if (
+            bound ||
+            isAiAccessQueryContext(context ?? QueryExecutionContext.SQL_RUNNER)
+        ) {
+            return this.warehouseClientFactory.withWarehouseClient(
+                {
+                    kind: 'binding',
+                    projectUuid,
+                    binding: {
+                        kind: 'connection',
+                        warehouseConnectionUuid: null,
+                    },
+                },
+                connectionContextFromUser(
+                    { userUuid: user.userUuid, isRegisteredUser: true },
+                    {
+                        organizationUuid,
+                        queryContext:
+                            context ?? QueryExecutionContext.SQL_RUNNER,
+                        surface:
+                            querySurface === undefined
+                                ? undefined
+                                : connectionSurfaceFromQuerySurface(
+                                      querySurface,
+                                      context ?? null,
+                                  ),
+                    },
+                ),
+                async ({ warehouseClient }) => {
+                    const queryContext =
+                        context ?? QueryExecutionContext.SQL_RUNNER;
+                    const tables = await warehouseClient.getAllTables(
+                        undefined,
+                        withAgentMarkerTag({ query_context: queryContext }),
+                    );
+                    if (
+                        agentExecutionContext.getStore()
+                            ?.agentConnectionExecution
+                    )
+                        await this.assertConnectionDiscovery(user, projectUuid);
+                    return WarehouseAvailableTablesModel.toWarehouseCatalog(
+                        tables.map((table) => ({
+                            ...table,
+                            partition_column: table.partitionColumn || null,
+                            table_type: table.tableType,
+                        })),
+                    );
+                },
+            );
+        }
+        const { warehouseCredentials: credentials } =
+            await this.getWarehouseCredentialsWithConnection({
+                context,
+                projectUuid,
+                binding: { kind: 'connection', warehouseConnectionUuid: null },
+                userId: user.userUuid,
+                isRegisteredUser: true,
+            });
 
         let catalog: WarehouseTablesCatalog | null = null;
         // Check the cache for catalog
@@ -6280,10 +15202,228 @@ export class ProjectService extends BaseService {
         tableName?: string,
         schemaName?: string,
         databaseName?: string,
+        querySurface?: QuerySurface,
     ): Promise<WarehouseTableSchema> {
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
         const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('SqlRunner', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: {
+                        tableName,
+                        schemaName,
+                        databaseName,
+                        queryContext,
+                    },
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionDiscovery(user, projectUuid);
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'binding',
+                projectUuid,
+                binding: { kind: 'connection', warehouseConnectionUuid: null },
+            },
+            connectionContextFromUser(
+                { userUuid: user.userUuid, isRegisteredUser: true },
+                {
+                    organizationUuid,
+                    queryContext,
+                    surface:
+                        querySurface === undefined
+                            ? undefined
+                            : connectionSurfaceFromQuerySurface(
+                                  querySurface,
+                                  queryContext,
+                              ),
+                },
+            ),
+            async ({ warehouseClient, warehouseCredentials: credentials }) => {
+                const queryTags: RunQueryTags = withAgentMarkerTag({
+                    organization_uuid: user.organizationUuid,
+                    project_uuid: projectUuid,
+                    user_uuid: user.userUuid,
+                    query_context: queryContext,
+                });
+
+                let database =
+                    databaseName ??
+                    ProjectService.getWarehouseDatabase(credentials);
+                if (database === undefined) {
+                    throw new NotFoundError(
+                        'Database not found in warehouse credentials',
+                    );
+                }
+                if (credentials.type === WarehouseTypes.SNOWFLAKE) {
+                    // TODO: credentials returning a lower case database name for snowflake (bug) - this hack works for unquoted database names
+                    database = database.toUpperCase();
+                }
+                if (!schemaName) {
+                    throw new ParameterError('Schema name is required');
+                }
+                if (!tableName) {
+                    throw new ParameterError('Table name is required');
+                }
+
+                try {
+                    const warehouseCatalog = await warehouseClient.getFields(
+                        tableName,
+                        schemaName,
+                        database,
+                        queryTags,
+                    );
+
+                    if (
+                        agentExecutionContext.getStore()
+                            ?.agentConnectionExecution
+                    )
+                        await this.assertConnectionDiscovery(user, projectUuid);
+                    return warehouseCatalog[database][schemaName][tableName];
+                } catch (error) {
+                    this.logger.error('Error fetching warehouse fields', {
+                        error,
+                    });
+                    if (
+                        error instanceof AiAccessRefusedError ||
+                        (error instanceof ForbiddenError &&
+                            agentExecutionContext.getStore()
+                                ?.agentConnectionExecution)
+                    ) {
+                        throw error;
+                    }
+                    if (error instanceof WarehouseConnectionError) {
+                        throw error;
+                    }
+                    throw new NotFoundError(
+                        `Could not find table "${tableName}" in schema "${schemaName}" of database "${database}". Please verify the table exists and you have access to it.`,
+                    );
+                }
+            },
+        );
+    }
+
+    private async getConnectionSqlRunnerContext(
+        account: RegisteredAccount,
+        projectUuid: string,
+        warehouseConnectionUuid: string,
+        metadata?: Record<string, unknown>,
+        context?: QueryExecutionContext,
+    ) {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('SqlRunner', {
+                    organizationUuid,
+                    projectUuid,
+                    ...(metadata ? { metadata } : {}),
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        if (
+            (await this.projectModel.getConnectionRoute(projectUuid, {
+                kind: 'connection',
+                warehouseConnectionUuid,
+            })) !== 'multi'
+        ) {
+            throw new SingleConnectionProjectError();
+        }
+        const project =
+            await this.warehouseConnectionModel.getProject(projectUuid);
+        const connection = await this.warehouseConnectionModel.get(
+            project,
+            warehouseConnectionUuid,
+        );
+        const connectionContext = connectionContextFromUser(
+            { userUuid: account.user.userUuid, isRegisteredUser: true },
+            { organizationUuid, queryContext: context ?? null },
+        );
+        const resolution =
+            await this.warehouseClientFactory.resolveWarehouseCredentials(
+                {
+                    kind: 'binding',
+                    projectUuid,
+                    binding: {
+                        kind: 'connection',
+                        warehouseConnectionUuid:
+                            connection.warehouseConnectionUuid,
+                    },
+                },
+                connectionContext,
+            );
+        return {
+            connection,
+            resolution,
+            credentials: resolution.warehouseCredentials,
+            organizationUuid,
+            connectionContext,
+        };
+    }
+
+    private async withConnectionWarehouseClient<T>(
+        projectUuid: string,
+        resolution: ResolvedWarehouseConnection,
+        run: (warehouseClient: WarehouseClient) => Promise<T>,
+        connectionContext: ConnectionContext,
+        context: QueryExecutionContext = QueryExecutionContext.SQL_RUNNER,
+    ): Promise<T> {
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'resolved',
+                projectUuid,
+                credentials: resolution.warehouseCredentials,
+                aiPlan: null,
+                warehouseConnectionUuid: resolution.warehouseConnectionUuid,
+                connectionRoute: resolution.connectionRoute,
+            },
+            { ...connectionContext, queryContext: context },
+            ({ warehouseClient }) => run(warehouseClient),
+        );
+    }
+
+    private async listConnectionSqlRunnerDatabases(
+        projectUuid: string,
+        connection: WarehouseConnection,
+        resolution: ResolvedWarehouseConnection,
+        connectionContext: ConnectionContext,
+        context: QueryExecutionContext = QueryExecutionContext.SQL_RUNNER,
+    ): Promise<WarehouseDatabaseListing> {
+        return listConnectionDatabases({
+            connection,
+            credentials: resolution.warehouseCredentials,
+            listAllDatabases: () =>
+                this.withConnectionWarehouseClient(
+                    projectUuid,
+                    resolution,
+                    (warehouseClient) =>
+                        warehouseClient.listDatabases(
+                            withAgentMarkerTag({ query_context: context }),
+                        ),
+                    connectionContext,
+                    context,
+                ),
+        });
+    }
+
+    async getSqlRunnerConnections(
+        account: RegisteredAccount,
+        projectUuid: string,
+    ): Promise<SqlRunnerWarehouseConnection[]> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(account);
         if (
             auditedAbility.cannot(
                 'manage',
@@ -6292,57 +15432,267 @@ export class ProjectService extends BaseService {
         ) {
             throw new ForbiddenError();
         }
-        const credentials = await this.getWarehouseCredentials({
-            projectUuid,
-            userId: user.userUuid,
-            isRegisteredUser: true,
-        });
-
-        const { warehouseClient, sshTunnel } = await this._getWarehouseClient(
-            projectUuid,
-            credentials,
+        if (
+            (await this.projectModel.getConnectionRoute(projectUuid, {
+                kind: 'connection',
+                warehouseConnectionUuid: null,
+            })) !== 'multi'
+        ) {
+            throw new SingleConnectionProjectError();
+        }
+        const project =
+            await this.warehouseConnectionModel.getProject(projectUuid);
+        const connections = await this.warehouseConnectionModel.list(project);
+        return connections.map(
+            ({ warehouseConnectionUuid, name, isOriginal, warehouseType }) => ({
+                warehouseConnectionUuid,
+                name,
+                isOriginal,
+                warehouseType,
+            }),
         );
+    }
 
-        const queryTags: RunQueryTags = {
-            organization_uuid: user.organizationUuid,
-            project_uuid: projectUuid,
-            user_uuid: user.userUuid,
-            query_context: queryContext,
+    async getConnectionDatabases(
+        account: RegisteredAccount,
+        projectUuid: string,
+        warehouseConnectionUuid: string,
+        context?: QueryExecutionContext,
+    ): Promise<WarehouseDatabaseListing> {
+        const {
+            connection,
+            credentials,
+            resolution,
+            organizationUuid,
+            connectionContext,
+        } = await this.getConnectionSqlRunnerContext(
+            account,
+            projectUuid,
+            warehouseConnectionUuid,
+            undefined,
+            context,
+        );
+        const connectionAnalytics = await this.getConnectionAnalyticsProperties(
+            {
+                projectUuid,
+                warehouseConnectionUuid: connection.warehouseConnectionUuid,
+                warehouseType: credentials.type,
+            },
+        );
+        const properties = {
+            organizationId: organizationUuid,
+            projectId: projectUuid,
+            ...connectionAnalytics,
+            entryPoint: 'sql_runner_sidebar' as const,
         };
-
-        let database =
-            databaseName ?? ProjectService.getWarehouseDatabase(credentials);
-        if (database === undefined) {
-            throw new NotFoundError(
-                'Database not found in warehouse credentials',
-            );
-        }
-        if (credentials.type === WarehouseTypes.SNOWFLAKE) {
-            // TODO: credentials returning a lower case database name for snowflake (bug) - this hack works for unquoted database names
-            database = database.toUpperCase();
-        }
-        if (!schemaName) {
-            throw new ParameterError('Schema name is required');
-        }
-        if (!tableName) {
-            throw new ParameterError('Table name is required');
-        }
-
         try {
-            const warehouseCatalog = await warehouseClient.getFields(
-                tableName,
-                schemaName,
-                database,
-                queryTags,
+            const listing = await this.listConnectionSqlRunnerDatabases(
+                projectUuid,
+                connection,
+                resolution,
+                connectionContext,
+                context,
             );
-
-            await sshTunnel.disconnect();
-
-            return warehouseCatalog[database][schemaName][tableName];
+            trackSafely(() => {
+                this.analytics.trackAccount(account, {
+                    event: 'sql_runner.database_list_succeeded',
+                    properties: {
+                        ...properties,
+                        databaseCount: listing.databases.length,
+                        truncated: listing.truncated,
+                        limit: listing.limit,
+                    },
+                });
+            });
+            return listing;
         } catch (error) {
-            this.logger.error('Error fetching warehouse fields', { error });
+            trackSafely(() => {
+                this.analytics.trackAccount(account, {
+                    event: 'sql_runner.database_list_failed',
+                    properties: {
+                        ...properties,
+                        reason: getDatabaseListFailureReason(
+                            error,
+                            credentials.type,
+                        ),
+                    },
+                });
+            });
+            throw error;
+        }
+    }
+
+    async getConnectionTables(
+        account: RegisteredAccount,
+        projectUuid: string,
+        warehouseConnectionUuid: string,
+        listedDatabaseName: string,
+        context?: QueryExecutionContext,
+    ): Promise<WarehouseTablesCatalog> {
+        const { connection, credentials, resolution, connectionContext } =
+            await this.getConnectionSqlRunnerContext(
+                account,
+                projectUuid,
+                warehouseConnectionUuid,
+                undefined,
+                context,
+            );
+        const listedDatabase = findListedDatabase(
+            await this.listConnectionSqlRunnerDatabases(
+                projectUuid,
+                connection,
+                resolution,
+                connectionContext,
+                context,
+            ),
+            listedDatabaseName,
+        );
+        const scope = {
+            projectUuid,
+            warehouseConnectionUuid: connection.warehouseConnectionUuid,
+            userWarehouseCredentialsUuid:
+                credentials.userWarehouseCredentialsUuid ?? null,
+        };
+        const cached = await this.warehouseConnectionTablesModel.getTables(
+            scope,
+            listedDatabase.name,
+        );
+        if (cached) return cached;
+
+        const warehouseTables = await this.withConnectionWarehouseClient(
+            projectUuid,
+            resolution,
+            (warehouseClient) =>
+                supportsConnectionDatabaseListing(credentials.type)
+                    ? warehouseClient.getTablesForDatabase(
+                          listedDatabase,
+                          withAgentMarkerTag({
+                              query_context:
+                                  context ?? QueryExecutionContext.SQL_RUNNER,
+                          }),
+                      )
+                    : warehouseClient.getAllTables(
+                          undefined,
+                          withAgentMarkerTag({
+                              query_context:
+                                  context ?? QueryExecutionContext.SQL_RUNNER,
+                          }),
+                      ),
+            connectionContext,
+            context,
+        );
+        await this.warehouseConnectionTablesModel.replaceTables(
+            scope,
+            listedDatabase.name,
+            warehouseTables,
+        );
+        return WarehouseAvailableTablesModel.toWarehouseCatalog(
+            warehouseTables.map((table) => ({
+                ...table,
+                partition_column: table.partitionColumn || null,
+                table_type: table.tableType,
+            })),
+        );
+    }
+
+    async refreshConnectionTables(
+        account: RegisteredAccount,
+        projectUuid: string,
+        warehouseConnectionUuid: string,
+        context?: QueryExecutionContext,
+    ): Promise<void> {
+        const { connection, credentials } =
+            await this.getConnectionSqlRunnerContext(
+                account,
+                projectUuid,
+                warehouseConnectionUuid,
+                undefined,
+                context,
+            );
+        await this.warehouseConnectionTablesModel.clearTables({
+            projectUuid,
+            warehouseConnectionUuid: connection.warehouseConnectionUuid,
+            userWarehouseCredentialsUuid:
+                credentials.userWarehouseCredentialsUuid ?? null,
+        });
+    }
+
+    async getConnectionTableFields(
+        account: RegisteredAccount,
+        projectUuid: string,
+        warehouseConnectionUuid: string,
+        {
+            databaseName,
+            schemaName,
+            tableName,
+        }: { databaseName: string; schemaName: string; tableName: string },
+        queryContext: QueryExecutionContext = QueryExecutionContext.SQL_RUNNER,
+    ): Promise<WarehouseTableSchema> {
+        const { connection, credentials, resolution, connectionContext } =
+            await this.getConnectionSqlRunnerContext(
+                account,
+                projectUuid,
+                warehouseConnectionUuid,
+                { tableName, schemaName, databaseName, queryContext },
+                queryContext,
+            );
+        const listedDatabase = findListedCatalogDatabase(
+            await this.listConnectionSqlRunnerDatabases(
+                projectUuid,
+                connection,
+                resolution,
+                connectionContext,
+                queryContext,
+            ),
+            databaseName,
+            credentials.type,
+        );
+        const queryTags: RunQueryTags = withAgentMarkerTag({
+            organization_uuid: account.organization.organizationUuid,
+            project_uuid: projectUuid,
+            user_uuid: account.user.userUuid,
+            query_context: queryContext,
+        });
+        const listedDatabaseCredentials = credentialsForListedDatabase(
+            credentials,
+            listedDatabase,
+        );
+        try {
+            const warehouseCatalog = await this.withConnectionWarehouseClient(
+                projectUuid,
+                {
+                    ...resolution,
+                    warehouseCredentials: listedDatabaseCredentials,
+                },
+                (warehouseClient) =>
+                    warehouseClient.getFields(
+                        tableName,
+                        schemaName,
+                        databaseName,
+                        queryTags,
+                    ),
+                connectionContext,
+                queryContext,
+            );
+            const catalogDatabase =
+                (credentials.type === WarehouseTypes.SNOWFLAKE &&
+                !Object.hasOwn(warehouseCatalog, databaseName)
+                    ? Object.keys(warehouseCatalog).find(
+                          (key) =>
+                              key.toLowerCase() === databaseName.toLowerCase(),
+                      )
+                    : undefined) ?? databaseName;
+            const fields =
+                warehouseCatalog[catalogDatabase]?.[schemaName]?.[tableName];
+            if (!fields) throw new NotFoundError('Table not found');
+            return fields;
+        } catch (error) {
+            this.logger.error('Error fetching connection warehouse fields', {
+                error: getErrorMessage(error),
+            });
+            if (error instanceof WarehouseConnectionError) throw error;
             throw new NotFoundError(
-                `Could not find table "${tableName}" in schema "${schemaName}" of database "${database}". Please verify the table exists and you have access to it.`,
+                `Could not find table "${tableName}" in schema "${schemaName}" of database "${databaseName}". Please verify the table exists and you have access to it.`,
             );
         }
     }
@@ -6399,11 +15749,211 @@ export class ProjectService extends BaseService {
         return this.projectModel.getTablesConfiguration(projectUuid);
     }
 
+    async getProjectPreviewExpirationSettings(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<{
+        projectUuid: string;
+        defaultPreviewExpirationHours: number;
+        maxPreviewExpirationHours: number;
+    }> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'update',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        const settings =
+            await this.projectModel.getPreviewExpirationSettings(projectUuid);
+        return { projectUuid, ...settings };
+    }
+
+    async updateProjectPreviewExpirationSettings(
+        user: SessionUser,
+        projectUuid: string,
+        settings: {
+            defaultPreviewExpirationHours: number;
+            maxPreviewExpirationHours: number;
+        },
+    ): Promise<{
+        projectUuid: string;
+        defaultPreviewExpirationHours: number;
+        maxPreviewExpirationHours: number;
+    }> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'update',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        const { defaultPreviewExpirationHours, maxPreviewExpirationHours } =
+            settings;
+        if (
+            !Number.isInteger(defaultPreviewExpirationHours) ||
+            !Number.isInteger(maxPreviewExpirationHours)
+        ) {
+            throw new ParameterError(
+                'Preview expiration hours must be whole numbers',
+            );
+        }
+        if (
+            defaultPreviewExpirationHours < 1 ||
+            maxPreviewExpirationHours < 1
+        ) {
+            throw new ParameterError(
+                'Preview expiration hours must be at least 1',
+            );
+        }
+        if (defaultPreviewExpirationHours > maxPreviewExpirationHours) {
+            throw new ParameterError(
+                'Default preview expiration cannot exceed the maximum',
+            );
+        }
+        await this.projectModel.updatePreviewExpirationSettings(projectUuid, {
+            defaultPreviewExpirationHours,
+            maxPreviewExpirationHours,
+        });
+        const persisted =
+            await this.projectModel.getPreviewExpirationSettings(projectUuid);
+        return { projectUuid, ...persisted };
+    }
+
+    async getProjectResultsCacheSettings(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<ResultsCacheProjectSettings> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'update',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        const settings =
+            await this.projectModel.getResultsCacheSettings(projectUuid);
+        return {
+            projectUuid,
+            ...settings,
+            instanceDefaultTtlSeconds:
+                this.lightdashConfig.results.cacheStateTimeSeconds,
+        };
+    }
+
+    async updateProjectResultsCacheSettings(
+        user: SessionUser,
+        projectUuid: string,
+        settings: UpdateResultsCacheProjectSettings,
+    ): Promise<ResultsCacheProjectSettings> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'update',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        const { enabled: resultsCacheEnabled } =
+            await this.featureFlagModel.get({
+                user,
+                featureFlagId: FeatureFlags.ResultsCacheEnabled,
+            });
+        if (!resultsCacheEnabled) {
+            throw new ForbiddenError('Results caching is not enabled');
+        }
+        const { cacheTtlSeconds } = settings;
+        if (cacheTtlSeconds !== null) {
+            if (!Number.isInteger(cacheTtlSeconds)) {
+                throw new ParameterError(
+                    'Cache duration must be a whole number of seconds',
+                );
+            }
+            if (
+                cacheTtlSeconds < MIN_RESULTS_CACHE_TTL_SECONDS ||
+                cacheTtlSeconds > MAX_RESULTS_CACHE_TTL_SECONDS
+            ) {
+                throw new ParameterError(
+                    `Cache duration must be between ${MIN_RESULTS_CACHE_TTL_SECONDS} and ${MAX_RESULTS_CACHE_TTL_SECONDS} seconds (30 days)`,
+                );
+            }
+        }
+        await this.projectModel.updateResultsCacheSettings(projectUuid, {
+            cacheTtlSeconds,
+        });
+        return {
+            projectUuid,
+            cacheTtlSeconds,
+            instanceDefaultTtlSeconds:
+                this.lightdashConfig.results.cacheStateTimeSeconds,
+        };
+    }
+
+    async updatePreviewExpiresAt(
+        user: SessionUser,
+        projectUuid: string,
+        expiresInHours?: number,
+    ): Promise<PreviewExpiresAt> {
+        const project = await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'update',
+                subject('Project', {
+                    organizationUuid: project.organizationUuid,
+                    projectUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        if (project.type !== ProjectType.PREVIEW) {
+            throw new ParameterError(
+                'Expiration can only be updated on preview projects',
+            );
+        }
+        if (
+            expiresInHours !== undefined &&
+            (!Number.isInteger(expiresInHours) || expiresInHours < 1)
+        ) {
+            throw new ParameterError(
+                'expiresInHours must be a whole number of at least 1',
+            );
+        }
+        const expiresAt = await this.getPreviewExpiresAt(
+            ProjectType.PREVIEW,
+            project.upstreamProjectUuid,
+            expiresInHours,
+        );
+        if (expiresAt === null) {
+            throw new UnexpectedServerError(
+                'Failed to compute preview expiration',
+            );
+        }
+        await this.projectModel.updateExpiresAt(projectUuid, expiresAt);
+        return { projectUuid, expiresAt };
+    }
+
     async getAvailableFiltersForSavedQuery(
         account: Account,
         savedChartUuid: string,
     ): Promise<FilterableDimension[]> {
-        return Sentry.startSpan(
+        return traceSpan(
             {
                 op: 'projectService.getAvailableFiltersForSavedQuery',
                 name: 'ProjectService.getAvailableFiltersForSavedQuery',
@@ -6415,9 +15965,14 @@ export class ProjectService extends BaseService {
                     ]);
 
                 const spaceCtx =
-                    await this.spacePermissionService.getSpaceAccessContext(
+                    await this.spacePermissionService.resolveAccess(
                         account.user.id,
-                        savedChart.spaceUuid,
+                        {
+                            type: 'chart',
+                            chartUuid: savedChart.uuid,
+                            dashboardUuid: savedChart.dashboardUuid,
+                            spaceUuid: savedChart.spaceUuid,
+                        },
                     );
 
                 const auditedAbility = this.createAuditedAbility(account);
@@ -6446,9 +16001,15 @@ export class ProjectService extends BaseService {
                     savedChart.tableName,
                 );
 
-                return getDimensions(explore).filter(
+                const filters = getDimensions(explore).filter(
                     (field) => isFilterableDimension(field) && !field.hidden,
                 );
+                return this.cannotViewEmbedCompiledSql(
+                    account,
+                    savedChart.projectUuid,
+                )
+                    ? filters.map(redactFieldSql)
+                    : filters;
             },
         );
     }
@@ -6461,11 +16022,12 @@ export class ProjectService extends BaseService {
             uuid: string;
             filters: CompiledDimension[];
             metricFilters: Metric[];
+            hiddenFieldIds: string[];
         };
 
         let allFilters: ChartFilters[] = [];
 
-        allFilters = await Sentry.startSpan(
+        allFilters = await traceSpan(
             {
                 op: 'projectService.getAvailableFiltersForSavedQueries',
                 name: 'ProjectService.getAvailableFiltersForSavedQueries',
@@ -6479,18 +16041,24 @@ export class ProjectService extends BaseService {
                     await this.savedChartModel.getInfoForAvailableFilters(
                         savedQueryUuids,
                     );
-                const uniqueSpaceUuids = [
-                    ...new Set(savedCharts.map((chart) => chart.spaceUuid)),
-                ];
 
                 if (savedCharts.length === 0) {
                     return [];
                 }
 
-                const [spacesCtx, exploresMap] = await Promise.all([
-                    this.spacePermissionService.getSpacesAccessContext(
+                const savedChartsByUuid = new Map(
+                    savedCharts.map((chart) => [chart.uuid, chart]),
+                );
+
+                const [chartContexts, exploresMap] = await Promise.all([
+                    this.spacePermissionService.resolveAccessBatch(
                         account.user.id,
-                        uniqueSpaceUuids,
+                        savedCharts.map((chart) => ({
+                            type: 'chart' as const,
+                            chartUuid: chart.uuid,
+                            dashboardUuid: chart.dashboardUuid,
+                            spaceUuid: chart.spaceUuid,
+                        })),
                     ),
                     this.findExplores({
                         account,
@@ -6502,38 +16070,66 @@ export class ProjectService extends BaseService {
                     }),
                 ]);
 
+                const chartsWithSpaceContext = chartContexts.flatMap(
+                    ({ target, context: spaceCtx }) => {
+                        if (!spaceCtx) {
+                            return [];
+                        }
+                        const savedChart = savedChartsByUuid.get(
+                            target.chartUuid,
+                        );
+                        return savedChart ? [{ savedChart, spaceCtx }] : [];
+                    },
+                );
                 const auditedAbility = this.createAuditedAbility(account);
-                return savedCharts.map((savedChart) => {
-                    const spaceCtx = spacesCtx[savedChart.spaceUuid];
+                const accessResults = auditedAbility.canBulk(
+                    'view',
+                    chartsWithSpaceContext.map(({ savedChart, spaceCtx }) =>
+                        subject('SavedChart', {
+                            organizationUuid: spaceCtx.organizationUuid,
+                            projectUuid: spaceCtx.projectUuid,
+                            inheritsFromOrgOrProject:
+                                spaceCtx.inheritsFromOrgOrProject,
+                            access: spaceCtx.access,
+                            metadata: {
+                                savedChartUuid: savedChart.uuid,
+                                savedChartName: savedChart.name,
+                            },
+                        }),
+                    ),
+                );
+                const chartAccess = new Map(
+                    chartsWithSpaceContext.map(({ savedChart }, index) => [
+                        savedChart.uuid,
+                        accessResults[index],
+                    ]),
+                );
+                const shouldRedactSql = this.cannotViewEmbedCompiledSql(
+                    account,
+                    savedCharts[0].projectUuid,
+                );
 
-                    if (
-                        !spaceCtx ||
-                        auditedAbility.cannot(
-                            'view',
-                            subject('SavedChart', {
-                                organizationUuid: spaceCtx.organizationUuid,
-                                projectUuid: spaceCtx.projectUuid,
-                                inheritsFromOrgOrProject:
-                                    spaceCtx.inheritsFromOrgOrProject,
-                                access: spaceCtx.access,
-                                metadata: {
-                                    savedChartUuid: savedChart.uuid,
-                                    savedChartName: savedChart.name,
-                                },
-                            }),
-                        )
-                    ) {
+                return savedCharts.map((savedChart) => {
+                    if (!chartAccess.get(savedChart.uuid)) {
                         return {
                             uuid: savedChart.uuid,
                             filters: [],
                             metricFilters: [],
+                            hiddenFieldIds: [],
                         };
                     }
 
-                    const explore = exploresMap[savedChart.tableName];
+                    const cachedExplore = exploresMap[savedChart.tableName];
+                    const explore =
+                        shouldRedactSql &&
+                        cachedExplore &&
+                        !isExploreError(cachedExplore)
+                            ? redactExploreSql(cachedExplore)
+                            : cachedExplore;
 
                     let filters: CompiledDimension[] = [];
                     let metricFilters: Metric[] = [];
+                    let hiddenFieldIds: string[] = [];
                     if (explore && !isExploreError(explore)) {
                         filters = getDimensions(explore).filter(
                             (field) =>
@@ -6542,23 +16138,26 @@ export class ProjectService extends BaseService {
                         metricFilters = getMetrics(explore).filter(
                             (field) => !field.hidden,
                         );
+                        hiddenFieldIds = getHiddenFilterableFieldIds(explore);
                     }
 
                     return {
                         uuid: savedChart.uuid,
                         filters,
                         metricFilters,
+                        hiddenFieldIds,
                     };
                 });
             },
         );
 
+        // Explores that relabel a shared join alias keep their own entries
         const allFilterableFields: FilterableDimension[] = [];
         const filterIndexMap: Record<string, number> = {};
 
         allFilters.forEach((filterSet) => {
             filterSet.filters.forEach((filter) => {
-                const fieldId = getItemId(filter);
+                const fieldId = getDashboardFilterableFieldKey(filter);
                 if (!(fieldId in filterIndexMap)) {
                     filterIndexMap[fieldId] = allFilterableFields.length;
                     allFilterableFields.push(filter);
@@ -6571,7 +16170,7 @@ export class ProjectService extends BaseService {
 
         allFilters.forEach((filterSet) => {
             filterSet.metricFilters.forEach((metric) => {
-                const fieldId = getItemId(metric);
+                const fieldId = getDashboardFilterableFieldKey(metric);
                 if (!(fieldId in metricIndexMap)) {
                     metricIndexMap[fieldId] = allFilterableMetrics.length;
                     allFilterableMetrics.push(metric);
@@ -6589,7 +16188,8 @@ export class ProjectService extends BaseService {
             if (!filterResult || !filterResult.filters.length) return acc;
 
             const filterIndexes = filterResult.filters.map(
-                (filter) => filterIndexMap[getItemId(filter)],
+                (filter) =>
+                    filterIndexMap[getDashboardFilterableFieldKey(filter)],
             );
             return {
                 ...acc,
@@ -6607,7 +16207,8 @@ export class ProjectService extends BaseService {
             if (!filterResult || !filterResult.metricFilters.length) return acc;
 
             const metricIndexes = filterResult.metricFilters.map(
-                (metric) => metricIndexMap[getItemId(metric)],
+                (metric) =>
+                    metricIndexMap[getDashboardFilterableFieldKey(metric)],
             );
             return {
                 ...acc,
@@ -6620,6 +16221,11 @@ export class ProjectService extends BaseService {
             allFilterableFields,
             allFilterableMetrics,
             savedQueryMetricFilters,
+            hiddenFilterableFieldIds: Array.from(
+                new Set(
+                    allFilters.flatMap(({ hiddenFieldIds }) => hiddenFieldIds),
+                ),
+            ),
         };
     }
 
@@ -6659,6 +16265,7 @@ export class ProjectService extends BaseService {
         }
     }
 
+    /** @deprecated Only used by the deprecated project access endpoint; use RolesService.getProjectRoleAssignments instead. */
     async getProjectMemberAccess(
         user: SessionUser,
         projectUuid: string,
@@ -6673,6 +16280,7 @@ export class ProjectService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { userUuid },
                 }),
             )
         ) {
@@ -6718,6 +16326,13 @@ export class ProjectService extends BaseService {
         projectUuid: string,
         data: CreateProjectMember,
     ): Promise<void> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagModel,
+        });
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
         const auditedAbility = this.createAuditedAbility(user);
@@ -6727,6 +16342,7 @@ export class ProjectService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { role: data.role },
                 }),
             )
         ) {
@@ -6753,12 +16369,20 @@ export class ProjectService extends BaseService {
             );
     }
 
+    /** @deprecated Only used by the deprecated project access endpoint; use RolesService.upsertProjectUserRoleAssignment instead. */
     async updateProjectAccess(
         user: SessionUser,
         projectUuid: string,
         userUuid: string,
         data: UpdateProjectMember,
     ): Promise<void> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagModel,
+        });
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
         const auditedAbility = this.createAuditedAbility(user);
@@ -6768,6 +16392,7 @@ export class ProjectService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { userUuid, role: data.role },
                 }),
             )
         ) {
@@ -6800,6 +16425,18 @@ export class ProjectService extends BaseService {
         ) {
             throw new ForbiddenError();
         }
+        if (data.upstreamProjectUuid) {
+            // Pointing a preview at the training project would dress it up
+            // as a training copy; only the training service makes those.
+            const upstream = await this.projectModel.getSummary(
+                data.upstreamProjectUuid,
+            );
+            if (upstream.type === ProjectType.TRAINING) {
+                throw new ForbiddenError(
+                    'A preview cannot be re-parented to the training project',
+                );
+            }
+        }
 
         await this.projectModel.updateMetadata(projectUuid, data);
     }
@@ -6828,6 +16465,24 @@ export class ProjectService extends BaseService {
             projectUuid,
             data.hasDefaultUserSpaces,
         );
+
+        this.analytics.track({
+            event: 'default_user_spaces.updated',
+            userId: user.userUuid,
+            properties: {
+                organizationId: organizationUuid,
+                projectId: projectUuid,
+                hasDefaultUserSpaces: data.hasDefaultUserSpaces,
+            },
+        });
+
+        if (data.hasDefaultUserSpaces) {
+            await this.schedulerClient.backfillDefaultUserSpaces({
+                organizationUuid,
+                projectUuid,
+                userUuid: user.userUuid,
+            });
+        }
     }
 
     async updateColorPalette(
@@ -6841,7 +16496,11 @@ export class ProjectService extends BaseService {
         if (
             auditedAbility.cannot(
                 'update',
-                subject('Project', { organizationUuid, projectUuid }),
+                subject('Project', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { colorPaletteUuid },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -6880,7 +16539,15 @@ export class ProjectService extends BaseService {
         if (
             auditedAbility.cannot(
                 'view',
-                subject('Project', { organizationUuid, projectUuid }),
+                subject('Project', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: {
+                        spaceUuid: context.spaceUuid,
+                        dashboardUuid: context.dashboardUuid,
+                        chartUuid: context.chartUuid,
+                    },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -6894,6 +16561,7 @@ export class ProjectService extends BaseService {
         });
     }
 
+    /** @deprecated Only used by the deprecated project access endpoint; use RolesService.deleteProjectRoleAssignment instead. */
     async deleteProjectAccess(
         user: SessionUser,
         projectUuid: string,
@@ -6908,6 +16576,7 @@ export class ProjectService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { userUuid },
                 }),
             )
         ) {
@@ -6971,6 +16640,7 @@ export class ProjectService extends BaseService {
         return [...savedQueries, ...savedSqlCharts];
     }
 
+    /** @deprecated Only used by the deprecated chart summaries endpoint. */
     async getChartSummaries(
         user: SessionUser,
         projectUuid: string,
@@ -7014,7 +16684,11 @@ export class ProjectService extends BaseService {
         if (
             auditedAbility.cannot(
                 'view',
-                subject('Project', { organizationUuid, projectUuid }),
+                subject('Project', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { exploreName },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -7054,12 +16728,24 @@ export class ProjectService extends BaseService {
         }
 
         const spaces = await this.spaceModel.find({ projectUuid });
-        const allowedSpaceUuids =
-            await this.spacePermissionService.getAccessibleSpaceUuids(
+        const [allowedSpaceUuids, granted] = await Promise.all([
+            this.spacePermissionService.getAccessibleSpaceUuids(
                 'view',
                 user,
                 spaces.map((s) => s.uuid),
-            );
+            ),
+            // Directly granted content joins the homepage rails even without
+            // any space access path.
+            user.organizationUuid
+                ? this.directAccessService.findSharedWithMeUuids(
+                      {
+                          userUuid: user.userUuid,
+                          organizationUuid: user.organizationUuid,
+                      },
+                      [projectUuid],
+                  )
+                : undefined,
+        ]);
 
         const allowedSpaceUuidsSet = new Set(allowedSpaceUuids);
         const allowedSpaces = spaces.filter((space) =>
@@ -7067,32 +16753,55 @@ export class ProjectService extends BaseService {
         );
 
         const spaceUuids = allowedSpaces.map(({ uuid }) => uuid);
+        const grantedChartUuids = granted?.[DirectAccessResourceType.CHART];
+        const grantedSqlChartUuids =
+            granted?.[DirectAccessResourceType.SQL_CHART];
+        const grantedDashboardUuids =
+            granted?.[DirectAccessResourceType.DASHBOARD];
         const [
             popularCharts,
             popularSqlCharts,
             popularDashboards,
+            popularApps,
             recentCharts,
             recentSqlCharts,
             recentDashboards,
         ] = await Promise.all([
-            this.spaceModel.getSpaceQueries(spaceUuids, {
-                mostPopular: true,
-            }),
-            this.spaceModel.getSpaceSqlCharts(spaceUuids, {
-                mostPopular: true,
-            }),
-            this.spaceModel.getSpaceDashboards(spaceUuids, {
-                mostPopular: true,
-            }),
-            this.spaceModel.getSpaceQueries(spaceUuids, {
-                recentlyUpdated: true,
-            }),
-            this.spaceModel.getSpaceSqlCharts(spaceUuids, {
-                recentlyUpdated: true,
-            }),
-            this.spaceModel.getSpaceDashboards(spaceUuids, {
-                recentlyUpdated: true,
-            }),
+            this.spaceModel.getSpaceQueries(
+                spaceUuids,
+                { mostPopular: true },
+                grantedChartUuids,
+            ),
+            this.spaceModel.getSpaceSqlCharts(
+                spaceUuids,
+                { mostPopular: true },
+                grantedSqlChartUuids,
+            ),
+            this.spaceModel.getSpaceDashboards(
+                spaceUuids,
+                { mostPopular: true },
+                grantedDashboardUuids,
+            ),
+            this.spaceModel.getMostPopularApps(
+                projectUuid,
+                spaceUuids,
+                granted?.[DirectAccessResourceType.APP],
+            ),
+            this.spaceModel.getSpaceQueries(
+                spaceUuids,
+                { recentlyUpdated: true },
+                grantedChartUuids,
+            ),
+            this.spaceModel.getSpaceSqlCharts(
+                spaceUuids,
+                { recentlyUpdated: true },
+                grantedSqlChartUuids,
+            ),
+            this.spaceModel.getSpaceDashboards(
+                spaceUuids,
+                { recentlyUpdated: true },
+                grantedDashboardUuids,
+            ),
         ]);
 
         return {
@@ -7100,6 +16809,7 @@ export class ProjectService extends BaseService {
                 ...popularCharts,
                 ...popularSqlCharts,
                 ...popularDashboards,
+                ...popularApps,
             ]
                 .sort((a, b) => b.views - a.views)
                 .slice(
@@ -7209,41 +16919,60 @@ export class ProjectService extends BaseService {
 
         const spaces = await this.spaceModel.find({ projectUuid });
         const spaceUuids = spaces.map((s) => s.uuid);
-        const [userSpacesCtx, directAccessMap] = await Promise.all([
-            this.spacePermissionService.getSpacesAccessContext(
+        const [userSpaceContexts, directAccessMap] = await Promise.all([
+            this.spacePermissionService.resolveAccessBatch(
                 user.userUuid,
-                spaceUuids,
+                spaceUuids.map((spaceUuid) => ({
+                    type: 'space' as const,
+                    spaceUuid,
+                })),
             ),
             this.spacePermissionService.getDirectAccessUserUuids(spaceUuids),
         ]);
 
-        return spaces
-            .filter((space) => {
-                const ctx = userSpacesCtx[space.uuid];
-                return (
-                    ctx &&
-                    auditedAbility.can(
-                        'view',
-                        subject('Space', {
-                            organizationUuid: ctx.organizationUuid,
-                            projectUuid: ctx.projectUuid,
-                            inheritsFromOrgOrProject:
-                                ctx.inheritsFromOrgOrProject,
-                            access: ctx.access,
-                            metadata: {
-                                spaceUuid: space.uuid,
-                                spaceName: space.name,
-                            },
-                        }),
-                    )
-                );
-            })
-            .map((spaceSummary) => {
-                const ctx = userSpacesCtx[spaceSummary.uuid];
+        const spacesByUuid = new Map(
+            spaces.map((space) => [space.uuid, space]),
+        );
+        const spacesWithContext = userSpaceContexts.flatMap(
+            ({ target, context: ctx }) => {
+                const space = spacesByUuid.get(target.spaceUuid);
+                return space && ctx ? [{ space, ctx }] : [];
+            },
+        );
+        const accessResults = auditedAbility.canBulk(
+            'view',
+            spacesWithContext.map(({ space, ctx }) =>
+                subject('Space', {
+                    organizationUuid: ctx.organizationUuid,
+                    projectUuid: ctx.projectUuid,
+                    inheritsFromOrgOrProject: ctx.inheritsFromOrgOrProject,
+                    access: ctx.access,
+                    metadata: {
+                        spaceUuid: space.uuid,
+                        spaceName: space.name,
+                    },
+                }),
+            ),
+        );
+
+        const documentCounts = await this.spaceModel.getDocumentCounts(
+            spacesWithContext
+                .filter(
+                    ({ ctx }, index) =>
+                        accessResults[index] &&
+                        auditedAbility.can('view', subject('Document', ctx)),
+                )
+                .map(({ space }) => space.uuid),
+        );
+
+        return spacesWithContext
+            .filter((_, index) => accessResults[index])
+            .map(({ space: spaceSummary, ctx }) => {
                 const directAccessUuids =
                     directAccessMap[spaceSummary.uuid] ?? [];
                 return {
                     ...spaceSummary,
+                    documentCount: documentCounts[spaceSummary.uuid] ?? 0,
                     inheritsFromOrgOrProject: ctx.inheritsFromOrgOrProject,
                     access: directAccessUuids,
                     userAccess: ctx?.access.find(
@@ -7251,6 +16980,32 @@ export class ProjectService extends BaseService {
                     ),
                 };
             });
+    }
+
+    private async throwIfPreviewCopyFailed(
+        previewProject: ApiCreateProjectResults,
+    ): Promise<void> {
+        if (
+            !previewProject.accessCopyError &&
+            !previewProject.contentCopyError
+        ) {
+            return;
+        }
+
+        try {
+            await this.projectModel.delete(previewProject.project.projectUuid);
+        } catch (e) {
+            Sentry.captureException(e);
+            this.logger.error(
+                `Failed to clean up preview project ${previewProject.project.projectUuid} after copy failure`,
+                {
+                    error: getErrorMessage(e),
+                    stack: e instanceof Error ? e.stack : undefined,
+                },
+            );
+        }
+
+        throw new UnexpectedServerError('Failed to copy preview project');
     }
 
     async createPreview(
@@ -7265,8 +17020,10 @@ export class ProjectService extends BaseService {
                 manifest?: string;
             };
             warehouseConnectionOverrides?: { schema?: string };
+            validateAfterCompile?: boolean;
         },
         context: RequestMethod,
+        asyncCopyContent: boolean = false,
     ): Promise<ApiCreatePreviewResults> {
         // create preview project permissions are checked in `createWithoutCompile`
         const project =
@@ -7288,17 +17045,36 @@ export class ProjectService extends BaseService {
                 project.dbtConnection,
                 data.dbtConnectionOverrides ?? {},
             ),
-            upstreamProjectUuid: data.copyContent ? projectUuid : undefined,
-            organizationWarehouseCredentialsUuid:
-                project.organizationWarehouseCredentialsUuid,
+            upstreamProjectUuid: projectUuid,
+            copyContent: data.copyContent,
             dbtVersion: project.dbtVersion,
         };
 
+        const compileJobUuid = uuidv4();
         const previewProject = await this.createWithoutCompile(
             user,
             previewData,
             context,
+            undefined,
+            asyncCopyContent
+                ? {
+                      mode: 'async',
+                      compile: {
+                          jobUuid: compileJobUuid,
+                          validateAfterCompile:
+                              data.validateAfterCompile ?? false,
+                      },
+                  }
+                : { mode: 'sync' },
         );
+        await this.throwIfPreviewCopyFailed(previewProject);
+        if (previewProject.contentCopyJobUuid) {
+            return {
+                projectUuid: previewProject.project.projectUuid,
+                compileJobUuid,
+                contentCopyJobUuid: previewProject.contentCopyJobUuid,
+            };
+        }
 
         // Since the project is new, and we have copied some permissions,
         // it is possible that the user `abilities` are not uptodate
@@ -7310,11 +17086,426 @@ export class ProjectService extends BaseService {
             previewProject.project.projectUuid,
             context,
             true, // Skip permission check
+            data.validateAfterCompile ?? false,
         );
         return {
             projectUuid: previewProject.project.projectUuid,
             compileJobUuid: jobUuid,
         };
+    }
+
+    /**
+     * A learner's own copy of the training project, where walkthroughs run
+     * without touching what other learners are doing. One copy per learner:
+     * a walkthrough starts in the copy the learner already has, so what
+     * earlier walkthroughs built is still there, and only makes a new one
+     * when there is none or it has expired. Each start moves the expiry out
+     * again; the scheduler removes a copy nobody has come back to. Removing
+     * the copy (`deleteTrainingPreviews`) is how a learner starts clean.
+     */
+    async createTrainingPreview(
+        user: SessionUser,
+        trainingProjectUuid: string,
+    ): Promise<CreateTrainingPreviewResults> {
+        await this.assertCanViewLearn(user);
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        const training = await this.projectModel.get(trainingProjectUuid);
+        if (
+            training.type !== ProjectType.TRAINING ||
+            training.organizationUuid !== user.organizationUuid
+        ) {
+            throw new ForbiddenError(
+                "Training copies can only be made from your organization's training project",
+            );
+        }
+
+        // One copy at a time per learner, not more often than a person
+        // clicks, and only so many per organization at once: a copy is a
+        // whole project duplicate, and a loop of them is the cheapest way to
+        // load the instance.
+        return this.onboardingModel.runInTrainingCopyLock(
+            {
+                userUuid: user.userUuid,
+                organizationUuid: user.organizationUuid,
+                maxConcurrentPerOrganization:
+                    ProjectService.TRAINING_COPY_ORG_CONCURRENCY,
+            },
+            async () => {
+                const existing = (
+                    await this.projectModel.getAllByOrganizationUuid(
+                        user.organizationUuid,
+                    )
+                ).filter(
+                    (project) =>
+                        project.type === ProjectType.PREVIEW &&
+                        project.provisioningSource === 'training' &&
+                        project.upstreamProjectUuid === trainingProjectUuid &&
+                        project.createdByUserUuid === user.userUuid,
+                );
+                // The learner's live copy is handed back rather than
+                // replaced, with another day before it expires. A copy past
+                // its expiry that the scheduler has not swept yet counts as
+                // gone: the new copy's creation removes it.
+                const live = existing
+                    .filter(
+                        (project) =>
+                            project.expiresAt === null ||
+                            new Date(project.expiresAt).getTime() > Date.now(),
+                    )
+                    .sort(
+                        (a, b) =>
+                            new Date(b.createdAt).getTime() -
+                            new Date(a.createdAt).getTime(),
+                    )[0];
+                if (live) {
+                    const expiresAt = new Date(
+                        Date.now() +
+                            ProjectService.TRAINING_PREVIEW_EXPIRES_IN_HOURS *
+                                60 *
+                                60 *
+                                1000,
+                    );
+                    await this.projectModel.updateExpiresAt(
+                        live.projectUuid,
+                        expiresAt,
+                    );
+                    return {
+                        projectUuid: live.projectUuid,
+                        expiresAt,
+                        reused: true,
+                    };
+                }
+                const newest = existing
+                    .map((project) => new Date(project.createdAt).getTime())
+                    .sort((a, b) => b - a)[0];
+                if (
+                    newest !== undefined &&
+                    Date.now() - newest <
+                        ProjectService.TRAINING_COPY_COOLDOWN_MS
+                ) {
+                    throw new TooManyRequestsError(
+                        'A training copy was made moments ago; try again shortly',
+                    );
+                }
+                return this.makeTrainingCopy(user, training);
+            },
+        );
+    }
+
+    private static readonly TRAINING_COPY_COOLDOWN_MS = 15_000;
+
+    /**
+     * Copies one organization may have in flight at once. A copy is a whole
+     * project duplicate, so a workshop clicking Start together is asked to
+     * retry rather than allowed to pile onto the instance.
+     */
+    private static readonly TRAINING_COPY_ORG_CONCURRENCY = 5;
+
+    private async makeTrainingCopy(
+        user: SessionUser & { organizationUuid: string },
+        training: Awaited<ReturnType<ProjectModel['get']>>,
+    ): Promise<CreateTrainingPreviewResults> {
+        const trainingProjectUuid = training.projectUuid;
+        // The copy inherits the training project's connection and grants
+        // the learner SQL runner and export on it, so the copy is only safe
+        // while that connection is the shipped sample data. Fail closed
+        // rather than fall back to anything else.
+        const upstreamCredentials =
+            await this.projectModel.getWarehouseCredentialsForBinding(
+                trainingProjectUuid,
+                { kind: 'original' },
+            );
+        const isShippedSampleData =
+            upstreamCredentials.type === WarehouseTypes.DUCKDB &&
+            upstreamCredentials.connectionType ===
+                DuckdbConnectionType.EMBEDDED;
+        if (
+            !isShippedSampleData ||
+            training.organizationWarehouseCredentialsUuid
+        ) {
+            throw new ForbiddenError(
+                ProjectService.TRAINING_CONNECTION_MANAGED_MESSAGE,
+            );
+        }
+        await this.deleteTrainingPreviews(user, trainingProjectUuid);
+
+        const creation = await this.createWithoutCompile(
+            user,
+            {
+                // No personal data in the name: it lands in analytics.
+                name: 'Training copy',
+                type: ProjectType.PREVIEW,
+                upstreamProjectUuid: trainingProjectUuid,
+                copyContent: true,
+                copyWarehouseConnectionFromUpstreamProject: true,
+                dbtConnection: { type: DbtProjectType.NONE },
+                dbtVersion: training.dbtVersion,
+                expiresInHours:
+                    ProjectService.TRAINING_PREVIEW_EXPIRES_IN_HOURS,
+            },
+            RequestMethod.BACKEND,
+            { source: 'training' },
+            { mode: 'sync' },
+        );
+        await this.throwIfPreviewCopyFailed(creation);
+        const { projectUuid } = creation.project;
+        // Comments are keyed by tile uuid, which a copy would share with the
+        // training project; the copy gets its own tiles and its own comments.
+        await this.projectModel.giveTrainingCopyOwnTiles(
+            projectUuid,
+            training.createdByUserUuid,
+        );
+        // The seeded research thread becomes the learner's own.
+        await this.projectModel.copyDeepResearchForTrainingCopy(
+            trainingProjectUuid,
+            projectUuid,
+            user.userUuid,
+            training.createdByUserUuid,
+        );
+
+        // The training project's explores are a shipped bundle, never
+        // compiled from dbt, so copy the cache instead of scheduling a compile.
+        const multiUpstreamExplores = await this.getMultiUpstreamExplores(
+            trainingProjectUuid,
+            projectUuid,
+        );
+        if (multiUpstreamExplores) {
+            await this.multiConnectionCompiler.save(
+                projectUuid,
+                multiUpstreamExplores,
+            );
+        } else {
+            const explores = Object.values(
+                await this.projectModel.getAllExploresFromCache(
+                    trainingProjectUuid,
+                ),
+            );
+            await this.projectModel.saveExploresToCache(
+                projectUuid,
+                explores,
+                true,
+            );
+        }
+        // The metrics catalog is built from that cache before the copy is
+        // handed over, so its first page already knows it has metrics (the
+        // Metrics link in the bar depends on it). The copied YAML tags are
+        // assigned to metrics by reference; a fresh copy has nothing from a
+        // previous index to migrate, so no scheduler job is needed.
+        const cachedExploresMap = await this.projectModel.findExploresFromCache(
+            projectUuid,
+            'uuid',
+        );
+        const projectYamlTags = await this.tagsModel.getYamlTags(projectUuid);
+        const { catalogFieldMap } = await this.catalogModel.indexCatalog(
+            projectUuid,
+            cachedExploresMap,
+            projectYamlTags,
+            user.userUuid,
+        );
+        await this.projectModel.copyMetricsTreesForTrainingCopy(
+            trainingProjectUuid,
+            projectUuid,
+            user.userUuid,
+        );
+        await seedMissingTrainingCopyMetricsTrees({
+            projectUuid,
+            userUuid: user.userUuid,
+            catalogModel: this.catalogModel,
+        });
+        // Popularity (chart usage) orders the catalog; the copied charts
+        // count the same way the index job counts them.
+        const chartUsages = await this.savedChartModel.getChartCountPerField(
+            projectUuid,
+            Object.keys(catalogFieldMap),
+        );
+        await this.catalogModel.setChartUsages(
+            projectUuid,
+            chartUsages.flatMap<ChartUsageIn>(({ fieldId, count }) => {
+                const field = catalogFieldMap[fieldId];
+                if (!field || Number.isNaN(count)) return [];
+                return [
+                    {
+                        fieldName: field.fieldName,
+                        fieldType: field.fieldType,
+                        chartUsage: count,
+                        cachedExploreUuid: field.cachedExploreUuid,
+                    },
+                ];
+            }),
+        );
+
+        await this.seedSamplesInCopy(
+            user,
+            user.organizationUuid,
+            projectUuid,
+            training.createdByUserUuid,
+        );
+
+        // The trainee layer on the new copy only exists in a freshly built
+        // ability; the cached session user still reflects the old copies.
+        this.userModel.invalidateSessionUserCache(user.userUuid);
+
+        const preview = await this.projectModel.get(projectUuid);
+        return {
+            projectUuid,
+            expiresAt: preview.expiresAt ?? null,
+            reused: false,
+        };
+    }
+
+    /**
+     * Samples a copy does not carry over from the training project. Best
+     * effort, each on its own: a sample that fails to seed leaves the copy
+     * usable for every other walkthrough, the other sample included, rather
+     * than failing a copy that now exists. A failure is reported as well as
+     * logged, because the learner only sees a walkthrough step waiting for
+     * something that is not there.
+     */
+    private async seedSamplesInCopy(
+        user: SessionUser,
+        organizationUuid: string,
+        projectUuid: string,
+        createdByUserUuid: string | null,
+    ): Promise<void> {
+        const bestEffort = async (
+            sample: string,
+            seed: () => Promise<void> | undefined,
+        ) => {
+            try {
+                await seed();
+            } catch (error) {
+                Logger.error(
+                    `Training copy ${projectUuid}: the sample ${sample} could not be seeded`,
+                    error,
+                );
+                Sentry.captureException(error);
+            }
+        };
+        await bestEffort('document', () =>
+            this.seedSampleDocumentsInCopy(
+                user,
+                projectUuid,
+                createdByUserUuid,
+            ),
+        );
+        await bestEffort('knowledge document', () =>
+            this.seedTrainingCopyEnterpriseContent?.({
+                organizationUuid,
+                projectUuid,
+                createdByUserUuid,
+            }),
+        );
+    }
+
+    /**
+     * Copies carry no documents, so the sample a learner reads in the
+     * documents walkthrough is made in each copy, in the seeded space and
+     * credited to whoever enabled Learn.
+     */
+    private async seedSampleDocumentsInCopy(
+        user: SessionUser,
+        projectUuid: string,
+        createdByUserUuid: string | null,
+    ): Promise<void> {
+        const [space] = await this.spaceModel.find({
+            projectUuid,
+            path: TRAINING_SPACE.path,
+        });
+        if (!space) {
+            Logger.warn(
+                `Training copy ${projectUuid} has no "${TRAINING_SPACE.path}" space; skipping its sample documents`,
+            );
+            return;
+        }
+        await seedTrainingCopyDocuments({
+            projectUuid,
+            spaceUuid: space.uuid,
+            createdByUserUuid,
+            documentModel: this.documentModel,
+        });
+    }
+
+    private static readonly TRAINING_PREVIEW_EXPIRES_IN_HOURS = 24;
+
+    private async assertCanViewLearn(user: SessionUser): Promise<void> {
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        const ability = this.createAuditedAbility(user);
+        if (
+            ability.cannot(
+                'view',
+                subject('Learn', { organizationUuid: user.organizationUuid }),
+            )
+        ) {
+            throw new ForbiddenError('You do not have access to Learn');
+        }
+    }
+
+    /**
+     * Remove the caller's own copies of the training project (a finished or
+     * abandoned walkthrough). Other learners' copies are untouched.
+     */
+    async deleteTrainingPreviews(
+        user: SessionUser,
+        trainingProjectUuid: string,
+    ): Promise<{ deleted: number }> {
+        await this.assertCanViewLearn(user);
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+        const training = await this.projectModel.get(trainingProjectUuid);
+        if (
+            training.type !== ProjectType.TRAINING ||
+            training.organizationUuid !== user.organizationUuid
+        ) {
+            throw new ForbiddenError(
+                "Only copies of your organization's training project can be removed this way",
+            );
+        }
+        const projects = await this.projectModel.getAllByOrganizationUuid(
+            user.organizationUuid,
+        );
+        const copies = projects.filter(
+            (project) =>
+                project.type === ProjectType.PREVIEW &&
+                project.provisioningSource === 'training' &&
+                project.upstreamProjectUuid === trainingProjectUuid &&
+                project.createdByUserUuid === user.userUuid,
+        );
+        await Promise.all(
+            copies.map((copy) =>
+                this.deletePreviewAndAppFiles(copy.projectUuid),
+            ),
+        );
+        this.userModel.invalidateSessionUserCache(user.userUuid);
+        return { deleted: copies.length };
+    }
+
+    /**
+     * Remove a preview (a training copy, or any preview that aged out) and
+     * the app files it duplicated into the bucket, which deleting the
+     * project rows alone would leave behind. A bucket failure is reported
+     * but never keeps the project alive.
+     */
+    private async deletePreviewAndAppFiles(
+        previewProjectUuid: string,
+    ): Promise<void> {
+        try {
+            await this.getAppGenerateService?.()?.deleteProjectAppFiles(
+                previewProjectUuid,
+            );
+        } catch (error) {
+            Sentry.captureException(error);
+            this.logger.warn(
+                `Could not remove the app files of preview ${previewProjectUuid}: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            );
+        }
+        await this.projectModel.delete(previewProjectUuid);
     }
 
     /*
@@ -7336,45 +17527,94 @@ export class ProjectService extends BaseService {
                 upstreamProjectUuid,
             },
             async () => {
-                const projectAccesses =
-                    await this.projectModel.getProjectAccess(
-                        upstreamProjectUuid,
-                    );
-                const groupAccesses =
-                    await this.projectModel.getProjectGroupAccesses(
-                        upstreamProjectUuid,
-                    );
-
-                this.logger.info(
-                    `Copying ${projectAccesses.length} user access on ${previewProjectUuid}`,
-                );
-                this.logger.info(
-                    `Copying ${groupAccesses.length} group access on ${previewProjectUuid}`,
-                );
-                const insertProjectAccessPromises = projectAccesses.map(
-                    (projectAccess) =>
-                        this.projectModel.createProjectAccess(
-                            previewProjectUuid,
-                            projectAccess.email,
-                            projectAccess.role,
-                            projectAccess.roleUuid,
-                        ),
-                );
-                const insertGroupAccessPromises = groupAccesses.map(
-                    (groupAccess) =>
-                        this.groupsModel.addProjectAccess({
-                            groupUuid: groupAccess.groupUuid,
-                            projectUuid: previewProjectUuid,
-                            role: groupAccess.role,
-                        }),
+                const {
+                    userAccessCount,
+                    skippedUserAccessCount,
+                    groupAccessCount,
+                } = await this.projectModel.copyProjectAccess(
+                    upstreamProjectUuid,
+                    previewProjectUuid,
                 );
 
-                await Promise.all([
-                    ...insertGroupAccessPromises,
-                    ...insertProjectAccessPromises,
-                ]);
+                this.logger.info(
+                    `Copied ${userAccessCount} user access grants on ${previewProjectUuid}; skipped ${skippedUserAccessCount} ineligible grants`,
+                );
+                this.logger.info(
+                    `Copied ${groupAccessCount} group access grants on ${previewProjectUuid}`,
+                );
             },
         );
+    }
+
+    async runPreviewContentCopy(
+        user: SessionUser,
+        payload: CopyPreviewContentPayload,
+        signal?: AbortSignal,
+    ): Promise<void> {
+        try {
+            signal?.throwIfAborted();
+            await this.jobModel.tryJobStep(
+                payload.jobUuid,
+                JobStepType.COPYING_PREVIEW_CONTENT,
+                async () => {
+                    await this.copyContentOnPreview(
+                        payload.upstreamProjectUuid,
+                        payload.projectUuid,
+                        user,
+                    );
+                    signal?.throwIfAborted();
+                    if (payload.compile) {
+                        await this.scheduleCompileProject(
+                            user,
+                            payload.projectUuid,
+                            getRequestMethod(payload.requestMethod),
+                            true,
+                            payload.compile.validateAfterCompile,
+                            false,
+                            payload.compile.jobUuid,
+                        );
+                    }
+                    signal?.throwIfAborted();
+                },
+            );
+            signal?.throwIfAborted();
+            await this.jobModel.update(payload.jobUuid, {
+                jobStatus: JobStatusType.DONE,
+                jobResults: { projectUuid: payload.projectUuid },
+            });
+            signal?.throwIfAborted();
+        } catch (error) {
+            await this.failPreviewContentCopy(payload, error);
+            throw error;
+        }
+    }
+
+    async failPreviewContentCopy(
+        payload: CopyPreviewContentPayload,
+        error: unknown,
+    ): Promise<void> {
+        Sentry.captureException(error);
+        await this.jobModel.updateJobStep(
+            payload.jobUuid,
+            JobStepStatusType.ERROR,
+            JobStepType.COPYING_PREVIEW_CONTENT,
+            getErrorMessage(error),
+        );
+        await this.jobModel.update(payload.jobUuid, {
+            jobStatus: JobStatusType.ERROR,
+        });
+        try {
+            await this.projectModel.delete(payload.projectUuid);
+        } catch (cleanupError) {
+            Sentry.captureException(cleanupError);
+            this.logger.error(
+                'Failed to clean up preview after content copy failure',
+                {
+                    projectUuid: payload.projectUuid,
+                    error: getErrorMessage(cleanupError),
+                },
+            );
+        }
     }
 
     async copyContentOnPreview(
@@ -7382,6 +17622,15 @@ export class ProjectService extends BaseService {
         previewProjectUuid: string,
         user: SessionUser,
     ): Promise<void> {
+        const warehouseConnectionMap =
+            (await this.projectModel.getConnectionRoute(projectUuid, {
+                kind: 'original',
+            })) === 'multi'
+                ? await this.warehouseConnectionIdentityModel.getPreviewConnectionMap(
+                      projectUuid,
+                      previewProjectUuid,
+                  )
+                : null;
         this.logger.info(
             `Copying content from project ${projectUuid} to preview project ${previewProjectUuid}`,
         );
@@ -7393,11 +17642,35 @@ export class ProjectService extends BaseService {
             async () => {
                 const spaces = await this.spaceModel.find({ projectUuid }); // Get all spaces in the project
 
-                await this.projectModel.duplicateContent(
-                    projectUuid,
-                    previewProjectUuid,
-                    spaces,
-                );
+                const { spaceMapping } =
+                    await this.projectModel.duplicateContent(
+                        projectUuid,
+                        previewProjectUuid,
+                        spaces,
+                        warehouseConnectionMap,
+                    );
+
+                // Duplicate the upstream project's data apps into the preview
+                // and remap the copied dashboard tiles onto them. EE-only —
+                // resolves undefined in core builds. Best-effort: a failure
+                // here must not undo the content copy that already committed,
+                // so swallow and log rather than propagate.
+                const appGenerateService = this.getAppGenerateService?.();
+                if (appGenerateService) {
+                    try {
+                        await appGenerateService.duplicateAppsForPreview(
+                            projectUuid,
+                            previewProjectUuid,
+                            spaceMapping,
+                        );
+                    } catch (e) {
+                        this.logger.error(
+                            `Failed to duplicate data apps from ${projectUuid} to preview ${previewProjectUuid}: ${getErrorMessage(
+                                e,
+                            )}`,
+                        );
+                    }
+                }
             },
         );
     }
@@ -7413,24 +17686,37 @@ export class ProjectService extends BaseService {
         ) {
             throw new ForbiddenError();
         }
-        const cachedExplores = await this.projectModel.findExploresFromCache(
-            projectUuid,
-            'name',
+        const charts =
+            await this.savedChartModel.findInfoForDbtExposures(projectUuid);
+        const exploreNames = uniq(charts.map((chart) => chart.tableName));
+        const dbtExposuresReadContext = newExploreCacheReadContext(
+            'dbt-exposures',
+            exploreNames.length,
+        );
+        const { result: cachedExplores } = await measureTime(
+            async () => {
+                const explores =
+                    await this.projectModel.findExploreTableSummariesFromCache(
+                        projectUuid,
+                        exploreNames,
+                        dbtExposuresReadContext,
+                    );
+                Object.assign(dbtExposuresReadContext, {
+                    ...summarizeExploreCacheRead(explores),
+                });
+                return explores;
+            },
+            'ProjectService.getDbtExposures.cachedExploreRead',
+            this.logger,
+            dbtExposuresReadContext,
         );
         const allExplores = Object.values(cachedExplores);
 
         const validExplores = allExplores?.filter(
             (explore) =>
-                explore.type !== ExploreType.VIRTUAL &&
+                !isUserManagedExplore(explore) &&
                 explore.type !== ExploreType.PRE_AGGREGATE,
         );
-
-        if (!validExplores) {
-            throw new NotFoundError('No explores found');
-        }
-
-        const charts =
-            await this.savedChartModel.findInfoForDbtExposures(projectUuid);
 
         const chartExposures = charts.reduce<DbtExposure[]>((acc, chart) => {
             const dependsOn = Object.values(
@@ -7532,8 +17818,9 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
         const credentials =
-            await this.projectModel.getWarehouseCredentialsForProject(
+            await this.projectModel.getWarehouseCredentialsForBinding(
                 projectUuid,
+                { kind: 'original' },
             );
         return this.userWarehouseCredentialsModel.findForProject(
             project.projectUuid,
@@ -7555,8 +17842,9 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
         const credentials =
-            await this.projectModel.getWarehouseCredentialsForProject(
+            await this.projectModel.getWarehouseCredentialsForBinding(
                 projectUuid,
+                { kind: 'original' },
             );
         return {
             type: credentials.type,
@@ -7596,8 +17884,40 @@ export class ProjectService extends BaseService {
         }
         const project = await this.projectModel.getSummary(projectUuid);
         const auditedAbility = this.createAuditedAbility(user);
-        if (auditedAbility.cannot('view', subject('Project', project))) {
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('Project', {
+                    ...project,
+                    metadata: { userWarehouseCredentialsUuid },
+                }),
+            )
+        ) {
             throw new ForbiddenError();
+        }
+        const policy = await resolvePersonalCredentialPolicy(
+            this.featureFlagModel,
+            {
+                organizationUuid: project.organizationUuid,
+                userUuid: user.userUuid,
+            },
+        );
+        if (policy.strictPersonalOverlay) {
+            const connection =
+                await this.projectModel.getWarehouseCredentialsForBinding(
+                    projectUuid,
+                    { kind: 'original' },
+                );
+            if (
+                (userWarehouseCredentials.project !== null &&
+                    userWarehouseCredentials.project.projectUuid !==
+                        projectUuid) ||
+                userWarehouseCredentials.credentials.type !== connection.type
+            ) {
+                throw new ParameterError(
+                    'Personal warehouse credentials must match the project and warehouse type.',
+                );
+            }
         }
         await this.userWarehouseCredentialsModel.upsertUserCredentialsPreference(
             user.userUuid,
@@ -7606,6 +17926,7 @@ export class ProjectService extends BaseService {
         );
     }
 
+    /** @deprecated Only used by the deprecated custom metrics endpoint, which will be removed without replacement. */
     async getCustomMetrics(
         user: SessionUser,
         projectUuid: string,
@@ -7619,7 +17940,19 @@ export class ProjectService extends BaseService {
             chartUrl: string;
         }[]
     > {
-        // TODO implement permissions
+        const project = await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('Project', {
+                    organizationUuid: project.organizationUuid,
+                    projectUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
         const chartSummaries = await this.savedChartModel.find({
             projectUuid,
         });
@@ -7651,11 +17984,35 @@ export class ProjectService extends BaseService {
         }, []);
     }
 
+    private async getVirtualViewConnectionUuid(
+        projectUuid: string,
+        warehouseConnectionUuid: string | null,
+    ): Promise<string | null> {
+        if (warehouseConnectionUuid === null) return null;
+        if (
+            (await this.projectModel.getConnectionRoute(projectUuid, {
+                kind: 'original',
+            })) !== 'multi'
+        ) {
+            throw new ParameterError(
+                'A virtual view can name a connection only in a project with multiple connections',
+            );
+        }
+        const target = await this.projectModel.resolveWarehouseCredentialRead(
+            projectUuid,
+            { kind: 'connection', warehouseConnectionUuid },
+        );
+        return target.kind === 'extra' ? target.warehouseConnectionUuid : null;
+    }
+
     async createVirtualView(
         account: Account,
         projectUuid: string,
         payload: CreateVirtualViewPayload,
+        resolveParameterValues = true,
     ) {
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionPreAggregateRefresh(projectUuid);
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
 
@@ -7663,7 +18020,11 @@ export class ProjectService extends BaseService {
         if (
             auditedAbility.cannot(
                 'create',
-                subject('VirtualView', { organizationUuid, projectUuid }),
+                subject('VirtualView', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { name: payload.name },
+                }),
             )
         ) {
             throw new ForbiddenError();
@@ -7679,20 +18040,28 @@ export class ProjectService extends BaseService {
                 'Virtual view with this name already exists',
             );
         }
-        const { warehouseClient } = await this._getWarehouseClient(
+        const boundConnectionUuid = await this.getVirtualViewConnectionUuid(
             projectUuid,
-            await this.getWarehouseCredentials({
-                projectUuid,
-                userId: account.user.id,
-                isRegisteredUser: true,
-            }),
+            payload.warehouseConnectionUuid ?? null,
         );
-        const effectiveParameterValues =
-            await this.resolveVirtualViewParameters(
-                projectUuid,
-                payload.sql,
-                payload.parameterValues,
-            );
+        const settings = await this.getWarehouseSqlBuilderSettings(
+            projectUuid,
+            {
+                kind: 'connection',
+                warehouseConnectionUuid: boundConnectionUuid,
+            },
+        );
+        const warehouseSqlBuilder = warehouseSqlBuilderFromType(
+            settings.type,
+            settings.startOfWeek ?? undefined,
+        );
+        const effectiveParameterValues = resolveParameterValues
+            ? await this.resolveVirtualViewParameters(
+                  projectUuid,
+                  payload.sql,
+                  payload.parameterValues,
+              )
+            : payload.parameterValues;
 
         const virtualView = await this.projectModel.createVirtualView(
             projectUuid,
@@ -7700,7 +18069,9 @@ export class ProjectService extends BaseService {
                 ...payload,
                 parameterValues: effectiveParameterValues,
             },
-            warehouseClient,
+            warehouseSqlBuilder,
+            boundConnectionUuid,
+            ...this.getConnectionExploreWriteChecks(projectUuid),
         );
 
         this.analytics.trackAccount(account, {
@@ -7722,14 +18093,23 @@ export class ProjectService extends BaseService {
         projectUuid: string,
         exploreName: string,
         payload: UpdateVirtualViewPayload,
+        resolveParameterValues = true,
+        expectedExplore?: Explore,
     ) {
-        const virtualView = await this.findExplores({
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionPreAggregateRefresh(projectUuid);
+        const explores = await this.findExplores({
             account,
             projectUuid,
             exploreNames: [exploreName],
         });
+        const virtualView = explores[exploreName];
 
-        if (!virtualView) {
+        if (
+            !virtualView ||
+            isExploreError(virtualView) ||
+            virtualView.type !== ExploreType.VIRTUAL
+        ) {
             throw new NotFoundError('Virtual view not found');
         }
 
@@ -7750,22 +18130,30 @@ export class ProjectService extends BaseService {
             throw new ForbiddenError();
         }
 
-        const { warehouseClient } = await this._getWarehouseClient(
-            projectUuid,
-            await this.getWarehouseCredentials({
+        const boundConnectionUuid =
+            await this.projectModel.getExploreWarehouseConnectionUuid(
                 projectUuid,
-                userId: account.user.id,
-                isRegisteredUser: account.isRegisteredUser(),
-                isServiceAccount: account.isServiceAccount(),
-            }),
+                exploreName,
+            );
+        const settings = await this.getWarehouseSqlBuilderSettings(
+            projectUuid,
+            {
+                kind: 'connection',
+                warehouseConnectionUuid: boundConnectionUuid,
+            },
+        );
+        const warehouseSqlBuilder = warehouseSqlBuilderFromType(
+            settings.type,
+            settings.startOfWeek ?? undefined,
         );
 
-        const effectiveParameterValues =
-            await this.resolveVirtualViewParameters(
-                projectUuid,
-                payload.sql,
-                payload.parameterValues,
-            );
+        const effectiveParameterValues = resolveParameterValues
+            ? await this.resolveVirtualViewParameters(
+                  projectUuid,
+                  payload.sql,
+                  payload.parameterValues,
+              )
+            : payload.parameterValues;
 
         const updatedExplore = await this.projectModel.updateVirtualView(
             projectUuid,
@@ -7774,7 +18162,9 @@ export class ProjectService extends BaseService {
                 ...payload,
                 parameterValues: effectiveParameterValues,
             },
-            warehouseClient,
+            warehouseSqlBuilder,
+            expectedExplore,
+            ...this.getConnectionExploreWriteChecks(projectUuid),
         );
 
         this.analytics.trackAccount(account, {
@@ -7884,6 +18274,62 @@ export class ProjectService extends BaseService {
         return updatedProject;
     }
 
+    async getAgentSqlScope(
+        account: RegisteredAccount,
+        projectUuid: string,
+    ): Promise<AgentSqlScope | null> {
+        const project = await this.projectModel.getSummary(projectUuid);
+
+        const auditedAbility = this.createAuditedAbility(account);
+        if (auditedAbility.cannot('update', subject('Project', project))) {
+            throw new ForbiddenError();
+        }
+
+        return this.projectModel.getAgentSqlScope(projectUuid);
+    }
+
+    async updateAgentSqlScope(
+        account: RegisteredAccount,
+        projectUuid: string,
+        { agentSqlScope }: UpdateAgentSqlScope,
+    ): Promise<void> {
+        const project = await this.projectModel.getSummary(projectUuid);
+
+        const auditedAbility = this.createAuditedAbility(account);
+        if (auditedAbility.cannot('update', subject('Project', project))) {
+            throw new ForbiddenError();
+        }
+
+        if (agentSqlScope) {
+            const blank = [
+                ...agentSqlScope.schemas,
+                ...(agentSqlScope.catalogs ?? []),
+                ...(agentSqlScope.deniedSchemas ?? []),
+                ...(agentSqlScope.deniedCatalogs ?? []),
+            ].some((name) => name.trim() === '');
+            if (blank) {
+                throw new ParameterError(
+                    'Schema and catalog names cannot be blank',
+                );
+            }
+        }
+
+        await this.projectModel.updateAgentSqlScope(projectUuid, agentSqlScope);
+
+        this.analytics.track({
+            event: 'agent_sql_scope.updated',
+            userId: account.user.id,
+            properties: {
+                projectId: projectUuid,
+                organizationUuid: project.organizationUuid,
+                schemaCount: agentSqlScope?.schemas.length ?? 0,
+                catalogCount: agentSqlScope?.catalogs?.length ?? 0,
+                deniedSchemaCount: agentSqlScope?.deniedSchemas?.length ?? 0,
+                deniedCatalogCount: agentSqlScope?.deniedCatalogs?.length ?? 0,
+            },
+        });
+    }
+
     async updateQueryTimezone(
         user: SessionUser,
         projectUuid: string,
@@ -7971,6 +18417,7 @@ export class ProjectService extends BaseService {
                 subject('Tags', {
                     projectUuid,
                     organizationUuid,
+                    metadata: { name },
                 }),
             )
         ) {
@@ -8017,6 +18464,7 @@ export class ProjectService extends BaseService {
                 subject('Tags', {
                     projectUuid: tag.projectUuid,
                     organizationUuid,
+                    metadata: { tagUuid },
                 }),
             )
         ) {
@@ -8048,6 +18496,7 @@ export class ProjectService extends BaseService {
                 subject('Tags', {
                     projectUuid: tag.projectUuid,
                     organizationUuid,
+                    metadata: { tagUuid },
                 }),
             )
         ) {
@@ -8057,7 +18506,7 @@ export class ProjectService extends BaseService {
         await this.tagsModel.update(tagUuid, tagUpdate);
     }
 
-    async getTags(user: SessionUser, projectUuid: string) {
+    async getTags(user: Account, projectUuid: string) {
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
 
@@ -8117,6 +18566,7 @@ export class ProjectService extends BaseService {
                     organizationUuid,
                     type,
                     createdByUserUuid,
+                    metadata: { createdByUserUuid },
                 }),
             )
         ) {
@@ -8149,6 +18599,7 @@ export class ProjectService extends BaseService {
                     organizationUuid,
                     type,
                     createdByUserUuid,
+                    metadata: { createdByUserUuid },
                 }),
             )
         ) {
@@ -8157,9 +18608,12 @@ export class ProjectService extends BaseService {
             );
         }
 
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.assertConnectionPreAggregateRefresh(projectUuid);
         await this.projectParametersModel.replace(
             projectUuid,
             parameters ?? {},
+            ...this.getConnectionExploreWriteChecks(projectUuid),
         );
     }
 
@@ -8184,6 +18638,7 @@ export class ProjectService extends BaseService {
                     organizationUuid,
                     type,
                     createdByUserUuid,
+                    metadata: { createdByUserUuid },
                 }),
             )
         ) {
@@ -8220,6 +18675,44 @@ export class ProjectService extends BaseService {
             );
         }
 
+        const prevCatalogItemsWithTags =
+            await this.catalogModel.getCatalogItemsWithTags(projectUuid, {
+                onlyTagged: true,
+                includeYamlTags: false,
+            });
+        const prevCatalogItemsWithIcons =
+            await this.catalogModel.getCatalogItemsWithIcons(projectUuid);
+        const prevMetricTreeEdges =
+            await this.catalogModel.getAllMetricsTreeEdges(projectUuid);
+        const prevMetricsTreeNodes =
+            await this.catalogModel.getAllMetricsTreeNodes(projectUuid);
+
+        await this.replaceYamlTagsWithoutPermissionCheck(
+            user,
+            organizationUuid,
+            projectUuid,
+            yamlTags,
+        );
+        await this.schedulerClient.indexCatalog({
+            projectUuid,
+            userUuid: user.userUuid,
+            organizationUuid,
+            refreshMetadataBeforeIndex: true,
+            prevCatalogItemsWithTags,
+            prevCatalogItemsWithIcons,
+            prevMetricTreeEdges,
+            prevMetricsTreeNodes,
+        });
+    }
+
+    private async replaceYamlTagsWithoutPermissionCheck(
+        user: SessionUser,
+        organizationUuid: string,
+        projectUuid: string,
+        yamlTags: (Pick<Tag, 'name' | 'color'> & {
+            yamlReference: NonNullable<Tag['yamlReference']>;
+        })[],
+    ) {
         const yamlTagsIn = yamlTags.map((tag) => ({
             project_uuid: projectUuid,
             name: tag.name,
@@ -8286,12 +18779,14 @@ export class ProjectService extends BaseService {
     }
 
     async replaceCustomFields({
+        beforeEffect,
         userUuid,
         projectUuid,
         organizationUuid,
         replaceFields,
         skipChartsUpdatedAfter,
     }: {
+        beforeEffect?: () => Promise<void>;
         userUuid: string;
         organizationUuid: string;
         projectUuid: string;
@@ -8324,11 +18819,45 @@ export class ProjectService extends BaseService {
                 }
                 // create new version if any fields were replaced
                 if (hasChanges) {
-                    await this.savedChartModel.createVersion(
-                        chartUuid,
-                        chartVersion,
-                        undefined,
-                    );
+                    if (beforeEffect) await beforeEffect();
+                    const connectionAccount = agentExecutionContext.getStore()
+                        ?.agentConnectionExecution
+                        ? await this.assertAgentConnectionEffect(
+                              projectUuid,
+                              'replaceCustomFields',
+                          )
+                        : null;
+                    if (
+                        connectionAccount &&
+                        this.createAuditedAbility(connectionAccount).cannot(
+                            'update',
+                            subject('SavedChart', {
+                                ...chart,
+                                projectUuid,
+                                organizationUuid,
+                            }),
+                        )
+                    )
+                        throw new ForbiddenError();
+                    if (connectionAccount) {
+                        await this.savedChartModel.createVersion(
+                            chartUuid,
+                            chartVersion,
+                            toSessionUser(connectionAccount),
+                            undefined,
+                            undefined,
+                            getContentWriteAgentIdentity({
+                                userUuid,
+                                organizationUuid,
+                            }),
+                        );
+                    } else {
+                        await this.savedChartModel.createVersion(
+                            chartUuid,
+                            chartVersion,
+                            undefined,
+                        );
+                    }
                     return { uuid: chart.uuid, name: chart.name };
                 }
                 return null;
@@ -8352,12 +18881,12 @@ export class ProjectService extends BaseService {
         return updatedCharts;
     }
 
-    async createPreviewWithExplores(
+    async createPreviewFromDbtCloudWebhook(
         projectUuid: string,
-        accountId: string,
-        runId: string,
+        accountId: number,
+        runId: number,
+        webhookAuth: { rawBody: Buffer | null; signature: string | null },
     ): Promise<string> {
-        // create preview project permissions are checked in `createWithoutCompile`
         const project =
             await this.projectModel.getWithSensitiveFields(projectUuid);
 
@@ -8370,6 +18899,25 @@ export class ProjectService extends BaseService {
         if (project.dbtConnection.type !== DbtProjectType.DBT_CLOUD_IDE) {
             throw new ParameterError(
                 `Project ${projectUuid} is not a dbt Cloud IDE project`,
+            );
+        }
+
+        const webhookSecret = project.dbtConnection.webhook_hmac_secret;
+        if (webhookSecret) {
+            if (
+                !webhookAuth.rawBody ||
+                !webhookAuth.signature ||
+                !isValidDbtCloudWebhookSignature(
+                    webhookSecret,
+                    webhookAuth.rawBody,
+                    webhookAuth.signature,
+                )
+            ) {
+                throw new ForbiddenError('Invalid dbt Cloud webhook signature');
+            }
+        } else {
+            this.logger.info(
+                `dbt Cloud webhook for project ${projectUuid} processed without signature verification (no webhook_hmac_secret configured)`,
             );
         }
 
@@ -8406,87 +18954,164 @@ export class ProjectService extends BaseService {
                 ['model', 'seed'].includes(node.resource_type) && node.meta,
         ) as DbtRawModelNode[];
 
-        const { warehouseClient } = await this._getWarehouseClient(
-            projectUuid,
-            project.warehouseConnection,
-        );
-
-        const [dbtModelNode, exploreErrors] =
-            DbtBaseProjectAdapter._validateDbtModel(
-                warehouseClient.getAdapterType(),
-                models,
-                DbtManifestVersion.V12,
-            );
         const disableTimestampConversion =
-            project.warehouseConnection?.type === 'snowflake' &&
+            project.warehouseConnection.type === 'snowflake' &&
             project.warehouseConnection.disableTimestampConversion === true;
-
-        const convertedExplores = await convertExplores(
-            dbtModelNode,
-            false,
-            warehouseClient.getAdapterType(),
-            [],
-            warehouseClient,
+        const compileContext = connectionContextFromUser(
+            { userUuid: user.userUuid, isRegisteredUser: true },
             {
-                spotlight: {
-                    default_visibility: 'hide', // todo: pass correct config
-                },
-                defaults: project.projectDefaults,
-            },
-            {
-                disableTimestampConversion,
-                postProcessors: [preAggregatePostProcessor],
+                organizationUuid: project.organizationUuid,
+                queryContext: null,
+                purpose: 'compile',
             },
         );
-        Logger.info(`Explore count: ${convertedExplores.length}`);
+        const resolveCredentials =
+            this.lightdashConfig.warehouseClient
+                .resolveDbtCloudPreviewCredentials;
         const previewName = `preview_${jobId}_${prId}`;
-        Logger.info(`Preview name: ${previewName}`);
-        Logger.info(`Find all project for: ${project.organizationUuid}`);
-        const allProjects = await this.projectModel.getAllByOrganizationUuid(
-            project.organizationUuid,
-        );
-        const previewExists = allProjects.find(
-            (p) => p.name === previewName && p.type === ProjectType.PREVIEW,
-        );
+        const findPreview = async () => {
+            Logger.info(`Preview name: ${previewName}`);
+            Logger.info(`Find all project for: ${project.organizationUuid}`);
+            const allProjects =
+                await this.projectModel.getAllByOrganizationUuid(
+                    project.organizationUuid,
+                );
+            return allProjects.find(
+                (p) => p.name === previewName && p.type === ProjectType.PREVIEW,
+            );
+        };
+        const createPreviewData = (
+            credentials: CreateWarehouseCredentials,
+        ): CreateProject => ({
+            name: previewName,
+            type: ProjectType.PREVIEW,
+            warehouseConnection: maybeOverrideWarehouseConnection(credentials, {
+                schema: `dbt_cloud_pr_${jobId}_${prId}`,
+            }),
+            dbtConnection: { type: DbtProjectType.NONE },
+            upstreamProjectUuid: projectUuid,
+            dbtVersion: project.dbtVersion,
+        });
+        let previewExists = resolveCredentials
+            ? await findPreview()
+            : undefined;
+        let previewData: CreateProject | null = null;
+        let warehouseRef: WarehouseClientRef;
+        if (resolveCredentials) {
+            if (!previewExists) {
+                previewData = createPreviewData(project.warehouseConnection);
+                await this.validateProjectCreationPermissions(
+                    user,
+                    previewData,
+                );
+            }
+            const { warehouseCredentials } =
+                await this.warehouseClientFactory.resolveWarehouseCredentials(
+                    {
+                        kind: 'binding',
+                        projectUuid,
+                        binding: { kind: 'original' },
+                    },
+                    compileContext,
+                );
+            if (previewData) {
+                const {
+                    userWarehouseCredentialsUuid: _userWarehouseCredentialsUuid,
+                    ...credentials
+                } = warehouseCredentials;
+                previewData.warehouseConnection =
+                    maybeOverrideWarehouseConnection(credentials, {
+                        schema: `dbt_cloud_pr_${jobId}_${prId}`,
+                    });
+            }
+            warehouseRef = {
+                kind: 'compile',
+                projectUuid,
+                credentials: warehouseCredentials,
+            };
+        } else {
+            warehouseRef = {
+                kind: 'bypass',
+                mode: 'dbt_cloud_preview_webhook',
+                projectUuid,
+                credentials: prepareWarehouseOAuthCredentials(
+                    project.warehouseConnection,
+                ),
+            };
+        }
+        const { convertedExplores, exploreErrors } =
+            await this.warehouseClientFactory.withWarehouseClient(
+                warehouseRef,
+                compileContext,
+                async ({ warehouseClient }) => {
+                    const [dbtModelNode, validationErrors] =
+                        DbtBaseProjectAdapter._validateDbtModel(
+                            warehouseClient.getAdapterType(),
+                            models,
+                            DbtManifestVersion.V12,
+                        );
+                    const explores = await convertExplores(
+                        dbtModelNode,
+                        false,
+                        warehouseClient.getAdapterType(),
+                        warehouseClient,
+                        {
+                            spotlight: {
+                                default_visibility: 'hide', // todo: pass correct config
+                            },
+                            defaults: project.projectDefaults,
+                        },
+                        {
+                            disableTimestampConversion,
+                            postProcessors: [preAggregatePostProcessor],
+                        },
+                    );
+                    return {
+                        convertedExplores: explores,
+                        exploreErrors: validationErrors,
+                    };
+                },
+            );
+        Logger.info(`Explore count: ${convertedExplores.length}`);
+        if (!resolveCredentials) {
+            previewExists = await findPreview();
+        }
         let projectToSetExplores: string;
         Logger.info(`Preview exists: ${previewExists}`);
         if (previewExists) {
             projectToSetExplores = previewExists.projectUuid;
         } else {
-            const previewData: CreateProject = {
-                name: previewName,
-                type: ProjectType.PREVIEW,
-                warehouseConnection: maybeOverrideWarehouseConnection(
-                    project.warehouseConnection,
-                    {
-                        schema: `dbt_cloud_pr_${jobId}_${prId}`,
-                    },
-                ),
-                dbtConnection: {
-                    type: DbtProjectType.NONE,
-                },
-                upstreamProjectUuid: projectUuid,
-                dbtVersion: project.dbtVersion,
-            };
-
             const newPreview = await this.createWithoutCompile(
                 user,
-                previewData,
+                previewData ?? createPreviewData(project.warehouseConnection),
                 RequestMethod.WEB_APP, // TODO: fix context
+                undefined,
+                { mode: 'sync' },
             );
+            await this.throwIfPreviewCopyFailed(newPreview);
             projectToSetExplores = newPreview.project.projectUuid;
         }
 
         Logger.info(`Set explores for: ${projectToSetExplores}`);
-        await this.saveExploresToCacheAndIndexCatalog({
+        const webhookSave = {
             userUuid: user.userUuid,
             projectUuid: projectToSetExplores,
             explores: [...convertedExplores, ...exploreErrors],
-            compilationSource: 'refresh_dbt',
+            compilationSource: 'refresh_dbt' as const,
             jobUuid: null,
-            requestMethod: 'api',
+            requestMethod: 'api' as const,
             projectConfigDefaults: project.projectDefaults,
-        });
+            complete: true,
+        };
+        if (
+            (await this.projectModel.getConnectionRoute(projectToSetExplores, {
+                kind: 'original',
+            })) === 'multi'
+        ) {
+            await this.saveExploresKeepingExtraConnections(webhookSave);
+        } else {
+            await this.saveExploresToCacheAndIndexCatalog(webhookSave);
+        }
 
         Logger.info(`Schedule validation:`, {
             userUuid: user.userUuid,
@@ -8507,7 +19132,7 @@ export class ProjectService extends BaseService {
         // At this point, there might not be any projects
         // so we can't check any permissions here.
         // Bigquery will handle the permissions
-        const refreshToken = await this.userModel.getRefreshToken(
+        const refreshToken = await this.userOAuthGrantsModel.getRefreshToken(
             user.userUuid,
             OpenIdIdentityIssuerType.GOOGLE,
         );
@@ -8549,7 +19174,7 @@ export class ProjectService extends BaseService {
         // At this point, there might not be any projects
         // so we can't check any permissions here.
         // Bigquery will handle the permissions
-        const refreshToken = await this.userModel.getRefreshToken(
+        const refreshToken = await this.userOAuthGrantsModel.getRefreshToken(
             user.userUuid,
             OpenIdIdentityIssuerType.GOOGLE,
         );
@@ -8578,6 +19203,42 @@ export class ProjectService extends BaseService {
         }
     }
 
+    async getBigqueryProjectRecommendation(user: SessionUser) {
+        // At this point, there might not be any projects
+        // so we can't check any permissions here.
+        // Bigquery will handle the permissions
+        const refreshToken = await this.userOAuthGrantsModel.getRefreshToken(
+            user.userUuid,
+            OpenIdIdentityIssuerType.GOOGLE,
+        );
+        const accessToken = await UserService.generateGoogleAccessToken(
+            refreshToken,
+            'bigquery',
+        );
+
+        try {
+            const projects =
+                await BigqueryWarehouseClient.getProjects(accessToken);
+            return await BigqueryWarehouseClient.getProjectRecommendation(
+                projects,
+                refreshToken,
+            );
+        } catch (error) {
+            this.logger.error(
+                `getBigqueryProjectRecommendation error: ${JSON.stringify(error)}`,
+            );
+
+            if (BigqueryWarehouseClient.isBigqueryError(error)) {
+                throw new WarehouseConnectionError(
+                    'Failed to get a project recommendation from BigQuery',
+                );
+            }
+            throw new UnexpectedServerError(
+                'Failed to get a project recommendation',
+            );
+        }
+    }
+
     // eslint-disable-next-line class-methods-use-this
     getUserQueryTags(account: Account) {
         if (account.isJwtUser()) {
@@ -8591,51 +19252,156 @@ export class ProjectService extends BaseService {
         };
     }
 
+    private async getParameterDefinitionSources(
+        projectUuid: string,
+        explores: Explore[],
+        preloadedProjectParameters?: DbProjectParameter[],
+    ): Promise<
+        Pick<
+            ParameterFallbackSources,
+            'projectDefinitions' | 'exploreDefinitions'
+        >
+    > {
+        const parameterConfigs =
+            preloadedProjectParameters ??
+            (await this.projectParametersModel.find(projectUuid));
+        return {
+            projectDefinitions: Object.fromEntries(
+                parameterConfigs.map((p) => [p.name, p.config]),
+            ),
+            exploreDefinitions: explores.reduce<ParameterDefinitions>(
+                (acc, explore) => ({
+                    ...acc,
+                    ...getAvailableParametersFromTables(
+                        Object.values(explore.tables),
+                    ),
+                }),
+                {},
+            ),
+        };
+    }
+
+    private async getParameterFallbackSources(
+        projectUuid: string,
+        explores: Explore[],
+        preloadedProjectParameters?: DbProjectParameter[],
+    ): Promise<ParameterFallbackSources> {
+        const { projectDefinitions, exploreDefinitions } =
+            await this.getParameterDefinitionSources(
+                projectUuid,
+                explores,
+                preloadedProjectParameters,
+            );
+
+        // A `today` default is taken in the project's query timezone, so "today" means
+        // the same day the project's date dimensions report. Only look the zone up when
+        // a definition actually needs it.
+        const hasTodayDefault = [
+            ...Object.values(projectDefinitions),
+            ...Object.values(exploreDefinitions),
+        ].some(isTodayParameterDefault);
+        const now = new Date();
+        const timezone = hasTodayDefault
+            ? await this.getQueryTimezoneForProject(projectUuid)
+            : null;
+
+        return {
+            projectDefinitions,
+            exploreDefinitions,
+            virtualViewSavedValues: explores.reduce<ParametersValuesMap>(
+                (acc, explore) => ({
+                    ...acc,
+                    ...explore.savedParameterValues,
+                }),
+                {},
+            ),
+            now,
+            timezone,
+        };
+    }
+
     /**
      * Combines parameter values from multiple sources in order of priority:
      * 1. Request parameters (highest priority)
      * 2. Saved chart/dashboard parameters
-     * 3. Default explore parameters values
-     * 4. Default project parameters values(lowest priority)
+     * 3. Virtual view saved parameter values
+     * 4. Default explore parameters values
+     * 5. Default project parameters values (lowest priority)
      */
     public async combineParameters(
         projectUuid: string,
         explore?: Explore,
         requestParameters?: ParametersValuesMap,
         savedParameters?: ParametersValuesMap,
+        preloadedProjectParameters?: DbProjectParameter[],
     ): Promise<ParametersValuesMap> {
-        // Get default values for parameters
-        const projectDefaultParameterValues: ParametersValuesMap = {};
-
-        // Fetch all parameters
-        const parameterConfigs =
-            await this.projectParametersModel.find(projectUuid);
-
-        for (const paramConfig of parameterConfigs) {
-            if (paramConfig.config.default !== undefined) {
-                projectDefaultParameterValues[paramConfig.name] =
-                    paramConfig.config.default;
-            }
-        }
-
-        const exploreParameters = explore
-            ? getAvailableParametersFromTables(Object.values(explore.tables))
-            : [];
-
-        const exploreDefaultParameterValues = Object.fromEntries(
-            Object.entries(exploreParameters)
-                .map(([key, value]) => [key, value.default])
-                .filter(([key, value]) => value !== undefined),
+        const fallbackSources = await this.getParameterFallbackSources(
+            projectUuid,
+            explore ? [explore] : [],
+            preloadedProjectParameters,
         );
-
-        // Combine in order of priority: defaults (project / explore) < virtual view saved values < saved parameters (chart/dashboard) < request
+        // Values outside a parameter's fixed options fall through to the next source
+        const definitions = getEffectiveParameterDefinitions(fallbackSources);
         return {
-            ...projectDefaultParameterValues,
-            ...exploreDefaultParameterValues,
-            ...(explore?.savedParameterValues || {}),
-            ...(savedParameters || {}),
-            ...(requestParameters || {}),
+            ...resolveFallbackParameterValues(fallbackSources),
+            ...omitDisallowedParameterValues(
+                savedParameters || {},
+                definitions,
+            ),
+            ...omitDisallowedParameterValues(
+                requestParameters || {},
+                definitions,
+            ),
         };
+    }
+
+    // Dashboard value, else definition default, else chart-saved value, else fallback chain
+    public async resolveDashboardTileParameters({
+        projectUuid,
+        explore,
+        dashboardValues,
+        chartSavedValues,
+        isTargeted,
+        preloadedProjectParameters,
+    }: DashboardTileParameterInputs & {
+        projectUuid: string;
+        explore: Explore;
+        preloadedProjectParameters: DbProjectParameter[] | null;
+    }): Promise<ParametersValuesMap> {
+        const fallbackSources = await this.getParameterFallbackSources(
+            projectUuid,
+            [explore],
+            preloadedProjectParameters ?? undefined,
+        );
+        return resolveDashboardTileParameters({
+            fallbackSources,
+            dashboardValues,
+            chartSavedValues,
+            isTargeted,
+        });
+    }
+
+    // Tile overrides only, for queries that apply the fallback chain themselves (merge sources)
+    public async getDashboardTileParameterOverrides({
+        projectUuid,
+        explores,
+        dashboardValues,
+        chartSavedValues,
+        isTargeted,
+    }: DashboardTileParameterInputs & {
+        projectUuid: string;
+        explores: Explore[];
+    }): Promise<ParametersValuesMap> {
+        const definitionSources = await this.getParameterDefinitionSources(
+            projectUuid,
+            explores,
+        );
+        return getDashboardTileParameterOverrides({
+            definitions: getEffectiveParameterDefinitions(definitionSources),
+            dashboardValues,
+            chartSavedValues,
+            isTargeted,
+        });
     }
 
     /**
@@ -8662,6 +19428,40 @@ export class ProjectService extends BaseService {
             ),
         );
         return Object.keys(filtered).length > 0 ? filtered : undefined;
+    }
+
+    async validateVirtualViewParameterReferences(
+        projectUuid: string,
+        sql: string,
+        parameterValues?: ParametersValuesMap,
+    ): Promise<void> {
+        const references = getParameterReferences(sql);
+        const definitions = await this.projectParametersModel.find(projectUuid);
+        const definitionsByName = new Map(
+            definitions.map((definition) => [definition.name, definition]),
+        );
+        const unknown = references.filter(
+            (name) =>
+                !definitionsByName.has(name) && !isReservedParameterName(name),
+        );
+        if (unknown.length > 0) {
+            throw new ParameterError(
+                `Virtual view references unknown parameters: ${unknown.join(', ')}`,
+            );
+        }
+        const missing = references.filter((name) => {
+            const definition = definitionsByName.get(name);
+            if (!definition && isReservedParameterName(name)) return false;
+            return (
+                !(name in (parameterValues ?? {})) &&
+                definition?.config.default === undefined
+            );
+        });
+        if (missing.length > 0) {
+            throw new ParameterError(
+                `Virtual view is missing values for required parameters: ${missing.join(', ')}`,
+            );
+        }
     }
 
     static isChartEmbed(account: Account) {

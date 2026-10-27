@@ -191,6 +191,8 @@ metrics:
 - Multiple values: `["value1", "value2"]`
 - Null checks: `"null"`, `"!null"`
 - Date intervals: `"inThePast N days"`, `"inTheNext N months"` (supports: `days`, `weeks`, `months`, `years`)
+- Current period: `"inTheCurrent month"`, `"notInTheCurrent quarter"` (supports: `day`, `week`, `month`, `quarter`, `year`)
+- Current period to date: `"inTheCurrent month to date"`, `"inTheCurrent month to date excluding today"` (supports: `week`, `month`, `quarter`, `year`)
 
 **Date filter examples:**
 
@@ -205,9 +207,24 @@ metrics:
     type: count
     filters:
       - renewal_date: "inTheNext 7 days"
+
+  orders_this_month:
+    type: count
+    filters:
+      - created_at: "inTheCurrent month"
+
+  orders_month_to_date:
+    type: count
+    filters:
+      - created_at: "inTheCurrent month to date"
+
+  orders_month_to_date_full_days:
+    type: count
+    filters:
+      - created_at: "inTheCurrent month to date excluding today"
 ```
 
-**Important:** `inTheCurrent` is NOT a valid operator in metric definition filters. It is only available in chart and dashboard filters. If you need current-period logic in a metric, use custom SQL with date truncation instead.
+`inTheCurrent month` covers the whole calendar month, including future-dated rows. Add `to date` to end the range at today, and `excluding today` to end it at yesterday so the current partial day is left out. The `to date` suffix is only valid for `week`, `month`, `quarter` and `year`.
 
 ### Show Underlying Values
 
@@ -264,12 +281,33 @@ metrics:
 
 ### Access Control
 
+Metrics accept `required_attributes` and `any_attributes`.
+
+- **Model-level metrics** (under the model's `meta.metrics`) use only their own keys. They inherit nothing from the columns their `sql` references, so set the keys on the metric (or the table) to restrict them.
+- **Column-level metrics** (under a column's `meta.metrics`) inherit the parent dimension's `required_attributes` / `any_attributes`. Setting either key on the metric overrides that key; the other is still inherited.
+
 ```yaml
-metrics:
-  confidential_revenue:
-    type: sum
-    required_attributes:
-      role: "finance"
+# dbt v1.9
+meta:
+  metrics:
+    confidential_revenue:       # model-level: restricted by its own keys
+      type: sum
+      sql: ${TABLE}.revenue
+      required_attributes:
+        role: "finance"
+columns:
+  - name: salary
+    meta:
+      dimension:
+        required_attributes:
+          role: "hr"
+      metrics:
+        total_salary:           # inherits role: "hr"
+          type: sum
+        average_salary:         # overrides: visible to managers too
+          type: average
+          required_attributes:
+            role: ["hr", "manager"]
 ```
 
 ### AI Hints

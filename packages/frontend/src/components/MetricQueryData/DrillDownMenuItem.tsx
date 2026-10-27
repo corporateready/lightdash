@@ -4,9 +4,10 @@ import {
     isField,
     isMetric,
 } from '@lightdash/common';
-import { Menu, Text } from '@mantine-8/core';
+import { Menu, Text } from '@mantine/core';
 import { IconArrowBarToDown } from '@tabler/icons-react';
 import { useCallback, useMemo, type FC } from 'react';
+import { MergeSourceGate } from '../../features/mergeQuery/components/MergeSourceGate';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
 import MantineIcon from '../common/MantineIcon';
@@ -25,6 +26,8 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
     item,
     fieldValues,
     pivotReference,
+    source,
+    valueLabel,
     trackingData,
 }) => {
     const { explore, metricQuery, openDrillDownModal } =
@@ -39,7 +42,8 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
             : getItemId(item);
     }, [item, pivotReference]);
 
-    const value = fieldId ? fieldValues?.[fieldId]?.formatted : undefined;
+    const value =
+        (fieldId ? fieldValues?.[fieldId]?.formatted : undefined) ?? valueLabel;
 
     const handleDrillInto = useCallback(() => {
         if (!item || !openDrillDownModal || !fieldValues) {
@@ -50,6 +54,8 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
             item,
             fieldValues,
             pivotReference,
+            source,
+            valueLabel,
         });
         track({
             name: EventName.DRILL_BY_CLICKED,
@@ -64,7 +70,9 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
         item,
         openDrillDownModal,
         pivotReference,
+        source,
         track,
+        valueLabel,
         trackingData.organizationId,
         trackingData.projectId,
         trackingData.userId,
@@ -74,22 +82,28 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
         item &&
         isField(item) &&
         isMetric(item) &&
-        explore &&
+        (source || explore) &&
         fieldValues &&
-        metricQuery
+        (source?.metricQuery || metricQuery)
     ) {
-        return (
+        const menuItem = (
             <Menu.Item
                 leftSection={<MantineIcon icon={IconArrowBarToDown} />}
                 onClick={handleDrillInto}
             >
                 <>
                     Drill into{' '}
-                    <Text span fz="inherit" lh="inherit" fw="bold">
+                    <Text span fw="bold">
                         {value}
                     </Text>
                 </>
             </Menu.Item>
+        );
+        // A caller-supplied source is already resolved to that source's own fields
+        return source ? (
+            menuItem
+        ) : (
+            <MergeSourceGate item={item}>{menuItem}</MergeSourceGate>
         );
     }
 

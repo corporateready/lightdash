@@ -1,0 +1,205 @@
+import {
+    ContentAsCodeType,
+    parseDocumentAsCodeFile,
+    parseHomepageAsCode,
+    parseVersionedContentAsCodeDocument,
+    type AgentAsCode,
+    type AlertAsCode,
+    type DocumentAsCode,
+    type ExternalConnectionAsCode,
+    type GoogleSheetsSyncAsCode,
+    type HomepageAsCode,
+    type ScheduledDeliveryAsCode,
+    type VirtualViewAsCode,
+} from '@lightdash/common';
+import type { CodeResourceDefinition } from './resource';
+
+export const HOMEPAGE_CODE_RESOURCE: CodeResourceDefinition<HomepageAsCode> = {
+    kind: ContentAsCodeType.HOMEPAGE,
+    displayLabel: 'homepage',
+    identityLabel: 'name',
+    scope: 'project',
+    folderName: 'homepages',
+    acceptedExtensions: ['.yml', '.yaml'],
+    fileName: {
+        strategy: 'uriEncodedIdentity',
+        fallbackPrefix: 'homepage',
+        extension: '.yml',
+        preserveSpaces: true,
+    },
+    dependencies: ['space', 'chart', 'dashboard'],
+    identity: ({ name }) => name,
+    displayName: ({ name }) => name,
+    parse: parseHomepageAsCode,
+    sort: (a, b) => a.name.localeCompare(b.name),
+};
+
+export const VIRTUAL_VIEW_CODE_RESOURCE: CodeResourceDefinition<VirtualViewAsCode> =
+    {
+        kind: ContentAsCodeType.VIRTUAL_VIEW,
+        displayLabel: 'virtual view',
+        identityLabel: 'slug',
+        scope: 'project',
+        folderName: 'virtual-views',
+        acceptedExtensions: ['.yml', '.yaml'],
+        fileName: {
+            strategy: 'uriEncodedIdentity',
+            fallbackPrefix: 'virtual-view',
+            extension: '.yml',
+        },
+        dependencies: [],
+        identity: ({ slug }) => slug,
+        displayName: ({ name }) => name,
+        parse: (input, source) =>
+            parseVersionedContentAsCodeDocument<VirtualViewAsCode>({
+                input,
+                source,
+                resourceLabel: 'virtual view',
+                contentType: ContentAsCodeType.VIRTUAL_VIEW,
+            }),
+        sort: (left, right) => left.slug.localeCompare(right.slug),
+    };
+
+export const AI_AGENT_CODE_RESOURCE: CodeResourceDefinition<AgentAsCode> = {
+    kind: ContentAsCodeType.AI_AGENT,
+    displayLabel: 'AI agent',
+    identityLabel: 'slug',
+    scope: 'project',
+    folderName: 'ai-agents',
+    acceptedExtensions: ['.yml', '.yaml'],
+    fileName: {
+        strategy: 'identity',
+        fallbackPrefix: 'ai-agent',
+        extension: '.yml',
+    },
+    dependencies: [],
+    recursive: true,
+    identity: ({ slug }) => slug,
+    displayName: ({ name }) => name,
+    parse: (input, source) =>
+        parseVersionedContentAsCodeDocument<AgentAsCode>({
+            input,
+            source,
+            resourceLabel: 'AI agent',
+            contentType: ContentAsCodeType.AI_AGENT,
+        }),
+    serialize: ({ updatedAt, downloadedAt, ...agent }) => agent,
+    sort: (left, right) => left.slug.localeCompare(right.slug),
+};
+
+export const EXTERNAL_CONNECTION_CODE_RESOURCE: CodeResourceDefinition<ExternalConnectionAsCode> =
+    {
+        kind: ContentAsCodeType.EXTERNAL_CONNECTION,
+        displayLabel: 'external connection',
+        identityLabel: 'slug',
+        scope: 'project',
+        folderName: 'external-connections',
+        acceptedExtensions: ['.yml', '.yaml'],
+        fileName: {
+            strategy: 'identity',
+            fallbackPrefix: 'external-connection',
+            extension: '.yml',
+        },
+        dependencies: [],
+        identity: ({ slug }) => slug,
+        displayName: ({ name }) => name,
+        parse: (input, source) =>
+            parseVersionedContentAsCodeDocument<ExternalConnectionAsCode>({
+                input,
+                source,
+                resourceLabel: 'external connection',
+                contentType: ContentAsCodeType.EXTERNAL_CONNECTION,
+            }),
+        sort: (left, right) => left.slug.localeCompare(right.slug),
+    };
+
+const scheduledResource = <Document extends { slug: string; name: string }>({
+    contentType,
+    folderName,
+    label,
+}: {
+    contentType:
+        | ContentAsCodeType.SCHEDULED_DELIVERY
+        | ContentAsCodeType.ALERT
+        | ContentAsCodeType.GOOGLE_SHEETS_SYNC;
+    folderName: string;
+    label: string;
+}): CodeResourceDefinition<Document> => ({
+    kind: contentType,
+    displayLabel: label,
+    identityLabel: 'slug',
+    scope: 'project',
+    folderName,
+    acceptedExtensions: ['.yml', '.yaml'],
+    fileName: {
+        strategy: 'scheduledResource',
+        fallbackPrefix: contentType,
+        extension: '.yml',
+    },
+    dependencies: ['chart', 'dashboard'],
+    recursive: true,
+    identity: ({ slug }) => slug,
+    displayName: ({ name }) => name,
+    matches: (input) =>
+        typeof input === 'object' &&
+        input !== null &&
+        'contentType' in input &&
+        input.contentType === contentType,
+    parse: (input, source) =>
+        parseVersionedContentAsCodeDocument<Document>({
+            input,
+            source,
+            resourceLabel: label,
+            contentType,
+        }),
+    sort: (left, right) => left.slug.localeCompare(right.slug),
+});
+
+export const SCHEDULED_DELIVERY_CODE_RESOURCE =
+    scheduledResource<ScheduledDeliveryAsCode>({
+        contentType: ContentAsCodeType.SCHEDULED_DELIVERY,
+        folderName: 'scheduled-deliveries',
+        label: 'scheduled delivery',
+    });
+
+export const ALERT_CODE_RESOURCE = scheduledResource<AlertAsCode>({
+    contentType: ContentAsCodeType.ALERT,
+    folderName: 'alerts',
+    label: 'alert',
+});
+
+export const GOOGLE_SHEETS_CODE_RESOURCE =
+    scheduledResource<GoogleSheetsSyncAsCode>({
+        contentType: ContentAsCodeType.GOOGLE_SHEETS_SYNC,
+        folderName: 'google-sheets',
+        label: 'Google Sheets sync',
+    });
+
+export const DOCUMENT_CODE_RESOURCE: CodeResourceDefinition<DocumentAsCode> = {
+    kind: 'document',
+    displayLabel: 'document',
+    identityLabel: 'slug',
+    scope: 'project',
+    folderName: 'documents',
+    acceptedExtensions: ['.yml', '.yaml'],
+    fileName: {
+        strategy: 'identity',
+        fallbackPrefix: 'document',
+        extension: '.yml',
+    },
+    dependencies: [ContentAsCodeType.SPACE],
+    identity: ({ slug }) => slug,
+    displayName: ({ name }) => name,
+    parse: (input) => parseDocumentAsCodeFile(input),
+    sort: (left, right) => left.slug.localeCompare(right.slug),
+    leadingKeys: [
+        'name',
+        'slug',
+        'description',
+        'spaceSlug',
+        'schemaVersion',
+        'markdown',
+        'charts',
+        'unsupportedCharts',
+    ],
+};

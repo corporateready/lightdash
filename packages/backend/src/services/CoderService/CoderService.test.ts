@@ -1,14 +1,473 @@
 // CoderService.test.ts
 import {
     AnyType,
+    CartesianSeriesType,
+    ChartType,
     DashboardDAO,
     DashboardFilterRule,
     DashboardTileTarget,
     DashboardTileTypes,
+    DirectAccessPrincipalType,
+    DirectAccessResourceType,
+    PromotionAction,
+    SpaceMemberRole,
 } from '@lightdash/common';
+import { defaultSessionUser } from '../../auth/account/account.mock';
+import {
+    agentActionTestCases,
+    withAgentActionScope,
+} from '../AiAccessService/agentActionTestUtils.mock';
 import { CoderService } from './CoderService';
+import { withTileWarnings } from './dashboardReferences';
 
 describe('CoderService', () => {
+    describe('getMissingIds', () => {
+        it('recognizes requested chart aliases as downloaded content', () => {
+            expect(
+                CoderService.getMissingIds(
+                    ['old-orders'],
+                    [{ uuid: 'chart-uuid', slug: 'orders' }],
+                    ['old-orders'],
+                ),
+            ).toEqual([]);
+        });
+    });
+
+    describe('transformChart', () => {
+        it('identifies the chart when its space is missing', () => {
+            expect(() =>
+                (
+                    CoderService as unknown as {
+                        transformChart: (...args: AnyType[]) => AnyType;
+                    }
+                ).transformChart(
+                    { slug: 'missing-chart', spaceUuid: 'space-uuid' },
+                    [],
+                    {},
+                    new Map(),
+                ),
+            ).toThrow('Space space-uuid not found');
+        });
+
+        it('preserves per-value pivot series customizations for chart-as-code download', () => {
+            const chartConfig = {
+                type: ChartType.CARTESIAN,
+                config: {
+                    eChartsConfig: {
+                        series: [
+                            {
+                                color: '#1f77b4',
+                                encode: {
+                                    xRef: { field: 'events_date_day' },
+                                    yRef: {
+                                        field: 'events_count',
+                                        pivotValues: [
+                                            {
+                                                field: 'events_event_tier',
+                                                value: 'High',
+                                            },
+                                        ],
+                                    },
+                                },
+                                isFilteredOut: false,
+                                name: 'High tier custom blue',
+                                type: CartesianSeriesType.LINE,
+                                yAxisIndex: 0,
+                            },
+                            {
+                                color: '#d62728',
+                                encode: {
+                                    xRef: { field: 'events_date_day' },
+                                    yRef: {
+                                        field: 'events_count',
+                                        pivotValues: [
+                                            {
+                                                field: 'events_event_tier',
+                                                value: 'Low',
+                                            },
+                                        ],
+                                    },
+                                },
+                                isFilteredOut: true,
+                                name: 'Low tier hidden red',
+                                type: CartesianSeriesType.LINE,
+                                yAxisIndex: 0,
+                            },
+                            {
+                                color: '#2ca02c',
+                                encode: {
+                                    xRef: { field: 'events_date_day' },
+                                    yRef: {
+                                        field: 'events_count',
+                                        pivotValues: [
+                                            {
+                                                field: 'events_event_tier',
+                                                value: 'Very high',
+                                            },
+                                        ],
+                                    },
+                                },
+                                isFilteredOut: false,
+                                name: 'Very high tier green',
+                                type: CartesianSeriesType.LINE,
+                                yAxisIndex: 0,
+                            },
+                        ],
+                        showAxisTicks: false,
+                    },
+                    layout: {
+                        xField: 'events_date_day',
+                        yField: ['events_count'],
+                    },
+                },
+            };
+
+            const result = (
+                CoderService as unknown as {
+                    transformChart: (...args: AnyType[]) => AnyType;
+                }
+            ).transformChart(
+                {
+                    chartConfig,
+                    dashboardUuid: null,
+                    description: null,
+                    metricQuery: {
+                        additionalMetrics: [],
+                        customDimensions: [],
+                        dimensionOverrides: {},
+                        dimensions: ['events_event_tier', 'events_date_day'],
+                        exploreName: 'events',
+                        filters: {},
+                        limit: 500,
+                        metricOverrides: {},
+                        metrics: ['events_count'],
+                        sorts: [
+                            {
+                                descending: false,
+                                fieldId: 'events_event_tier',
+                            },
+                        ],
+                        tableCalculations: [],
+                        timezone: 'project_timezone',
+                    },
+                    name: 'PROD-8534 pivot hidden series test',
+                    parameters: undefined,
+                    pivotConfig: {
+                        columns: ['events_event_tier'],
+                    },
+                    slug: 'prod-8534-pivot-hidden-series-test',
+                    spaceUuid: 'space-uuid',
+                    tableConfig: {
+                        columnOrder: [
+                            'events_event_tier',
+                            'events_date_day',
+                            'events_count',
+                        ],
+                    },
+                    tableName: 'events',
+                    updatedAt: new Date('2026-06-29T11:49:43.855Z'),
+                    uuid: 'chart-uuid',
+                },
+                [
+                    {
+                        name: 'Jaffle shop',
+                        path: 'jaffle_shop',
+                        uuid: 'space-uuid',
+                    },
+                ],
+                {},
+                new Map(),
+            );
+
+            const { series } = result.chartConfig.config.eChartsConfig;
+            expect(series).toHaveLength(3);
+            expect(
+                series.map((s: AnyType) => s.encode.yRef.pivotValues[0]),
+            ).toEqual([
+                { field: 'events_event_tier', value: 'High' },
+                { field: 'events_event_tier', value: 'Low' },
+                { field: 'events_event_tier', value: 'Very high' },
+            ]);
+            expect(series[1]).toEqual(
+                expect.objectContaining({
+                    color: '#d62728',
+                    isFilteredOut: true,
+                    name: 'Low tier hidden red',
+                }),
+            );
+        });
+
+        it('omits project-local metric UUIDs and empty dimension overrides', () => {
+            const result = (
+                CoderService as unknown as {
+                    transformChart: (...args: AnyType[]) => AnyType;
+                }
+            ).transformChart(
+                {
+                    chartConfig: { type: ChartType.TABLE, config: {} },
+                    dashboardUuid: null,
+                    description: null,
+                    metricQuery: {
+                        additionalMetrics: [
+                            {
+                                name: 'custom_total',
+                                table: 'orders',
+                                type: 'sum',
+                                sql: '${TABLE}.amount',
+                                uuid: 'project-local-metric-uuid',
+                            },
+                        ],
+                        dimensionOverrides: {},
+                        dimensions: [],
+                        exploreName: 'orders',
+                        filters: {},
+                        limit: 500,
+                        metrics: ['orders_custom_total'],
+                        sorts: [],
+                        tableCalculations: [],
+                    },
+                    name: 'Portable chart',
+                    slug: 'portable-chart',
+                    spaceUuid: 'space-uuid',
+                    tableName: 'orders',
+                    uuid: 'chart-uuid',
+                },
+                [
+                    {
+                        name: 'Space',
+                        path: 'space',
+                        uuid: 'space-uuid',
+                    },
+                ],
+                {},
+                new Map(),
+            );
+
+            expect(result.metricQuery.additionalMetrics).toEqual([
+                {
+                    name: 'custom_total',
+                    table: 'orders',
+                    type: 'sum',
+                    sql: '${TABLE}.amount',
+                },
+            ]);
+            expect(result.metricQuery.dimensionOverrides).toBeUndefined();
+        });
+    });
+
+    describe('draft space overlays', () => {
+        const publishedChart = {
+            uuid: 'chart-uuid',
+            slug: 'chart-slug',
+            name: 'Chart',
+            description: null,
+            spaceUuid: 'published-space',
+            dashboardUuid: null,
+            tableName: 'orders',
+            metricQuery: {
+                exploreName: 'orders',
+                metrics: [],
+                dimensions: [],
+                filters: {},
+                sorts: [],
+                limit: 500,
+                tableCalculations: [],
+            },
+            chartConfig: { type: ChartType.TABLE, config: {} },
+            tableConfig: {},
+            pivotConfig: undefined,
+            parameters: undefined,
+            merge: null,
+            updatedAt: new Date('2026-08-27T00:00:00Z'),
+        };
+        const publishedDashboard = {
+            uuid: 'dashboard-uuid',
+            slug: 'dashboard-slug',
+            name: 'Dashboard',
+            description: null,
+            spaceUuid: 'published-space',
+            tiles: [],
+            tabs: [],
+            filters: {
+                dimensions: [],
+                metrics: [],
+                tableCalculations: [],
+            },
+            config: {},
+            updatedAt: new Date('2026-08-27T00:00:00Z'),
+        };
+        const service = new CoderService({
+            agentActionLogModel: {
+                insert: vi.fn().mockResolvedValue(undefined),
+            },
+            directAccessService: {} as AnyType,
+            savedChartModel: {
+                get: vi.fn().mockResolvedValue(publishedChart),
+            },
+            dashboardModel: {
+                getByIdOrSlug: vi.fn().mockResolvedValue(publishedDashboard),
+            },
+            spaceModel: {
+                find: vi.fn(async ({ spaceUuids }: AnyType) =>
+                    spaceUuids.map((uuid: string) => ({
+                        uuid,
+                        name: 'Draft space',
+                        path: 'draft_space',
+                    })),
+                ),
+            },
+            contentVerificationModel: {
+                getByContentUuids: vi.fn().mockResolvedValue(new Map()),
+            },
+        } as AnyType);
+
+        it('renders a chart draft move as the target space slug', async () => {
+            const result = await service.getPortableChartAsCodeWithOverlay(
+                'project-uuid',
+                publishedChart.uuid,
+                { spaceUuid: 'draft-space' },
+            );
+
+            expect(result.spaceSlug).toBe('draft-space');
+        });
+
+        it('exports a legacy merge draft using the named merge schema', async () => {
+            const result = await service.getPortableChartAsCodeWithOverlay(
+                'project-uuid',
+                publishedChart.uuid,
+                {
+                    merge: {
+                        primarySourceId: 'a',
+                        sources: [
+                            { id: 'a', kind: 'chart' },
+                            {
+                                id: 'b',
+                                kind: 'query',
+                                metricQuery: {
+                                    ...publishedChart.metricQuery,
+                                    exploreName: 'payments',
+                                },
+                            },
+                        ],
+                        joinKey: [
+                            {
+                                name: 'month',
+                                fieldIdBySourceId: {
+                                    a: 'orders_month',
+                                    b: 'payments_month',
+                                },
+                            },
+                        ],
+                        joinType: 'left',
+                        tableCalculations: [],
+                    },
+                },
+            );
+            expect(result).not.toHaveProperty('pipeline');
+            expect(result.merge).toMatchObject({
+                chartAs: 'a',
+                queries: { b: { explore: 'payments' } },
+                keys: { orders_month: ['b.payments_month'] },
+                join: 'left',
+            });
+        });
+
+        it('rejects an invalid merge draft instead of exporting a single-source chart', async () => {
+            await expect(
+                service.getPortableChartAsCodeWithOverlay(
+                    'project-uuid',
+                    publishedChart.uuid,
+                    {
+                        merge: {
+                            queries: {},
+                            keys: {},
+                            join: 'left',
+                            limit: 500,
+                        },
+                    },
+                ),
+            ).rejects.toThrow('Invalid saved merge definition');
+        });
+
+        it('renders a dashboard draft move as the target space slug', async () => {
+            const result = await service.getDashboardAsCodeWithOverlay(
+                publishedDashboard.uuid,
+                { spaceUuid: 'draft-space' },
+            );
+
+            expect(result.spaceSlug).toBe('draft-space');
+        });
+    });
+
+    describe('getTileSlugForTileUuid', () => {
+        it('should return undefined when chart tile slug is null', () => {
+            const mockDashboard = {
+                tiles: [
+                    {
+                        uuid: 'uuid-1',
+                        type: DashboardTileTypes.SAVED_CHART,
+                        properties: { chartSlug: null },
+                    },
+                ],
+            } as AnyType;
+
+            expect(
+                CoderService.getTileSlugForTileUuid(mockDashboard, 'uuid-1'),
+            ).toBeUndefined();
+        });
+    });
+
+    describe('getTileSlugForTileUuid - data app tiles', () => {
+        const dashboardWith = (tiles: AnyType[]) => ({ tiles }) as AnyType;
+
+        it('returns the app slug for a data app tile', () => {
+            const dashboard = dashboardWith([
+                {
+                    uuid: 'tile-1',
+                    type: DashboardTileTypes.DATA_APP,
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+            ]);
+
+            expect(
+                CoderService.getTileSlugForTileUuid(dashboard, 'tile-1'),
+            ).toBe('revenue-explorer');
+        });
+
+        it('suffixes when one app appears in two tiles', () => {
+            const dashboard = dashboardWith([
+                {
+                    uuid: 'tile-1',
+                    type: DashboardTileTypes.DATA_APP,
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+                {
+                    uuid: 'tile-2',
+                    type: DashboardTileTypes.DATA_APP,
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+            ]);
+
+            expect(
+                CoderService.getTileSlugForTileUuid(dashboard, 'tile-2'),
+            ).toBe('revenue-explorer-2');
+        });
+
+        it('returns undefined when the app slug is missing', () => {
+            const dashboard = dashboardWith([
+                {
+                    uuid: 'tile-1',
+                    type: DashboardTileTypes.DATA_APP,
+                    properties: { appSlug: null },
+                },
+            ]);
+
+            expect(
+                CoderService.getTileSlugForTileUuid(dashboard, 'tile-1'),
+            ).toBeUndefined();
+        });
+    });
+
     describe('getFiltersWithTileSlugs', () => {
         it('should convert tile UUIDs to slugs in filters', () => {
             const mockDashboard: DashboardDAO = {
@@ -150,7 +609,7 @@ describe('CoderService', () => {
         });
 
         it('should log an error if a tile slug does not match any UUID', () => {
-            console.error = jest.fn();
+            console.error = vi.fn();
 
             const dashboardAsCode = {
                 filters: {
@@ -204,5 +663,2241 @@ describe('CoderService', () => {
                 },
             });
         });
+    });
+
+    describe('data app tile filter target round-trip', () => {
+        it('should preserve a single data app tile filter target through download then upload', () => {
+            const mockDashboard = {
+                filters: {
+                    dimensions: [
+                        {
+                            tileTargets: {
+                                'original-uuid': { fieldId: 'field-1' },
+                            },
+                        },
+                    ],
+                },
+                tiles: [
+                    {
+                        uuid: 'original-uuid',
+                        type: DashboardTileTypes.DATA_APP,
+                        properties: { appSlug: 'revenue-explorer' },
+                    },
+                ],
+            } as AnyType;
+
+            const asCodeFilters =
+                CoderService.getFiltersWithTileSlugs(mockDashboard);
+
+            expect(
+                Object.keys(asCodeFilters.dimensions[0].tileTargets ?? {}),
+            ).toEqual(['revenue-explorer']);
+
+            const tilesWithNewUuids = [
+                {
+                    uuid: 'regenerated-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    tileSlug: 'revenue-explorer',
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+            ];
+
+            const restoredFilters = CoderService.getFiltersWithTileUuids(
+                { filters: asCodeFilters } as AnyType,
+                tilesWithNewUuids as AnyType,
+            );
+
+            expect(restoredFilters.dimensions[0].tileTargets).toEqual({
+                'regenerated-uuid': { fieldId: 'field-1' },
+            });
+        });
+
+        it('should resolve the correct tile when the same app appears in two tiles', () => {
+            const mockDashboard = {
+                filters: {
+                    dimensions: [
+                        {
+                            tileTargets: {
+                                'tile-1-uuid': { fieldId: 'field-1' },
+                                'tile-2-uuid': { fieldId: 'field-2' },
+                            },
+                        },
+                    ],
+                },
+                tiles: [
+                    {
+                        uuid: 'tile-1-uuid',
+                        type: DashboardTileTypes.DATA_APP,
+                        properties: { appSlug: 'revenue-explorer' },
+                    },
+                    {
+                        uuid: 'tile-2-uuid',
+                        type: DashboardTileTypes.DATA_APP,
+                        properties: { appSlug: 'revenue-explorer' },
+                    },
+                ],
+            } as AnyType;
+
+            const asCodeFilters =
+                CoderService.getFiltersWithTileSlugs(mockDashboard);
+
+            // Download disambiguates the two tiles sharing an app slug
+            expect(asCodeFilters.dimensions[0].tileTargets).toEqual({
+                'revenue-explorer-1': { fieldId: 'field-1' },
+                'revenue-explorer-2': { fieldId: 'field-2' },
+            });
+
+            // Upload: both tiles are re-created with brand new UUIDs, each
+            // carrying the disambiguated tileSlug from the YAML
+            const tilesWithNewUuids = [
+                {
+                    uuid: 'new-tile-1-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    tileSlug: 'revenue-explorer-1',
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+                {
+                    uuid: 'new-tile-2-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    tileSlug: 'revenue-explorer-2',
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+            ];
+
+            const restoredFilters = CoderService.getFiltersWithTileUuids(
+                { filters: asCodeFilters } as AnyType,
+                tilesWithNewUuids as AnyType,
+            );
+
+            // The target aimed at tile 2 resolves to tile 2's new uuid,
+            // not tile 1's, and neither target is dropped
+            expect(restoredFilters.dimensions[0].tileTargets).toEqual({
+                'new-tile-1-uuid': { fieldId: 'field-1' },
+                'new-tile-2-uuid': { fieldId: 'field-2' },
+            });
+        });
+    });
+
+    describe('getConfigWithDateZoomTileSlugs', () => {
+        it('should convert date zoom tileTargets tile UUIDs to slugs', () => {
+            const mockDashboard = {
+                config: {
+                    isDateZoomDisabled: false,
+                    dateZoomConfig: {
+                        controls: [
+                            {
+                                uuid: 'control-1',
+                                name: 'Revenue zoom',
+                                granularity: 'WEEK',
+                            },
+                        ],
+                        tileTargets: {
+                            'uuid-1': {
+                                controlUuid: 'control-1',
+                                fieldId: 'orders_order_date',
+                                tableName: 'orders',
+                            },
+                        },
+                    },
+                },
+                tiles: [
+                    {
+                        uuid: 'uuid-1',
+                        type: DashboardTileTypes.SAVED_CHART,
+                        properties: { chartSlug: 'slug-1' },
+                    },
+                ],
+            } as AnyType;
+
+            const result =
+                CoderService.getConfigWithDateZoomTileSlugs(mockDashboard);
+
+            expect(result?.dateZoomConfig?.tileTargets).toEqual({
+                'slug-1': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+            });
+            // controls are untouched
+            expect(result?.dateZoomConfig?.controls).toEqual(
+                mockDashboard.config.dateZoomConfig.controls,
+            );
+        });
+
+        it('should drop tileTargets whose tile UUID no longer exists', () => {
+            const mockDashboard = {
+                config: {
+                    isDateZoomDisabled: false,
+                    dateZoomConfig: {
+                        controls: [
+                            {
+                                uuid: 'control-1',
+                                name: 'Revenue zoom',
+                                granularity: 'WEEK',
+                            },
+                        ],
+                        tileTargets: {
+                            'orphaned-uuid': {
+                                controlUuid: 'control-1',
+                                fieldId: 'orders_order_date',
+                                tableName: 'orders',
+                            },
+                        },
+                    },
+                },
+                tiles: [],
+            } as AnyType;
+
+            const result =
+                CoderService.getConfigWithDateZoomTileSlugs(mockDashboard);
+
+            expect(result?.dateZoomConfig?.tileTargets).toEqual({});
+        });
+
+        it('should return config unchanged when there is no dateZoomConfig', () => {
+            const mockDashboard = {
+                config: { isDateZoomDisabled: false },
+                tiles: [],
+            } as AnyType;
+
+            const result =
+                CoderService.getConfigWithDateZoomTileSlugs(mockDashboard);
+
+            expect(result).toEqual({ isDateZoomDisabled: false });
+        });
+
+        it('should return undefined when there is no config', () => {
+            const mockDashboard = { tiles: [] } as AnyType;
+
+            expect(
+                CoderService.getConfigWithDateZoomTileSlugs(mockDashboard),
+            ).toBeUndefined();
+        });
+    });
+
+    describe('getConfigWithDateZoomTileUuids', () => {
+        const tilesWithUuids = [
+            {
+                uuid: 'uuid-1',
+                type: DashboardTileTypes.SAVED_CHART,
+                properties: { chartSlug: 'slug-1' },
+            },
+            {
+                uuid: 'uuid-2',
+                type: DashboardTileTypes.SAVED_CHART,
+                properties: { chartSlug: 'slug-2' },
+            },
+        ];
+
+        it('should convert date zoom tileTargets tile slugs to UUIDs', () => {
+            const config = {
+                isDateZoomDisabled: false,
+                dateZoomConfig: {
+                    controls: [
+                        {
+                            uuid: 'control-1',
+                            name: 'Revenue zoom',
+                            granularity: 'WEEK',
+                        },
+                    ],
+                    tileTargets: {
+                        'slug-1': {
+                            controlUuid: 'control-1',
+                            fieldId: 'orders_order_date',
+                            tableName: 'orders',
+                        },
+                    },
+                },
+            };
+
+            const result = CoderService.getConfigWithDateZoomTileUuids(
+                config as AnyType,
+                tilesWithUuids as AnyType,
+            );
+
+            expect(result.dateZoomConfig?.tileTargets).toEqual({
+                'uuid-1': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+            });
+        });
+
+        it('should log an error and skip a target whose slug does not match a tile', () => {
+            console.error = vi.fn();
+
+            const config = {
+                isDateZoomDisabled: false,
+                dateZoomConfig: {
+                    controls: [],
+                    tileTargets: {
+                        'slug-1': {
+                            controlUuid: 'control-1',
+                            fieldId: 'f1',
+                            tableName: 'orders',
+                        },
+                        'missing-slug': {
+                            controlUuid: 'control-1',
+                            fieldId: 'f2',
+                            tableName: 'orders',
+                        },
+                    },
+                },
+            };
+
+            const result = CoderService.getConfigWithDateZoomTileUuids(
+                config as AnyType,
+                tilesWithUuids as AnyType,
+            );
+
+            expect(console.error).toHaveBeenCalledWith(
+                'Tile with slug missing-slug not found for date zoom target',
+            );
+            expect(result.dateZoomConfig?.tileTargets).toEqual({
+                'uuid-1': {
+                    controlUuid: 'control-1',
+                    fieldId: 'f1',
+                    tableName: 'orders',
+                },
+            });
+        });
+
+        it('should return config unchanged when there is no dateZoomConfig', () => {
+            const config = { isDateZoomDisabled: false };
+
+            const result = CoderService.getConfigWithDateZoomTileUuids(
+                config as AnyType,
+                tilesWithUuids as AnyType,
+            );
+
+            expect(result).toEqual({ isDateZoomDisabled: false });
+        });
+    });
+
+    describe('date zoom config round-trip', () => {
+        it('should preserve tileTargets through download then upload', () => {
+            // Download: a saved dashboard keyed by the original tile UUID
+            const mockDashboard = {
+                config: {
+                    isDateZoomDisabled: false,
+                    dateZoomConfig: {
+                        controls: [
+                            {
+                                uuid: 'control-1',
+                                name: 'Revenue zoom',
+                                granularity: 'WEEK',
+                            },
+                        ],
+                        tileTargets: {
+                            'original-uuid': {
+                                controlUuid: 'control-1',
+                                fieldId: 'orders_order_date',
+                                tableName: 'orders',
+                            },
+                        },
+                    },
+                },
+                tiles: [
+                    {
+                        uuid: 'original-uuid',
+                        type: DashboardTileTypes.SAVED_CHART,
+                        properties: { chartSlug: 'revenue-over-time' },
+                    },
+                ],
+            } as AnyType;
+
+            const asCodeConfig =
+                CoderService.getConfigWithDateZoomTileSlugs(mockDashboard);
+
+            // As-code is keyed by slug, not the ephemeral tile UUID
+            expect(
+                Object.keys(asCodeConfig?.dateZoomConfig?.tileTargets ?? {}),
+            ).toEqual(['revenue-over-time']);
+
+            // Upload: the tile is re-created with a brand new UUID
+            const tilesWithNewUuids = [
+                {
+                    uuid: 'regenerated-uuid',
+                    type: DashboardTileTypes.SAVED_CHART,
+                    properties: { chartSlug: 'revenue-over-time' },
+                },
+            ];
+
+            const restoredConfig = CoderService.getConfigWithDateZoomTileUuids(
+                asCodeConfig as AnyType,
+                tilesWithNewUuids as AnyType,
+            );
+
+            // The target is re-attached to the new tile UUID, not lost
+            expect(restoredConfig.dateZoomConfig?.tileTargets).toEqual({
+                'regenerated-uuid': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+            });
+        });
+
+        it('should resolve each tile when the same data app appears in two tiles', () => {
+            const mockDashboard = {
+                config: {
+                    isDateZoomDisabled: false,
+                    dateZoomConfig: {
+                        controls: [
+                            {
+                                uuid: 'control-1',
+                                name: 'Revenue zoom',
+                                granularity: 'WEEK',
+                            },
+                        ],
+                        tileTargets: {
+                            'tile-1-uuid': {
+                                controlUuid: 'control-1',
+                                fieldId: 'orders_order_date',
+                                tableName: 'orders',
+                            },
+                            'tile-2-uuid': {
+                                controlUuid: 'control-1',
+                                fieldId: 'orders_order_date',
+                                tableName: 'orders',
+                            },
+                        },
+                    },
+                },
+                tiles: [
+                    {
+                        uuid: 'tile-1-uuid',
+                        type: DashboardTileTypes.DATA_APP,
+                        properties: { appSlug: 'revenue-explorer' },
+                    },
+                    {
+                        uuid: 'tile-2-uuid',
+                        type: DashboardTileTypes.DATA_APP,
+                        properties: { appSlug: 'revenue-explorer' },
+                    },
+                ],
+            } as AnyType;
+
+            const asCodeConfig =
+                CoderService.getConfigWithDateZoomTileSlugs(mockDashboard);
+
+            expect(asCodeConfig?.dateZoomConfig?.tileTargets).toEqual({
+                'revenue-explorer-1': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+                'revenue-explorer-2': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+            });
+
+            const tilesWithNewUuids = [
+                {
+                    uuid: 'new-tile-1-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    tileSlug: 'revenue-explorer-1',
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+                {
+                    uuid: 'new-tile-2-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    tileSlug: 'revenue-explorer-2',
+                    properties: { appSlug: 'revenue-explorer' },
+                },
+            ];
+
+            const restoredConfig = CoderService.getConfigWithDateZoomTileUuids(
+                asCodeConfig as AnyType,
+                tilesWithNewUuids as AnyType,
+            );
+
+            // The target aimed at tile 2 resolves to tile 2's new uuid,
+            // not tile 1's, and neither target is dropped
+            expect(restoredConfig.dateZoomConfig?.tileTargets).toEqual({
+                'new-tile-1-uuid': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+                'new-tile-2-uuid': {
+                    controlUuid: 'control-1',
+                    fieldId: 'orders_order_date',
+                    tableName: 'orders',
+                },
+            });
+        });
+    });
+
+    describe('convertTileWithSlugsToUuids', () => {
+        it('should allow chart tiles with null chartSlug', async () => {
+            const service = new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentAsCodeProjectSettingsModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: {
+                    find: vi.fn(),
+                } as AnyType,
+                savedSqlModel: {
+                    find: vi.fn(),
+                } as AnyType,
+                appModel: {
+                    findAppsBySlugs: vi.fn(async () => []),
+                } as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+
+            const { tiles: result } = await service.convertTileWithSlugsToUuids(
+                'project-uuid',
+                [
+                    {
+                        type: DashboardTileTypes.SAVED_CHART,
+                        uuid: undefined,
+                        tileSlug: undefined,
+                        x: 0,
+                        y: 0,
+                        h: 2,
+                        w: 4,
+                        tabUuid: null,
+                        properties: {
+                            chartSlug: null,
+                            chartName: 'Deleted chart',
+                        },
+                    },
+                    {
+                        type: DashboardTileTypes.SQL_CHART,
+                        uuid: undefined,
+                        tileSlug: undefined,
+                        x: 4,
+                        y: 0,
+                        h: 2,
+                        w: 4,
+                        tabUuid: null,
+                        properties: {
+                            chartSlug: null,
+                            chartName: 'Deleted SQL chart',
+                        },
+                    },
+                ] as AnyType,
+            );
+
+            expect(result).toMatchObject([
+                {
+                    type: DashboardTileTypes.SAVED_CHART,
+                    properties: {
+                        chartSlug: null,
+                        savedChartUuid: null,
+                    },
+                },
+                {
+                    type: DashboardTileTypes.SQL_CHART,
+                    properties: {
+                        chartSlug: null,
+                        savedSqlUuid: null,
+                    },
+                },
+            ]);
+            expect(result[0].uuid).toEqual(expect.any(String));
+            expect(result[1].uuid).toEqual(expect.any(String));
+        });
+
+        it('warns when a chart tile slug does not resolve in the project', async () => {
+            const service = new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentAsCodeProjectSettingsModel: {} as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: {
+                    find: vi.fn(async () => []),
+                    getSlugAliasMappingsForUuids: vi.fn(async () => []),
+                } as AnyType,
+                savedSqlModel: {
+                    find: vi.fn(async () => []),
+                } as AnyType,
+                appModel: {
+                    findAppsBySlugs: vi.fn(async () => []),
+                } as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    {
+                        type: DashboardTileTypes.SAVED_CHART,
+                        uuid: undefined,
+                        tileSlug: undefined,
+                        x: 0,
+                        y: 0,
+                        h: 2,
+                        w: 4,
+                        tabUuid: null,
+                        properties: {
+                            chartSlug: 'missing-chart',
+                            chartName: 'Missing chart',
+                        },
+                    },
+                ] as AnyType);
+
+            expect(tiles).toMatchObject([
+                {
+                    type: DashboardTileTypes.SAVED_CHART,
+                    properties: {
+                        chartSlug: 'missing-chart',
+                        savedChartUuid: null,
+                    },
+                },
+            ]);
+            expect(warnings).toEqual([
+                expect.stringContaining(
+                    'Chart "missing-chart" was not found in this project',
+                ),
+            ]);
+        });
+
+        it('resolves portable tab slugs and still accepts legacy tab UUIDs', async () => {
+            const service = new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentAsCodeProjectSettingsModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: { find: vi.fn() } as AnyType,
+                savedSqlModel: { find: vi.fn() } as AnyType,
+                appModel: {
+                    findAppsBySlugs: vi.fn(async () => []),
+                } as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+
+            const { tiles: result } = await service.convertTileWithSlugsToUuids(
+                'project-uuid',
+                [
+                    {
+                        type: DashboardTileTypes.MARKDOWN,
+                        tabSlug: 'overview',
+                        properties: { title: 'Slug tile', content: '' },
+                    },
+                    {
+                        type: DashboardTileTypes.MARKDOWN,
+                        tabUuid: 'legacy-tab-uuid',
+                        properties: { title: 'Legacy tile', content: '' },
+                    },
+                ] as AnyType,
+                new Map([['overview', 'target-project-tab-uuid']]),
+            );
+
+            expect(result).toMatchObject([
+                { tabUuid: 'target-project-tab-uuid' },
+                { tabUuid: 'legacy-tab-uuid' },
+            ]);
+            expect(result[0]).not.toHaveProperty('tabSlug');
+        });
+
+        type AppRow = { app_id: string; slug: string };
+        const buildAppModelMock = (apps: AppRow[]) => ({
+            findAppsBySlugs: vi.fn(async (): Promise<AppRow[]> => apps),
+            findAppsByUuids: vi.fn(async (): Promise<AppRow[]> => apps),
+        });
+        let appModelMock = buildAppModelMock([]);
+
+        const buildServiceWithApps = (apps: AppRow[]) => {
+            appModelMock = buildAppModelMock(apps);
+            return new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentAsCodeProjectSettingsModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: { find: vi.fn(async () => []) } as AnyType,
+                savedSqlModel: { find: vi.fn(async () => []) } as AnyType,
+                appModel: appModelMock as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+        };
+
+        const dataAppTile = (properties: AnyType) => ({
+            type: DashboardTileTypes.DATA_APP,
+            uuid: undefined,
+            tileSlug: undefined,
+            x: 0,
+            y: 0,
+            h: 9,
+            w: 18,
+            tabUuid: null,
+            properties,
+        });
+
+        it('resolves appSlug to the target project app uuid', async () => {
+            const service = buildServiceWithApps([
+                { app_id: 'target-app-uuid', slug: 'revenue-explorer' },
+            ]);
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    dataAppTile({
+                        title: 'Revenue explorer',
+                        appSlug: 'revenue-explorer',
+                    }),
+                ] as AnyType);
+
+            expect(warnings).toEqual([]);
+            expect(tiles).toHaveLength(1);
+            expect(tiles[0].properties).toMatchObject({
+                appUuid: 'target-app-uuid',
+                appSlug: 'revenue-explorer',
+            });
+            expect(tiles[0].uuid).toEqual(expect.any(String));
+            // App lookups must be scoped to the target project
+            expect(appModelMock.findAppsBySlugs).toHaveBeenCalledWith(
+                'project-uuid',
+                ['revenue-explorer'],
+            );
+        });
+
+        it('skips a tile whose app is missing and warns', async () => {
+            const service = buildServiceWithApps([]);
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    dataAppTile({ title: 'Gone', appSlug: 'revenue-explorer' }),
+                ] as AnyType);
+
+            expect(tiles).toEqual([]);
+            expect(warnings).toEqual([
+                'Data app "revenue-explorer" was not found in this project — tile skipped. Upload the app first, then re-upload the dashboard.',
+            ]);
+        });
+
+        it('falls back to a legacy appUuid when the tile has no appSlug', async () => {
+            const service = buildServiceWithApps([
+                { app_id: 'legacy-app-uuid', slug: 'legacy-app' },
+            ]);
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    dataAppTile({
+                        title: 'Legacy',
+                        appUuid: 'legacy-app-uuid',
+                    }),
+                ] as AnyType);
+
+            expect(warnings).toEqual([]);
+            expect(tiles[0].properties).toMatchObject({
+                appUuid: 'legacy-app-uuid',
+            });
+            expect(appModelMock.findAppsByUuids).toHaveBeenCalledWith(
+                'project-uuid',
+                ['legacy-app-uuid'],
+            );
+        });
+
+        it('skips a legacy appUuid that is not in the target project', async () => {
+            const service = buildServiceWithApps([
+                { app_id: 'some-other-app', slug: 'other' },
+            ]);
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    dataAppTile({
+                        title: 'Foreign',
+                        appUuid: 'foreign-app-uuid',
+                    }),
+                ] as AnyType);
+
+            expect(tiles).toEqual([]);
+            expect(warnings).toHaveLength(1);
+        });
+
+        it('resolves a chart tile and a data app tile together (main return path)', async () => {
+            const service = new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentAsCodeProjectSettingsModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: {
+                    find: vi.fn(async () => [
+                        { uuid: 'chart-uuid', slug: 'revenue-chart' },
+                    ]),
+                    getSlugAliasMappingsForUuids: vi.fn(async () => []),
+                } as AnyType,
+                savedSqlModel: { find: vi.fn(async () => []) } as AnyType,
+                appModel: {
+                    findAppsBySlugs: vi.fn(async () => [
+                        { app_id: 'target-app-uuid', slug: 'revenue-explorer' },
+                    ]),
+                    findAppsByUuids: vi.fn(async () => []),
+                } as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    {
+                        type: DashboardTileTypes.SAVED_CHART,
+                        uuid: undefined,
+                        tileSlug: undefined,
+                        x: 0,
+                        y: 0,
+                        h: 2,
+                        w: 4,
+                        tabUuid: null,
+                        properties: {
+                            chartSlug: 'revenue-chart',
+                            chartName: 'Revenue',
+                        },
+                    },
+                    dataAppTile({
+                        title: 'Revenue explorer',
+                        appSlug: 'revenue-explorer',
+                    }),
+                ] as AnyType);
+
+            expect(warnings).toEqual([]);
+            expect(tiles).toHaveLength(2);
+            expect(tiles[0].properties).toMatchObject({
+                chartSlug: 'revenue-chart',
+                savedChartUuid: 'chart-uuid',
+            });
+            expect(tiles[1].properties).toMatchObject({
+                appUuid: 'target-app-uuid',
+                appSlug: 'revenue-explorer',
+            });
+        });
+
+        it('resolves a historical chart slug to the existing chart UUID', async () => {
+            const service = new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentAsCodeProjectSettingsModel: {
+                    upsert: vi.fn(),
+                } as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: {
+                    find: vi.fn(async () => [
+                        { uuid: 'chart-uuid', slug: 'new-revenue-chart' },
+                    ]),
+                    getSlugAliasMappingsForUuids: vi.fn(async () => [
+                        {
+                            slug: 'old-revenue-chart',
+                            savedChartUuid: 'chart-uuid',
+                        },
+                    ]),
+                } as AnyType,
+                savedSqlModel: { find: vi.fn(async () => []) } as AnyType,
+                appModel: {
+                    findAppsBySlugs: vi.fn(async () => []),
+                    findAppsByUuids: vi.fn(async () => []),
+                } as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    {
+                        type: DashboardTileTypes.SAVED_CHART,
+                        properties: {
+                            chartSlug: 'old-revenue-chart',
+                            chartName: 'Revenue',
+                        },
+                    },
+                ] as AnyType);
+
+            expect(warnings).toEqual([]);
+            expect(tiles[0].properties).toMatchObject({
+                chartSlug: 'old-revenue-chart',
+                savedChartUuid: 'chart-uuid',
+            });
+        });
+
+        it('produces one warning per skipped data app tile when there are multiple', async () => {
+            const service = buildServiceWithApps([]);
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    dataAppTile({ title: 'Gone 1', appSlug: 'app-one' }),
+                    dataAppTile({ title: 'Gone 2', appSlug: 'app-two' }),
+                ] as AnyType);
+
+            expect(tiles).toEqual([]);
+            expect(warnings).toEqual([
+                'Data app "app-one" was not found in this project — tile skipped. Upload the app first, then re-upload the dashboard.',
+                'Data app "app-two" was not found in this project — tile skipped. Upload the app first, then re-upload the dashboard.',
+            ]);
+        });
+
+        it('names the tile by title when it has no app reference to resolve', async () => {
+            const service = buildServiceWithApps([]);
+
+            const { tiles, warnings } =
+                await service.convertTileWithSlugsToUuids('project-uuid', [
+                    dataAppTile({ title: 'Orphaned tile', appSlug: null }),
+                ] as AnyType);
+
+            expect(tiles).toEqual([]);
+            expect(warnings).toEqual([
+                'Data app tile "Orphaned tile" has no app reference to resolve — tile skipped.',
+            ]);
+        });
+    });
+
+    describe('withTileWarnings', () => {
+        it('omits the key when there is nothing to report', () => {
+            expect(withTileWarnings({ dashboards: [] } as AnyType, [])).toEqual(
+                {
+                    dashboards: [],
+                },
+            );
+        });
+
+        it('attaches warnings when tiles were skipped', () => {
+            expect(
+                withTileWarnings({ dashboards: [] } as AnyType, ['nope']),
+            ).toEqual({ dashboards: [], warnings: ['nope'] });
+        });
+
+        it('does not mutate the changes it was given', () => {
+            const changes = { dashboards: [] } as AnyType;
+            withTileWarnings(changes, ['nope']);
+            expect(changes).not.toHaveProperty('warnings');
+        });
+    });
+
+    describe('transformDashboard', () => {
+        it('identifies the dashboard when its space is missing', () => {
+            expect(() =>
+                (
+                    CoderService as unknown as {
+                        transformDashboard: (...args: AnyType[]) => AnyType;
+                    }
+                ).transformDashboard(
+                    { slug: 'missing-dashboard', spaceUuid: 'space-uuid' },
+                    [],
+                    new Map(),
+                ),
+            ).toThrow('Space space-uuid not found');
+        });
+
+        it('exports tabs and tile references as portable slugs', () => {
+            const result = (
+                CoderService as unknown as {
+                    transformDashboard: (...args: AnyType[]) => AnyType;
+                }
+            ).transformDashboard(
+                {
+                    description: null,
+                    filters: {
+                        dimensions: [],
+                        metrics: [],
+                        tableCalculations: [],
+                    },
+                    name: 'Dashboard',
+                    slug: 'dashboard',
+                    spaceUuid: 'space-uuid',
+                    tabs: [
+                        {
+                            uuid: 'source-project-tab-uuid',
+                            name: 'Overview',
+                            order: 0,
+                            hidden: false,
+                        },
+                    ],
+                    tiles: [
+                        {
+                            uuid: 'tile-uuid',
+                            type: DashboardTileTypes.MARKDOWN,
+                            x: 0,
+                            y: 0,
+                            h: 2,
+                            w: 4,
+                            tabUuid: 'source-project-tab-uuid',
+                            properties: { title: 'Tile', content: '' },
+                        },
+                    ],
+                    uuid: 'dashboard-uuid',
+                },
+                [
+                    {
+                        name: 'Space',
+                        path: 'space',
+                        uuid: 'space-uuid',
+                    },
+                ],
+                new Map(),
+            );
+
+            expect(result.tabs).toEqual([
+                {
+                    slug: 'overview',
+                    name: 'Overview',
+                    order: 0,
+                    hidden: false,
+                },
+            ]);
+            expect(result.tiles[0]).toMatchObject({
+                tabSlug: 'overview',
+            });
+            expect(result.tiles[0].tabUuid).toBeUndefined();
+        });
+
+        it('reuses target-project tab UUIDs for portable slugs', () => {
+            const result = (
+                CoderService as unknown as {
+                    convertTabsWithSlugsToUuids: (
+                        ...args: AnyType[]
+                    ) => AnyType;
+                }
+            ).convertTabsWithSlugsToUuids(
+                [{ slug: 'overview', name: 'Overview', order: 0 }],
+                [
+                    {
+                        uuid: 'target-project-tab-uuid',
+                        name: 'Overview',
+                        order: 0,
+                    },
+                ],
+            );
+
+            expect(result.tabs).toEqual([
+                {
+                    uuid: 'target-project-tab-uuid',
+                    name: 'Overview',
+                    order: 0,
+                },
+            ]);
+            expect(result.tabUuidsBySlug.get('overview')).toBe(
+                'target-project-tab-uuid',
+            );
+        });
+    });
+
+    describe('dashboard read tile chart queries', () => {
+        const chartTile = (
+            tileSlug: string,
+            chartSlug: string | null,
+        ): AnyType => ({
+            type: DashboardTileTypes.SAVED_CHART,
+            uuid: undefined,
+            tileSlug,
+            x: 0,
+            y: 0,
+            h: 2,
+            w: 4,
+            tabSlug: null,
+            properties: { chartSlug, chartName: tileSlug, title: tileSlug },
+        });
+
+        it('reports the explore of every chart tile so filters can be targeted across explores', () => {
+            const result = CoderService.withTileChartQueries(
+                {
+                    tiles: [
+                        chartTile('orders-by-month', 'orders-by-month'),
+                        chartTile('customers-by-month', 'customers-by-month'),
+                        {
+                            type: DashboardTileTypes.MARKDOWN,
+                            uuid: undefined,
+                            tileSlug: undefined,
+                            x: 0,
+                            y: 2,
+                            h: 1,
+                            w: 4,
+                            properties: { title: 'Note', content: '' },
+                        },
+                    ],
+                } as AnyType,
+                {
+                    'orders-by-month': {
+                        exploreName: 'orders',
+                        fieldIds: ['orders_order_date_month', 'orders_count'],
+                    },
+                    'customers-by-month': {
+                        exploreName: 'customers',
+                        fieldIds: ['customers_created_month'],
+                    },
+                },
+            );
+
+            expect(result.tiles).toMatchObject([
+                {
+                    tileSlug: 'orders-by-month',
+                    properties: {
+                        chartQuery: {
+                            exploreName: 'orders',
+                            fieldIds: [
+                                'orders_order_date_month',
+                                'orders_count',
+                            ],
+                        },
+                    },
+                },
+                {
+                    tileSlug: 'customers-by-month',
+                    properties: {
+                        chartQuery: {
+                            exploreName: 'customers',
+                            fieldIds: ['customers_created_month'],
+                        },
+                    },
+                },
+                { type: DashboardTileTypes.MARKDOWN },
+            ]);
+            expect(result.tiles[2].properties).not.toHaveProperty('chartQuery');
+        });
+
+        it('keeps reading a dashboard whose tile chart is missing', () => {
+            const result = CoderService.withTileChartQueries(
+                {
+                    tiles: [
+                        chartTile('deleted-chart', 'deleted-chart'),
+                        chartTile('empty-tile', null),
+                    ],
+                } as AnyType,
+                {},
+            );
+
+            expect(result.tiles).toMatchObject([
+                {
+                    properties: {
+                        chartSlug: 'deleted-chart',
+                        chartQuery: null,
+                    },
+                },
+                { properties: { chartSlug: null, chartQuery: null } },
+            ]);
+        });
+
+        it('ignores the read-only chart query when tiles are written back', async () => {
+            const service = new CoderService({
+                agentActionLogModel: {
+                    insert: vi.fn().mockResolvedValue(undefined),
+                },
+                directAccessService: {} as AnyType,
+                analytics: {} as AnyType,
+                contentAsCodeSnapshotModel: {} as AnyType,
+                contentAsCodeProjectSettingsModel: {} as AnyType,
+                contentVerificationModel: {} as AnyType,
+                dashboardModel: {} as AnyType,
+                lightdashConfig: {} as AnyType,
+                projectModel: {} as AnyType,
+                promoteService: {} as AnyType,
+                savedChartModel: {
+                    find: vi.fn(async () => [
+                        { uuid: 'orders-chart-uuid', slug: 'orders-by-month' },
+                    ]),
+                    getSlugAliasMappingsForUuids: vi.fn(async () => []),
+                } as AnyType,
+                savedSqlModel: {
+                    find: vi.fn(async () => []),
+                } as AnyType,
+                appModel: {
+                    findAppsBySlugs: vi.fn(async () => []),
+                } as AnyType,
+                schedulerModel: {} as AnyType,
+                schedulerService: {} as AnyType,
+                savedChartService: {} as AnyType,
+                dashboardService: {} as AnyType,
+                schedulerClient: {} as AnyType,
+                spaceModel: {} as AnyType,
+                spacePermissionService: {} as AnyType,
+                groupsModel: {} as AnyType,
+                organizationMemberProfileModel: {} as AnyType,
+                userModel: {} as AnyType,
+                warehouseConnectionModel: {} as never,
+            });
+
+            const { tiles } = await service.convertTileWithSlugsToUuids(
+                'project-uuid',
+                [
+                    {
+                        ...chartTile('orders-by-month', 'orders-by-month'),
+                        properties: {
+                            chartSlug: 'orders-by-month',
+                            chartName: 'Orders by month',
+                            chartQuery: {
+                                exploreName: 'payments',
+                                fieldIds: ['payments_amount'],
+                            },
+                        },
+                    },
+                ],
+            );
+
+            expect(tiles).toMatchObject([
+                {
+                    type: DashboardTileTypes.SAVED_CHART,
+                    properties: {
+                        chartSlug: 'orders-by-month',
+                        savedChartUuid: 'orders-chart-uuid',
+                    },
+                },
+            ]);
+            expect(tiles[0].properties).not.toHaveProperty('chartQuery');
+        });
+    });
+
+    describe('transformDashboard - data app tiles', () => {
+        const spaceSummary = [
+            { uuid: 'space-uuid', name: 'My space', path: 'my_space' },
+        ];
+
+        const transform = (tiles: AnyType[]) =>
+            (
+                CoderService as unknown as {
+                    transformDashboard: (...args: AnyType[]) => AnyType;
+                }
+            ).transformDashboard(
+                {
+                    name: 'Dash',
+                    description: '',
+                    slug: 'dash',
+                    spaceUuid: 'space-uuid',
+                    tabs: [],
+                    tiles,
+                    filters: {
+                        dimensions: [],
+                        metrics: [],
+                        tableCalculations: [],
+                    },
+                    updatedAt: new Date('2026-01-01'),
+                },
+                spaceSummary,
+                new Map(),
+            );
+
+        it('emits appSlug and drops appUuid and appDeletedAt', () => {
+            const result = transform([
+                {
+                    uuid: 'tile-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    x: 0,
+                    y: 0,
+                    h: 9,
+                    w: 18,
+                    tabUuid: null,
+                    properties: {
+                        title: 'Revenue explorer',
+                        hideTitle: false,
+                        appUuid: 'app-uuid',
+                        appSlug: 'revenue-explorer',
+                        appDeletedAt: null,
+                    },
+                },
+            ]);
+
+            expect(result.tiles[0].properties).toEqual({
+                title: 'Revenue explorer',
+                hideTitle: false,
+                appSlug: 'revenue-explorer',
+            });
+            expect(result.tiles[0].uuid).toBeUndefined();
+        });
+
+        it('emits a null appSlug when the app row is gone', () => {
+            const result = transform([
+                {
+                    uuid: 'tile-uuid',
+                    type: DashboardTileTypes.DATA_APP,
+                    x: 0,
+                    y: 0,
+                    h: 9,
+                    w: 18,
+                    tabUuid: null,
+                    properties: {
+                        title: 'Orphaned',
+                        appUuid: 'app-uuid',
+                        appSlug: null,
+                        appDeletedAt: '2026-01-01T00:00:00.000Z',
+                    },
+                },
+            ]);
+
+            expect(result.tiles[0].properties.appSlug).toBeNull();
+            expect(result.tiles[0].properties).not.toHaveProperty(
+                'appDeletedAt',
+            );
+        });
+
+        it('bakes in the disambiguated tileSlug, mirroring chart tiles', () => {
+            const result = transform([
+                {
+                    uuid: 'tile-1',
+                    type: DashboardTileTypes.DATA_APP,
+                    x: 0,
+                    y: 0,
+                    h: 9,
+                    w: 18,
+                    tabUuid: null,
+                    properties: {
+                        title: 'Revenue explorer A',
+                        hideTitle: false,
+                        appUuid: 'app-uuid',
+                        appSlug: 'revenue-explorer',
+                        appDeletedAt: null,
+                    },
+                },
+                {
+                    uuid: 'tile-2',
+                    type: DashboardTileTypes.DATA_APP,
+                    x: 0,
+                    y: 9,
+                    h: 9,
+                    w: 18,
+                    tabUuid: null,
+                    properties: {
+                        title: 'Revenue explorer B',
+                        hideTitle: false,
+                        appUuid: 'app-uuid',
+                        appSlug: 'revenue-explorer',
+                        appDeletedAt: null,
+                    },
+                },
+            ]);
+
+            expect(result.tiles.map((tile: AnyType) => tile.tileSlug)).toEqual([
+                'revenue-explorer-1',
+                'revenue-explorer-2',
+            ]);
+        });
+    });
+
+    describe('withDataAppVizSlugs', () => {
+        const { withDataAppVizSlugs } = CoderService as unknown as {
+            withDataAppVizSlugs: (
+                charts: AnyType[],
+                slugByUuid: Map<string, string>,
+            ) => AnyType[];
+        };
+
+        it('swaps the viz uuid for its slug in DATA_APP_VIZ chart configs', () => {
+            const charts = [
+                {
+                    slug: 'viz-chart',
+                    chartConfig: {
+                        type: ChartType.DATA_APP_VIZ,
+                        config: {
+                            dataAppVizUuid: 'viz-uuid',
+                            dataAppVizVersion: 4,
+                            fieldMapping: {},
+                        },
+                    },
+                },
+                {
+                    slug: 'bar-chart',
+                    chartConfig: { type: ChartType.CARTESIAN, config: {} },
+                },
+            ];
+            const result = withDataAppVizSlugs(
+                charts,
+                new Map([['viz-uuid', 'my-chart-type']]),
+            );
+            expect(result[0].chartConfig.config).toEqual({
+                dataAppVizSlug: 'my-chart-type',
+                dataAppVizVersion: 4,
+                fieldMapping: {},
+            });
+            expect(result[1]).toBe(charts[1]);
+        });
+
+        it('leaves the config untouched when the viz uuid is unknown', () => {
+            const charts = [
+                {
+                    slug: 'viz-chart',
+                    chartConfig: {
+                        type: ChartType.DATA_APP_VIZ,
+                        config: {
+                            dataAppVizUuid: 'gone-uuid',
+                            fieldMapping: {},
+                        },
+                    },
+                },
+            ];
+            const result = withDataAppVizSlugs(charts, new Map());
+            expect(result[0]).toBe(charts[0]);
+        });
+    });
+
+    describe('resolveDataAppVizBinding', () => {
+        const buildResolver = ({
+            findAppsBySlugs = vi.fn().mockResolvedValue([]),
+            findAppsByUuids = vi.fn().mockResolvedValue([]),
+            getLatestRenderableDataAppVizVersion = vi.fn().mockResolvedValue({
+                version: 9,
+                status: 'ready',
+                viz_schema: {},
+            }),
+            getVersion = vi.fn().mockResolvedValue({
+                version: 2,
+                status: 'ready',
+                viz_schema: {},
+            }),
+        }: {
+            findAppsBySlugs?: ReturnType<typeof vi.fn>;
+            findAppsByUuids?: ReturnType<typeof vi.fn>;
+            getLatestRenderableDataAppVizVersion?: ReturnType<typeof vi.fn>;
+            getVersion?: ReturnType<typeof vi.fn>;
+        } = {}) => {
+            const warn = vi.fn();
+            const service = {
+                appModel: {
+                    findAppsBySlugs,
+                    findAppsByUuids,
+                    getLatestRenderableDataAppVizVersion,
+                    getVersion,
+                },
+                logger: { warn },
+                resolveDataAppVizBinding: (CoderService.prototype as AnyType)
+                    .resolveDataAppVizBinding,
+            } as AnyType;
+            return { service, warn };
+        };
+
+        it('resolves the slug to this project uuid and strips it', async () => {
+            const { service } = buildResolver({
+                findAppsBySlugs: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { app_id: 'target-viz-uuid', slug: 'my-chart-type' },
+                    ]),
+                // A resolvable uuid must not win over the slug.
+                findAppsByUuids: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { app_id: 'source-viz-uuid', slug: 'other' },
+                    ]),
+            });
+            const result = await service.resolveDataAppVizBinding('proj', {
+                type: ChartType.DATA_APP_VIZ,
+                config: {
+                    dataAppVizUuid: 'source-viz-uuid',
+                    dataAppVizSlug: 'my-chart-type',
+                    dataAppVizVersion: 2,
+                    fieldMapping: { x: 'field_x' },
+                },
+            });
+            expect(result.config).toEqual({
+                dataAppVizUuid: 'target-viz-uuid',
+                dataAppVizVersion: 2,
+                fieldMapping: { x: 'field_x' },
+            });
+            expect(service.appModel.getVersion).toHaveBeenCalledWith(
+                'target-viz-uuid',
+                2,
+            );
+            expect(
+                service.appModel.getLatestRenderableDataAppVizVersion,
+            ).not.toHaveBeenCalled();
+            expect(service.appModel.findAppsBySlugs).toHaveBeenCalledWith(
+                'proj',
+                ['my-chart-type'],
+                { dataAppVizsFilter: 'only' },
+            );
+        });
+
+        it('uses the latest renderable version for legacy slug files without a pin', async () => {
+            const getLatestRenderableDataAppVizVersion = vi
+                .fn()
+                .mockResolvedValue({
+                    version: 3,
+                    status: 'ready',
+                    viz_schema: {},
+                });
+            const { service } = buildResolver({
+                findAppsBySlugs: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { app_id: 'target-viz-uuid', slug: 'my-chart-type' },
+                    ]),
+                getLatestRenderableDataAppVizVersion,
+            });
+            await expect(
+                service.resolveDataAppVizBinding('proj', {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: {
+                        dataAppVizSlug: 'my-chart-type',
+                        fieldMapping: {},
+                    },
+                }),
+            ).resolves.toMatchObject({
+                config: {
+                    dataAppVizUuid: 'target-viz-uuid',
+                    dataAppVizVersion: 3,
+                },
+            });
+            expect(getLatestRenderableDataAppVizVersion).toHaveBeenCalledWith(
+                'target-viz-uuid',
+            );
+        });
+
+        it('preserves the exported pin when a newer target version exists', async () => {
+            const getLatestRenderableDataAppVizVersion = vi.fn();
+            const { service } = buildResolver({
+                findAppsBySlugs: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { app_id: 'target-viz-uuid', slug: 'my-chart-type' },
+                    ]),
+                getLatestRenderableDataAppVizVersion,
+                getVersion: vi.fn().mockResolvedValue({
+                    version: 2,
+                    status: 'ready',
+                    viz_schema: {},
+                }),
+            });
+            const { withDataAppVizSlugs } = CoderService as unknown as {
+                withDataAppVizSlugs: (
+                    charts: AnyType[],
+                    slugByUuid: Map<string, string>,
+                ) => AnyType[];
+            };
+            const exportedConfig = withDataAppVizSlugs(
+                [
+                    {
+                        chartConfig: {
+                            type: ChartType.DATA_APP_VIZ,
+                            config: {
+                                dataAppVizUuid: 'source-viz-uuid',
+                                dataAppVizVersion: 2,
+                                fieldMapping: {},
+                            },
+                        },
+                    },
+                ],
+                new Map([['source-viz-uuid', 'my-chart-type']]),
+            )[0].chartConfig.config;
+            await expect(
+                service.resolveDataAppVizBinding('proj', {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: exportedConfig,
+                }),
+            ).resolves.toMatchObject({
+                config: {
+                    dataAppVizUuid: 'target-viz-uuid',
+                    dataAppVizVersion: 2,
+                },
+            });
+            expect(getLatestRenderableDataAppVizVersion).not.toHaveBeenCalled();
+        });
+
+        it('keeps the original uuid (slug stripped) when the slug is missing but the uuid resolves in the project', async () => {
+            const { service, warn } = buildResolver({
+                findAppsByUuids: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { app_id: 'source-viz-uuid', slug: 'gone-chart-type' },
+                    ]),
+            });
+            const result = await service.resolveDataAppVizBinding('proj', {
+                type: ChartType.DATA_APP_VIZ,
+                config: {
+                    dataAppVizUuid: 'source-viz-uuid',
+                    dataAppVizSlug: 'gone-chart-type',
+                    fieldMapping: {},
+                },
+            });
+            expect(result.config).toEqual({
+                dataAppVizUuid: 'source-viz-uuid',
+                dataAppVizVersion: 9,
+                fieldMapping: {},
+            });
+            expect(service.appModel.findAppsByUuids).toHaveBeenCalledWith(
+                'proj',
+                ['source-viz-uuid'],
+                { dataAppVizsFilter: 'only' },
+            );
+            expect(warn).toHaveBeenCalled();
+        });
+
+        it('fails when the slug is missing and the fallback uuid does not resolve in the project', async () => {
+            const { service, warn } = buildResolver();
+            await expect(
+                service.resolveDataAppVizBinding('proj', {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: {
+                        dataAppVizUuid: 'foreign-viz-uuid',
+                        dataAppVizSlug: 'gone-chart-type',
+                        fieldMapping: {},
+                    },
+                }),
+            ).rejects.toThrow(
+                'Custom chart type "gone-chart-type" was not found',
+            );
+            expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('passes non-viz configs through untouched', async () => {
+            const findAppsBySlugs = vi.fn();
+            const findAppsByUuids = vi.fn();
+            const { service } = buildResolver({
+                findAppsBySlugs,
+                findAppsByUuids,
+            });
+            const cartesian = {
+                type: ChartType.CARTESIAN,
+                config: {},
+            };
+            expect(
+                await service.resolveDataAppVizBinding('proj', cartesian),
+            ).toBe(cartesian);
+            expect(findAppsBySlugs).not.toHaveBeenCalled();
+            expect(findAppsByUuids).not.toHaveBeenCalled();
+        });
+
+        it('accepts legacy uuid-only files when the uuid resolves in the project', async () => {
+            const findAppsBySlugs = vi.fn();
+            const { service } = buildResolver({
+                findAppsBySlugs,
+                findAppsByUuids: vi
+                    .fn()
+                    .mockResolvedValue([
+                        { app_id: 'viz-uuid', slug: 'my-chart-type' },
+                    ]),
+            });
+            const legacyViz = {
+                type: ChartType.DATA_APP_VIZ,
+                config: { dataAppVizUuid: 'viz-uuid', fieldMapping: {} },
+            };
+            expect(
+                await service.resolveDataAppVizBinding('proj', legacyViz),
+            ).toEqual({
+                ...legacyViz,
+                config: {
+                    ...legacyViz.config,
+                    dataAppVizVersion: 9,
+                },
+            });
+            expect(findAppsBySlugs).not.toHaveBeenCalled();
+            expect(service.appModel.findAppsByUuids).toHaveBeenCalledWith(
+                'proj',
+                ['viz-uuid'],
+                { dataAppVizsFilter: 'only' },
+            );
+        });
+
+        it('rejects legacy uuid-only files whose uuid does not resolve in the project', async () => {
+            // findAppsByUuids with dataAppVizsFilter 'only' also returns no
+            // rows when the uuid names a regular data app, so this covers
+            // both foreign uuids and non-chart-type uuids.
+            const { service } = buildResolver();
+            await expect(
+                service.resolveDataAppVizBinding('proj', {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: {
+                        dataAppVizUuid: 'foreign-viz-uuid',
+                        fieldMapping: {},
+                    },
+                }),
+            ).rejects.toThrow(
+                'Custom chart type foreign-viz-uuid was not found in this project',
+            );
+        });
+
+        it.each([
+            { status: 'building', viz_schema: null },
+            { status: 'ready', viz_schema: null },
+            null,
+        ])(
+            'fails actionably when explicit target version is unavailable: %o',
+            async (version) => {
+                const { service } = buildResolver({
+                    findAppsBySlugs: vi.fn().mockResolvedValue([
+                        {
+                            app_id: 'target-viz-uuid',
+                            slug: 'my-chart-type',
+                        },
+                    ]),
+                    getVersion: vi
+                        .fn()
+                        .mockResolvedValue(
+                            version && { version: 2, ...version },
+                        ),
+                });
+                await expect(
+                    service.resolveDataAppVizBinding('proj', {
+                        type: ChartType.DATA_APP_VIZ,
+                        config: {
+                            dataAppVizSlug: 'my-chart-type',
+                            dataAppVizVersion: 2,
+                            fieldMapping: {},
+                        },
+                    }),
+                ).rejects.toThrow(
+                    'version 2 is not renderable in this project. Upload a renderable version of this chart type, then re-upload this chart.',
+                );
+            },
+        );
+
+        it('fails loudly when the slug is missing and there is no legacy uuid', async () => {
+            const { service } = buildResolver();
+            await expect(
+                service.resolveDataAppVizBinding('proj', {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: {
+                        dataAppVizSlug: 'gone-chart-type',
+                        fieldMapping: {},
+                    },
+                }),
+            ).rejects.toThrow(
+                'Custom chart type "gone-chart-type" was not found',
+            );
+        });
+
+        it('fails when the config carries neither slug nor uuid', async () => {
+            const { service } = buildResolver();
+            await expect(
+                service.resolveDataAppVizBinding('proj', {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: { fieldMapping: {} },
+                }),
+            ).rejects.toThrow(
+                'carries neither dataAppVizSlug nor dataAppVizUuid',
+            );
+        });
+    });
+});
+
+describe('CoderService.upsertChart custom chart type pins', () => {
+    const chartUuid = 'chart-uuid';
+    const vizUuid = 'viz-uuid';
+    const updatedAt = new Date('2026-09-01T12:00:00.000Z');
+    const savedConfig = {
+        type: ChartType.DATA_APP_VIZ,
+        config: { dataAppVizUuid: vizUuid, dataAppVizVersion: 2 },
+    };
+
+    const upload = async (requestedVersion?: number) => {
+        const currentChart = {
+            uuid: chartUuid,
+            slug: 'orders',
+            name: 'Orders',
+            description: null,
+            updatedAt,
+            spaceUuid: 'space-uuid',
+            chartConfig: savedConfig,
+        };
+        const getChartChanges = vi.fn(async (promotedChart: AnyType) => ({
+            spaces: [],
+            dashboards: [],
+            charts: [
+                {
+                    // The promotion comparator ignores chartConfig when the
+                    // downloaded timestamp and metadata have not changed.
+                    action: PromotionAction.NO_CHANGES,
+                    data: promotedChart.chart,
+                },
+            ],
+        }));
+        const upsertCharts = vi.fn(
+            async (_user: AnyType, changes: AnyType) => changes,
+        );
+        const service = Object.assign(Object.create(CoderService.prototype), {
+            resolveSyncEnabled: vi.fn(async () => false),
+            projectModel: {
+                get: vi.fn(async () => ({
+                    projectUuid: 'project-uuid',
+                    organizationUuid: 'organization-uuid',
+                })),
+            },
+            appModel: {
+                findAppsBySlugs: vi.fn(async () => [{ app_id: vizUuid }]),
+                getVersion: vi.fn(async (_uuid: string, version: number) => ({
+                    version,
+                    status: 'ready',
+                    viz_schema: {},
+                })),
+                getLatestRenderableDataAppVizVersion: vi.fn(async () => ({
+                    version: 3,
+                    status: 'ready',
+                    viz_schema: {},
+                })),
+            },
+            savedChartModel: {
+                find: vi.fn(async () => [currentChart]),
+            },
+            promoteService: {
+                getPromoteCharts: vi.fn(async () => ({
+                    promotedChart: {
+                        chart: currentChart,
+                        space: { uuid: 'space-uuid', slug: 'space' },
+                        spaces: [],
+                    },
+                    upstreamChart: {
+                        chart: {
+                            uuid: currentChart.uuid,
+                            name: currentChart.name,
+                            updatedAt: currentChart.updatedAt,
+                        },
+                        projectUuid: 'project-uuid',
+                    },
+                })),
+                getChartChanges,
+                upsertCharts,
+            },
+            createAuditedAbility: vi.fn(() => ({
+                can: () => true,
+                cannot: () => false,
+            })),
+            prepareDirectAccessReplace: vi.fn(async () => []),
+            findAccessibleSpace: vi.fn(async () => ({ uuid: 'space-uuid' })),
+            getOrCreateSpace: vi.fn(async () => ({
+                space: { uuid: 'space-uuid' },
+                created: false,
+            })),
+            assertSpaceContentAccess: vi.fn(async () => undefined),
+            syncVerification: vi.fn(async () => undefined),
+            stampAppliedChartSnapshot: vi.fn(async () => undefined),
+            applyDirectAccessPolicy: vi.fn(async () => undefined),
+        }) as CoderService;
+
+        await service.upsertChart(
+            { userUuid: 'user-uuid' } as AnyType,
+            'project-uuid',
+            'orders',
+            {
+                name: 'Orders',
+                description: null,
+                slug: 'orders',
+                spaceSlug: 'space',
+                updatedAt,
+                chartConfig: {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: {
+                        dataAppVizSlug: 'my-viz',
+                        ...(requestedVersion === undefined
+                            ? {}
+                            : { dataAppVizVersion: requestedVersion }),
+                    },
+                },
+                metricQuery: { exploreName: 'orders', filters: {} },
+            } as AnyType,
+        );
+
+        return { getChartChanges, upsertCharts };
+    };
+
+    it('updates an existing chart when an omitted legacy pin resolves to a newer ready version', async () => {
+        const { upsertCharts } = await upload();
+        expect(upsertCharts.mock.calls[0][1].charts[0]).toMatchObject({
+            action: PromotionAction.UPDATE,
+            data: {
+                chartConfig: {
+                    config: { dataAppVizUuid: vizUuid, dataAppVizVersion: 3 },
+                },
+            },
+        });
+    });
+
+    it('updates an existing chart when an explicit pin changes', async () => {
+        const { upsertCharts } = await upload(3);
+        expect(upsertCharts.mock.calls[0][1].charts[0].action).toBe(
+            PromotionAction.UPDATE,
+        );
+    });
+
+    it('keeps an existing chart unchanged when its explicit pin matches', async () => {
+        const { upsertCharts } = await upload(2);
+        expect(upsertCharts.mock.calls[0][1].charts[0].action).toBe(
+            PromotionAction.NO_CHANGES,
+        );
+    });
+});
+
+describe('content-as-code access split', () => {
+    const viewer = {
+        userUuid: 'user-uuid',
+        organizationUuid: 'org-uuid',
+        ability: {
+            can: vi.fn(() => false),
+            cannot: vi.fn(() => true),
+            relevantRuleFor: vi.fn(() => ({ inverted: true })),
+            rules: [],
+        },
+    } as AnyType;
+
+    const service = new CoderService({
+        agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
+        directAccessService: {} as AnyType,
+        projectModel: {
+            get: vi.fn().mockResolvedValue({
+                projectUuid: 'project-uuid',
+                organizationUuid: 'org-uuid',
+            }),
+            getSummary: vi.fn().mockResolvedValue({
+                projectUuid: 'project-uuid',
+                organizationUuid: 'org-uuid',
+            }),
+        },
+        savedChartModel: {
+            getLatestVersionQueriesBySlugs: vi.fn(async () => ({})),
+        },
+    } as AnyType);
+
+    it('blocks export without view:ContentAsCode', async () => {
+        await expect(
+            service.getChartsForExport(viewer, 'project-uuid', []),
+        ).rejects.toThrow('You are not allowed to download charts');
+        await expect(
+            service.getDashboardsForExport(viewer, 'project-uuid', []),
+        ).rejects.toThrow('You are not allowed to download dashboards');
+    });
+
+    it('allows read without view:ContentAsCode', async () => {
+        await expect(
+            service.getChartsForRead(viewer, 'project-uuid', []),
+        ).resolves.toMatchObject({ charts: [] });
+        await expect(
+            service.getDashboardsForRead(viewer, 'project-uuid', []),
+        ).resolves.toMatchObject({ dashboards: [] });
+    });
+});
+
+describe.each(agentActionTestCases)(
+    'direct access replacement ledger: %s',
+    (_, surface, enabled, count) => {
+        test.each(['remove', 'replace', 'unchanged'] as const)(
+            '%s',
+            async (operation) => {
+                const original = [
+                    {
+                        principal: {
+                            type: DirectAccessPrincipalType.USER,
+                            uuid: 'private-old-recipient',
+                        },
+                        role: SpaceMemberRole.VIEWER,
+                    },
+                ];
+                let persistedPolicy = original;
+                const policies = {
+                    unchanged: null,
+                    remove: [],
+                    replace: [
+                        {
+                            principal: {
+                                type: DirectAccessPrincipalType.USER,
+                                uuid: 'private-old-recipient',
+                            },
+                            role: SpaceMemberRole.EDITOR,
+                        },
+                        {
+                            principal: {
+                                type: DirectAccessPrincipalType.GROUP,
+                                uuid: 'private-new-group',
+                            },
+                            role: SpaceMemberRole.VIEWER,
+                        },
+                    ],
+                };
+                const assignments = policies[operation];
+                const replacePolicy = vi.fn(
+                    async (
+                        _account,
+                        _projectUuid,
+                        _resourceType,
+                        _resourceUuid,
+                        replacement,
+                    ) => {
+                        persistedPolicy = replacement;
+                    },
+                );
+                const insert = vi.fn().mockResolvedValue(undefined);
+                const service = new CoderService({
+                    agentActionLogModel: { insert },
+                    directAccessService: { replacePolicy },
+                } as AnyType);
+                await withAgentActionScope(
+                    defaultSessionUser,
+                    surface,
+                    enabled,
+                    () =>
+                        service.applyDirectAccessPolicy(
+                            defaultSessionUser,
+                            'project',
+                            DirectAccessResourceType.CHART,
+                            'chart',
+                            assignments,
+                        ),
+                );
+                expect(persistedPolicy).toEqual(assignments ?? original);
+                expect(replacePolicy).toHaveBeenCalledTimes(
+                    assignments === null ? 0 : 1,
+                );
+                expect(insert).toHaveBeenCalledTimes(
+                    assignments === null ? 0 : count,
+                );
+                if (assignments !== null && count)
+                    expect(insert).toHaveBeenCalledWith(
+                        expect.objectContaining({
+                            object_type: 'direct_access_policy',
+                            object_uuid: 'chart',
+                            action: 'replace',
+                            outcome: 'allowed',
+                        }),
+                    );
+                expect(JSON.stringify(insert.mock.calls)).not.toContain(
+                    'private-',
+                );
+            },
+        );
+    },
+);
+
+describe('CoderService.upsertChart new chart defaults', () => {
+    const updatedAt = new Date('2026-09-01T12:00:00.000Z');
+    const existingChart = {
+        uuid: 'chart-uuid',
+        slug: 'orders',
+        name: 'Orders',
+        description: null,
+        updatedAt,
+        spaceUuid: 'space-uuid',
+        chartConfig: {
+            type: ChartType.CARTESIAN,
+            config: { layout: {}, eChartsConfig: {} },
+        },
+    };
+    const chartAsCode = {
+        name: 'Orders',
+        description: null,
+        slug: 'orders',
+        spaceSlug: 'space',
+        updatedAt,
+        chartConfig: {
+            type: ChartType.CARTESIAN,
+            config: {
+                layout: { xField: 'orders_created_week' },
+                eChartsConfig: {},
+            },
+        },
+        metricQuery: { exploreName: 'orders', filters: {} },
+        tableName: 'orders',
+    };
+
+    const upload = async (existing: typeof existingChart | undefined) => {
+        const create = vi.fn(async () => ({ uuid: 'new-chart-uuid' }));
+        const upsertCharts = vi.fn(
+            async (_user: AnyType, changes: AnyType) => changes,
+        );
+        const service = Object.assign(Object.create(CoderService.prototype), {
+            resolveSyncEnabled: vi.fn(async () => false),
+            projectModel: {
+                get: vi.fn(async () => ({
+                    projectUuid: 'project-uuid',
+                    organizationUuid: 'organization-uuid',
+                })),
+            },
+            savedChartModel: {
+                find: vi.fn(async () => (existing ? [existing] : [])),
+                create,
+            },
+            promoteService: {
+                getPromoteCharts: vi.fn(async () => ({
+                    promotedChart: {
+                        chart: existing,
+                        space: { uuid: 'space-uuid', slug: 'space' },
+                        spaces: [],
+                    },
+                    upstreamChart: {
+                        chart: existing && {
+                            uuid: existing.uuid,
+                            name: existing.name,
+                            updatedAt: existing.updatedAt,
+                        },
+                        projectUuid: 'project-uuid',
+                    },
+                })),
+                getChartChanges: vi.fn(async (promotedChart: AnyType) => ({
+                    spaces: [],
+                    dashboards: [],
+                    charts: [
+                        {
+                            action: PromotionAction.UPDATE,
+                            data: promotedChart.chart,
+                        },
+                    ],
+                })),
+                upsertCharts,
+            },
+            createAuditedAbility: vi.fn(() => ({
+                can: () => true,
+                cannot: () => false,
+            })),
+            prepareDirectAccessReplace: vi.fn(async () => []),
+            findAccessibleSpace: vi.fn(async () => ({ uuid: 'space-uuid' })),
+            getOrCreateSpace: vi.fn(async () => ({
+                space: { uuid: 'space-uuid' },
+                created: false,
+            })),
+            assertSpaceContentAccess: vi.fn(async () => undefined),
+            assertContentAccessForMissingSpace: vi.fn(async () => undefined),
+            spacePermissionService: {
+                resolveAccessBatch: vi.fn(async () => ({})),
+            },
+            syncVerification: vi.fn(async () => undefined),
+            stampAppliedChartSnapshot: vi.fn(async () => undefined),
+            applyDirectAccessPolicy: vi.fn(async () => undefined),
+        }) as CoderService;
+
+        await service.upsertChart(
+            { userUuid: 'user-uuid' } as AnyType,
+            'project-uuid',
+            'orders',
+            chartAsCode as AnyType,
+        );
+        return { create, upsertCharts };
+    };
+
+    it('turns the incomplete period on for a chart created from code without it', async () => {
+        const { create } = await upload(undefined);
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(
+            (create.mock.calls[0] as unknown as [string, string, AnyType])[2]
+                .chartConfig,
+        ).toEqual({
+            type: ChartType.CARTESIAN,
+            config: {
+                layout: {
+                    xField: 'orders_created_week',
+                    showIncompletePeriod: true,
+                },
+                eChartsConfig: {},
+            },
+        });
+    });
+
+    it('leaves an existing chart uploaded without it unchanged', async () => {
+        const { create, upsertCharts } = await upload(existingChart);
+        expect(create).not.toHaveBeenCalled();
+        expect(
+            upsertCharts.mock.calls[0][1].charts[0].data.chartConfig,
+        ).toEqual(chartAsCode.chartConfig);
     });
 });

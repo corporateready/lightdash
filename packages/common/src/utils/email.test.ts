@@ -1,5 +1,9 @@
 /* eslint-disable no-useless-escape */
-import { getEmailDomain } from './email';
+import {
+    getEmailDomain,
+    isPublicEmailProviderDomain,
+    validateOrganizationEmailDomains,
+} from './email';
 
 describe('getEmailDomain', () => {
     it('should return the correct domain for a valid email', () => {
@@ -89,5 +93,67 @@ describe('getEmailDomain', () => {
         expect(getEmailDomain("!#$%&'*+-/=?^_`{}|~@example.org")).toBe(
             'example.org',
         );
+    });
+});
+
+describe('isPublicEmailProviderDomain', () => {
+    it('flags public providers (including former SSO-only entries)', () => {
+        expect(isPublicEmailProviderDomain('gmail.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('outlook.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('icloud.com')).toBe(true);
+        // Consolidated from OrganizationSsoService.DISALLOWED_DOMAINS
+        expect(isPublicEmailProviderDomain('google.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('microsoft.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('onmicrosoft.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('sfr.fr')).toBe(true);
+    });
+
+    it('flags providers from the maintained list that the old hand-list missed', () => {
+        expect(isPublicEmailProviderDomain('proton.me')).toBe(true);
+        expect(isPublicEmailProviderDomain('protonmail.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('gmx.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('zoho.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('qq.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('163.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('yandex.com')).toBe(true);
+        expect(isPublicEmailProviderDomain('fastmail.com')).toBe(true);
+    });
+
+    it('is case-insensitive and trims', () => {
+        expect(isPublicEmailProviderDomain('GMAIL.COM')).toBe(true);
+        expect(isPublicEmailProviderDomain('  Gmail.com ')).toBe(true);
+        expect(isPublicEmailProviderDomain('  Proton.ME ')).toBe(true);
+    });
+
+    it('does not flag corporate domains', () => {
+        expect(isPublicEmailProviderDomain('acme.com')).toBe(false);
+        expect(isPublicEmailProviderDomain('lightdash.com')).toBe(false);
+    });
+
+    it('does not flag corporate domains the package list wrongly includes', () => {
+        expect(isPublicEmailProviderDomain('telekom.de')).toBe(false);
+        expect(isPublicEmailProviderDomain('  Telekom.DE ')).toBe(false);
+        expect(
+            validateOrganizationEmailDomains(['telekom.de']),
+        ).toBeUndefined();
+        // Consumer domains of the same provider stay blocked
+        expect(isPublicEmailProviderDomain('t-online.de')).toBe(true);
+    });
+});
+
+describe('validateOrganizationEmailDomains', () => {
+    it('returns undefined when all domains are allowed', () => {
+        expect(
+            validateOrganizationEmailDomains(['acme.com', 'acme.io']),
+        ).toBeUndefined();
+    });
+
+    it('returns an error listing public providers', () => {
+        expect(validateOrganizationEmailDomains(['gmail.com'])).toContain(
+            'gmail.com',
+        );
+        expect(
+            validateOrganizationEmailDomains(['acme.com', 'outlook.com']),
+        ).toContain('outlook.com');
     });
 });

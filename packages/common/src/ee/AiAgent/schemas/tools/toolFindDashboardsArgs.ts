@@ -1,6 +1,10 @@
 import { z } from 'zod';
-import { baseOutputMetadataSchema } from '../outputMetadata';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
+import { findContentDashboardItemSchema } from './toolFindContentArgs';
 
 export const TOOL_FIND_DASHBOARDS_DESCRIPTION = `Tool: "findDashboards"
 Purpose:
@@ -17,9 +21,7 @@ Usage tips:
 - It doesn't provide a dashboard summary yet, so don't suggest this capability
 `;
 
-export const toolFindDashboardsArgsSchema = createToolSchema({
-    description: TOOL_FIND_DASHBOARDS_DESCRIPTION,
-})
+export const toolFindDashboardsArgsSchema = createToolSchema()
     .extend({
         dashboardSearchQueries: z.array(
             z.object({
@@ -43,11 +45,27 @@ export const toolFindDashboardsArgsSchemaTransformed =
 
 export type ToolFindDashboardsArgsTransformed = ToolFindDashboardsArgs;
 
-export const toolFindDashboardsOutputSchema = z.object({
-    result: z.string(),
-    metadata: baseOutputMetadataSchema,
+export const toolFindDashboardsStructuredContentSchema = z.object({
+    searchResults: z
+        .array(
+            z.object({
+                searchQuery: z.string(),
+                dashboards: z
+                    .array(findContentDashboardItemSchema)
+                    .describe('Matching dashboards, verified first.'),
+            }),
+        )
+        .describe('One entry per search query, in the order given.'),
 });
 
+export const toolFindDashboardsOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema,
+    structuredContent: toolFindDashboardsStructuredContentSchema,
+});
+
+export type ToolFindDashboardsStructuredContent = z.infer<
+    typeof toolFindDashboardsStructuredContentSchema
+>;
 export type ToolFindDashboardsOutput = z.infer<
     typeof toolFindDashboardsOutputSchema
 >;

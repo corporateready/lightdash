@@ -1,57 +1,103 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
+import type { ToolName } from '@lightdash/common';
+import { getAnthropicApiBaseUrl } from '../../../../config/aiGatewayConfig';
 import { LightdashConfig } from '../../../../config/parseConfig';
-import { ModelPreset } from './presets';
+import Logger from '../../../../logging/logger';
+import {
+    ModelPreset,
+    ReasoningEffort,
+    XHIGH_MAX_OUTPUT_TOKENS,
+    XHIGH_THINKING_BUDGET_TOKENS,
+} from './presets';
 import { AiModel } from './types';
 
 const PROVIDER = 'anthropic';
+
+const TOOL_RESULT_CLEARING_TRIGGER_INPUT_TOKENS = 120_000;
+const TOOL_RESULT_CLEARING_MIN_INPUT_TOKENS = 5_000;
+// Covers the charts inspected just before an edit; earlier reads can still be cleared.
+const TOOL_RESULTS_KEPT_AFTER_CLEARING = 10;
+// Skills are instructions the agent follows until the end of the run; content reads
+// are pruned by the agent loop itself so the latest read of each item survives.
+const TOOL_RESULTS_EXEMPT_FROM_CLEARING: ToolName[] = [
+    'loadSkill',
+    'readContent',
+];
 
 export const getAnthropicModel = (
     config: NonNullable<
         LightdashConfig['ai']['copilot']['providers']['anthropic']
     >,
     preset: ModelPreset<'anthropic'>,
-    options?: { enableReasoning?: boolean },
+    options?: { enableReasoning?: boolean; reasoningEffort?: ReasoningEffort },
 ): AiModel<typeof PROVIDER> => {
-    const anthropic = createAnthropic({
-        apiKey: config.apiKey,
-        headers: config.customHeaders,
-    });
+    const anthropic = config.baseUrl
+        ? createAnthropic({
+              authToken: config.apiKey,
+              baseURL: getAnthropicApiBaseUrl(config.baseUrl),
+              headers: config.customHeaders,
+          })
+        : createAnthropic({
+              apiKey: config.apiKey,
+              baseURL: getAnthropicApiBaseUrl(),
+              headers: config.customHeaders,
+          });
 
     const model = anthropic(preset.modelId);
 
     const reasoningEnabled =
         options?.enableReasoning && preset.supportsReasoning;
 
+    // Default-on: only an explicit false disables it
+    const contextManagementEnabled = config.supportsContextManagement !== false;
+    if (!contextManagementEnabled) {
+        Logger.debug(
+            `Provider does not support context management: sending "${preset.modelId}" requests without server-side context clearing`,
+        );
+    }
+
     const reasoningStyle = preset.reasoningStyle ?? 'budget';
+    const effort = options?.reasoningEffort ?? 'medium';
 
     return {
         model,
         callOptions: {
             ...preset.callOptions,
             ...(reasoningEnabled && { temperature: undefined }),
+            // A large thinking budget needs room in max_tokens.
+            ...(reasoningEnabled &&
+                effort === 'xhigh' && {
+                    maxOutputTokens: XHIGH_MAX_OUTPUT_TOKENS,
+                }),
         },
         providerOptions: {
             [PROVIDER]: {
                 ...(preset.providerOptions || {}),
-                contextManagement: {
-                    edits: [
-                        ...(reasoningEnabled
-                            ? [{ type: 'clear_thinking_20251015' as const }]
-                            : []),
-                        {
-                            type: 'clear_tool_uses_20250919',
-                            trigger: {
-                                type: 'input_tokens',
-                                value: 120_000,
+                ...(contextManagementEnabled && {
+                    contextManagement: {
+                        edits: [
+                            ...(reasoningEnabled
+                                ? [{ type: 'clear_thinking_20251015' as const }]
+                                : []),
+                            {
+                                type: 'clear_tool_uses_20250919',
+                                trigger: {
+                                    type: 'input_tokens',
+                                    value: TOOL_RESULT_CLEARING_TRIGGER_INPUT_TOKENS,
+                                },
+                                keep: {
+                                    type: 'tool_uses',
+                                    value: TOOL_RESULTS_KEPT_AFTER_CLEARING,
+                                },
+                                clearAtLeast: {
+                                    type: 'input_tokens',
+                                    value: TOOL_RESULT_CLEARING_MIN_INPUT_TOKENS,
+                                },
+                                excludeTools: TOOL_RESULTS_EXEMPT_FROM_CLEARING,
                             },
-                            keep: { type: 'tool_uses', value: 3 },
-                            clearAtLeast: {
-                                type: 'input_tokens',
-                                value: 5_000,
-                            },
-                        },
-                    ],
-                },
+                        ],
+                    },
+                }),
                 ...(reasoningEnabled &&
                     (reasoningStyle === 'adaptive'
                         ? {
@@ -65,14 +111,17 @@ export const getAnthropicModel = (
                               // sending enabled, both produce a 400.
                               // @ai-sdk/anthropic exposes the adaptive variant
                               // from 3.0.62+.
-                              effort: 'medium' as const,
+                              effort,
                               thinking: { type: 'adaptive' as const },
                           }
                         : {
                               thinking: {
                                   type: 'enabled' as const,
                                   /** @ref https://platform.claude.com/docs/en/build-with-claude/extended-thinking#working-with-thinking-budgets */
-                                  budgetTokens: 2048,
+                                  budgetTokens:
+                                      effort === 'xhigh'
+                                          ? XHIGH_THINKING_BUDGET_TOKENS
+                                          : 2048,
                               },
                           })),
             },

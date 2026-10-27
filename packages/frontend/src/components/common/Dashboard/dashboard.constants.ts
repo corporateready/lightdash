@@ -1,14 +1,9 @@
-import { BANNER_HEIGHT } from '../Page/constants';
-
 export const DASHBOARD_HEADER_HEIGHT = 50;
 export const DASHBOARD_HEADER_ZINDEX = 99;
-const DASHBOARD_TAB_HEIGHT = 50;
-const DASHBOARD_TABS_ZINDEX = 98;
-
-export const dashboardCSSVars = {
-    '--dashboard-header-height': `${DASHBOARD_HEADER_HEIGHT}px`,
-    '--dashboard-header-zindex': `${DASHBOARD_HEADER_ZINDEX}`,
-    '--dashboard-tab-height': `${DASHBOARD_TAB_HEIGHT}px`,
-    '--dashboard-tabs-zindex': `${DASHBOARD_TABS_ZINDEX}`,
-    '--banner-height': `${BANNER_HEIGHT}px`,
-} as const;
+export const DASHBOARD_TAB_HEIGHT = 50;
+export const DASHBOARD_TABS_ZINDEX = 98;
+// The dashboard's scroll-to-top button: its size and its distance from the
+// bottom, higher while the AI launcher is mounted
+export const SCROLL_TO_TOP_SIZE = 40;
+export const SCROLL_TO_TOP_BOTTOM = 24;
+export const SCROLL_TO_TOP_BOTTOM_WITH_LAUNCHER = 52;

@@ -10,13 +10,17 @@
 #
 # Registry location: ~/.lightdash/dev-instances/<instance-id>.json
 #
+# New claims start at slot 0. Set LD_SLOT_START, or write a number to
+# ~/.lightdash/slot-start, to give a machine its own port range: a remote dev
+# machine can then forward its ports to a laptop without colliding.
+#
 # Usage:
 #   dev-ports.sh claim [--instance-id NAME]   Claim a port slot (idempotent)
 #   dev-ports.sh release [--instance-id NAME] Release a port slot
 #   dev-ports.sh show [--instance-id NAME]    Print current port assignments
 #   dev-ports.sh list                          List all active instances
 #   dev-ports.sh env [--instance-id NAME]     Output sourceable env var exports
-#   dev-ports.sh gc                            Release instances with missing worktree paths
+#   dev-ports.sh gc [--dry-run]                Release stale instances and orphaned volumes
 
 set -euo pipefail
 
@@ -26,6 +30,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 REGISTRY_DIR="$HOME/.lightdash/dev-instances"
+SLOT_START_FILE="$HOME/.lightdash/slot-start"
 
 # Shared service ports (fixed, single instance for all worktrees)
 SHARED_MINIO_PORT=9000
@@ -39,6 +44,12 @@ SHARED_NATS_MONITOR_PORT=8222
 get_instance_id() {
     local id="${INSTANCE_ID:-}"
     if [ -z "$id" ]; then
+        # Prefer the worktree's own LD_INSTANCE_ID pin: same-basename checkouts
+        # (e.g. two clones both named "lightdash") collide on basename and would
+        # silently resolve to another worktree's slot.
+        id="$(get_env_instance_id "$(pwd)")"
+    fi
+    if [ -z "$id" ]; then
         id="$(basename "$(pwd)")"
     fi
     echo "$id"
@@ -48,12 +59,17 @@ parse_args() {
     SUBCOMMAND="${1:-}"
     shift || true
     INSTANCE_ID=""
+    DRY_RUN=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --instance-id)
                 INSTANCE_ID="${2:-}"
                 shift 2
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
                 ;;
             *)
                 shift
@@ -74,34 +90,48 @@ compute_ports() {
     # (e.g. slot 3 FRONTEND_PORT=3030 vs slot 0 SDK_TEST_PORT=3030).
     # validate_slot_ports() checks lsof at claim time to catch these at runtime.
     PG_PORT=$((5432 + slot * 100))
-    FRONTEND_PORT=$((3000 + slot * 10))
+    FRONTEND_PORT="${LD_FRONTEND_PORT_OVERRIDE:-$((3000 + slot * 10))}"
     API_PORT=$((8080 + slot * 10))
     SCHEDULER_PORT=$((8081 + slot * 10))
     DEBUG_PORT=$((9229 + slot * 10))
     SDK_TEST_PORT=$((3030 + slot * 10))
-    SPOTLIGHT_PORT=$((8969 + slot * 10))
+    MAPLE_PORT=$((4320 + slot * 10))
     PROMETHEUS_PORT=$((9090 + slot * 10))
 }
 
 get_taken_slots() {
-    local slots=""
-    if [ -d "$REGISTRY_DIR" ]; then
-        for f in "$REGISTRY_DIR"/*.json; do
-            [ -f "$f" ] || continue
-            local s
-            s=$(python3 -c "import json; print(json.load(open('$f'))['slot'])" 2>/dev/null || true)
-            if [ -n "$s" ]; then
-                slots="$slots $s"
-            fi
-        done
+    python3 - "$REGISTRY_DIR" <<'PYTHON'
+import glob, json, os, sys
+slots = []
+for filename in glob.glob(os.path.join(sys.argv[1], '*.json')):
+    try:
+        with open(filename) as stream:
+            slots.append(str(json.load(stream)['slot']))
+    except (OSError, ValueError, KeyError):
+        pass
+print(' '.join(slots))
+PYTHON
+}
+
+first_slot() {
+    local start="${LD_SLOT_START:-}"
+    if [ -z "$start" ] && [ -f "$SLOT_START_FILE" ]; then
+        start=$(tr -d '[:space:]' < "$SLOT_START_FILE")
     fi
-    echo "$slots"
+    case "${start:-0}" in
+        *[!0-9]*)
+            echo "ERROR: slot start must be a whole number, got '$start'" >&2
+            return 1
+            ;;
+    esac
+    echo "${start:-0}"
 }
 
 find_next_slot() {
     local taken
     taken=$(get_taken_slots)
-    local slot=0
+    local slot
+    slot=$(first_slot) || return 1
     while true; do
         if ! echo "$taken" | grep -qw "$slot"; then
             echo "$slot"
@@ -113,10 +143,35 @@ find_next_slot() {
 
 check_port_available() {
     local port="$1"
-    if lsof -iTCP:"$port" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
-        return 1
+    local output status candidate
+    if command -v lsof >/dev/null 2>&1; then
+        if output=$(lsof -iTCP:"$port" -sTCP:LISTEN -P -n -w 2>&1); then
+            return 1
+        else
+            status=$?
+        fi
+        if [ "$status" -eq 1 ] && [ -z "$output" ]; then
+            return 0
+        fi
+        echo "ERROR: lsof could not verify TCP ports (exit $status): $output" >&2
+        return 2
     fi
-    return 0
+    if command -v ss >/dev/null 2>&1; then
+        if output=$(ss -H -ltn 2>&1); then
+            for candidate in ${port//,/ }; do
+                if printf '%s\n' "$output" | awk -v port="$candidate" '$4 ~ (":" port "$") { found=1 } END { exit !found }'; then
+                    return 1
+                fi
+            done
+            return 0
+        else
+            status=$?
+        fi
+        echo "ERROR: ss could not verify TCP ports (exit $status): $output" >&2
+        return 2
+    fi
+    echo "ERROR: Cannot verify TCP ports: install lsof or ss (iproute2) before claiming a slot." >&2
+    return 2
 }
 
 validate_slot_ports() {
@@ -124,14 +179,16 @@ validate_slot_ports() {
     compute_ports "$slot"
 
     # Only check per-instance ports (shared services are not our concern)
-    local all_ports="$PG_PORT $FRONTEND_PORT $API_PORT $SCHEDULER_PORT $DEBUG_PORT $SDK_TEST_PORT $SPOTLIGHT_PORT $PROMETHEUS_PORT"
+    local all_ports="$PG_PORT $API_PORT $SCHEDULER_PORT $DEBUG_PORT $SDK_TEST_PORT $MAPLE_PORT $PROMETHEUS_PORT"
+    # Amp reserves the declared portal port before this script runs. It is not
+    # an application listener, so allow the matching frontend slot in an orb.
+    if [ "${LD_FRONTEND_PORT_RESERVED:-}" != true ] || [ "$FRONTEND_PORT" != "${PORT:-}" ]; then
+        all_ports="$FRONTEND_PORT $all_ports"
+    fi
 
-    for port in $all_ports; do
-        if ! check_port_available "$port"; then
-            return 1
-        fi
-    done
-    return 0
+    local port_list
+    port_list=$(printf '%s\n' $all_ports | paste -sd, -)
+    [ -n "$port_list" ] && check_port_available "$port_list"
 }
 
 write_instance_file() {
@@ -161,7 +218,7 @@ write_instance_file() {
     "scheduler": ${SCHEDULER_PORT},
     "debug": ${DEBUG_PORT},
     "sdkTest": ${SDK_TEST_PORT},
-    "spotlight": ${SPOTLIGHT_PORT},
+    "maple": ${MAPLE_PORT},
     "prometheus": ${PROMETHEUS_PORT}
   },
   "shared": {
@@ -179,6 +236,10 @@ ENDJSON
 }
 
 cmd_claim() {
+    if ! command -v lsof >/dev/null 2>&1 && ! command -v ss >/dev/null 2>&1; then
+        echo "ERROR: Cannot verify TCP ports: install lsof or ss (iproute2) before claiming a slot." >&2
+        return 1
+    fi
     local id
     id=$(get_instance_id)
     local file="$REGISTRY_DIR/${id}.json"
@@ -250,6 +311,12 @@ cmd_claim() {
         fi
         if validate_slot_ports "$slot"; then
             break
+        else
+            local probe_status=$?
+            if [ "$probe_status" -ne 1 ]; then
+                rmdir "$lockdir" 2>/dev/null || true
+                return "$probe_status"
+            fi
         fi
         echo "Slot $slot has port conflicts, trying next..." >&2
         slot=$((slot + 1))
@@ -358,7 +425,10 @@ print(f\"export FE_PORT={p['frontend']}\")
 print(f\"export SCHEDULER_PORT={p['scheduler']}\")
 print(f\"export DEBUG_PORT={p['debug']}\")
 print(f\"export SDK_TEST_PORT={p['sdkTest']}\")
-print(f\"export SPOTLIGHT_PORT={p['spotlight']}\")
+
+# Instance files claimed before Maple replaced Spotlight have no 'maple' port,
+# and are never rewritten — derive it from the slot rather than failing.
+print(f\"export MAPLE_PORT={p.get('maple', 4320 + d['slot'] * 10)}\")
 print(f\"export LIGHTDASH_PROMETHEUS_PORT={p['prometheus']}\")
 print(f\"export PGPORT={p['pg']}\")
 print(f\"export SITE_URL=http://localhost:{p['frontend']}\")
@@ -369,10 +439,92 @@ print(f\"export EMAIL_SMTP_PORT={s['mailpitSmtp']}\")
 "
 }
 
+get_env_instance_id() {
+    local env_file="$1/.env.development.local"
+    [ -f "$env_file" ] || return 0
+
+    sed -n -E 's/^LD_INSTANCE_ID=(.*)$/\1/p' "$env_file" | head -n 1 | sed -E "s/^['\"](.*)['\"]$/\1/"
+}
+
+add_live_instance() {
+    local instance_id="$1"
+    local live_instance_id
+    # bash 3.2 (macOS default) treats "${ARR[@]}" on an empty array as unbound
+    # under set -u, so guard every expansion with a length check.
+    if [ "${#LIVE_INSTANCE_IDS[@]}" -gt 0 ]; then
+        for live_instance_id in "${LIVE_INSTANCE_IDS[@]}"; do
+            [ "$live_instance_id" = "$instance_id" ] && return
+        done
+    fi
+    LIVE_INSTANCE_IDS+=("$instance_id")
+}
+
+is_stale_instance() {
+    local instance_id="$1"
+    local stale_instance_id
+    [ "${#STALE_INSTANCE_IDS[@]}" -gt 0 ] || return 1
+    for stale_instance_id in "${STALE_INSTANCE_IDS[@]}"; do
+        [ "$stale_instance_id" = "$instance_id" ] && return 0
+    done
+    return 1
+}
+
+collect_live_instances() {
+    LIVE_INSTANCE_IDS=()
+    CHECKOUT_COUNT=0
+
+    local registry_file
+    for registry_file in "$REGISTRY_DIR"/*.json; do
+        [ -f "$registry_file" ] || continue
+        local registered_instance_id
+        registered_instance_id=$(python3 -c "import json; print(json.load(open('$registry_file'))['instanceId'])" 2>/dev/null) || return 1
+        [ -n "$registered_instance_id" ] || continue
+        is_stale_instance "$registered_instance_id" || add_live_instance "$registered_instance_id"
+    done
+
+    local script_dir
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    local repo_root
+    repo_root=$(git -C "$script_dir/.." rev-parse --show-toplevel 2>/dev/null || true)
+    [ -n "$repo_root" ] || return 1
+
+    local checkout_instance_id
+    CHECKOUT_COUNT=$((CHECKOUT_COUNT + 1))
+    checkout_instance_id=$(get_env_instance_id "$repo_root") || return 1
+    [ -n "$checkout_instance_id" ] && add_live_instance "$checkout_instance_id"
+
+    local worktree_list
+    worktree_list=$(git -C "$repo_root" worktree list --porcelain) || return 1
+
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*)
+                CHECKOUT_COUNT=$((CHECKOUT_COUNT + 1))
+                checkout_instance_id=$(get_env_instance_id "${line#worktree }") || return 1
+                [ -n "$checkout_instance_id" ] && add_live_instance "$checkout_instance_id"
+                ;;
+        esac
+    done <<< "$worktree_list"
+
+    return 0
+}
+
+is_live_instance() {
+    local instance_id="$1"
+    local live_instance_id
+    [ "${#LIVE_INSTANCE_IDS[@]}" -gt 0 ] || return 1
+    for live_instance_id in "${LIVE_INSTANCE_IDS[@]}"; do
+        [ "$live_instance_id" = "$instance_id" ] && return 0
+    done
+    return 1
+}
+
 cmd_gc() {
     mkdir -p "$REGISTRY_DIR"
 
     local cleaned=0
+    STALE_INSTANCE_IDS=()
     for f in "$REGISTRY_DIR"/*.json; do
         [ -f "$f" ] || continue
 
@@ -382,16 +534,70 @@ cmd_gc() {
         instance_id=$(python3 -c "import json; print(json.load(open('$f'))['instanceId'])" 2>/dev/null || true)
 
         if [ -n "$worktree_path" ] && [ ! -d "$worktree_path" ]; then
-            echo "Releasing stale instance '$instance_id' (worktree $worktree_path no longer exists)"
-            rm "$f"
+            STALE_INSTANCE_IDS+=("$instance_id")
+            if [ "$DRY_RUN" = true ]; then
+                echo "Would release stale instance '$instance_id' (worktree $worktree_path no longer exists)"
+            else
+                echo "Releasing stale instance '$instance_id' (worktree $worktree_path no longer exists)"
+                rm "$f"
+            fi
             cleaned=$((cleaned + 1))
         fi
     done
 
     if [ "$cleaned" -eq 0 ]; then
         echo "No stale instances found"
+    elif [ "$DRY_RUN" = true ]; then
+        echo "Would clean up $cleaned stale instance(s)"
     else
         echo "Cleaned up $cleaned stale instance(s)"
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "Docker unavailable; skipping orphaned volume sweep"
+        return
+    fi
+
+    local volumes
+    if ! volumes=$(docker volume ls -q 2>/dev/null); then
+        echo "Docker unavailable; skipping orphaned volume sweep"
+        return
+    fi
+
+    if ! collect_live_instances; then
+        echo "WARNING: Could not complete live instance scan; skipping orphaned volume sweep"
+        return
+    fi
+
+    if [ "$CHECKOUT_COUNT" -gt 0 ] && [ "${#LIVE_INSTANCE_IDS[@]}" -eq 0 ]; then
+        echo "WARNING: Live instance scan found no instances for existing checkouts; skipping orphaned volume sweep"
+        return
+    fi
+
+    local volumes_cleaned=0
+    local volume
+    for volume in $volumes; do
+        [[ "$volume" == ld-shared_* ]] && continue
+        if [[ "$volume" =~ ^ld-(.*)_postgres_data(_snapshot)?$ ]]; then
+            local instance_id="${BASH_REMATCH[1]}"
+            if ! is_live_instance "$instance_id"; then
+                if [ "$DRY_RUN" = true ]; then
+                    echo "Would remove orphaned volume '$volume'"
+                    volumes_cleaned=$((volumes_cleaned + 1))
+                else
+                    if docker volume rm "$volume" >/dev/null; then
+                        echo "Removed orphaned volume '$volume'"
+                        volumes_cleaned=$((volumes_cleaned + 1))
+                    else
+                        echo "Could not remove orphaned volume '$volume' (it may be in use)"
+                    fi
+                fi
+            fi
+        fi
+    done
+
+    if [ "$volumes_cleaned" -eq 0 ]; then
+        echo "No orphaned instance volumes found"
     fi
 }
 

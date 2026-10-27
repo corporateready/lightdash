@@ -45,8 +45,8 @@ export const PieChartConfiguration = ({
     }, [errors?.groupByFieldError?.references]);
 
     return (
-        <Stack spacing="sm" mb="lg">
-            <Title order={5} fz="sm" c="ldGray.9">
+        <Stack gap="sm" mb="lg">
+            <Title order={5} fz="sm">
                 Data
             </Title>
 

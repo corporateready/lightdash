@@ -1,30 +1,53 @@
-import { type SavedChart } from '@lightdash/common';
-import { useMantineColorScheme } from '@mantine/core';
-import { useEffect, useState, type FC } from 'react';
-import { Outlet, useNavigate, useParams } from 'react-router';
+import { useEffect, type FC } from 'react';
+import { Outlet, useParams } from 'react-router';
 import EmbedProvider from '../../providers/Embed/EmbedProvider';
 import useEmbed from '../../providers/Embed/useEmbed';
+import { useEmbedRouteNavigation } from './useEmbedRouteNavigation';
 
 /**
- * Syncs the embed theme URL params with the Mantine color scheme
- * and applies a custom background color if provided.
+ * Applies the embed's custom background color if provided.
+ *
+ * The color scheme itself is forced at the app root (see App.tsx) from the
+ * ?theme= URL param, so the embed never writes to the viewer's shared
+ * (cross-tab) theme preference.
  */
-const EmbedThemeSync: FC<React.PropsWithChildren> = ({ children }) => {
-    const { theme, backgroundColor } = useEmbed();
-    const { toggleColorScheme } = useMantineColorScheme();
-
-    useEffect(() => {
-        toggleColorScheme(theme);
-    }, [theme, toggleColorScheme]);
+const EmbedBackgroundColorSync: FC<React.PropsWithChildren> = ({
+    children,
+}) => {
+    const { backgroundColor } = useEmbed();
 
     useEffect(() => {
         if (backgroundColor) {
+            const alphaHex =
+                backgroundColor.length === 5
+                    ? backgroundColor.slice(-1).repeat(2)
+                    : backgroundColor.length === 9
+                      ? backgroundColor.slice(-2)
+                      : 'ff';
             document.documentElement.style.backgroundColor = backgroundColor;
             document.body.style.backgroundColor = backgroundColor;
+            // Alpha colors show the page behind the header without another tint.
+            document.documentElement.style.setProperty(
+                '--ld-embed-header-background-color',
+                alphaHex.toLowerCase() === 'ff'
+                    ? backgroundColor
+                    : 'transparent',
+            );
+            // Let tabs and actions show the header background beneath them.
+            document.documentElement.style.setProperty(
+                '--ld-embed-header-surface-color',
+                'transparent',
+            );
         }
         return () => {
             document.documentElement.style.backgroundColor = '';
             document.body.style.backgroundColor = '';
+            document.documentElement.style.removeProperty(
+                '--ld-embed-header-background-color',
+            );
+            document.documentElement.style.removeProperty(
+                '--ld-embed-header-surface-color',
+            );
         };
     }, [backgroundColor]);
 
@@ -37,30 +60,24 @@ const EmbedThemeSync: FC<React.PropsWithChildren> = ({ children }) => {
  */
 const EmbeddedApp: FC = () => {
     const { projectUuid } = useParams<{ projectUuid: string }>();
-    const [savedChart, setSavedChart] = useState<SavedChart>();
-    const navigate = useNavigate();
-
-    const handleExplore = (options: { chart: SavedChart }) => {
-        setSavedChart(options.chart);
-        void navigate(
-            `/embed/${projectUuid}/explore/${options.chart.tableName}`,
-        );
-    };
-
-    const handleBackToDashboard = async () => {
-        await navigate(`/embed/${projectUuid}`);
-    };
+    const {
+        savedChart,
+        customSqlProvenanceChartUuid,
+        handleExplore,
+        handleBackToDashboard,
+    } = useEmbedRouteNavigation(projectUuid);
 
     return (
         <EmbedProvider
             savedChart={savedChart}
+            customSqlProvenanceChartUuid={customSqlProvenanceChartUuid}
             projectUuid={projectUuid}
             onExplore={handleExplore}
             onBackToDashboard={handleBackToDashboard}
         >
-            <EmbedThemeSync>
+            <EmbedBackgroundColorSync>
                 <Outlet />
-            </EmbedThemeSync>
+            </EmbedBackgroundColorSync>
         </EmbedProvider>
     );
 };

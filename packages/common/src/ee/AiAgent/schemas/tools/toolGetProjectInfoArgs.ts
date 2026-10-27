@@ -1,0 +1,78 @@
+import { z } from 'zod';
+import {
+    DbtProjectType,
+    ProjectType,
+    WarehouseTypes,
+} from '../../../../types/projects';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
+
+export const TOOL_GET_PROJECT_INFO_DESCRIPTION = [
+    'Get details about the project you are working in and its underlying dbt project.',
+    'Use it when the user asks what dbt project this is, which git repository or branch it connects to, what dbt version or warehouse it uses, or wants general context about the project.',
+    'It never returns credentials or secrets.',
+].join(' ');
+
+export const toolGetProjectInfoArgsSchema = z.object({});
+
+export type ToolGetProjectInfoArgs = z.infer<
+    typeof toolGetProjectInfoArgsSchema
+>;
+
+export const toolGetProjectInfoStructuredContentSchema = z.object({
+    projectName: z.string(),
+    projectType: z
+        .enum(ProjectType)
+        .describe('DEFAULT for a regular project, PREVIEW for a preview.'),
+    dbtConnectionType: z
+        .enum(DbtProjectType)
+        .describe('How the dbt project is connected (git host, dbt Cloud, …).'),
+    dbtConnectionLabel: z
+        .string()
+        .describe('Human-readable name of the dbt connection type.'),
+    dbtVersion: z.string(),
+    warehouseType: z
+        .enum(WarehouseTypes)
+        .nullable()
+        .describe('Null when the project has no warehouse connection.'),
+    connections: z.array(
+        z.object({
+            name: z.string(),
+            warehouseConnectionUuid: z.string().nullable(),
+            warehouseType: z.enum(WarehouseTypes),
+            isOriginal: z.boolean(),
+        }),
+    ),
+    git: z
+        .object({
+            repository: z.string(),
+            branch: z.string(),
+            projectSubPath: z
+                .string()
+                .nullable()
+                .describe(
+                    'Directory of the dbt project inside the repo; null when it is the repo root.',
+                ),
+            hostDomain: z
+                .string()
+                .nullable()
+                .describe('Self-hosted git domain; null for the default host.'),
+        })
+        .nullable()
+        .describe('Null when the dbt project is not git-backed.'),
+});
+
+export type ToolGetProjectInfoStructuredContent = z.infer<
+    typeof toolGetProjectInfoStructuredContentSchema
+>;
+
+export const toolGetProjectInfoOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema,
+    structuredContent: toolGetProjectInfoStructuredContentSchema,
+});
+
+export type ToolGetProjectInfoOutput = z.infer<
+    typeof toolGetProjectInfoOutputSchema
+>;

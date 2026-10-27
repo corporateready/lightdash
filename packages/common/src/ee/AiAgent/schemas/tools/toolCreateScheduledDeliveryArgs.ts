@@ -1,0 +1,179 @@
+import { z } from 'zod';
+import { type ToolDescriptionContext } from '../defineTool';
+import { toolErrorStructuredContentSchema } from '../outputMetadata';
+import { toolNameFor } from './discoveryToolNames';
+
+export const TOOL_CREATE_SCHEDULED_DELIVERY_DESCRIPTION = ({
+    runtime,
+}: ToolDescriptionContext): string =>
+    [
+        'Create a scheduled delivery that sends a saved chart or dashboard to Slack channels or email recipients on a cron schedule.',
+        'An enabled delivery sends from the moment it is created, so first propose the full configuration to the user (name, schedule in plain words, cron, timezone, destinations, format, AI augmentation prompt if any) and wait for their explicit confirmation in the conversation.',
+        // MCP has no system prompt to carry the save-then-schedule order.
+        ...(runtime === 'mcp'
+            ? [
+                  `Content that exists only in this conversation is saved with ${toolNameFor('createContent', runtime)} first, then scheduled by the created uuid: propose the save and the schedule as one plan with a single confirmation.`,
+              ]
+            : []),
+    ].join(' ');
+
+const slackTargetSchema = z.object({
+    type: z.literal('slack'),
+    channel: z
+        .string()
+        .min(1)
+        .describe(
+            'Slack channel ID (preferred, e.g. "C0123ABCDEF") or channel name. The Lightdash Slack app must be able to join it.',
+        ),
+});
+
+const emailTargetSchema = z.object({
+    type: z.literal('email'),
+    recipient: z.string().min(3).describe('Email address of the recipient.'),
+});
+
+export const toolCreateScheduledDeliveryArgsSchema = z.object({
+    resourceType: z
+        .enum(['chart', 'dashboard'])
+        .describe('Type of saved content to deliver.'),
+    resourceUuidOrSlug: z
+        .string()
+        .describe(
+            'UUID (preferred) or project-scoped slug of the saved chart or dashboard to deliver. Use the uuid from the tool result that created or found the content as the canonical identity.',
+        ),
+    name: z.string().min(1).describe('Human-readable delivery name.'),
+    cron: z
+        .string()
+        .describe(
+            '5-part cron expression, e.g. "0 9 * * 1". Minimum frequency is hourly — sub-hourly minute patterns (e.g. "*/15") are rejected.',
+        ),
+    timezone: z
+        .string()
+        .nullable()
+        .describe(
+            'IANA timezone the cron runs in (e.g. "Europe/London"). null = project default.',
+        ),
+    format: z
+        .enum(['csv', 'image'])
+        .describe(
+            '"image" sends a rendered image of the chart/dashboard; "csv" sends the results as CSV.',
+        ),
+    csvOptions: z
+        .object({
+            formatted: z
+                .boolean()
+                .describe('Apply Lightdash value formatting.'),
+            limit: z
+                .union([
+                    z.literal('table'),
+                    z.literal('all'),
+                    z.coerce.number().int().positive(),
+                ])
+                .describe(
+                    '"table" = the chart\'s own limit, "all" = all results, or an explicit row count.',
+                ),
+        })
+        .nullable()
+        .describe(
+            'Only used when format is "csv". null = defaults (formatted, table limit).',
+        ),
+    message: z
+        .string()
+        .nullable()
+        .describe(
+            'Optional static message included with every delivery. Ignored when aiAugmentationPrompt is set (the AI writes the message instead).',
+        ),
+    targets: z
+        .array(
+            z.discriminatedUnion('type', [
+                slackTargetSchema,
+                emailTargetSchema,
+            ]),
+        )
+        .min(1)
+        .describe('At least one Slack channel or email recipient.'),
+    enabled: z
+        .boolean()
+        .describe(
+            'true only when the user confirmed the delivery should go live; otherwise false creates it paused, for the user to enable from its page.',
+        ),
+    aiAugmentationPrompt: z
+        .string()
+        .nullable()
+        .describe(
+            'Instructions for the AI-written delivery message, regenerated from the delivered data on every send. null = plain delivery without AI augmentation.',
+        ),
+});
+
+export type ToolCreateScheduledDeliveryArgs = z.infer<
+    typeof toolCreateScheduledDeliveryArgsSchema
+>;
+
+const toolCreateScheduledDeliveryMetadataSchema = z.discriminatedUnion(
+    'status',
+    [
+        z.object({ status: z.literal('error') }),
+        z.object({
+            status: z.literal('success'),
+            schedulerUuid: z.string(),
+            name: z.string(),
+            cron: z.string(),
+            resourceType: z.enum(['chart', 'dashboard']),
+            resourceUuid: z.string(),
+            href: z.string(),
+            aiAugmentationAttached: z.boolean(),
+            warnings: z.array(z.string()),
+        }),
+    ],
+);
+
+export const toolCreateScheduledDeliveryStructuredContentSchema = z.object({
+    schedulerUuid: z.string().describe('Uuid of the created delivery.'),
+    name: z.string().describe('Delivery name.'),
+    cron: z.string().describe('5-part cron expression the delivery runs on.'),
+    timezone: z
+        .string()
+        .nullable()
+        .describe('IANA timezone the cron runs in; null = project default.'),
+    targets: z
+        .array(
+            z.discriminatedUnion('type', [
+                slackTargetSchema,
+                emailTargetSchema,
+            ]),
+        )
+        .describe('Slack channels and email recipients the delivery sends to.'),
+    enabled: z
+        .boolean()
+        .describe('true = live and firing; false = created paused.'),
+    aiAugmentationAttached: z
+        .boolean()
+        .describe('Whether an AI-written message is generated on each send.'),
+    href: z
+        .string()
+        .describe(
+            "Link to the delivery's settings page, to share with the user as a markdown link whose text is the delivery name.",
+        ),
+    warnings: z
+        .array(z.string())
+        .describe('Non-fatal issues raised while creating the delivery.'),
+});
+
+export type ToolCreateScheduledDeliveryStructuredContent = z.infer<
+    typeof toolCreateScheduledDeliveryStructuredContentSchema
+>;
+
+// Same envelope as `structuredToolOutputSchema`, which only accepts object
+// metadata; this tool's metadata is a discriminated union on status.
+export const toolCreateScheduledDeliveryOutputSchema = z.object({
+    result: z.string(),
+    metadata: toolCreateScheduledDeliveryMetadataSchema,
+    structuredContent: z.union([
+        toolCreateScheduledDeliveryStructuredContentSchema,
+        toolErrorStructuredContentSchema,
+    ]),
+});
+
+export type ToolCreateScheduledDeliveryOutput = z.infer<
+    typeof toolCreateScheduledDeliveryOutputSchema
+>;

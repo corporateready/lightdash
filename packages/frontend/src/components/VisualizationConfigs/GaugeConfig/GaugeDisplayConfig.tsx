@@ -1,58 +1,83 @@
-import { getItemId, getItemLabelWithoutTableName } from '@lightdash/common';
+import {
+    getGranularityMapFromItems,
+    getItemId,
+    getItemLabelWithoutTableName,
+} from '@lightdash/common';
 import {
     Center,
     Checkbox,
     Group,
-    NumberInput,
     SegmentedControl,
     Stack,
-    TextInput,
     Tooltip,
 } from '@mantine/core';
-import { memo, type FC } from 'react';
+import { memo, useMemo, type FC } from 'react';
+import {
+    getGaugeItem,
+    selectGaugeEditor,
+    selectNumericMetricsAndTableCalculations,
+    selectGaugeSelectedField,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
+import { useGaugeEditorActions } from '../../../hooks/useGaugeChartConfig';
 import FieldSelect from '../../common/FieldSelect';
-import { isGaugeVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import { NumberInput } from '../../common/NumberInput';
+import {
+    useVisualizationInputs,
+    useVisualizationInputSelector,
+} from '../../LightdashVisualization/useVisualizationContext';
 import { Config } from '../common/Config';
+import { LabelEditor } from '../common/LabelEditor';
 import GaugeSections from './GaugeSections';
 import { GaugeValueMode } from './types';
 
 export const GaugeDisplayConfig: FC = memo(() => {
-    const { visualizationConfig } = useVisualizationContext();
-
-    if (!isGaugeVisualizationConfig(visualizationConfig)) {
-        return null;
-    }
-
+    const { itemsMap } = useVisualizationInputs();
+    const numericMetrics = useVisualizationInputSelector(
+        selectNumericMetricsAndTableCalculations,
+    );
+    const selectedFieldId = useVisualizationInputSelector(
+        selectGaugeSelectedField,
+    );
+    const min = useVisualizationSelector((s) => selectGaugeEditor(s).min);
+    const max = useVisualizationSelector((s) => selectGaugeEditor(s).max);
+    const maxFieldId = useVisualizationSelector(
+        (s) => selectGaugeEditor(s).maxFieldId,
+    );
+    const showAxisLabels = useVisualizationSelector(
+        (s) => selectGaugeEditor(s).showAxisLabels,
+    );
+    const customLabel = useVisualizationSelector(
+        (s) => selectGaugeEditor(s).customLabel,
+    );
+    const showPercentage = useVisualizationSelector(
+        (s) => selectGaugeEditor(s).showPercentage,
+    );
+    const customPercentageLabel = useVisualizationSelector(
+        (s) => selectGaugeEditor(s).customPercentageLabel,
+    );
     const {
-        chartConfig: {
-            selectedField: selectedFieldId,
-            min,
-            setMin,
-            max,
-            setMax,
-            maxFieldId,
-            setMaxFieldId,
-            getField,
-            showAxisLabels,
-            setShowAxisLabels,
-            customLabel,
-            setCustomLabel,
-            showPercentage,
-            setShowPercentage,
-            customPercentageLabel,
-            setCustomPercentageLabel,
-        },
-        numericMetrics,
-    } = visualizationConfig;
+        setMin,
+        setMax,
+        setMaxFieldId,
+        setShowAxisLabels,
+        setCustomLabel,
+        setShowPercentage,
+        setCustomPercentageLabel,
+    } = useGaugeEditorActions();
+
+    const granularityFields = useMemo(
+        () => Object.keys(getGranularityMapFromItems(itemsMap)),
+        [itemsMap],
+    );
 
     const maxValueMode = maxFieldId
         ? GaugeValueMode.FIELD
         : GaugeValueMode.FIXED;
-    const maxField = getField(maxFieldId);
-    const selectedField = getField(selectedFieldId);
+    const maxField = getGaugeItem(itemsMap, maxFieldId);
+    const selectedField = getGaugeItem(itemsMap, selectedFieldId);
 
-    const numericMetricsList = Object.values(numericMetrics ?? {});
+    const numericMetricsList = Object.values(numericMetrics);
 
     return (
         <Stack>
@@ -60,25 +85,25 @@ export const GaugeDisplayConfig: FC = memo(() => {
                 <Config.Section>
                     <Config.Heading>Scale</Config.Heading>
                     <NumberInput
+                        size="xs"
                         label="Minimum value"
                         description="Set the minimum value for the gauge scale"
                         value={min}
-                        onChange={(value) => setMin(Number(value))}
+                        onNumberChange={(value) => setMin(value ?? 0)}
                         placeholder="0"
-                        precision={2}
-                        removeTrailingZeros={true}
+                        decimalScale={2}
                     />
-                    <Group spacing="xs" align="flex-end">
+                    <Group gap="xs" align="flex-end">
                         {maxValueMode === GaugeValueMode.FIXED ? (
                             <NumberInput
+                                size="xs"
                                 label="Maximum value"
                                 description="Set the maximum value for the gauge scale"
                                 value={max}
-                                onChange={(value) => setMax(Number(value))}
+                                onNumberChange={(value) => setMax(value ?? 0)}
                                 placeholder="100"
-                                precision={2}
-                                removeTrailingZeros={true}
-                                style={{ flex: 1 }}
+                                decimalScale={2}
+                                flex={1}
                             />
                         ) : (
                             <FieldSelect
@@ -94,7 +119,7 @@ export const GaugeDisplayConfig: FC = memo(() => {
                                     );
                                 }}
                                 hasGrouping
-                                style={{ flex: 1 }}
+                                flex={1}
                             />
                         )}
                         <SegmentedControl
@@ -116,11 +141,7 @@ export const GaugeDisplayConfig: FC = memo(() => {
                             data={[
                                 {
                                     label: (
-                                        <Tooltip
-                                            label="Set the maximum value"
-                                            withinPortal
-                                            variant="xs"
-                                        >
+                                        <Tooltip label="Set the maximum value">
                                             <Center>Value</Center>
                                         </Tooltip>
                                     ),
@@ -128,11 +149,7 @@ export const GaugeDisplayConfig: FC = memo(() => {
                                 },
                                 {
                                     label: (
-                                        <Tooltip
-                                            label="Select a field to use as the maximum value"
-                                            withinPortal
-                                            variant="xs"
-                                        >
+                                        <Tooltip label="Select a field to use as the maximum value">
                                             <Center>Field</Center>
                                         </Tooltip>
                                     ),
@@ -148,6 +165,7 @@ export const GaugeDisplayConfig: FC = memo(() => {
                     <Config.Heading>Appearance</Config.Heading>
 
                     <Checkbox
+                        size="xs"
                         label="Show axis labels"
                         description="Display axis labels and tick marks"
                         checked={showAxisLabels}
@@ -157,6 +175,7 @@ export const GaugeDisplayConfig: FC = memo(() => {
                     />
 
                     <Checkbox
+                        size="xs"
                         label="Show as percentage"
                         description="Display the value as a percentage of the scale"
                         checked={showPercentage}
@@ -166,28 +185,24 @@ export const GaugeDisplayConfig: FC = memo(() => {
                     />
 
                     {showPercentage && (
-                        <TextInput
+                        <LabelEditor
                             label="Custom percentage label"
                             description="Add a custom label after the percentage"
                             value={customPercentageLabel || ''}
-                            onChange={(event) =>
-                                setCustomPercentageLabel(
-                                    event.currentTarget.value || undefined,
-                                )
+                            onChange={(value) =>
+                                setCustomPercentageLabel(value || undefined)
                             }
+                            fields={granularityFields}
                             placeholder="e.g. 'completed'"
                         />
                     )}
 
-                    <TextInput
+                    <LabelEditor
                         label="Custom label"
                         description="Override the default field label"
                         value={customLabel || ''}
-                        onChange={(event) =>
-                            setCustomLabel(
-                                event.currentTarget.value || undefined,
-                            )
-                        }
+                        onChange={(value) => setCustomLabel(value || undefined)}
+                        fields={granularityFields}
                         placeholder={
                             selectedField
                                 ? getItemLabelWithoutTableName(selectedField)

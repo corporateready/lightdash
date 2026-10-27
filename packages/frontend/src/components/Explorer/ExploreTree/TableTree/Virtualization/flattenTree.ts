@@ -8,7 +8,7 @@ import {
     type CustomDimension,
     type Explore,
 } from '@lightdash/common';
-import { LD_FIELD_COLORS } from '../../../../../mantineTheme';
+import { LD_FIELD_COLORS } from '../../../../../theme';
 import { sortNodes } from '../Tree/sortNodes';
 import {
     isGroupNode,
@@ -34,7 +34,9 @@ import {
 } from './types';
 
 /**
- * Recursively flatten a node and its children
+ * Recursively flatten a node and its children.
+ * Active (selected) fields are excluded — they render in the pinned
+ * "Selected" section instead of the tree.
  */
 function flattenNodeRecursive(
     node: TreeNode,
@@ -44,6 +46,7 @@ function flattenNodeRecursive(
     expandedGroups: Set<string>,
     searchResults: string[],
     isSearching: boolean,
+    activeFields: Set<string>,
     depth: number = 0,
     parentPath: string = '',
 ): TreeNodeItem[] {
@@ -54,21 +57,26 @@ function flattenNodeRecursive(
 
     const isGroup = isGroupNode(node);
 
-    if (!isVisible && !isGroup) return items;
+    if (!isGroup && (!isVisible || activeFields.has(node.key))) return items;
 
     // If it's a group, check if any children are visible
     if (isGroup) {
         const groupNode = node;
-        const hasMatchInDescendants = (treeNode: TreeNode): boolean =>
-            searchResults.includes(treeNode.key) ||
-            (isGroupNode(treeNode) &&
-                Object.values(treeNode.children).some(hasMatchInDescendants));
+        const hasVisibleDescendant = (treeNode: TreeNode): boolean => {
+            if (isGroupNode(treeNode)) {
+                return Object.values(treeNode.children).some(
+                    hasVisibleDescendant,
+                );
+            }
+            if (activeFields.has(treeNode.key)) return false;
+            return !isSearching || searchResults.includes(treeNode.key);
+        };
 
-        const hasVisibleChildren =
-            !isSearching ||
-            Object.values(groupNode.children).some(hasMatchInDescendants);
+        const isGroupVisible =
+            (isSearching && searchResults.includes(node.key)) ||
+            Object.values(groupNode.children).some(hasVisibleDescendant);
 
-        if (!hasVisibleChildren && isSearching) {
+        if (!isGroupVisible) {
             return items;
         }
 
@@ -111,6 +119,7 @@ function flattenNodeRecursive(
                         expandedGroups,
                         searchResults,
                         isSearching,
+                        activeFields,
                         depth + 1,
                         childParentPath,
                     ),
@@ -174,6 +183,7 @@ function flattenSection(
             sectionInfo.missingItems
                 ? sectionInfo.missingItems.filter((i) => isCustomDimension(i))
                 : undefined,
+        dashboardMetricIds: options.dashboardMetricIds,
         itemsAlerts: sectionInfo.itemsAlerts,
         orderFieldsBy: sectionInfo.orderFieldsBy,
         isGithubIntegrationEnabled: options.isGithubIntegrationEnabled,
@@ -202,6 +212,7 @@ function flattenSection(
                 expandedGroups,
                 searchResults,
                 isSearching,
+                options.activeFields,
                 baseDepth,
             ),
         );
@@ -275,10 +286,9 @@ function flattenTable(
         });
     }
 
-    // Helper to check if section has any visible items
-    const sectionHasResults = (sectionResults: TreeNodeItem[]) => {
-        return sectionResults.length > 0;
-    };
+    // While searching, only show sections that contain matching fields
+    const shouldShowSection = (sectionItems: TreeNodeItem[]) =>
+        !options.isSearching || sectionItems.length > 0;
 
     // 1. Dimensions section
     const dimensionsMap = Object.values(table.dimensions).reduce(
@@ -286,12 +296,26 @@ function flattenTable(
         {},
     );
     const hasDimensions = Object.keys(dimensionsMap).length > 0;
+    const dimensionItems = hasDimensions
+        ? flattenSection(
+              {
+                  type: TreeSection.Dimensions,
+                  label: 'Dimensions',
+                  color: LD_FIELD_COLORS.dimension.color,
+                  itemsMap: dimensionsMap,
+                  orderFieldsBy: table.orderFieldsBy,
+              },
+              tableName,
+              options.expandedGroups,
+              searchResults,
+              options.isSearching,
+              options,
+              sectionContexts,
+              baseDepth,
+          )
+        : [];
 
-    if (
-        hasDimensions ||
-        (!options.isSearching && !hasDimensions) ||
-        (options.isSearching && searchResults.length > 0)
-    ) {
+    if (shouldShowSection(dimensionItems)) {
         items.push({
             id: `${tableName}-section-dimensions`,
             type: 'section-header',
@@ -304,30 +328,10 @@ function flattenTable(
                 depth: baseDepth,
             },
         } satisfies SectionHeaderItem);
+        items.push(...dimensionItems);
     }
 
-    if (hasDimensions) {
-        const dimensionItems = flattenSection(
-            {
-                type: TreeSection.Dimensions,
-                label: 'Dimensions',
-                color: LD_FIELD_COLORS.dimension.color,
-                itemsMap: dimensionsMap,
-                orderFieldsBy: table.orderFieldsBy,
-            },
-            tableName,
-            options.expandedGroups,
-            searchResults,
-            options.isSearching,
-            options,
-            sectionContexts,
-            baseDepth,
-        );
-
-        if (sectionHasResults(dimensionItems) || !options.isSearching) {
-            items.push(...dimensionItems);
-        }
-    } else if (!options.isSearching) {
+    if (!hasDimensions && !options.isSearching) {
         items.push({
             id: `${tableName}-empty-dimensions`,
             type: 'empty-state',
@@ -346,12 +350,26 @@ function flattenTable(
         {},
     );
     const hasMetrics = Object.keys(metricsMap).length > 0;
+    const metricItems = hasMetrics
+        ? flattenSection(
+              {
+                  type: TreeSection.Metrics,
+                  label: 'Metrics',
+                  color: LD_FIELD_COLORS.metric.color,
+                  itemsMap: metricsMap,
+                  orderFieldsBy: table.orderFieldsBy,
+              },
+              tableName,
+              options.expandedGroups,
+              searchResults,
+              options.isSearching,
+              options,
+              sectionContexts,
+              baseDepth,
+          )
+        : [];
 
-    if (
-        hasMetrics ||
-        (!options.isSearching && !hasMetrics) ||
-        (options.isSearching && searchResults.length > 0)
-    ) {
+    if (shouldShowSection(metricItems)) {
         items.push({
             id: `${tableName}-section-metrics`,
             type: 'section-header',
@@ -371,29 +389,7 @@ function flattenTable(
                     : undefined,
             },
         } satisfies SectionHeaderItem);
-    }
-
-    if (hasMetrics) {
-        const metricItems = flattenSection(
-            {
-                type: TreeSection.Metrics,
-                label: 'Metrics',
-                color: LD_FIELD_COLORS.metric.color,
-                itemsMap: metricsMap,
-                orderFieldsBy: table.orderFieldsBy,
-            },
-            tableName,
-            options.expandedGroups,
-            searchResults,
-            options.isSearching,
-            options,
-            sectionContexts,
-            baseDepth,
-        );
-
-        if (sectionHasResults(metricItems) || !options.isSearching) {
-            items.push(...metricItems);
-        }
+        items.push(...metricItems);
     }
 
     // 3. Custom metrics section
@@ -406,24 +402,6 @@ function flattenTable(
     ].reduce((acc, item) => ({ ...acc, [getItemId(item)]: item }), {});
 
     if (Object.keys(customMetricsMap).length > 0) {
-        items.push({
-            id: `${tableName}-section-custom-metrics`,
-            type: 'section-header',
-            estimatedHeight: ITEM_HEIGHTS.SECTION_HEADER,
-            data: {
-                tableName,
-                treeSection: TreeSection.CustomMetrics,
-                label: 'Custom metrics',
-                color: LD_FIELD_COLORS.metric.color,
-                depth: baseDepth,
-                helpButton: {
-                    href: 'https://docs.lightdash.com/guides/how-to-create-metrics#-adding-custom-metrics-in-the-explore-view',
-                    tooltipText:
-                        'Add custom metrics by hovering over the dimension of your choice & selecting the three-dot Action Menu. Click to view docs.',
-                },
-            },
-        } satisfies SectionHeaderItem);
-
         // Calculate custom metrics issues
         const customMetricsIssues = options.additionalMetrics.reduce(
             (acc, item) => {
@@ -468,7 +446,26 @@ function flattenTable(
             baseDepth,
         );
 
-        items.push(...customMetricItems);
+        if (shouldShowSection(customMetricItems)) {
+            items.push({
+                id: `${tableName}-section-custom-metrics`,
+                type: 'section-header',
+                estimatedHeight: ITEM_HEIGHTS.SECTION_HEADER,
+                data: {
+                    tableName,
+                    treeSection: TreeSection.CustomMetrics,
+                    label: 'Custom metrics',
+                    color: LD_FIELD_COLORS.metric.color,
+                    depth: baseDepth,
+                    helpButton: {
+                        href: 'https://docs.lightdash.com/guides/how-to-create-metrics#-adding-custom-metrics-in-the-explore-view',
+                        tooltipText:
+                            'Add custom metrics by hovering over the dimension of your choice & selecting the three-dot Action Menu. Click to view docs.',
+                    },
+                },
+            } satisfies SectionHeaderItem);
+            items.push(...customMetricItems);
+        }
     }
 
     // 4. Custom dimensions section
@@ -481,19 +478,6 @@ function flattenTable(
     );
 
     if (Object.keys(customDimensionsMap).length > 0) {
-        items.push({
-            id: `${tableName}-section-custom-dimensions`,
-            type: 'section-header',
-            estimatedHeight: ITEM_HEIGHTS.SECTION_HEADER,
-            data: {
-                tableName,
-                treeSection: TreeSection.CustomDimensions,
-                label: 'Custom dimensions',
-                color: LD_FIELD_COLORS.dimension.color,
-                depth: baseDepth,
-            },
-        } satisfies SectionHeaderItem);
-
         const customDimensionItems = flattenSection(
             {
                 type: TreeSection.CustomDimensions,
@@ -514,7 +498,21 @@ function flattenTable(
             baseDepth,
         );
 
-        items.push(...customDimensionItems);
+        if (shouldShowSection(customDimensionItems)) {
+            items.push({
+                id: `${tableName}-section-custom-dimensions`,
+                type: 'section-header',
+                estimatedHeight: ITEM_HEIGHTS.SECTION_HEADER,
+                data: {
+                    tableName,
+                    treeSection: TreeSection.CustomDimensions,
+                    label: 'Custom dimensions',
+                    color: LD_FIELD_COLORS.dimension.color,
+                    depth: baseDepth,
+                },
+            } satisfies SectionHeaderItem);
+            items.push(...customDimensionItems);
+        }
     }
 
     return items;

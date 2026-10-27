@@ -1,4 +1,5 @@
 import {
+    DeleteObjectCommand,
     GetObjectCommand,
     HeadObjectCommand,
     NoSuchKey,
@@ -8,35 +9,45 @@ import {
     S3ServiceException,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
     DownloadFileType,
     getErrorMessage,
     MissingConfigError,
+    NotFoundError,
     S3Error,
     type WarehouseResults,
 } from '@lightdash/common';
 import * as Sentry from '@sentry/node';
 import { ReadStream } from 'fs';
 import { PassThrough, Readable } from 'stream';
-import { LightdashConfig } from '../../config/parseConfig';
+import { type LightdashConfig, type S3Config } from '../../config/parseConfig';
 import Logger from '../../logging/logger';
 import { createContentDispositionHeader } from '../../utils/FileDownloadUtils/FileDownloadUtils';
 import { writeWithBackpressure } from '../../utils/streamUtils';
-import { type FileStorageClient } from '../FileStorage/FileStorageClient';
+import {
+    type FileStorageClient,
+    type FileStreamResult,
+} from '../FileStorage/FileStorageClient';
 import getContentTypeFromFileType from './getContentTypeFromFileType';
 import { S3BaseClient } from './S3BaseClient';
 
 type S3ClientArguments = {
     lightdashConfig: LightdashConfig;
+    s3Config?: S3Config;
 };
 
 export class S3Client extends S3BaseClient implements FileStorageClient {
     lightdashConfig: LightdashConfig;
 
-    constructor({ lightdashConfig }: S3ClientArguments) {
-        super(lightdashConfig.s3);
+    private readonly s3Config: S3Config | undefined;
+
+    constructor({
+        lightdashConfig,
+        s3Config = lightdashConfig.s3,
+    }: S3ClientArguments) {
+        super(s3Config);
         this.lightdashConfig = lightdashConfig;
+        this.s3Config = s3Config;
     }
 
     private async uploadFile(
@@ -45,7 +56,11 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         fileOpts: { contentType: string; attachmentDownloadName?: string },
         urlOptions?: { expiresIn: number },
     ): Promise<string> {
-        if (!this.lightdashConfig.s3?.bucket || this.s3 === undefined) {
+        if (
+            !this.s3Config?.bucket ||
+            this.s3 === undefined ||
+            this.urlSigner === undefined
+        ) {
             throw new MissingConfigError(
                 "Missing S3 bucket configuration, can't upload files",
             );
@@ -53,7 +68,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         const upload = new Upload({
             client: this.s3,
             params: {
-                Bucket: this.lightdashConfig.s3.bucket,
+                Bucket: this.s3Config.bucket,
                 Key: fileId,
                 Body: file,
                 ContentType: fileOpts.contentType,
@@ -64,29 +79,23 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         });
         try {
             await upload.done();
-            const url = await getSignedUrl(
-                this.s3,
-                new GetObjectCommand({
-                    Bucket: this.lightdashConfig.s3.bucket,
-                    Key: fileId,
-                }),
-                {
-                    expiresIn: this.lightdashConfig.s3.expirationTime,
-                    ...urlOptions,
-                },
+            const url = await this.urlSigner.getSignedDownloadUrl(
+                this.s3Config.bucket,
+                fileId,
+                urlOptions?.expiresIn ?? this.s3Config.expirationTime,
             );
             return url;
         } catch (error) {
             if (error instanceof S3ServiceException) {
                 Logger.error(
                     `Failed to upload file to s3 with endpoint: ${
-                        this.lightdashConfig.s3.endpoint ?? 'no endpoint'
+                        this.s3Config.endpoint ?? 'no endpoint'
                     }. ${error.name} - ${error.message}`,
                 );
             } else {
                 Logger.error(
                     `Failed to upload file to s3 with endpoint: ${
-                        this.lightdashConfig.s3.endpoint ?? 'no endpoint'
+                        this.s3Config.endpoint ?? 'no endpoint'
                     }. ${getErrorMessage(error)}`,
                 );
             }
@@ -94,7 +103,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
             Sentry.captureException(
                 new S3Error(
                     `Failed to upload file to s3 with endpoint: ${
-                        this.lightdashConfig.s3.endpoint ?? 'no endpoint'
+                        this.s3Config.endpoint ?? 'no endpoint'
                     }. ${getErrorMessage(error)}`,
                     {
                         fileId,
@@ -159,9 +168,14 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         });
     }
 
-    async uploadZip(zip: ReadStream, zipName: string): Promise<string> {
+    async uploadZip(
+        zip: ReadStream,
+        zipName: string,
+        attachmentDownloadName?: string,
+    ): Promise<string> {
         return this.uploadFile(zipName, zip, {
             contentType: 'application/zip',
+            attachmentDownloadName,
         });
     }
 
@@ -184,7 +198,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         buffer: PassThrough,
         fileId: string,
     ): Promise<() => Promise<string>> {
-        if (!this.lightdashConfig.s3?.bucket || this.s3 === undefined) {
+        if (!this.s3Config?.bucket || this.s3 === undefined) {
             throw new MissingConfigError(
                 "Missing S3 bucket configuration, can't upload files",
             );
@@ -192,7 +206,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         const upload = new Upload({
             client: this.s3,
             params: {
-                Bucket: this.lightdashConfig.s3.bucket,
+                Bucket: this.s3Config.bucket,
                 Key: fileId,
                 Body: buffer,
                 ContentType: `application/jsonl`,
@@ -208,13 +222,13 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
                 if (error instanceof S3ServiceException) {
                     Logger.error(
                         `Failed to stream results to S3 on upload: ${
-                            this.lightdashConfig.s3?.endpoint ?? 'no endpoint'
+                            this.s3Config?.endpoint ?? 'no endpoint'
                         }. ${error.name} - ${error.message}`,
                     );
                 } else {
                     Logger.error(
                         `Failed to stream results to S3 on upload: ${
-                            this.lightdashConfig.s3?.endpoint ?? 'no endpoint'
+                            this.s3Config?.endpoint ?? 'no endpoint'
                         }. ${getErrorMessage(error)}`,
                     );
                 }
@@ -222,7 +236,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
                 Sentry.captureException(
                     new S3Error(
                         `Failed to stream results to S3 on upload: ${
-                            this.lightdashConfig.s3?.endpoint ?? 'no endpoint'
+                            this.s3Config?.endpoint ?? 'no endpoint'
                         }. ${getErrorMessage(error)}`,
                         {
                             fileId,
@@ -237,9 +251,9 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         return onEnd;
     }
 
-    async getFileStream(fileId: string): Promise<Readable> {
+    async getFileStream(fileId: string): Promise<FileStreamResult> {
         const command = new GetObjectCommand({
-            Bucket: this.lightdashConfig.s3?.bucket,
+            Bucket: this.s3Config?.bucket,
             Key: fileId,
         });
 
@@ -248,8 +262,14 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
             if (response === undefined) {
                 throw new S3Error('No response from S3', { fileId });
             }
-            return response.Body as Readable;
+            return {
+                stream: response.Body as Readable,
+                contentDisposition: response.ContentDisposition ?? null,
+            };
         } catch (error) {
+            if (error instanceof NoSuchKey || error instanceof NotFound) {
+                throw new NotFoundError('File not found');
+            }
             if (error instanceof S3Error) {
                 Sentry.captureException(error);
                 throw error;
@@ -284,7 +304,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         },
         attachmentDownloadName?: string,
     ) {
-        if (!this.lightdashConfig.s3 || !this.s3) {
+        if (!this.s3Config || !this.s3) {
             throw new MissingConfigError('S3 configuration is not set');
         }
 
@@ -297,13 +317,13 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         );
 
         Logger.debug(
-            `Creating upload stream for ${this.lightdashConfig.s3.bucket}/${fileName} with content disposition: ${contentDisposition} and contentType: ${opts.contentType}`,
+            `Creating upload stream for ${this.s3Config.bucket}/${fileName} with content disposition: ${contentDisposition} and contentType: ${opts.contentType}`,
         );
 
         const upload = new Upload({
             client: this.s3,
             params: {
-                Bucket: this.lightdashConfig.s3.bucket,
+                Bucket: this.s3Config.bucket,
                 Key: fileName,
                 Body: passThrough,
                 ContentType: opts.contentType,
@@ -318,7 +338,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
 
         let isClosed = false;
         const close = async () => {
-            if (!this.lightdashConfig.s3) {
+            if (!this.s3Config) {
                 throw new MissingConfigError('S3 configuration is not set');
             }
 
@@ -328,12 +348,12 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
                 passThrough.end(); // signal EOF
                 await uploadPromise; // wait for upload to finish
                 Logger.debug(
-                    `Successfully closed upload stream to ${this.lightdashConfig.s3.bucket}/${fileName}`,
+                    `Successfully closed upload stream to ${this.s3Config.bucket}/${fileName}`,
                 );
             } catch (error) {
                 Logger.error(
                     `Error closing upload stream to ${
-                        this.lightdashConfig.s3.bucket
+                        this.s3Config.bucket
                     }/${fileName}: ${getErrorMessage(error)}`,
                 );
                 Logger.debug(`Full error: ${JSON.stringify(error)}`);
@@ -368,32 +388,43 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
      * @returns Pre-signed URL for downloading the file
      */
     async getFileUrl(fileName: string, expiresIn?: number) {
-        if (!this.lightdashConfig.s3?.bucket || this.s3 === undefined) {
+        if (
+            !this.s3Config?.bucket ||
+            this.s3 === undefined ||
+            this.urlSigner === undefined
+        ) {
             throw new MissingConfigError('S3 configuration is not set');
         }
 
-        const url = await getSignedUrl(
-            this.s3,
-            new GetObjectCommand({
-                Bucket: this.lightdashConfig.s3.bucket,
-                Key: fileName,
-            }),
-            {
-                expiresIn: expiresIn ?? this.lightdashConfig.s3.expirationTime,
-            },
+        const url = await this.urlSigner.getSignedDownloadUrl(
+            this.s3Config.bucket,
+            fileName,
+            expiresIn ?? this.s3Config.expirationTime,
         );
 
         return url;
     }
 
+    async deleteFile(fileName: string): Promise<void> {
+        if (!this.s3Config?.bucket || this.s3 === undefined) {
+            throw new MissingConfigError('S3 configuration is not set');
+        }
+        await this.s3.send(
+            new DeleteObjectCommand({
+                Bucket: this.s3Config.bucket,
+                Key: fileName,
+            }),
+        );
+    }
+
     async objectExists(fileName: string): Promise<boolean> {
-        if (!this.lightdashConfig.s3?.bucket || this.s3 === undefined) {
+        if (!this.s3Config?.bucket || this.s3 === undefined) {
             throw new MissingConfigError('S3 configuration is not set');
         }
         try {
             await this.s3.send(
                 new HeadObjectCommand({
-                    Bucket: this.lightdashConfig.s3.bucket,
+                    Bucket: this.s3Config.bucket,
                     Key: fileName,
                 }),
             );
@@ -415,7 +446,7 @@ export class S3Client extends S3BaseClient implements FileStorageClient {
         const timeInSeconds = this.lightdashConfig.persistentDownloadUrls
             .enabled
             ? this.lightdashConfig.persistentDownloadUrls.expirationSeconds
-            : this.lightdashConfig.s3?.expirationTime || 259200;
+            : this.s3Config?.expirationTime || 259200;
         return Math.floor(timeInSeconds / 60 / 60 / 24);
     }
 }

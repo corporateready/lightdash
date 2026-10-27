@@ -5,7 +5,7 @@ import {
     type MetricQuery,
 } from '@lightdash/common';
 import { listFunctions } from '@lightdash/formula';
-import { Box } from '@mantine-8/core';
+import { Box } from '@mantine/core';
 import { RichTextEditor } from '@mantine/tiptap';
 import Mention from '@tiptap/extension-mention';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -15,9 +15,10 @@ import { useEditor, type Editor } from '@tiptap/react';
 import type { JSONContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { useEffect, useMemo, useRef, useState, type FC } from 'react';
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
+import ResizableSplitter from '../../../../components/common/ResizableSplitter';
 import {
     generateFieldSuggestion,
+    sortFieldSuggestions,
     type FieldSuggestionItem,
 } from '../../../../components/common/SuggestionList';
 import styles from './FormulaEditor.module.css';
@@ -147,6 +148,8 @@ const buildGhostPlugin = (state: GhostState) =>
 type Props = {
     explore: Explore | undefined;
     metricQuery: MetricQuery;
+    /** Exact result fields to offer instead of deriving one explore's fields. */
+    fieldSuggestionsOverride?: FieldSuggestionItem[];
     initialContent?: string;
     onTextChange?: (text: string) => void;
     onBlur?: () => void;
@@ -170,13 +173,14 @@ type Props = {
 };
 
 const PLACEHOLDER_FORMULA =
-    'Type @ for fields or # for functions. Example: =IF(@Revenue > 1000, "high", "low")';
+    'Type @ to use your selected fields or # for functions. Example: =IF(@Revenue > 1000, "high", "low")';
 const PLACEHOLDER_DUAL =
-    'Describe the calculation, or =SUM(@Revenue) for a formula';
+    'Describe the calculation, or type @ to use your selected fields — e.g. =SUM(@Revenue)';
 
 export const FormulaEditor: FC<Props> = ({
     explore,
     metricQuery,
+    fieldSuggestionsOverride,
     initialContent,
     onTextChange,
     onBlur,
@@ -209,7 +213,7 @@ export const FormulaEditor: FC<Props> = ({
     const showTabHintRef = useRef(false);
     const showRetryHintRef = useRef(false);
 
-    const fieldSuggestions: FieldSuggestionItem[] = useMemo(() => {
+    const derivedFieldSuggestions: FieldSuggestionItem[] = useMemo(() => {
         if (!explore) return [];
 
         const itemsMap = getItemMap(
@@ -225,18 +229,22 @@ export const FormulaEditor: FC<Props> = ({
             ...(metricQuery.tableCalculations ?? []).map((tc) => tc.name),
         ]);
 
-        return Object.entries(itemsMap)
-            .filter(([id]) => usedFieldIds.has(id))
-            .map(([id, fieldItem]) => ({
-                id,
-                label: isField(fieldItem)
-                    ? fieldItem.label
-                    : 'displayName' in fieldItem
-                      ? (fieldItem.displayName ?? fieldItem.name)
-                      : fieldItem.name,
-                item: fieldItem,
-            }));
+        return sortFieldSuggestions(
+            Object.entries(itemsMap)
+                .filter(([id]) => usedFieldIds.has(id))
+                .map(([id, fieldItem]) => ({
+                    id,
+                    label: isField(fieldItem)
+                        ? fieldItem.label
+                        : 'displayName' in fieldItem
+                          ? (fieldItem.displayName ?? fieldItem.name)
+                          : fieldItem.name,
+                    item: fieldItem,
+                })),
+        );
     }, [explore, metricQuery]);
+    const fieldSuggestions =
+        fieldSuggestionsOverride ?? derivedFieldSuggestions;
 
     const functionSuggestions: FunctionSuggestionItem[] = useMemo(
         () =>
@@ -296,6 +304,9 @@ export const FormulaEditor: FC<Props> = ({
                 blockquote: false,
                 codeBlock: false,
                 horizontalRule: false,
+                link: false,
+                underline: false,
+                trailingNode: false,
             }),
             MentionWithLabel.configure({
                 suggestion: {
@@ -343,7 +354,8 @@ export const FormulaEditor: FC<Props> = ({
     }, [editor, editorRef]);
 
     useEffect(() => {
-        if (!editor || initialContent === undefined) return;
+        if (!editor || editor.isDestroyed || initialContent === undefined)
+            return;
         if (editor.getText() === initialContent) return;
         editor.commands.setContent(
             buildInitialContent(initialContent, fieldSuggestions),
@@ -352,7 +364,7 @@ export const FormulaEditor: FC<Props> = ({
     }, [editor, initialContent, fieldSuggestions]);
 
     useEffect(() => {
-        if (editor && fieldSuggestions.length > 0) {
+        if (editor && !editor.isDestroyed && fieldSuggestions.length > 0) {
             editor.extensionManager.extensions.forEach((ext) => {
                 if (ext.name === 'mention') {
                     ext.options.suggestion =
@@ -399,6 +411,21 @@ export const FormulaEditor: FC<Props> = ({
         placeholder,
     ]);
 
+    const insertField = (field: FieldSuggestionItem) => {
+        if (!editor) return;
+        editor
+            .chain()
+            .focus()
+            .insertContent([
+                {
+                    type: 'mention',
+                    attrs: { id: field.id, label: field.label },
+                },
+                { type: 'text', text: ' ' },
+            ])
+            .run();
+    };
+
     const insertFunction = (text: string) => {
         if (!editor) return;
         if (text.endsWith('(')) {
@@ -421,16 +448,18 @@ export const FormulaEditor: FC<Props> = ({
 
     return (
         <Box className={styles.container}>
-            <PanelGroup
-                direction="vertical"
+            <ResizableSplitter
+                handleLabel="Resize formula reference"
+                classNames={{ handle: styles.resizeHandle }}
+                orientation="vertical"
                 className={styles.panelGroup}
-                autoSaveId="formula-editor-split"
+                lineSize={4}
+                storageKey="formula-editor-split"
             >
-                <Panel
+                <ResizableSplitter.Pane
                     id="formula-editor"
-                    order={1}
                     defaultSize={referenceOpened ? 55 : 100}
-                    minSize={20}
+                    min={20}
                 >
                     <RichTextEditor
                         editor={editor}
@@ -448,31 +477,26 @@ export const FormulaEditor: FC<Props> = ({
                             />
                         </Box>
                     </RichTextEditor>
-                </Panel>
+                </ResizableSplitter.Pane>
                 {referenceOpened && (
-                    <>
-                        <PanelResizeHandle
-                            className={styles.resizeHandle}
-                            aria-label="Resize formula reference"
+                    <ResizableSplitter.Pane
+                        id="formula-reference"
+                        defaultSize={45}
+                        min={20}
+                    >
+                        <FormulaReferencePanel
+                            opened={referenceOpened}
+                            onToggle={onReferenceToggle}
+                            onInsert={insertFunction}
                         />
-                        <Panel
-                            id="formula-reference"
-                            order={2}
-                            defaultSize={45}
-                            minSize={20}
-                        >
-                            <FormulaReferencePanel
-                                opened={referenceOpened}
-                                onToggle={onReferenceToggle}
-                                onInsert={insertFunction}
-                            />
-                        </Panel>
-                    </>
+                    </ResizableSplitter.Pane>
                 )}
-            </PanelGroup>
+            </ResizableSplitter>
             <FormulaReferenceBar
                 opened={referenceOpened}
                 onToggle={onReferenceToggle}
+                fields={fieldSuggestions}
+                onInsertField={insertField}
             />
         </Box>
     );

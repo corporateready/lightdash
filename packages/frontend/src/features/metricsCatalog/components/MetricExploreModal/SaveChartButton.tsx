@@ -1,5 +1,5 @@
 import { type CreateSavedChartVersion, type Explore } from '@lightdash/common';
-import { Button, Tooltip } from '@mantine-8/core';
+import { Button, Tooltip } from '@mantine/core';
 import { IconDeviceFloppy } from '@tabler/icons-react';
 import { useCallback, useState, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
@@ -8,6 +8,8 @@ import {
     useAmbientAiEnabled,
     useGenerateChartMetadata,
 } from '../../../../ee/features/ambientAi';
+import useEmbed from '../../../../ee/providers/Embed/useEmbed';
+import { useContentAuthoringEnabled } from '../../../../hooks/useContentAuthoringEnabled';
 import { DEFAULT_EMPTY_EXPLORE_CONFIG } from '../../../../hooks/useExplorerRoute';
 
 type Props = {
@@ -25,7 +27,9 @@ export const SaveChartButton: FC<Props> = ({
     hasData,
     canSave,
 }) => {
-    const isAmbientAiEnabled = useAmbientAiEnabled();
+    const authoringEnabled = useContentAuthoringEnabled();
+    const isAmbientAiEnabled = useAmbientAiEnabled(projectUuid);
+    const { embedToken, embedWriteContext } = useEmbed();
     const [isSaveChartModalOpen, setIsSaveChartModalOpen] = useState(false);
     const [isPendingOpen, setIsPendingOpen] = useState(false);
 
@@ -70,9 +74,9 @@ export const SaveChartButton: FC<Props> = ({
                 disabled={!canSaveChart}
             >
                 <Button
+                    display={authoringEnabled ? undefined : 'none'}
                     variant="default"
                     size="xs"
-                    radius="md"
                     leftSection={<MantineIcon icon={IconDeviceFloppy} />}
                     disabled={!canSaveChart}
                     loading={isPendingOpen}
@@ -94,6 +98,11 @@ export const SaveChartButton: FC<Props> = ({
                     onClose={() => setIsSaveChartModalOpen(false)}
                     onConfirm={() => setIsSaveChartModalOpen(false)}
                     chartMetadata={generatedMetadata ?? undefined}
+                    restrictedSpaces={
+                        embedToken
+                            ? embedWriteContext?.writableSpaces
+                            : undefined
+                    }
                 />
             )}
         </>

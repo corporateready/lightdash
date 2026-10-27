@@ -1,17 +1,46 @@
 import {
     getFormattedValue,
-    isLineSeriesOption,
+    CartesianSeriesType,
     type PivotReference,
 } from '@lightdash/common';
 import { IconChartBarOff } from '@tabler/icons-react';
-import { type EChartsReactProps, type Opts } from 'echarts-for-react/lib/types';
-import { memo, useCallback, useEffect, useMemo, useRef, type FC } from 'react';
+import { format as echartsFormat, type ECharts } from 'echarts';
+import {
+    type EChartsInstance,
+    type EChartsReactProps,
+    type Opts,
+} from 'echarts-for-react/lib/types';
+import {
+    memo,
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
 import useEchartsCartesianConfig from '../../hooks/echarts/useEchartsCartesianConfig';
-import { useLegendDoubleClickSelection } from '../../hooks/echarts/useLegendDoubleClickSelection';
+import {
+    getDisabledLegendEntries,
+    useLegendDoubleClickSelection,
+    type LegendSelection,
+} from '../../hooks/echarts/useLegendDoubleClickSelection';
+import { useLegendScrollPosition } from '../../hooks/echarts/useLegendScrollPosition';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
 import EChartsReact from '../EChartsReactWrapper';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import { isCartesianVisualizationConfig } from '../LightdashVisualization/types';
+import {
+    useVisualizationConfig,
+    useVisualizationInputs,
+    useVisualizationServices,
+} from '../LightdashVisualization/useVisualizationContext';
+import { SERIES_FOCUS_ACTION } from './chartSeriesFocus';
+import {
+    CHART_POINTER_OPTIONS,
+    createChartTooltipController,
+} from './chartTooltipController';
 
 type EchartsBaseClickEvent = {
     // The component name clicked,
@@ -52,6 +81,10 @@ export type EchartsSeriesClickEvent = EchartsBaseClickEvent & {
     // encode maps x/y axes to indices in dimensionNames (e.g., {x: [0], y: [1]})
     encode?: { x?: number[]; y?: number[] };
     pivotReference?: PivotReference;
+    // Full dataset row for the clicked item, resolved via dataIndex before the
+    // event is forwarded. Stacked bar series carry sparse [x, y] tuples, so
+    // this is the only way consumers can see the row's remaining columns.
+    datasetRow?: Record<string, unknown>;
 };
 
 type EchartsClickEvent = EchartsSeriesClickEvent | EchartsBaseClickEvent;
@@ -130,22 +163,100 @@ const resolveCssVariablesInOptions = <T,>(obj: T): T => {
     return obj;
 };
 
+// How far past the plot area a pointer still counts as hovering the axis
+const AXIS_LABEL_HOVER_BAND_PX = 40;
+
+type GridRect = { x: number; y: number; width: number; height: number };
+
+const isDimensionAxis = (axis: { type?: string } | undefined): boolean =>
+    axis?.type === 'category' || axis?.type === 'time';
+
+// Point inside the plot area that a pointer over the dimension axis labels maps
+// to, or null when the pointer isn't over them
+const getPlotPointForAxisHover = (
+    eCharts: EChartsInstance,
+    x: number,
+    y: number,
+): { x: number; y: number } | null => {
+    const grid: GridRect | undefined = eCharts
+        .getModel?.()
+        ?.getComponent?.('grid', 0)
+        ?.coordinateSystem?.getRect?.();
+    if (!grid) return null;
+
+    const isUnderXAxis =
+        x >= grid.x &&
+        x <= grid.x + grid.width &&
+        y > grid.y + grid.height &&
+        y <= grid.y + grid.height + AXIS_LABEL_HOVER_BAND_PX;
+    const isBesideYAxis =
+        y >= grid.y &&
+        y <= grid.y + grid.height &&
+        x < grid.x &&
+        x >= grid.x - AXIS_LABEL_HOVER_BAND_PX;
+    // getOption() clones the whole option, so only read it when it matters
+    if (!isUnderXAxis && !isBesideYAxis) return null;
+
+    const { xAxis, yAxis } = eCharts.getOption() as {
+        xAxis?: { type?: string }[];
+        yAxis?: { type?: string }[];
+    };
+
+    if (isUnderXAxis && isDimensionAxis(xAxis?.[0])) {
+        return { x, y: grid.y + grid.height / 2 };
+    }
+    if (isBesideYAxis && isDimensionAxis(yAxis?.[0])) {
+        return { x: grid.x + grid.width / 2, y };
+    }
+
+    return null;
+};
+
 const SimpleChart: FC<SimpleChartProps> = memo(
-    ({ onScreenshotReady, onScreenshotError, ...props }) => {
+    ({ onScreenshotReady, onScreenshotError, onChartReady, ...props }) => {
+        const { chartRef, onSeriesContextMenu } = useVisualizationServices();
+        const visualizationConfig = useVisualizationConfig();
         const {
-            chartRef,
             isLoading,
-            onSeriesContextMenu,
             itemsMap,
             resultsData,
             resolvedTimezone,
-        } = useVisualizationContext();
+            isEditMode,
+        } = useVisualizationInputs();
+
+        const cartesianChartConfig = isCartesianVisualizationConfig(
+            visualizationConfig,
+        )
+            ? visualizationConfig.chartConfig
+            : undefined;
+
+        const persistLegendSelection = useCallback(
+            (selected: LegendSelection) => {
+                if (!isEditMode || !cartesianChartConfig) return;
+                const { selected: previousSelected, ...legend } =
+                    cartesianChartConfig.dirtyEchartsConfig?.legend ?? {};
+                const disabledEntries = getDisabledLegendEntries(selected);
+                if (!disabledEntries && !previousSelected) return;
+                cartesianChartConfig.setLegend(
+                    disabledEntries
+                        ? { ...legend, selected: disabledEntries }
+                        : legend,
+                );
+            },
+            [isEditMode, cartesianChartConfig],
+        );
 
         const { selectedLegends, onLegendChange } =
-            useLegendDoubleClickSelection();
+            useLegendDoubleClickSelection(
+                cartesianChartConfig?.dirtyEchartsConfig?.legend?.selected,
+                persistLegendSelection,
+            );
+        // Measured canvas width so outside legends can size their labels
+        const [chartWidth, setChartWidth] = useState<number | null>(null);
         const eChartsOptions = useEchartsCartesianConfig(
             selectedLegends,
             props.isInDashboard,
+            chartWidth,
         );
 
         const hasSignaledScreenshotReady = useRef(false);
@@ -190,22 +301,43 @@ const SimpleChart: FC<SimpleChartProps> = memo(
             resultsData?.setFetchAll(true);
         }, [resultsData]);
 
+        // echarts-for-react owns the instance; it reports each new one here
+        const [eChartsInstance, setEChartsInstance] = useState<ECharts | null>(
+            null,
+        );
+        const handleChartReady = useCallback(
+            (instance: ECharts) => {
+                setEChartsInstance(instance);
+                onChartReady?.(instance);
+            },
+            [onChartReady],
+        );
+        // Error, loading and empty states unmount the chart, which disposes its instance
+        const isChartMounted =
+            !resultsData?.error && !isLoading && !!eChartsOptions;
+        if (!isChartMounted && eChartsInstance) setEChartsInstance(null);
+
         useEffect(() => {
-            const eCharts = chartRef.current?.getEchartsInstance();
-            const dom = eCharts?.getDom();
-            if (!eCharts || !dom) return;
+            const dom = eChartsInstance?.getDom();
+            if (!eChartsInstance || !dom) return;
 
             let rafId: number | null = null;
             const resizeChart = () => {
                 if (rafId !== null) return;
                 rafId = requestAnimationFrame(() => {
-                    eCharts.resize();
                     rafId = null;
+                    if (!eChartsInstance.isDisposed()) eChartsInstance.resize();
                 });
             };
 
             // Observe container size changes (e.g., collapsible card expand/collapse)
-            const observer = new ResizeObserver(resizeChart);
+            const observer = new ResizeObserver((entries) => {
+                // A target detached before cleanup reports 0x0
+                if (entries[0] && !entries[0].target.isConnected) return;
+                const width = entries[0]?.contentRect.width;
+                if (width !== undefined) setChartWidth(Math.round(width));
+                resizeChart();
+            });
             observer.observe(dom);
 
             // Also listen for window resize events
@@ -216,36 +348,45 @@ const SimpleChart: FC<SimpleChartProps> = memo(
                 observer.disconnect();
                 if (rafId !== null) cancelAnimationFrame(rafId);
             };
-        }, [chartRef, eChartsOptions]);
+        }, [eChartsInstance]);
 
-        const onChartContextMenu = useCallback(
-            (e: EchartsClickEvent) => {
-                if (onSeriesContextMenu) {
-                    if (e.event.event.defaultPrevented) {
-                        return;
-                    }
-                    e.event.event.preventDefault();
-                    if (isSeriesClickEvent(e)) {
-                        const series = (eChartsOptions?.series || [])[
-                            e.seriesIndex
-                        ];
-                        if (series && series.encode) {
-                            onSeriesContextMenu(
-                                e,
-                                eChartsOptions?.series || [],
-                            );
-                        }
+        // A changed handler in onEvents makes echarts-for-react re-create the
+        // instance, so the handler stays stable and reads committed values
+        const latestRef = useRef({ eChartsOptions, onSeriesContextMenu });
+        useLayoutEffect(() => {
+            latestRef.current = { eChartsOptions, onSeriesContextMenu };
+        }, [eChartsOptions, onSeriesContextMenu]);
+
+        const onChartContextMenu = useCallback((e: EchartsClickEvent) => {
+            const { eChartsOptions: options, onSeriesContextMenu: onMenu } =
+                latestRef.current;
+            if (onMenu) {
+                if (e.event.event.defaultPrevented) {
+                    return;
+                }
+                e.event.event.preventDefault();
+                if (isSeriesClickEvent(e)) {
+                    const series = (options?.series || [])[e.seriesIndex];
+                    if (series && series.encode) {
+                        // Stacked bar series carry sparse [x, y] tuples,
+                        // so resolve the full dataset row via dataIndex
+                        // for consumers that need the remaining columns
+                        const datasetRow =
+                            options?.dataset?.source?.[e.dataIndex];
+                        onMenu({ ...e, datasetRow }, options?.series || []);
                     }
                 }
-            },
-            [onSeriesContextMenu, eChartsOptions],
-        );
+            }
+        }, []);
 
         const opts = useMemo<Opts>(() => {
-            const baseOpts: Opts & { useCoarsePointer?: boolean } = {
+            const baseOpts: Opts = {
                 renderer: 'svg',
-                // Reduce mouseover hit-testing overhead on dashboard tiles
-                ...(props.isInDashboard && { useCoarsePointer: true }),
+                ...CHART_POINTER_OPTIONS,
+                // Retain the larger native touch target on coarse pointers.
+                ...(window.matchMedia('(pointer: coarse)').matches
+                    ? { pointerSize: 44 }
+                    : {}),
             };
 
             if (!eChartsOptions) {
@@ -259,7 +400,7 @@ const SimpleChart: FC<SimpleChartProps> = memo(
                 return { ...baseOpts, renderer: 'canvas' };
             }
             return baseOpts;
-        }, [eChartsOptions, props.isInDashboard]);
+        }, [eChartsOptions]);
 
         // When using canvas renderer, resolve CSS variables to computed values
         // since canvas doesn't have DOM access to resolve var(--...) strings.
@@ -270,206 +411,112 @@ const SimpleChart: FC<SimpleChartProps> = memo(
             return resolveCssVariablesInOptions(eChartsOptions);
         }, [eChartsOptions, opts.renderer]);
 
-        // Track whether we're currently in item-tooltip mode to avoid
-        // redundant setOption calls that cause flickering in mixed charts.
-        const isItemTooltipActive = useRef(false);
-        const mouseOverTimer = useRef<
-            ReturnType<typeof setTimeout> | undefined
-        >(undefined);
-        const highlightTimer = useRef<
-            ReturnType<typeof setTimeout> | undefined
-        >(undefined);
-        const hasDispatchedHighlight = useRef(false);
+        const { optionWithScrollPosition, onLegendScroll } =
+            useLegendScrollPosition(chartRef, resolvedEChartsOptions);
 
-        const handleOnMouseOver = useCallback(
-            (params: any) => {
-                const eCharts = chartRef.current?.getEchartsInstance();
+        // Keep native axis/legend tooltips and local emphasis. Narrow segment tips
+        // before paint. A short grace period bridges gaps without rebuilding options.
+        useEffect(() => {
+            const eCharts = eChartsInstance;
+            if (!eCharts || eCharts.isDisposed() || !resolvedEChartsOptions)
+                return;
 
-                if (eCharts) {
-                    let setTooltipItemTrigger = true;
-                    // Tooltip trigger 'item' does not work when symbol is not shown; reference: https://github.com/apache/echarts/issues/14563
-                    const series = eCharts.getOption().series;
-
-                    const isGrouped = (series as any[]).some(
-                        (serie) => serie.pivotReference !== undefined,
-                    );
-                    if (Array.isArray(series) && !isGrouped) return null;
-
+            const zRender = eCharts.getZr();
+            let focusedSeries: number | null = null;
+            const controller = createChartTooltipController<any>({
+                dispatchAction: (action) => eCharts.dispatchAction(action),
+                focusItem: (item) => {
+                    const nextSeries = item?.seriesIndex ?? null;
+                    if (nextSeries === focusedSeries || eCharts.isDisposed())
+                        return;
+                    focusedSeries = nextSeries;
+                    eCharts.dispatchAction({
+                        type: SERIES_FOCUS_ACTION,
+                        seriesIndex: nextSeries,
+                    });
+                },
+                containsPoint: ({ x, y }) =>
+                    eCharts.containPixel({ gridIndex: 0 }, [x, y]),
+                projectAxisPoint: ({ x, y }) =>
+                    getPlotPointForAxisHover(eCharts, x, y),
+                formatItem: (param) => {
+                    // Item events lack the axis header. Preserve the same
+                    // formatting used by the full-category tooltip.
+                    let axisValueLabel = param.name;
                     if (
-                        Array.isArray(series) &&
-                        isLineSeriesOption(series[params.seriesIndex])
+                        param.value !== null &&
+                        typeof param.value === 'object' &&
+                        !Array.isArray(param.value)
                     ) {
-                        setTooltipItemTrigger =
-                            !!series[params.seriesIndex].showSymbol;
+                        const dimensionIndex = param.encode?.x?.[0];
+                        const dim =
+                            dimensionIndex !== undefined
+                                ? param.dimensionNames[dimensionIndex]
+                                : '';
+                        const axisValue = param.value[dim];
+                        axisValueLabel = itemsMap
+                            ? getFormattedValue(
+                                  axisValue,
+                                  dim,
+                                  itemsMap,
+                                  true,
+                                  undefined,
+                                  undefined,
+                                  resolvedTimezone,
+                              )
+                            : axisValue;
                     }
-
-                    if (
-                        setTooltipItemTrigger &&
-                        eChartsOptions?.tooltip.formatter
-                    ) {
-                        // Clear any pending mouseOut reset to prevent race conditions
-                        // when moving between series elements quickly
-                        if (mouseOverTimer.current) {
-                            clearTimeout(mouseOverTimer.current);
-                            mouseOverTimer.current = undefined;
-                        }
-
-                        if (!isItemTooltipActive.current) {
-                            isItemTooltipActive.current = true;
-                            eCharts.setOption(
-                                {
-                                    tooltip: {
-                                        trigger: 'item',
-                                        formatter: (param: any) => {
-                                            // item param are slightly different to axis params, and they don't contain the axisValueLabel
-                                            // so we need to generate it here (and wrap it in an array) and then reuse the formatter used
-                                            // on `useEchartsCartesianConfig` to generate the tooltip
-                                            if (
-                                                eChartsOptions.tooltip.formatter
-                                            ) {
-                                                // When using tuple mode (array values) for stacked bars
-                                                // param.value is an array like ["Dr. Wilson", 3]
-                                                // param.name contains the category header
-                                                if (
-                                                    Array.isArray(param.value)
-                                                ) {
-                                                    return (
-                                                        eChartsOptions.tooltip
-                                                            .formatter as any
-                                                    )([
-                                                        {
-                                                            ...param,
-                                                            axisValueLabel:
-                                                                param.name,
-                                                        },
-                                                    ]);
-                                                }
-
-                                                // When using primitive values (non-object)
-                                                if (
-                                                    typeof param.value !==
-                                                        'object' ||
-                                                    param.value === null
-                                                ) {
-                                                    return (
-                                                        eChartsOptions.tooltip
-                                                            .formatter as any
-                                                    )([
-                                                        {
-                                                            ...param,
-                                                            axisValueLabel:
-                                                                param.name,
-                                                        },
-                                                    ]);
-                                                }
-
-                                                // When using dataset mode with object values (100% stacked)
-                                                // param.value is an object with dimension keys
-                                                const dim =
-                                                    param.encode?.x?.[0] !==
-                                                    undefined
-                                                        ? param.dimensionNames[
-                                                              param.encode?.x[0]
-                                                          ]
-                                                        : '';
-
-                                                const axisValue =
-                                                    param.value[dim];
-                                                const formattedValue = itemsMap
-                                                    ? getFormattedValue(
-                                                          axisValue,
-                                                          dim,
-                                                          itemsMap,
-                                                          true,
-                                                          undefined,
-                                                          undefined,
-                                                          resolvedTimezone,
-                                                      )
-                                                    : axisValue;
-
-                                                return (
-                                                    eChartsOptions.tooltip
-                                                        .formatter as any
-                                                )([
-                                                    {
-                                                        ...param,
-                                                        axisValueLabel:
-                                                            formattedValue,
-                                                    },
-                                                ]);
-                                            }
-                                        },
-                                    },
-                                },
-                                false,
-                                true, // lazy update
-                            );
-                        }
-                    }
-                    // Wait for tooltip to change from `axis` to `item` and keep hovered on item highlighted
-                    if (highlightTimer.current) {
-                        clearTimeout(highlightTimer.current);
-                    }
-                    highlightTimer.current = setTimeout(() => {
-                        eCharts.dispatchAction({
-                            type: 'highlight',
-                            seriesIndex: params.seriesIndex,
-                        });
-                        hasDispatchedHighlight.current = true;
-                        highlightTimer.current = undefined;
-                    }, 100);
-                }
-            },
-            [chartRef, eChartsOptions?.tooltip, itemsMap, resolvedTimezone],
-        );
-
-        const handleOnMouseOut = useCallback(() => {
-            // Cancel any pending highlight that hasn't fired yet so we don't
-            // re-highlight after the cursor has already left the chart area.
-            if (highlightTimer.current) {
-                clearTimeout(highlightTimer.current);
-                highlightTimer.current = undefined;
-            }
-            // Explicitly clear emphasis state, but only if we previously
-            // dispatched a manual `highlight`. That manual dispatch bypasses
-            // ECharts' automatic mouseout downplay, so without this mirror
-            // the focused series stays blurred-focused when the cursor leaves.
-            // When no manual highlight was dispatched (e.g. fast hovers under
-            // the 100ms threshold), ECharts' built-in mouseout handles cleanup
-            // and dispatching downplay here interferes with internal state on
-            // mixed charts during rapid bar↔line transitions.
-            if (hasDispatchedHighlight.current) {
-                const eCharts = chartRef.current?.getEchartsInstance();
-                if (eCharts) {
-                    eCharts.dispatchAction({ type: 'downplay' });
-                }
-                hasDispatchedHighlight.current = false;
-            }
-            // Debounce the reset to prevent rapid axis<->item tooltip flicker
-            // when moving between adjacent series elements in mixed charts
-            if (mouseOverTimer.current) {
-                clearTimeout(mouseOverTimer.current);
-            }
-            mouseOverTimer.current = setTimeout(() => {
-                const echartsInstance = chartRef.current?.getEchartsInstance();
-                if (echartsInstance) {
-                    isItemTooltipActive.current = false;
-                    const tooltipOptions =
-                        resolvedEChartsOptions?.tooltip ??
-                        eChartsOptions?.tooltip;
-                    echartsInstance.setOption(
+                    return (resolvedEChartsOptions.tooltip.formatter as any)([
                         {
-                            tooltip: tooltipOptions,
+                            ...param,
+                            axisValueLabel,
+                            marker: echartsFormat.getTooltipMarker(param.color),
                         },
-                        false,
-                        true, // lazy update
-                    );
+                    ]);
+                },
+            });
+            const onMouseOver = (params: any) => {
+                const series = resolvedEChartsOptions.series ?? [];
+                const hoveredSeries = series[params.seriesIndex];
+                // Single-series charts and lines without symbols keep the
+                // category tooltip. Reference lines also keep their native tip.
+                if (
+                    params.componentType === 'series' &&
+                    series.length > 1 &&
+                    hoveredSeries &&
+                    (hoveredSeries.type !== CartesianSeriesType.LINE ||
+                        hoveredSeries.showSymbol)
+                ) {
+                    controller.setItem(params);
                 }
-            }, 50);
+            };
+            const onMouseOut = () => controller.setItem(null);
+            const onMouseMove = ({
+                offsetX,
+                offsetY,
+            }: {
+                offsetX: number;
+                offsetY: number;
+            }) => controller.move({ x: offsetX, y: offsetY });
+
+            eCharts.on('mouseover', onMouseOver);
+            eCharts.on('mouseout', onMouseOut);
+            zRender.on('mousemove', onMouseMove);
+            zRender.on('globalout', controller.leave);
+            return () => {
+                controller.dispose();
+                if (!eCharts.isDisposed()) {
+                    eCharts.off('mouseover', onMouseOver);
+                    eCharts.off('mouseout', onMouseOut);
+                    zRender.off('mousemove', onMouseMove);
+                    zRender.off('globalout', controller.leave);
+                }
+            };
         }, [
-            chartRef,
-            eChartsOptions?.tooltip,
-            resolvedEChartsOptions?.tooltip,
+            eChartsInstance,
+            resolvedEChartsOptions,
+            itemsMap,
+            resolvedTimezone,
         ]);
 
         // Memoize onEvents to prevent echarts-for-react from disposing and
@@ -480,16 +527,10 @@ const SimpleChart: FC<SimpleChartProps> = memo(
             () => ({
                 contextmenu: onChartContextMenu,
                 click: onChartContextMenu,
-                mouseover: handleOnMouseOver,
-                mouseout: handleOnMouseOut,
                 legendselectchanged: onLegendChange,
+                legendscroll: onLegendScroll,
             }),
-            [
-                onChartContextMenu,
-                handleOnMouseOver,
-                handleOnMouseOut,
-                onLegendChange,
-            ],
+            [onChartContextMenu, onLegendChange, onLegendScroll],
         );
 
         if (resultsData?.error) return <EmptyChart />;
@@ -512,13 +553,14 @@ const SimpleChart: FC<SimpleChartProps> = memo(
                               width: '100%',
                           }
                 }
-                ref={chartRef}
-                option={resolvedEChartsOptions ?? eChartsOptions}
-                notMerge
                 lazyUpdate={props.isInDashboard}
+                {...props}
+                ref={chartRef}
+                option={optionWithScrollPosition ?? eChartsOptions}
+                notMerge
                 opts={opts}
                 onEvents={onEvents}
-                {...props}
+                onChartReady={handleChartReady}
             />
         );
     },

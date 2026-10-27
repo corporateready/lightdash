@@ -1,19 +1,25 @@
-import { ManagedAgentScheduleOption } from '@lightdash/common';
-import { Box, Group, Select, Stack, Text } from '@mantine-8/core';
+import { type ApiError, ManagedAgentScheduleOption } from '@lightdash/common';
+import { Box, Group, Select, Stack, Text } from '@mantine/core';
 import {
-    IconBolt,
     IconChartBar,
     IconClock,
+    IconTarget,
     IconTool,
     IconTrendingUp,
 } from '@tabler/icons-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { type FC, useState } from 'react';
-import { lightdashApi } from '../../../api';
+import { type LightdashApi } from '../../../api';
 import MantineModal from '../../../components/common/MantineModal';
+import useToaster from '../../../hooks/toaster/useToaster';
+import useApp from '../../../providers/App/useApp';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
+import { useManagedAgentRuntime } from './hooks/useManagedAgentRuntime';
+import { ManagedAgentRuntimeDetails } from './ManagedAgentRuntimeDetails';
 import classes from './ManagedAgentSetupModal.module.css';
 
 const updateSettings = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     body: { enabled: boolean; schedule: ManagedAgentScheduleOption },
 ) =>
@@ -38,7 +44,7 @@ const CAPABILITIES = [
     {
         icon: IconClock,
         title: 'Stale content cleanup',
-        detail: 'Flags charts & dashboards not viewed in 3+ months and preview projects older than 3 months. Zero-view content is soft-deleted.',
+        detail: 'Reviews stale charts, dashboards, and preview projects. Flags or deletes content according to the cleanup mode and project protections.',
     },
     {
         icon: IconTool,
@@ -64,12 +70,16 @@ export const ManagedAgentSetupModal: FC<{
     onClose: () => void;
     onEnabled: () => void;
 }> = ({ projectUuid, opened, onClose, onEnabled }) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
+    const { user } = useApp();
+    const runtime = useManagedAgentRuntime(projectUuid, opened);
+    const { showToastApiError } = useToaster();
     const [schedule, setSchedule] = useState(ManagedAgentScheduleOption.DAILY);
 
-    const mutation = useMutation({
+    const mutation = useMutation<unknown, ApiError>({
         mutationFn: () =>
-            updateSettings(projectUuid, {
+            updateSettings(lightdashApi, projectUuid, {
                 enabled: true,
                 schedule,
             }),
@@ -82,6 +92,12 @@ export const ManagedAgentSetupModal: FC<{
             });
             onEnabled();
         },
+        onError: (error) => {
+            showToastApiError({
+                title: 'Failed to enable Autopilot',
+                apiError: error.error,
+            });
+        },
     });
 
     return (
@@ -89,16 +105,21 @@ export const ManagedAgentSetupModal: FC<{
             opened={opened}
             onClose={onClose}
             title="Enable Autopilot"
-            icon={IconBolt}
+            icon={IconTarget}
             size="lg"
             onConfirm={() => mutation.mutate()}
             confirmLabel="Enable"
+            confirmLoading={mutation.isLoading}
+            confirmDisabled={
+                runtime.isLoading || runtime.isError || !!runtime.data?.error
+            }
+            cancelDisabled={mutation.isLoading}
         >
             <Stack gap="xl">
                 {/* Description */}
                 <Text fz="sm" c="dimmed">
                     An AI agent that monitors your project&apos;s health
-                    automatically — cleaning up stale content, fixing broken
+                    automatically, cleaning up stale content, fixing broken
                     charts, and surfacing insights. All actions are logged and
                     reversible.
                 </Text>
@@ -119,17 +140,25 @@ export const ManagedAgentSetupModal: FC<{
                             <Box className={classes.capIcon}>
                                 <cap.icon size={14} />
                             </Box>
-                            <div>
+                            <Box>
                                 <Text fz="sm" fw={600}>
                                     {cap.title}
                                 </Text>
                                 <Text fz="xs" c="dimmed" lh={1.5}>
                                     {cap.detail}
                                 </Text>
-                            </div>
+                            </Box>
                         </Group>
                     ))}
                 </Stack>
+
+                <ManagedAgentRuntimeDetails
+                    runtime={runtime}
+                    canManageAiSettings={
+                        user.data?.ability.can('manage', 'Organization') ??
+                        false
+                    }
+                />
 
                 {/* Schedule */}
                 <Box>

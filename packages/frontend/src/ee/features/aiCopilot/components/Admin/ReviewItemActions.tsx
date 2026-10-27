@@ -1,0 +1,409 @@
+import {
+    AI_AGENT_SKILL_FILE_NAME,
+    buildAiAgentSkillMarkdown,
+    getReviewItemSkillProposal,
+    type AiAgentReviewItemSummary,
+} from '@lightdash/common';
+import {
+    ActionIcon,
+    Button,
+    Group,
+    Loader,
+    Stack,
+    Text,
+    Tooltip,
+} from '@mantine/core';
+import {
+    IconAlertCircle,
+    IconInfoCircle,
+    IconLayoutColumns,
+    IconLicense,
+} from '@tabler/icons-react';
+import { type FC, type SyntheticEvent, useState } from 'react';
+import { Link, useNavigate } from 'react-router';
+import MantineIcon from '../../../../../components/common/MantineIcon';
+import {
+    useAiAgentAdminReviewItem,
+    useCreateAiAgentReviewItemWriteback,
+    useUpdateAiAgentReviewItemStatus,
+} from '../../hooks/useAiAgentAdmin';
+import { AiAgentSkillModal } from '../AiAgentSkillModal';
+import { ProjectContextWritebackModal } from './ProjectContextWritebackModal';
+import {
+    getReviewItemAgentUuid,
+    shouldShowWritebackBlockedReason,
+    writebackBlockedReasonDescriptions,
+    writebackBlockedReasonLabels,
+} from './reviewItemDetails';
+
+type ReviewItemActionsProps = {
+    reviewItem: AiAgentReviewItemSummary;
+    /**
+     * `header` renders the compact modal-header form: the stage's primary
+     * action (Accept / Open workspace / Create PR) with Dismiss demoted to a
+     * quiet secondary beside it, and no blocked-reason note.
+     */
+    mode?: 'table' | 'drawer' | 'header';
+    /** Suppress the "Open workspace" button (e.g. when it lives elsewhere). */
+    hideWorkspaceLink?: boolean;
+    /** Suppress the writeback-blocked note (e.g. when it's rendered elsewhere). */
+    hideBlockedReason?: boolean;
+};
+
+export const ReviewItemActions: FC<ReviewItemActionsProps> = ({
+    reviewItem,
+    mode = 'table',
+    hideWorkspaceLink = false,
+    hideBlockedReason = false,
+}) => {
+    const createWriteback = useCreateAiAgentReviewItemWriteback();
+    const updateStatus = useUpdateAiAgentReviewItemStatus();
+    const navigate = useNavigate();
+    const [previewOpen, setPreviewOpen] = useState(false);
+    const [skillModalOpen, setSkillModalOpen] = useState(false);
+
+    const workspaceUrl = `/generalSettings/ai/issues/${encodeURIComponent(
+        reviewItem.fingerprint,
+    )}`;
+
+    const propInFlight =
+        reviewItem.prWritebackStatus === 'queued' ||
+        reviewItem.prWritebackStatus === 'running' ||
+        reviewItem.remediation?.status === 'pr_open';
+    const { data: polled } = useAiAgentAdminReviewItem(reviewItem.fingerprint, {
+        enabled: propInFlight,
+        refetchInterval:
+            reviewItem.remediation?.status === 'pr_open' ? 10_000 : 2500,
+    });
+    const current = polled ?? reviewItem;
+
+    // Terminal items are already closed; everything before that (To Do, In
+    // Progress, …) can still be dismissed.
+    const isTerminal =
+        current.status === 'resolved' ||
+        current.status === 'dismissed' ||
+        current.status === 'duplicate';
+
+    const isWritebackInFlight =
+        current.prWritebackStatus === 'queued' ||
+        current.prWritebackStatus === 'running';
+    const canCreatePr = current.writebackEligibility.eligible;
+    const blockedReason = current.writebackEligibility.eligible
+        ? null
+        : current.writebackEligibility.reason;
+    const blockedReasonLabel = shouldShowWritebackBlockedReason(blockedReason)
+        ? writebackBlockedReasonLabels[blockedReason]
+        : null;
+    const blockedReasonDescription = shouldShowWritebackBlockedReason(
+        blockedReason,
+    )
+        ? (writebackBlockedReasonDescriptions[blockedReason] ?? null)
+        : null;
+    const previewsDiff = current.primaryRootCause === 'project_context';
+    const skillProposal = getReviewItemSkillProposal(current);
+    const skillDraftFiles = skillProposal
+        ? {
+              [AI_AGENT_SKILL_FILE_NAME]: buildAiAgentSkillMarkdown(
+                  {
+                      name: skillProposal.name,
+                      description: skillProposal.description,
+                      ...(skillProposal.arguments.length > 0
+                          ? { arguments: skillProposal.arguments }
+                          : {}),
+                      ...(skillProposal.argumentHint
+                          ? { 'argument-hint': skillProposal.argumentHint }
+                          : {}),
+                  },
+                  skillProposal.instructions,
+              ),
+          }
+        : null;
+
+    const phase = current.prWritebackMessage ?? 'Opening pull request…';
+    const remediationError =
+        current.remediation?.status === 'failed'
+            ? current.remediation.errorMessage
+            : null;
+    const buttonSize: 'xs' | 'compact-xs' =
+        mode === 'table' ? 'compact-xs' : 'xs';
+    const stopPropagation = (event: SyntheticEvent) => event.stopPropagation();
+    const errorIconSize = mode === 'table' ? 15 : 16;
+    // In the header the stage's primary action reads as the app's primary
+    // (filled dark) and Dismiss demotes to a quiet secondary beside it.
+    const isHeader = mode === 'header';
+    // Saving the drafted skill is the card's remediation, so it is the primary
+    // action wherever the card is, triage included.
+    const createSkillButton =
+        skillDraftFiles && !isTerminal ? (
+            <Tooltip
+                label="Review the drafted skill and save it to this agent"
+                maw={260}
+            >
+                <Button
+                    size={buttonSize}
+                    radius={isHeader ? 'md' : undefined}
+                    color={isHeader ? 'dark' : 'indigo'}
+                    leftSection={<MantineIcon size="sm" icon={IconLicense} />}
+                    onClick={(event) => {
+                        stopPropagation(event);
+                        setSkillModalOpen(true);
+                    }}
+                >
+                    Create skill
+                </Button>
+            </Tooltip>
+        ) : null;
+
+    return (
+        <>
+            {isWritebackInFlight ? (
+                // The modal's Activity timeline owns the live progress row —
+                // a second spinner in the corner would duplicate it.
+                mode !== 'table' ? null : (
+                    <Tooltip label={phase} openDelay={300}>
+                        <Group gap={8} wrap="nowrap" maw={180}>
+                            <Loader size={12} color="ldGray.5" />
+                            <Text fz="xs" c="dimmed" lineClamp={1}>
+                                {phase}
+                            </Text>
+                        </Group>
+                    </Tooltip>
+                )
+            ) : current.status === 'triage' ? (
+                <Group gap={4} wrap="nowrap">
+                    {createSkillButton ?? (
+                        <Button
+                            size={buttonSize}
+                            color={isHeader ? 'dark' : 'indigo'}
+                            loading={updateStatus.isLoading}
+                            onClick={(event) => {
+                                stopPropagation(event);
+                                updateStatus.mutate({
+                                    fingerprint: current.fingerprint,
+                                    body: {
+                                        status: 'open',
+                                        dismissedReason: null,
+                                    },
+                                });
+                            }}
+                        >
+                            Accept
+                        </Button>
+                    )}
+                    <Button
+                        size={buttonSize}
+                        variant="default"
+                        loading={updateStatus.isLoading}
+                        onClick={(event) => {
+                            stopPropagation(event);
+                            updateStatus.mutate({
+                                fingerprint: current.fingerprint,
+                                body: {
+                                    status: 'dismissed',
+                                    dismissedReason: 'not_actionable',
+                                },
+                            });
+                        }}
+                    >
+                        Dismiss
+                    </Button>
+                </Group>
+            ) : (
+                <Stack gap={mode === 'drawer' ? 'xs' : 6} align="flex-start">
+                    <Group gap={4} wrap="wrap">
+                        {/* Once a remediation exists, the workspace is the one
+                            place to view the PR and the verification — collapse
+                            to a single entry point. */}
+                        {current.remediation
+                            ? !hideWorkspaceLink && (
+                                  <Button
+                                      component={Link}
+                                      to={workspaceUrl}
+                                      onClick={stopPropagation}
+                                      size={buttonSize}
+                                      fz="xs"
+                                      radius={isHeader ? 'md' : undefined}
+                                      variant={isHeader ? 'filled' : 'light'}
+                                      color={isHeader ? 'dark' : 'indigo'}
+                                      leftSection={
+                                          <MantineIcon
+                                              size="sm"
+                                              icon={IconLayoutColumns}
+                                          />
+                                      }
+                                  >
+                                      Open workspace
+                                  </Button>
+                              )
+                            : current.linkedPrUrl && (
+                                  <Button
+                                      component="a"
+                                      href={current.linkedPrUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={stopPropagation}
+                                      size={buttonSize}
+                                      fz="xs"
+                                      loading={createWriteback.isLoading}
+                                      variant="subtle"
+                                      color="gray"
+                                  >
+                                      View PR
+                                  </Button>
+                              )}
+
+                        {createSkillButton}
+
+                        {canCreatePr && !current.linkedPrUrl && (
+                            <Tooltip
+                                label="Open a pull request against the connected project (runs in the background, may take a few minutes)"
+                                maw={260}
+                            >
+                                <Button
+                                    size={buttonSize}
+                                    variant="default"
+                                    loading={createWriteback.isLoading}
+                                    onClick={(event) => {
+                                        stopPropagation(event);
+                                        if (previewsDiff) {
+                                            setPreviewOpen(true);
+                                        } else {
+                                            void createWriteback
+                                                .mutateAsync(
+                                                    current.fingerprint,
+                                                )
+                                                .then(() =>
+                                                    navigate(workspaceUrl),
+                                                );
+                                        }
+                                    }}
+                                >
+                                    Create PR
+                                </Button>
+                            </Tooltip>
+                        )}
+
+                        {remediationError && (
+                            <Tooltip
+                                label={remediationError}
+                                openDelay={300}
+                                maw={320}
+                            >
+                                <ActionIcon
+                                    aria-label="Show writeback error"
+                                    color="red"
+                                    variant="transparent"
+                                    size={20}
+                                    onClick={stopPropagation}
+                                >
+                                    <MantineIcon
+                                        icon={IconAlertCircle}
+                                        color="red.6"
+                                        size={errorIconSize}
+                                    />
+                                </ActionIcon>
+                            </Tooltip>
+                        )}
+
+                        {/* Dismiss stays available past triage so an item can be
+                            closed at any stage (the triage lane has its own
+                            Accept/Dismiss pair above). */}
+                        {!isTerminal && (
+                            <Button
+                                size={buttonSize}
+                                variant="subtle"
+                                color="gray"
+                                loading={updateStatus.isLoading}
+                                onClick={(event) => {
+                                    stopPropagation(event);
+                                    updateStatus.mutate({
+                                        fingerprint: current.fingerprint,
+                                        body: {
+                                            status: 'dismissed',
+                                            dismissedReason: 'not_actionable',
+                                        },
+                                    });
+                                }}
+                            >
+                                Dismiss
+                            </Button>
+                        )}
+                    </Group>
+
+                    {!hideBlockedReason &&
+                        !isHeader &&
+                        !canCreatePr &&
+                        !current.linkedPrUrl &&
+                        !isWritebackInFlight &&
+                        blockedReasonLabel &&
+                        (mode === 'drawer' ? (
+                            <Group
+                                gap={10}
+                                wrap="nowrap"
+                                align="flex-start"
+                                maw={360}
+                            >
+                                <MantineIcon
+                                    icon={IconInfoCircle}
+                                    size={20}
+                                    stroke={1.6}
+                                    color="ldGray.5"
+                                />
+                                <Stack gap={2}>
+                                    <Text fz="xs" fw={600} c="ldGray.7">
+                                        {blockedReasonLabel}
+                                    </Text>
+                                    {blockedReasonDescription && (
+                                        <Text fz="xs" c="dimmed" lh={1.45}>
+                                            {blockedReasonDescription}
+                                        </Text>
+                                    )}
+                                </Stack>
+                            </Group>
+                        ) : (
+                            <Tooltip label={blockedReasonLabel} openDelay={300}>
+                                <Group gap={4} wrap="nowrap" maw={220}>
+                                    <MantineIcon
+                                        icon={IconInfoCircle}
+                                        size="xs"
+                                    />
+                                    <Text
+                                        fz="xs"
+                                        c="dimmed"
+                                        fw={500}
+                                        lineClamp={1}
+                                    >
+                                        {blockedReasonLabel}
+                                    </Text>
+                                </Group>
+                            </Tooltip>
+                        ))}
+                </Stack>
+            )}
+
+            {previewsDiff && (
+                <ProjectContextWritebackModal
+                    fingerprint={current.fingerprint}
+                    opened={previewOpen}
+                    onClose={() => setPreviewOpen(false)}
+                />
+            )}
+
+            {skillModalOpen && skillDraftFiles && (
+                <AiAgentSkillModal
+                    skill={null}
+                    draftFiles={skillDraftFiles}
+                    bindToAgentUuid={getReviewItemAgentUuid(current)}
+                    onCreated={() => {
+                        // Saving the skill is the remediation for this card.
+                        updateStatus.mutate({
+                            fingerprint: current.fingerprint,
+                            body: { status: 'resolved', dismissedReason: null },
+                        });
+                    }}
+                    onClose={() => setSkillModalOpen(false)}
+                />
+            )}
+        </>
+    );
+};

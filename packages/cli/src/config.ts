@@ -18,6 +18,7 @@ export type Config = {
         serverUrl?: string;
         project?: string;
         projectName?: string;
+        source?: string;
         /**
          * This is an API token that is used to authenticate with the Lightdash API.
          * It could be a personal access token or a service account token.
@@ -33,16 +34,63 @@ export type Config = {
     };
 };
 
+/** @internal Exported for filesystem-permission regression tests. */
+export const ensureConfigFilePermissions = async (
+    filePath: string,
+): Promise<void> => {
+    if (process.platform === 'win32') return;
+    await fs.chmod(path.dirname(filePath), 0o700);
+    try {
+        await fs.chmod(filePath, 0o600);
+    } catch (error: unknown) {
+        if (
+            !(
+                error instanceof Error &&
+                'code' in error &&
+                error.code === 'ENOENT'
+            )
+        ) {
+            throw error;
+        }
+    }
+};
+
+/** @internal Exported for filesystem-permission regression tests. */
+export const writeConfigToFile = async (
+    filePath: string,
+    config: Config,
+): Promise<void> => {
+    const directory = path.dirname(filePath);
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    // Tighten an existing config before overwriting it. `mode` on writeFile
+    // only applies when it creates a new file.
+    await ensureConfigFilePermissions(filePath);
+    await fs.writeFile(filePath, yaml.dump(config), {
+        encoding: 'utf8',
+        mode: 0o600,
+    });
+
+    // `mode` only applies when mkdir/writeFile creates a path. Tighten
+    // existing CLI config paths as well; Windows does not implement POSIX
+    // permission bits, so leave ACL management to the OS there.
+    await ensureConfigFilePermissions(filePath);
+};
+
 const setConfig = async (config: Config) => {
-    await fs.mkdir(path.dirname(configFilePath), { recursive: true });
-    await fs.writeFile(configFilePath, yaml.dump(config), 'utf8');
+    await writeConfigToFile(configFilePath, config);
 };
 
 const getRawConfig = async (): Promise<Config> => {
     try {
-        const raw = yaml.load(await fs.readFile(configFilePath, 'utf8'));
+        await ensureConfigFilePermissions(configFilePath);
+        const contents = await fs.readFile(configFilePath, 'utf8');
+        const raw = yaml.load(contents);
         return raw as Config;
     } catch (e: unknown) {
+        if (e instanceof yaml.YAMLException)
+            throw new yaml.YAMLException(
+                `Could not parse CLI configuration${e.mark ? ` at line ${e.mark.line + 1}, column ${e.mark.column + 1}` : ''}. Check the syntax of config.yaml.`,
+            );
         if (e instanceof Error && 'code' in e && e.code === 'ENOENT') {
             return {} as Config;
         }
@@ -63,9 +111,11 @@ const setAnonymousUuid = async (anonymousUuid: string): Promise<Config> => {
     return newConfig;
 };
 
-export const getConfig = async (): Promise<Config> => {
+export const getConfig = async ({
+    readOnly = false,
+}: { readOnly?: boolean } = {}): Promise<Config> => {
     let rawConfig = await getRawConfig();
-    if (rawConfig.user?.anonymousUuid === undefined) {
+    if (!readOnly && rawConfig.user?.anonymousUuid === undefined) {
         rawConfig = await setAnonymousUuid(uuidv4());
     }
     return {
@@ -75,6 +125,16 @@ export const getConfig = async (): Promise<Config> => {
             apiKey: process.env.LIGHTDASH_API_KEY || rawConfig.context?.apiKey,
             project:
                 process.env.LIGHTDASH_PROJECT || rawConfig.context?.project,
+            projectName:
+                process.env.LIGHTDASH_PROJECT &&
+                process.env.LIGHTDASH_PROJECT !== rawConfig.context?.project
+                    ? undefined
+                    : rawConfig.context?.projectName,
+            source:
+                process.env.LIGHTDASH_PROJECT &&
+                process.env.LIGHTDASH_PROJECT !== rawConfig.context?.project
+                    ? undefined
+                    : rawConfig.context?.source,
             serverUrl:
                 process.env.LIGHTDASH_URL || rawConfig.context?.serverUrl,
             proxyAuthorization:
@@ -92,6 +152,10 @@ export const setProject = async (projectUuid: string, projectName: string) => {
             ...(config.context || {}),
             project: projectUuid,
             projectName,
+            source:
+                config.context?.project === projectUuid
+                    ? config.context.source
+                    : undefined,
         },
     });
 };
@@ -104,6 +168,18 @@ export const unsetProject = async () => {
             ...(config.context || {}),
             project: undefined,
             projectName: undefined,
+            source: undefined,
+        },
+    });
+};
+
+export const setSource = async (source: string) => {
+    const config = await getRawConfig();
+    await setConfig({
+        ...config,
+        context: {
+            ...(config.context || {}),
+            source,
         },
     });
 };

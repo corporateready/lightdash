@@ -1,0 +1,1 @@
+export const SEARCH_SEMANTIC_LAYER_SECTION = `- For a project-wide question about the semantic layer itself rather than a specific number (e.g. "what metrics do we have?", "find duplicate or confusingly similar metrics", "audit / inventory our metrics"), use searchSemanticLayer.`;

@@ -1,0 +1,545 @@
+import {
+    EXTERNAL_CONNECTION_IDENTITY_HEADERS,
+    ParameterError,
+} from '@lightdash/common';
+import {
+    validateExternalConnectionConfig,
+    validateServiceAccountKeyfile,
+    type ValidatableExternalConnectionConfig,
+} from './externalConnectionConfigValidation';
+
+const base: ValidatableExternalConnectionConfig = {
+    type: 'none',
+    origin: 'https://api.example.com',
+    allowedPathPrefixes: ['/v1/'],
+    allowedMethods: ['GET'],
+    allowedContentTypes: ['application/json'],
+};
+
+describe('validateExternalConnectionConfig', () => {
+    it.each(Object.values(EXTERNAL_CONNECTION_IDENTITY_HEADERS))(
+        'reserves %s for backend identity assertions',
+        (header) => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        customHeaders: { [header.toUpperCase()]: 'spoofed' },
+                    },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'api_key',
+                        apiKeyName: header.toLowerCase(),
+                        apiKeyLocation: 'header',
+                    },
+                    true,
+                ),
+            ).toThrow(ParameterError);
+        },
+    );
+
+    it('accepts a valid no-auth config', () => {
+        expect(() =>
+            validateExternalConnectionConfig(base, false),
+        ).not.toThrow();
+    });
+
+    describe('browser image loading', () => {
+        it('accepts an opted-in no-auth GET connection', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, allowBrowserImages: true },
+                    false,
+                ),
+            ).not.toThrow();
+        });
+
+        it('rejects authenticated connections', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'bearer_token',
+                        allowBrowserImages: true,
+                    },
+                    true,
+                ),
+            ).toThrow(/only available for no-auth/);
+        });
+
+        it('accepts an image-only connection', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        allowedMethods: [],
+                        allowBrowserImages: true,
+                    },
+                    false,
+                ),
+            ).not.toThrow();
+        });
+    });
+
+    describe('origin', () => {
+        it('rejects non-https', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, origin: 'http://api.example.com' },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects a path on the origin', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, origin: 'https://api.example.com/v1' },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects embedded credentials', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, origin: 'https://user:pass@api.example.com' },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects a non-URL', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, origin: 'not a url' },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+    });
+
+    describe('instructions', () => {
+        it('accepts absent, null, or reasonably-sized instructions', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, instructions: null },
+                    false,
+                ),
+            ).not.toThrow();
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, instructions: 'Paginate with ?page=.' },
+                    false,
+                ),
+            ).not.toThrow();
+        });
+
+        it('rejects instructions over the character cap', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, instructions: 'x'.repeat(10_001) },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+    });
+
+    describe('auth invariants', () => {
+        it('rejects a none connection that carries a secret', () => {
+            expect(() => validateExternalConnectionConfig(base, true)).toThrow(
+                ParameterError,
+            );
+        });
+
+        it('rejects bearer_token without a secret', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, type: 'bearer_token' },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('accepts bearer_token with a secret', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, type: 'bearer_token' },
+                    true,
+                ),
+            ).not.toThrow();
+        });
+
+        it('rejects api_key missing name/location', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, type: 'api_key' },
+                    true,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('accepts api_key with name + location + secret', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'api_key',
+                        apiKeyName: 'X-Api-Key',
+                        apiKeyLocation: 'header',
+                    },
+                    true,
+                ),
+            ).not.toThrow();
+        });
+
+        const googleScopes = ['https://www.googleapis.com/auth/bigquery'];
+
+        it('rejects google_service_account without a secret', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'google_service_account',
+                        oauthScopes: googleScopes,
+                    },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects google_service_account with no scopes', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'google_service_account',
+                        oauthScopes: [],
+                    },
+                    true,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects google_service_account with an invalid scope', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'google_service_account',
+                        oauthScopes: ['not-a-url'],
+                    },
+                    true,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('accepts google_service_account with a secret + scopes', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'google_service_account',
+                        oauthScopes: googleScopes,
+                    },
+                    true,
+                ),
+            ).not.toThrow();
+        });
+
+        it('accepts the bare OIDC scopes openid/email/profile', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'google_service_account',
+                        oauthScopes: ['openid', 'email', 'profile'],
+                    },
+                    true,
+                ),
+            ).not.toThrow();
+        });
+
+        it('rejects oauthScopes on a non-OAuth type', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'bearer_token',
+                        oauthScopes: googleScopes,
+                    },
+                    true,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        const oauthClientCredentials = {
+            ...base,
+            type: 'oauth_client_credentials' as const,
+            oauthTokenUrl: 'https://auth.example.com/oauth/token',
+            oauthClientId: 'client-1',
+            oauthClientAuthMethod: 'basic' as const,
+            oauthScopes: ['read:data'],
+        };
+
+        it('accepts OAuth client credentials with Basic or body authentication', () => {
+            expect(() =>
+                validateExternalConnectionConfig(oauthClientCredentials, true),
+            ).not.toThrow();
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...oauthClientCredentials,
+                        oauthClientAuthMethod: 'body',
+                        oauthScopes: [],
+                    },
+                    true,
+                ),
+            ).not.toThrow();
+        });
+
+        it('requires a complete OAuth client-credentials configuration and secret', () => {
+            expect(() =>
+                validateExternalConnectionConfig(oauthClientCredentials, false),
+            ).toThrow(/requires a client secret/);
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...oauthClientCredentials, oauthClientId: null },
+                    true,
+                ),
+            ).toThrow(/requires a valid client ID/);
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...oauthClientCredentials, oauthTokenUrl: null },
+                    true,
+                ),
+            ).toThrow(/requires a valid token URL/);
+        });
+
+        it('rejects unsafe OAuth token URLs and invalid scopes', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...oauthClientCredentials,
+                        oauthTokenUrl: 'http://auth.example.com/oauth/token',
+                    },
+                    true,
+                ),
+            ).toThrow(/must use https/);
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...oauthClientCredentials,
+                        oauthTokenUrl:
+                            'https://client:secret@auth.example.com/oauth/token',
+                    },
+                    true,
+                ),
+            ).toThrow(/must not contain credentials/);
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...oauthClientCredentials, oauthScopes: ['read data'] },
+                    true,
+                ),
+            ).toThrow(/Invalid OAuth scope/);
+        });
+
+        it('rejects OAuth client fields on another authentication type', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        type: 'bearer_token',
+                        oauthTokenUrl: 'https://auth.example.com/oauth/token',
+                    },
+                    true,
+                ),
+            ).toThrow(/only valid for type "oauth_client_credentials"/);
+        });
+    });
+
+    describe('validateServiceAccountKeyfile', () => {
+        const validKeyfile = JSON.stringify({
+            type: 'service_account',
+            client_email: 'sa@proj.iam.gserviceaccount.com',
+            private_key:
+                '-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n',
+        });
+
+        it('accepts a valid keyfile', () => {
+            expect(() =>
+                validateServiceAccountKeyfile(validKeyfile),
+            ).not.toThrow();
+        });
+
+        it('rejects non-JSON', () => {
+            expect(() => validateServiceAccountKeyfile('not json')).toThrow(
+                ParameterError,
+            );
+        });
+
+        it('rejects a keyfile with the wrong type', () => {
+            expect(() =>
+                validateServiceAccountKeyfile(
+                    JSON.stringify({
+                        type: 'authorized_user',
+                        client_email: 'x@y.z',
+                        private_key: 'k',
+                    }),
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects a keyfile missing client_email', () => {
+            expect(() =>
+                validateServiceAccountKeyfile(
+                    JSON.stringify({
+                        type: 'service_account',
+                        private_key: 'k',
+                    }),
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects a keyfile missing private_key', () => {
+            expect(() =>
+                validateServiceAccountKeyfile(
+                    JSON.stringify({
+                        type: 'service_account',
+                        client_email: 'x@y.z',
+                    }),
+                ),
+            ).toThrow(ParameterError);
+        });
+    });
+
+    describe('allowlists and limits', () => {
+        it('rejects empty methods', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, allowedMethods: [] },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects an unsupported method', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, allowedMethods: ['TRACE'] },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('accepts the extended write methods', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        allowedMethods: [
+                            'GET',
+                            'POST',
+                            'PUT',
+                            'PATCH',
+                            'DELETE',
+                        ],
+                    },
+                    false,
+                ),
+            ).not.toThrow();
+        });
+
+        it('rejects empty content types', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, allowedContentTypes: [] },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('accepts common structured and text response content types', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    {
+                        ...base,
+                        allowedContentTypes: [
+                            'application/geo+json',
+                            'application/x-ndjson',
+                            'text/tab-separated-values',
+                        ],
+                    },
+                    false,
+                ),
+            ).not.toThrow();
+        });
+
+        it('rejects path traversal in a prefix', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, allowedPathPrefixes: ['/v1/../secrets'] },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+
+        it('rejects an out-of-bounds timeout', () => {
+            expect(() =>
+                validateExternalConnectionConfig(
+                    { ...base, timeoutMs: 999_999 },
+                    false,
+                ),
+            ).toThrow(ParameterError);
+        });
+    });
+});
+
+describe('validateExternalConnectionConfig customHeaders', () => {
+    it('accepts a config with valid custom headers', () => {
+        expect(() =>
+            validateExternalConnectionConfig(
+                {
+                    ...base,
+                    customHeaders: { 'anthropic-version': '2023-06-01' },
+                },
+                false,
+            ),
+        ).not.toThrow();
+    });
+
+    it('rejects a custom header colliding with the api key header', () => {
+        expect(() =>
+            validateExternalConnectionConfig(
+                {
+                    ...base,
+                    type: 'api_key',
+                    apiKeyName: 'X-Service-Key',
+                    apiKeyLocation: 'header',
+                    customHeaders: { 'x-service-key': 'clobber' },
+                },
+                true,
+            ),
+        ).toThrow(ParameterError);
+    });
+
+    it('allows the same name when the api key is sent as a query param', () => {
+        expect(() =>
+            validateExternalConnectionConfig(
+                {
+                    ...base,
+                    type: 'api_key',
+                    apiKeyName: 'X-Service-Key',
+                    apiKeyLocation: 'query',
+                    customHeaders: { 'x-service-key': 'header-plane-value' },
+                },
+                true,
+            ),
+        ).not.toThrow();
+    });
+});

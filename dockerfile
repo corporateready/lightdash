@@ -1,15 +1,32 @@
 # syntax=docker/dockerfile:1.7
 
+# Extensions are ABI-versioned. Keep this pinned image and the destination path
+# below aligned with @duckdb/node-api; the production stage fails if they drift.
+FROM duckdb/duckdb:1.5.2@sha256:5658472bf45cce867048a17201b9d38d4632507e7df4a69994f8236599f69d45 AS duckdb-extensions
+RUN ["/duckdb", "-c", "INSTALL httpfs; INSTALL aws;"]
+
+FROM ghcr.io/pnpm/pnpm:12.3.4@sha256:b81d53184f670fe19d1a33f9d5041907d314b31d596838e8133cbd83d45be043 AS pnpm-cli
+
 # -----------------------------
 # Stage 0: pnpm setup base
 # -----------------------------
-FROM node:20-bookworm-slim AS pnpm-base
+FROM node:24.22.1-trixie-slim AS node-runtime
+
+# Keep Python 3.11 for the older supported dbt adapters on Debian 13.
+FROM python:3.11-slim-trixie AS pnpm-base
+COPY --from=node-runtime /usr/local /usr/local
 
 ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-RUN npm i -g corepack@latest
-RUN corepack enable
-RUN corepack prepare pnpm@10.33.0 --activate
+ENV PATH="$PNPM_HOME/bin:/opt/pnpm:$PATH"
+COPY --from=pnpm-cli /opt/pnpm /opt/pnpm
+COPY --from=pnpm-cli --chmod=755 /pnpm /pnpm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 libstdc++6 \
+    && groupadd --gid 1000 node \
+    && useradd --uid 1000 --gid node --shell /bin/bash --create-home node \
+    && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["node"]
 RUN pnpm config set store-dir /pnpm/store
 
 WORKDIR /usr/app
@@ -23,11 +40,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     g++ \
     libsasl2-modules-gssapi-mit \
-    python3 \
-    python3-psycopg2 \
-    python3-venv \
-    python3-dev \
-    software-properties-common \
     unzip \
     git \
     # Required by node-canvas prebuilt binaries for font rendering in chart images
@@ -45,6 +57,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Installing multiple versions of dbt
 # dbt 1.4 is the default
+# NOTE: keep the per-version adapter list in sync with
+# DBT_VERSION_SUPPORTED_WAREHOUSES in packages/common/src/types/projects.ts —
+# `latest` only advances to a version with full adapter coverage.
 # Use pip cache to speed up subsequent builds
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m venv /usr/local/dbt1.4 \
@@ -118,6 +133,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "dbt-clickhouse~=1.9.0" \
     "dbt-athena~=1.9.0" \
     "dbt-duckdb~=1.9.0" \
+# dbt-snowflake below 1.12.4 caps certifi under 2025.4.26, which still trusts
+# the distrusted emSign ECC Root CA - G3. certifi is only a CA bundle.
+    && /usr/local/dbt1.9/bin/pip install --no-deps "certifi>=2026.10.19" \
     && ln -s /usr/local/dbt1.9/bin/dbt /usr/local/bin/dbt1.9 \
     && python3 -m venv /usr/local/dbt1.10 \
     && /usr/local/dbt1.10/bin/pip install \
@@ -131,6 +149,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "dbt-clickhouse~=1.9.0" \
     "dbt-athena~=1.10.0" \
     "dbt-duckdb~=1.10.0" \
+    && /usr/local/dbt1.10/bin/pip install --no-deps "certifi>=2026.10.19" \
     && ln -s /usr/local/dbt1.10/bin/dbt /usr/local/bin/dbt1.10 \
     && python3 -m venv /usr/local/dbt1.11 \
     && /usr/local/dbt1.11/bin/pip install \
@@ -144,7 +163,23 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "dbt-clickhouse~=1.9.0" \
     "dbt-athena~=1.10.0" \
     "dbt-duckdb~=1.10.0" \
-    && ln -s /usr/local/dbt1.11/bin/dbt /usr/local/bin/dbt1.11
+    && /usr/local/dbt1.11/bin/pip install --no-deps "certifi>=2026.10.19" \
+    && ln -s /usr/local/dbt1.11/bin/dbt /usr/local/bin/dbt1.11 \
+    && python3 -m venv /usr/local/dbt1.12 \
+# dbt-databricks 1.12 requires dbt-core below 1.12.1.
+    && /usr/local/dbt1.12/bin/pip install \
+    "dbt-core==1.12.0" \
+    "dbt-postgres~=1.10.0" \
+    "dbt-redshift~=1.10.0" \
+    "dbt-snowflake~=1.12.0" \
+    "dbt-bigquery~=1.12.0" \
+    "dbt-databricks~=1.12.3" \
+    "dbt-trino~=1.10.0" \
+    "dbt-clickhouse~=1.9.0" \
+    "dbt-athena~=1.10.0" \
+    "dbt-duckdb~=1.10.0" \
+    && /usr/local/dbt1.12/bin/pip install --no-deps "certifi>=2026.10.19" \
+    && ln -s /usr/local/dbt1.12/bin/dbt /usr/local/bin/dbt1.12
 
 # -----------------------------
 # Stage 1: stop here for dev environment
@@ -175,14 +210,17 @@ ENV TURBO_API=https://cache.depot.dev
 COPY package.json .
 COPY pnpm-workspace.yaml .
 COPY pnpm-lock.yaml .
+COPY patches ./patches
 COPY turbo.json .
 COPY tsconfig.json .
-COPY .eslintrc.js .
+COPY .oxlintrc.base.json .
 COPY .pnpmfile.cjs .
 COPY packages/common/package.json ./packages/common/
+COPY packages/visualization/package.json ./packages/visualization/
 COPY packages/formula/package.json ./packages/formula/
 COPY packages/warehouses/package.json ./packages/warehouses/
 COPY packages/backend/package.json ./packages/backend/
+COPY packages/cli/package.json ./packages/cli/
 COPY packages/backend/src/ee/services/McpService/mcp-chart-app/package.json ./packages/backend/src/ee/services/McpService/mcp-chart-app/
 COPY packages/frontend/package.json ./packages/frontend/
 
@@ -211,6 +249,16 @@ RUN --mount=type=secret,id=TURBO_TOKEN \
     export TURBO_TOKEN=$(cat /run/secrets/TURBO_TOKEN 2>/dev/null || echo "") && \
     turbo build --filter=@lightdash/common
 
+# Build visualization package
+FROM prod-builder AS build-visualization
+COPY --from=build-common /usr/app/packages/common/ ./packages/common/
+COPY packages/visualization/tsconfig*.json ./packages/visualization/
+COPY packages/visualization/scripts/ ./packages/visualization/scripts/
+COPY packages/visualization/src/ ./packages/visualization/src/
+RUN --mount=type=secret,id=TURBO_TOKEN \
+    export TURBO_TOKEN=$(cat /run/secrets/TURBO_TOKEN 2>/dev/null || echo "") && \
+    turbo build --filter=@lightdash/visualization
+
 # Build formula package
 FROM prod-builder AS build-formula
 COPY packages/formula/tsconfig.json ./packages/formula/
@@ -223,6 +271,7 @@ RUN --mount=type=secret,id=TURBO_TOKEN \
 FROM prod-builder AS build-warehouses
 COPY --from=build-common /usr/app/packages/common/ ./packages/common/
 COPY packages/warehouses/tsconfig.json ./packages/warehouses/
+COPY packages/warehouses/tsconfig.build.json ./packages/warehouses/
 COPY packages/warehouses/src/ ./packages/warehouses/src/
 RUN --mount=type=secret,id=TURBO_TOKEN \
     export TURBO_TOKEN=$(cat /run/secrets/TURBO_TOKEN 2>/dev/null || echo "") && \
@@ -234,7 +283,9 @@ COPY --from=build-common /usr/app/packages/common/ ./packages/common/
 COPY --from=build-formula /usr/app/packages/formula/ ./packages/formula/
 COPY --from=build-warehouses /usr/app/packages/warehouses/ ./packages/warehouses/
 COPY packages/backend/tsconfig.json ./packages/backend/
+COPY packages/backend/tsconfig.build.json ./packages/backend/
 COPY packages/backend/tsconfig.sentry.json ./packages/backend/
+COPY packages/backend/tsoa.yml ./packages/backend/
 COPY packages/backend/src/ ./packages/backend/src/
 
 # Build MCP chart app (pnpm workspace member — deps already installed in prod-builder)
@@ -261,6 +312,7 @@ RUN --mount=type=secret,id=TURBO_TOKEN \
 # Build frontend package
 FROM prod-builder AS build-frontend
 COPY --from=build-common /usr/app/packages/common/ ./packages/common/
+COPY --from=build-visualization /usr/app/packages/visualization/ ./packages/visualization/
 COPY --from=build-formula /usr/app/packages/formula/ ./packages/formula/
 COPY packages/frontend ./packages/frontend
 
@@ -279,16 +331,31 @@ RUN --mount=type=secret,id=TURBO_TOKEN \
     turbo build --filter=@lightdash/frontend; \
     fi
 
+# Build CLI package (ships in the image for the Learn developer sandbox)
+FROM prod-builder AS build-cli
+COPY --from=build-common /usr/app/packages/common/ ./packages/common/
+COPY --from=build-warehouses /usr/app/packages/warehouses/ ./packages/warehouses/
+COPY packages/cli/tsconfig*.json ./packages/cli/
+COPY packages/cli/src/ ./packages/cli/src/
+# postbuild vendors the data-app template into dist/vendor
+COPY sandboxes/data-apps/template/ ./sandboxes/data-apps/template/
+RUN --mount=type=secret,id=TURBO_TOKEN \
+    export TURBO_TOKEN=$(cat /run/secrets/TURBO_TOKEN 2>/dev/null || echo "") && \
+    turbo build --filter=@lightdash/cli
+
 # -----------------------------
 # Stage 4: final build assembly
 # -----------------------------
 
 FROM prod-builder AS build-final
+COPY release-safety.json ./release-safety.json
 COPY --from=build-common /usr/app/packages/common/dist/ ./packages/common/dist/
+COPY --from=build-visualization /usr/app/packages/visualization/dist/ ./packages/visualization/dist/
 COPY --from=build-formula /usr/app/packages/formula/dist/ ./packages/formula/dist/
 COPY --from=build-warehouses /usr/app/packages/warehouses/dist/ ./packages/warehouses/dist/
 COPY --from=build-backend /usr/app/packages/backend/dist/ ./packages/backend/dist/
 COPY --from=build-frontend /usr/app/packages/frontend/build/ ./packages/frontend/build/
+COPY --from=build-cli /usr/app/packages/cli/dist/ ./packages/cli/dist/
 
 # Install Sentry CLI and process sourcemaps if environment variables are set
 ARG SENTRY_AUTH_TOKEN=""
@@ -300,6 +367,7 @@ ARG SENTRY_ENVIRONMENT=""
 
 RUN if [ -n "${SENTRY_AUTH_TOKEN}" ] && [ -n "${SENTRY_ORG}" ] && [ -n "${SENTRY_RELEASE_VERSION}" ] && [ -n "${SENTRY_FRONTEND_PROJECT}" ] && [ -n "${SENTRY_BACKEND_PROJECT}" ] && [ -n "${SENTRY_ENVIRONMENT}" ]; then \
     npm install -g @sentry/cli; \
+    export PATH="$(npm prefix -g)/bin:${PATH}"; \
     echo "Creating Sentry releases and processing sourcemaps"; \
     # Create releases for both projects \
     sentry-cli releases new "${SENTRY_RELEASE_VERSION}" --project "${SENTRY_FRONTEND_PROJECT}"; \
@@ -336,26 +404,58 @@ ENV NODE_ENV production
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm install --prod --frozen-lockfile --prefer-offline
 
+# The CLI must start with the production node_modules just installed; a
+# missing runtime dependency fails the build here rather than in a learner's terminal.
+RUN node packages/cli/dist/index.js --version
+
+# Keep the versioned playground bundle in a late layer so bundle-only updates
+# do not invalidate production dependency installation or sourcemap processing.
+COPY packages/backend/assets/ ./packages/backend/assets/
+
+# The extension bundle is assembled and verified here rather than in the runtime
+# stage: the check needs the production node_modules, and the runtime stage must
+# stay free of RUN instructions so its application layer can be rebased onto
+# cached parents instead of hydrating them.
+COPY --from=duckdb-extensions \
+    /root/.duckdb/extensions/v1.5.2/*/*.duckdb_extension \
+    /usr/app/packages/warehouses/dist/duckdbExtensions/v1.5.2/
+
+# Never silently restore production runtime downloads after a DuckDB upgrade.
+RUN duckdb_version="$(cd /usr/app/packages/warehouses && node -e "process.stdout.write(require('@duckdb/node-api').version())")" \
+    && extension_directory="/usr/app/packages/warehouses/dist/duckdbExtensions/${duckdb_version}" \
+    && if [ ! -r "${extension_directory}/httpfs.duckdb_extension" ] \
+        || [ ! -r "${extension_directory}/aws.duckdb_extension" ]; then \
+        echo >&2 "Bundled extensions do not match @duckdb/node-api ${duckdb_version}"; \
+        exit 1; \
+    fi
+
+# Release build contexts can carry world-writable modes into the image.
+RUN find /usr/app ! -type l -perm -0002 -exec chmod o-w {} +
+
 # -----------------------------
-# Stage 5: execution environment for backend
+# Stage 5: runtime base
 # -----------------------------
 
-FROM pnpm-base as prod
+# Everything here is invalidated only by this file: system packages, the dbt
+# virtualenvs and their symlinks. It is deliberately independent of the build
+# context so a release version bump never rebuilds it.
+FROM pnpm-base AS runtime-base
 
 ENV NODE_ENV production
+ENV PLAYGROUND_DATA_DIR=/usr/app/packages/backend/assets/playground
+# Boot works fully offline because the standalone pnpm binary is baked in.
 
 WORKDIR /usr/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-psycopg2 \
-    python3-venv \
     git \
     build-essential \
     # Required by node-canvas prebuilt binaries for font rendering in chart images
     fontconfig \
     # Required so headless chart screenshots can render CJK glyphs
     fonts-noto-cjk \
+    # Required so DuckDB httpfs can verify HTTPS object storage (Node carries its own trust store)
+    ca-certificates \
     dumb-init \
     # Optional: jemalloc allocator reduces native memory fragmentation vs glibc malloc.
     # Dormant unless activated via LD_PRELOAD env var per customer.
@@ -363,15 +463,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=prod-builder  /usr/local/dbt1.4 /usr/local/dbt1.4
-COPY --from=prod-builder  /usr/local/dbt1.5 /usr/local/dbt1.5
-COPY --from=prod-builder  /usr/local/dbt1.6 /usr/local/dbt1.6
-COPY --from=prod-builder  /usr/local/dbt1.7 /usr/local/dbt1.7
-COPY --from=prod-builder  /usr/local/dbt1.8 /usr/local/dbt1.8
-COPY --from=prod-builder  /usr/local/dbt1.9 /usr/local/dbt1.9
-COPY --from=prod-builder  /usr/local/dbt1.10 /usr/local/dbt1.10
-COPY --from=prod-builder  /usr/local/dbt1.11 /usr/local/dbt1.11
-COPY --from=build-final /usr/app /usr/app
+# Taken from `base` rather than `prod-builder`: the virtualenvs are identical in
+# both, and sourcing them from `base` keeps this stage off the application build
+# graph entirely.
+COPY --link --from=base /usr/local/dbt1.4 /usr/local/dbt1.4
+COPY --link --from=base /usr/local/dbt1.5 /usr/local/dbt1.5
+COPY --link --from=base /usr/local/dbt1.6 /usr/local/dbt1.6
+COPY --link --from=base /usr/local/dbt1.7 /usr/local/dbt1.7
+COPY --link --from=base /usr/local/dbt1.8 /usr/local/dbt1.8
+COPY --link --from=base /usr/local/dbt1.9 /usr/local/dbt1.9
+COPY --link --from=base /usr/local/dbt1.10 /usr/local/dbt1.10
+COPY --link --from=base /usr/local/dbt1.11 /usr/local/dbt1.11
+COPY --link --from=base /usr/local/dbt1.12 /usr/local/dbt1.12
 
 RUN ln -s /usr/local/dbt1.4/bin/dbt /usr/local/bin/dbt \
     && ln -s /usr/local/dbt1.5/bin/dbt /usr/local/bin/dbt1.5 \
@@ -380,15 +483,49 @@ RUN ln -s /usr/local/dbt1.4/bin/dbt /usr/local/bin/dbt \
     && ln -s /usr/local/dbt1.8/bin/dbt /usr/local/bin/dbt1.8 \
     && ln -s /usr/local/dbt1.9/bin/dbt /usr/local/bin/dbt1.9 \
     && ln -s /usr/local/dbt1.10/bin/dbt /usr/local/bin/dbt1.10 \
-    && ln -s /usr/local/dbt1.11/bin/dbt /usr/local/bin/dbt1.11
+    && ln -s /usr/local/dbt1.11/bin/dbt /usr/local/bin/dbt1.11 \
+    && ln -s /usr/local/dbt1.12/bin/dbt /usr/local/bin/dbt1.12
 
+# `lightdash` on PATH for the Learn developer sandbox. The CLI itself arrives
+# with the application layers in the prod stage (COPY --link only there), so
+# this wrapper is written here and dangles until then.
+RUN printf '#!/bin/sh\nexec node /usr/app/packages/cli/dist/index.js "$@"\n' > /usr/local/bin/lightdash \
+    && chmod 755 /usr/local/bin/lightdash
 
-# Run backend
-COPY ./docker/prod-entrypoint.sh /usr/bin/prod-entrypoint.sh
+# Runs as the `node` user (uid 1000) created in pnpm-base; the app tree stays root-owned.
+# Writable dirs for LIGHTDASH_LOG_OUTPUTS=file (default path and docs/audit-logging.md).
+RUN mkdir -p /usr/app/packages/backend/logs /var/log/lightdash \
+    && chown 1000:1000 /usr/app/packages/backend/logs /var/log/lightdash
+ENV HOME=/home/node
+
+# The runtime working directory is set here, not after the application layers.
+# WORKDIR compiles to a mkdir even when the path already exists, and any
+# filesystem mutation after a COPY --link forces BuildKit to materialise the
+# layers it was meant to leave untouched.
+WORKDIR /usr/app/packages/backend
+
+# -----------------------------
+# Stage 6: execution environment for backend
+# -----------------------------
+
+FROM runtime-base AS prod
+
+# INVARIANT: this stage may contain only COPY --link and image metadata.
+# A RUN, a WORKDIR or a classic COPY placed after the application content has
+# to write onto the parent filesystem, which forces BuildKit to hydrate the
+# ~2.1 GiB of cached runtime and dbt layers below — 252s per release build,
+# even with every one of those layers a cache hit. Keep additions above, in
+# runtime-base.
+# COPY --link also does not follow symlinks in its destination path, so every
+# destination here must stay a real directory.
+COPY --link --from=build-final /usr/app /usr/app
+COPY --link --chmod=755 ./docker/prod-entrypoint.sh /usr/bin/prod-entrypoint.sh
+# Preserve the Yarn installation referenced by the Node image's binary links.
+COPY --link --from=node-runtime /opt /opt
 
 EXPOSE 8080
 
-WORKDIR /usr/app/packages/backend
+USER 1000:1000
 
 ENTRYPOINT ["dumb-init", "--", "/usr/bin/prod-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

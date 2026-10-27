@@ -1,4 +1,8 @@
 import {
+    FeatureFlags,
+    isAiAgentSemanticArtifactVizQuery,
+    isAiAgentSqlArtifactVizQuery,
+    isAiSqlChartArtifactConfig,
     parseVizConfig,
     type AiAgentChartTypeOption,
     type AiAgentMessageAssistant,
@@ -13,17 +17,29 @@ import {
     Stack,
     Text,
     Title,
-} from '@mantine-8/core';
-import { useMediaQuery } from '@mantine-8/hooks';
+} from '@mantine/core';
 import { IconExclamationCircle, IconX } from '@tabler/icons-react';
 import { useMemo, useState, type FC } from 'react';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import { useCompiledSqlFromMetricQuery } from '../../../../../hooks/useCompiledSql';
+import { getAiAccessRefusal } from '../../../../../features/aiAccess/errors';
 import { useInfiniteQueryResults } from '../../../../../hooks/useQueryResults';
+import { useServerFeatureFlag } from '../../../../../hooks/useServerOrClientFeatureFlag';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
+import { getAiAgentArtifactResultsUrl } from '../../hooks/aiAgentRouting';
+import { useAgentMaxWidth } from '../../hooks/useAgentMaxWidth';
+import {
+    getAiArtifactChartSource,
+    useAiArtifactCompiledSql,
+} from '../../hooks/useAiArtifactChart';
 import { useAiAgentArtifactVizQuery } from '../../hooks/useProjectAiAgents';
-import { clearArtifact } from '../../store/aiArtifactSlice';
+import { clearPreview } from '../../store/aiArtifactSlice';
 import { useAiAgentStoreDispatch } from '../../store/hooks';
+import { AiAccessCallout } from './AiAccessCallout';
 import { AiChartQuickOptions } from './AiChartQuickOptions';
+import {
+    AiSqlArtifactActions,
+    AiSqlArtifactVisualization,
+} from './AiSqlArtifactVisualization';
 import { AiVisualizationRenderer } from './AiVisualizationRenderer';
 import { ViewSqlButton } from './ViewSqlButton';
 
@@ -47,15 +63,22 @@ export const AiChartVisualization: FC<Props> = ({
     showCloseButton = true,
 }) => {
     const dispatch = useAiAgentStoreDispatch();
-    const isMobile = useMediaQuery('(max-width: 768px)');
+    const isMobile = useAgentMaxWidth(768);
+    const isEmbed = useIsEmbedded();
+    const identityFlag = useServerFeatureFlag(FeatureFlags.AgentIdentity);
+    const identityEnabled = identityFlag.data?.enabled === true;
 
     const [selectedChartType, setSelectedChartType] =
         useState<AiAgentChartTypeOption | null>(null);
 
+    const isSqlArtifact = isAiSqlChartArtifactConfig(artifactData.chartConfig);
+    const { isMergeArtifact, semanticChartConfig, customChartType } =
+        getAiArtifactChartSource(artifactData.chartConfig);
+
     const vizConfig = useMemo(() => {
-        if (!artifactData?.chartConfig) return null;
-        return parseVizConfig(artifactData.chartConfig);
-    }, [artifactData?.chartConfig]);
+        if (!semanticChartConfig) return null;
+        return parseVizConfig(semanticChartConfig);
+    }, [semanticChartConfig]);
 
     const queryExecutionHandle = useAiAgentArtifactVizQuery(
         {
@@ -64,23 +87,61 @@ export const AiChartVisualization: FC<Props> = ({
             artifactUuid,
             versionUuid,
         },
-        { enabled: !!vizConfig },
+        { enabled: !!vizConfig || isSqlArtifact },
     );
 
+    const semanticVizQueryData =
+        queryExecutionHandle.data &&
+        isAiAgentSemanticArtifactVizQuery(queryExecutionHandle.data)
+            ? queryExecutionHandle.data
+            : undefined;
+    const sqlVizQueryData =
+        queryExecutionHandle.data &&
+        isAiAgentSqlArtifactVizQuery(queryExecutionHandle.data)
+            ? queryExecutionHandle.data
+            : undefined;
+
+    const queryUuid = (semanticVizQueryData ?? sqlVizQueryData)?.query
+        .queryUuid;
     const queryResults = useInfiniteQueryResults(
         projectUuid,
-        queryExecutionHandle?.data?.query.queryUuid,
+        isEmbed || !identityFlag.isLoading ? queryUuid : undefined,
+        undefined,
+        identityEnabled && !isEmbed && queryUuid
+            ? getAiAgentArtifactResultsUrl({
+                  projectUuid,
+                  agentUuid,
+                  artifactUuid,
+                  versionUuid,
+                  queryUuid,
+                  cached: false,
+              })
+            : null,
     );
 
-    const { data: compiledSql } = useCompiledSqlFromMetricQuery({
-        tableName: queryExecutionHandle.data?.query.metricQuery?.exploreName,
+    const compiledSqlQuery = useAiArtifactCompiledSql({
         projectUuid,
-        metricQuery: queryExecutionHandle.data?.query.metricQuery,
+        isMergeArtifact,
+        vizQueryData: semanticVizQueryData,
     });
 
     const isQueryLoading =
-        queryExecutionHandle.isLoading || queryResults.isFetchingRows;
+        queryExecutionHandle.isLoading ||
+        (!isSqlArtifact && queryResults.isFetchingRows);
     const isQueryError = queryExecutionHandle.isError || queryResults.error;
+
+    const refusal =
+        getAiAccessRefusal(queryExecutionHandle.error?.error) ??
+        getAiAccessRefusal(queryResults.error?.error);
+    if (refusal) {
+        return (
+            <AiAccessCallout
+                projectUuid={projectUuid}
+                refusal={refusal}
+                variant="inline"
+            />
+        );
+    }
 
     if (isQueryLoading) {
         return (
@@ -99,9 +160,8 @@ export const AiChartVisualization: FC<Props> = ({
                 <Group justify="flex-end">
                     <ActionIcon
                         size="sm"
-                        variant="subtle"
                         color="ldGray.9"
-                        onClick={() => dispatch(clearArtifact())}
+                        onClick={() => dispatch(clearPreview())}
                     >
                         <MantineIcon icon={IconX} />
                     </ActionIcon>
@@ -122,41 +182,100 @@ export const AiChartVisualization: FC<Props> = ({
         );
     }
 
-    if (!queryExecutionHandle.data || !vizConfig) {
+    if (sqlVizQueryData) {
+        const sqlHeaderContent = (
+            <Group gap="md" align="start">
+                <Stack gap={0} flex={1}>
+                    <Title order={5}>{sqlVizQueryData.metadata.title}</Title>
+                    <Text c="dimmed" size="xs">
+                        {sqlVizQueryData.metadata.description}
+                    </Text>
+                </Stack>
+                <Group gap="sm" display={isMobile ? 'none' : 'flex'}>
+                    <AiSqlArtifactActions
+                        projectUuid={projectUuid}
+                        agentUuid={agentUuid}
+                        artifactUuid={artifactUuid}
+                        versionUuid={versionUuid}
+                        savedSqlUuid={artifactData.savedSqlUuid}
+                        sql={sqlVizQueryData.sql}
+                        limit={sqlVizQueryData.limit}
+                        queryUuid={sqlVizQueryData.query.queryUuid}
+                        totalResults={
+                            queryResults.totalResults ??
+                            queryResults.rows.length
+                        }
+                        title={sqlVizQueryData.metadata.title ?? 'SQL results'}
+                        description={sqlVizQueryData.metadata.description}
+                        columns={Object.values(queryResults.columns ?? {})}
+                    />
+                    {showCloseButton && (
+                        <ActionIcon
+                            size="sm"
+                            color="ldGray.4"
+                            onClick={() => dispatch(clearPreview())}
+                        >
+                            <MantineIcon icon={IconX} />
+                        </ActionIcon>
+                    )}
+                </Group>
+            </Group>
+        );
+
+        return (
+            <AiSqlArtifactVisualization
+                projectUuid={projectUuid}
+                results={queryResults}
+                headerContent={sqlHeaderContent}
+            />
+        );
+    }
+
+    if (!semanticVizQueryData || !vizConfig || !semanticChartConfig) {
         return null;
     }
 
     const inlineHeaderContent = (
         <Group gap="md" align="start">
             <Stack gap={0} flex={1}>
-                <Title order={5}>
-                    {queryExecutionHandle.data.metadata.title}
-                </Title>
+                <Title order={5}>{semanticVizQueryData.metadata.title}</Title>
                 <Text c="dimmed" size="xs">
-                    {queryExecutionHandle.data.metadata.description}
+                    {semanticVizQueryData.metadata.description}
                 </Text>
             </Stack>
             <Group gap="sm" display={isMobile ? 'none' : 'flex'}>
-                <ViewSqlButton sql={compiledSql?.query} />
+                <ViewSqlButton
+                    sql={compiledSqlQuery}
+                    isFormatted={isMergeArtifact}
+                />
                 <AiChartQuickOptions
                     message={message}
                     projectUuid={projectUuid}
                     agentUuid={agentUuid}
+                    showDownloadResults
                     artifactData={artifactData}
                     saveChartOptions={{
-                        name: queryExecutionHandle.data.metadata.title,
-                        description:
-                            queryExecutionHandle.data.metadata.description,
+                        name: semanticVizQueryData.metadata.title,
+                        description: semanticVizQueryData.metadata.description,
                         linkToMessage: true,
                     }}
-                    compiledSql={compiledSql?.query}
+                    compiledSql={compiledSqlQuery}
+                    merge={
+                        isMergeArtifact
+                            ? {
+                                  query: semanticVizQueryData.mergeQuery,
+                                  parameters:
+                                      semanticVizQueryData.query
+                                          .usedParametersValues,
+                              }
+                            : null
+                    }
                 />
                 {showCloseButton && (
                     <ActionIcon
                         size="sm"
-                        variant="subtle"
                         color="ldGray.4"
-                        onClick={() => dispatch(clearArtifact())}
+                        onClick={() => dispatch(clearPreview())}
                     >
                         <MantineIcon icon={IconX} />
                     </ActionIcon>
@@ -167,12 +286,14 @@ export const AiChartVisualization: FC<Props> = ({
 
     return (
         <AiVisualizationRenderer
-            vizQueryData={queryExecutionHandle.data}
+            vizQueryData={semanticVizQueryData}
             results={queryResults}
-            chartConfig={artifactData.chartConfig!}
+            chartConfig={semanticChartConfig}
+            customChartType={customChartType}
             selectedChartType={selectedChartType}
             onChartTypeChange={setSelectedChartType}
             headerContent={inlineHeaderContent}
+            loadExplore={!isMergeArtifact}
         />
     );
 };

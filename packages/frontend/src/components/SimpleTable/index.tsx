@@ -1,13 +1,10 @@
-import { FeatureFlags } from '@lightdash/common';
-import { Box, Button, Flex, Text } from '@mantine/core';
-import { noop } from '@mantine/utils';
+import { Box, Flex, Text, Button } from '@mantine/core';
 import { IconAlertCircle, IconRefresh, IconTable } from '@tabler/icons-react';
 import { useCallback, useEffect, useMemo, useRef, type FC } from 'react';
 import {
     isChunkLoadError,
     triggerChunkErrorReload,
 } from '../../features/chunkErrorHandler';
-import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
 import { computeLimitedRowCount, sliceRows } from '../../utils/sliceRows';
 import LoadingChart from '../common/LoadingChart';
 import PivotTable from '../common/PivotTable';
@@ -19,12 +16,18 @@ import {
     type HeaderProps,
 } from '../common/Table/types';
 import { isTableVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationConfig,
+    useVisualizationInputs,
+} from '../LightdashVisualization/useVisualizationContext';
 import CellContextMenu from './CellContextMenu';
 import DashboardCellContextMenu from './DashboardCellContextMenu';
 import DashboardHeaderContextMenu from './DashboardHeaderContextMenu';
 import ExplorerPivotTable from './ExplorerPivotTable';
 import MinimalCellContextMenu from './MinimalCellContextMenu';
+import PivotRerunState from './PivotRerunState';
+
+const noop = () => undefined;
 
 type SimpleTableProps = {
     isDashboard: boolean;
@@ -34,6 +37,9 @@ type SimpleTableProps = {
     minimal?: boolean;
     onScreenshotReady?: () => void;
     onScreenshotError?: () => void;
+    enableContextMenu?: boolean;
+    /** Edge to edge: no padding, side borders or radius. */
+    flush?: boolean;
 };
 
 const SimpleTable: FC<SimpleTableProps> = ({
@@ -44,22 +50,20 @@ const SimpleTable: FC<SimpleTableProps> = ({
     minimal = false,
     onScreenshotReady,
     onScreenshotError,
+    enableContextMenu = true,
+    flush = false,
     ...rest
 }) => {
     const {
         columnOrder,
         itemsMap,
-        visualizationConfig,
         resultsData,
         isLoading,
         isEditMode,
         parameters,
-    } = useVisualizationContext();
-
-    const { data: pivotColumnSortFlag } = useServerFeatureFlag(
-        FeatureFlags.PivotColumnSort,
-    );
-    const isPivotColumnSortEnabled = pivotColumnSortFlag?.enabled ?? false;
+        hasExplorerStore,
+    } = useVisualizationInputs();
+    const visualizationConfig = useVisualizationConfig();
 
     const hasSignaledScreenshotReady = useRef(false);
 
@@ -110,8 +114,21 @@ const SimpleTable: FC<SimpleTableProps> = ({
         if (!onScreenshotReady && !onScreenshotError) return;
         if (!isTableVisualizationConfig(visualizationConfig)) return;
 
-        const { pivotTableData, isPivotTableEnabled } =
-            visualizationConfig.chartConfig;
+        const {
+            pivotTableData,
+            rendersPivotTable,
+            isCalculatingColumnTotals,
+            isCalculatingRowTotals,
+            isCalculatingRowSubtotals,
+            isCalculatingGrandTotals,
+            isCalculatingSubtotals,
+        } = visualizationConfig.chartConfig;
+        const isCalculatingAnyTotals =
+            isCalculatingColumnTotals ||
+            isCalculatingRowTotals ||
+            isCalculatingRowSubtotals ||
+            isCalculatingGrandTotals ||
+            isCalculatingSubtotals;
 
         if (pivotTableData.error) {
             onScreenshotError?.();
@@ -119,7 +136,12 @@ const SimpleTable: FC<SimpleTableProps> = ({
             return;
         }
 
-        if (isPivotTableEnabled) {
+        // Pivot and flat tables both show total cells as skeletons while totals load.
+        if (isCalculatingAnyTotals) {
+            return;
+        }
+
+        if (rendersPivotTable) {
             if (pivotTableData.data && resultsData?.hasFetchedAllRows) {
                 onScreenshotReady?.();
                 hasSignaledScreenshotReady.current = true;
@@ -227,12 +249,25 @@ const SimpleTable: FC<SimpleTableProps> = ({
         minMaxMap,
         hideRowNumbers,
         pivotTableData,
+        isPivotTableEnabled,
+        isPivotResultStale,
         getFieldLabel,
         getField,
         showResultsTotal,
         showSubtotals,
         showSubtotalsExpanded,
+        showRowGrouping,
         updateColumnProperty,
+        columnTotalsError,
+        rowTotalsError,
+        grandTotalsError,
+        columnSubtotalsError,
+        rowSubtotalsError,
+        isCalculatingColumnTotals,
+        isCalculatingRowTotals,
+        isCalculatingRowSubtotals,
+        isCalculatingGrandTotals,
+        isCalculatingSubtotals,
     } = visualizationConfig.chartConfig;
 
     const onColumnWidthChange =
@@ -255,7 +290,7 @@ const SimpleTable: FC<SimpleTableProps> = ({
                                 Refresh your browser to load the latest version
                                 and display this visualization correctly.
                             </Text>
-                            <Text size="sm" color="dimmed">
+                            <Text size="sm" c="dimmed">
                                 If this persists after refreshing, contact
                                 support.
                             </Text>
@@ -265,7 +300,7 @@ const SimpleTable: FC<SimpleTableProps> = ({
                         <Button
                             variant="default"
                             size={'xs'}
-                            leftIcon={<IconRefresh size={16} />}
+                            leftSection={<IconRefresh size={16} />}
                             onClick={triggerChunkErrorReload}
                         >
                             Refresh page
@@ -281,7 +316,22 @@ const SimpleTable: FC<SimpleTableProps> = ({
                 icon={IconAlertCircle}
             />
         );
-    } else if (pivotTableData.loading || pivotTableData.data) {
+    }
+
+    // Pivot is configured but the current results weren't computed with the same
+    // pivot dimensions (pivot just added, or config changed without re-running).
+    // Prompt a re-run in the editor instead of an empty/stale table.
+    if (
+        isPivotTableEnabled &&
+        isPivotResultStale &&
+        !isDashboard &&
+        isEditMode &&
+        !isLoading
+    ) {
+        return <PivotRerunState />;
+    }
+
+    if (pivotTableData.loading || pivotTableData.data) {
         return (
             <Box
                 p={isDashboard ? 0 : 'xs'}
@@ -291,36 +341,12 @@ const SimpleTable: FC<SimpleTableProps> = ({
             >
                 {pivotTableData.data && resultsData?.hasFetchedAllRows ? (
                     <>
-                        {/* Dashboard mode has no explorer store — use plain
-                         * table. Gated behind PivotColumnSort flag so we can
-                         * validate the new sort UX with design partners before
-                         * GA. */}
-                        {isDashboard || !isPivotColumnSortEnabled ? (
-                            <PivotTable
-                                className={className}
-                                data={pivotTableData.data}
-                                isMinimal={minimal}
-                                isDashboard={isDashboard}
-                                conditionalFormattings={conditionalFormattings}
-                                minMaxMap={minMaxMap}
-                                getFieldLabel={getFieldLabel}
-                                getField={getField}
-                                hideRowNumbers={hideRowNumbers}
-                                showSubtotals={showSubtotals}
-                                showSubtotalsExpanded={showSubtotalsExpanded}
-                                columnProperties={
-                                    visualizationConfig.chartConfig
-                                        .columnProperties
-                                }
-                                onColumnWidthChange={onColumnWidthChange}
-                                parameters={parameters}
-                                {...rest}
-                            />
-                        ) : (
+                        {hasExplorerStore && !isDashboard ? (
                             <ExplorerPivotTable
                                 className={className}
                                 data={pivotTableData.data}
                                 isMinimal={minimal}
+                                enableContextMenu={enableContextMenu}
                                 isDashboard={isDashboard}
                                 conditionalFormattings={conditionalFormattings}
                                 minMaxMap={minMaxMap}
@@ -329,12 +355,64 @@ const SimpleTable: FC<SimpleTableProps> = ({
                                 hideRowNumbers={hideRowNumbers}
                                 showSubtotals={showSubtotals}
                                 showSubtotalsExpanded={showSubtotalsExpanded}
+                                showRowGrouping={showRowGrouping}
                                 columnProperties={
                                     visualizationConfig.chartConfig
                                         .columnProperties
                                 }
                                 onColumnWidthChange={onColumnWidthChange}
                                 parameters={parameters}
+                                isColumnTotalsLoading={
+                                    isCalculatingColumnTotals
+                                }
+                                columnTotalsError={columnTotalsError}
+                                rowTotalsError={rowTotalsError}
+                                grandTotalsError={grandTotalsError}
+                                columnSubtotalsError={columnSubtotalsError}
+                                rowSubtotalsError={rowSubtotalsError}
+                                isRowTotalsLoading={isCalculatingRowTotals}
+                                isRowSubtotalsLoading={
+                                    isCalculatingRowSubtotals
+                                }
+                                isGrandTotalsLoading={isCalculatingGrandTotals}
+                                isSubtotalsLoading={isCalculatingSubtotals}
+                                {...rest}
+                            />
+                        ) : (
+                            <PivotTable
+                                className={className}
+                                data={pivotTableData.data}
+                                isMinimal={minimal}
+                                enableContextMenu={enableContextMenu}
+                                isDashboard={isDashboard}
+                                conditionalFormattings={conditionalFormattings}
+                                minMaxMap={minMaxMap}
+                                getFieldLabel={getFieldLabel}
+                                getField={getField}
+                                hideRowNumbers={hideRowNumbers}
+                                showSubtotals={showSubtotals}
+                                showSubtotalsExpanded={showSubtotalsExpanded}
+                                showRowGrouping={showRowGrouping}
+                                columnProperties={
+                                    visualizationConfig.chartConfig
+                                        .columnProperties
+                                }
+                                onColumnWidthChange={onColumnWidthChange}
+                                parameters={parameters}
+                                isColumnTotalsLoading={
+                                    isCalculatingColumnTotals
+                                }
+                                columnTotalsError={columnTotalsError}
+                                rowTotalsError={rowTotalsError}
+                                grandTotalsError={grandTotalsError}
+                                columnSubtotalsError={columnSubtotalsError}
+                                rowSubtotalsError={rowSubtotalsError}
+                                isRowTotalsLoading={isCalculatingRowTotals}
+                                isRowSubtotalsLoading={
+                                    isCalculatingRowSubtotals
+                                }
+                                isGrandTotalsLoading={isCalculatingGrandTotals}
+                                isSubtotalsLoading={isCalculatingSubtotals}
                                 {...rest}
                             />
                         )}
@@ -354,9 +432,14 @@ const SimpleTable: FC<SimpleTableProps> = ({
     }
 
     return (
-        <Box p={isDashboard ? 0 : 'xs'} pb="md" miw="100%" h="100%">
+        <Box
+            p={isDashboard || flush ? 0 : 'xs'}
+            pb={flush ? 0 : 'md'}
+            miw="100%"
+            h="100%"
+        >
             <Table
-                isDashboard={isDashboard}
+                isDashboard={isDashboard || flush}
                 minimal={minimal}
                 $shouldExpand={$shouldExpand}
                 className={className}
@@ -373,6 +456,7 @@ const SimpleTable: FC<SimpleTableProps> = ({
                 showColumnCalculation={showColumnCalculation}
                 showSubtotals={showSubtotals}
                 showSubtotalsExpanded={showSubtotalsExpanded}
+                showRowGrouping={showRowGrouping}
                 conditionalFormattings={conditionalFormattings}
                 minMaxMap={minMaxMap}
                 onColumnWidthChange={onColumnWidthChange}
@@ -380,8 +464,12 @@ const SimpleTable: FC<SimpleTableProps> = ({
                     visualizationConfig.chartConfig.columnProperties
                 }
                 footer={pagination}
-                headerContextMenu={headerContextMenu}
-                cellContextMenu={cellContextMenu}
+                headerContextMenu={
+                    enableContextMenu ? headerContextMenu : undefined
+                }
+                cellContextMenu={
+                    enableContextMenu ? cellContextMenu : undefined
+                }
                 pagination={{ showResultsTotal }}
                 {...rest}
             />

@@ -1,19 +1,19 @@
 import type { AgentSuggestion } from '@lightdash/common';
-import { Box, Button, Skeleton, Text } from '@mantine-8/core';
+import { Box, Button } from '@mantine/core';
 import { IconArrowUpRight } from '@tabler/icons-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import styles from './AgentSuggestionChips.module.css';
 
 type Props = {
     chips: AgentSuggestion[];
-    isLoading: boolean;
-    loadingVariant?: 'skeleton' | 'follow-up';
     onChipClick: (chip: AgentSuggestion, index: number) => void;
     onImpression?: (chipCount: number) => void;
+    align?: 'center' | 'left';
+    showPromptAffordance?: boolean;
+    maxVisible?: number;
+    disabled?: boolean;
 };
-
-const SKELETON_COUNT = 4;
 
 const chipKey = (chip: AgentSuggestion, idx: number) =>
     chip.kind === 'navigate'
@@ -25,74 +25,69 @@ const renderLeftIcon = (chip: AgentSuggestion) => {
     return <MantineIcon icon={IconArrowUpRight} size={13} stroke={1.75} />;
 };
 
+const renderRightIcon = (
+    chip: AgentSuggestion,
+    showPromptAffordance: boolean,
+) => {
+    if (chip.kind !== 'prompt' || !showPromptAffordance) return undefined;
+    return <MantineIcon icon={IconArrowUpRight} size={12} stroke={1.75} />;
+};
+
 export const AgentSuggestionChips = ({
     chips,
-    isLoading,
-    loadingVariant = 'skeleton',
     onChipClick,
     onImpression,
+    align = 'center',
+    showPromptAffordance = false,
+    maxVisible,
+    disabled = false,
 }: Props) => {
     const impressedRef = useRef<string | null>(null);
+    const visibleChips = useMemo(
+        () => (maxVisible === undefined ? chips : chips.slice(0, maxVisible)),
+        [chips, maxVisible],
+    );
 
     useEffect(() => {
-        if (isLoading) return;
-        if (chips.length === 0) return;
-        const fingerprint = chips.map((c, i) => chipKey(c, i)).join('|');
+        if (visibleChips.length === 0) return;
+        const fingerprint = visibleChips.map((c, i) => chipKey(c, i)).join('|');
         if (impressedRef.current === fingerprint) return;
         impressedRef.current = fingerprint;
-        onImpression?.(chips.length);
-    }, [chips, isLoading, onImpression]);
+        onImpression?.(visibleChips.length);
+    }, [visibleChips, onImpression]);
 
-    if (isLoading) {
-        if (loadingVariant === 'follow-up') {
-            return (
-                <Box className={styles.followUpLoader}>
-                    <Text
-                        component="span"
-                        size="xs"
-                        className={styles.loaderText}
-                    >
-                        Finding good follow-ups
-                    </Text>
-                    <Box className={styles.loaderDots} aria-hidden>
-                        <span />
-                        <span />
-                        <span />
-                    </Box>
-                </Box>
-            );
-        }
-
-        return (
-            <Box className={styles.row}>
-                {Array.from({ length: SKELETON_COUNT }).map((_, idx) => (
-                    <Skeleton
-                        // eslint-disable-next-line react/no-array-index-key
-                        key={idx}
-                        className={styles.skeleton}
-                        width={idx % 2 === 0 ? 180 : 220}
-                    />
-                ))}
-            </Box>
-        );
-    }
-
-    if (chips.length === 0) return null;
+    if (visibleChips.length === 0) return null;
 
     return (
-        <Box className={styles.row}>
-            {chips.map((chip, idx) => {
+        <Box
+            className={`${styles.row} ${align === 'left' ? styles.rowLeft : ''}`}
+        >
+            {visibleChips.map((chip, idx) => {
                 const classes = [styles.chip, styles.fadeIn];
                 if (chip.kind === 'navigate') classes.push(styles.navigateChip);
                 return (
                     <Button
                         key={chipKey(chip, idx)}
+                        disabled={disabled}
                         variant="default"
                         size="xs"
                         className={classes.join(' ')}
                         style={{ ['--chip-idx' as string]: idx }}
                         leftSection={renderLeftIcon(chip)}
+                        rightSection={renderRightIcon(
+                            chip,
+                            showPromptAffordance,
+                        )}
                         onClick={() => onChipClick(chip, idx)}
+                        // Walkthrough anchor: a question the learner can ask
+                        // without typing. Navigate chips (continue a thread)
+                        // carry no anchor. See scripts/scope-tours/generate.ts.
+                        {...(chip.kind === 'prompt'
+                            ? {
+                                  'data-tour-anchor': 'ai-suggestion',
+                                  'data-tour-hint': 'Pick a suggested question',
+                              }
+                            : {})}
                     >
                         {chip.label}
                     </Button>

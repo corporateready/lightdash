@@ -1,147 +1,155 @@
-import { Navigate, Outlet, type RouteObject } from 'react-router';
-import NavBar from '../components/NavBar';
+import { Navigate, type RouteObject } from 'react-router';
+import { NavBarLayout } from '../components/NavBarLayout';
 import PrivateRoute from '../components/PrivateRoute';
+import { loadLazyRouteDefault } from '../features/chunkErrorHandler';
 import { TrackPage } from '../providers/Tracking/TrackingProvider';
 import { PageName } from '../types/Events';
-import EmbeddedApp from './features/embed/EmbeddedApp';
-import { AiAgentsAdminPage } from './pages/AiAgents/Admin/AiAgentsAdminPage';
-import AgentPage from './pages/AiAgents/AgentPage';
-import AgentsRedirect from './pages/AiAgents/AgentsRedirect';
-import AgentsWelcome from './pages/AiAgents/AgentsWelcome';
-import AiAgentThreadPage from './pages/AiAgents/AgentThreadPage';
-import AiAgentNewThreadPage from './pages/AiAgents/AiAgentNewThreadPage';
-import AiAgentsNotAuthorizedPage from './pages/AiAgents/AiAgentsNotAuthorizedPage';
-import { AiAgentsRootLayout } from './pages/AiAgents/AiAgentsRootLayout';
-import ProjectAiAgentEditPage from './pages/AiAgents/ProjectAiAgentEditPage';
-import EmbedChart from './pages/EmbedChart';
-import EmbedDashboard from './pages/EmbedDashboard';
-import EmbedExplore from './pages/EmbedExplore';
-import { SlackAuthSuccess } from './pages/SlackAuthSuccess';
 
 const COMMERCIAL_EMBED_ROUTES: RouteObject[] = [
     {
         path: '/embed',
         handle: { hideAILauncher: true },
-        element: <EmbeddedApp />,
+        lazy: async () => {
+            const EmbeddedApp = await loadLazyRouteDefault(
+                './features/embed/EmbeddedApp',
+                () => import('./features/embed/EmbeddedApp'),
+            );
+            return { Component: EmbeddedApp };
+        },
         children: [
             {
                 path: '/embed/:projectUuid',
-                element: (
-                    <TrackPage name={PageName.EMBED_DASHBOARD}>
-                        <EmbedDashboard />
-                    </TrackPage>
-                ),
+                lazy: async () => {
+                    const EmbedDashboard = await loadLazyRouteDefault(
+                        './pages/EmbedDashboard',
+                        () => import('./pages/EmbedDashboard'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.EMBED_DASHBOARD}>
+                                <EmbedDashboard />
+                            </TrackPage>
+                        ),
+                    };
+                },
             },
             {
                 path: '/embed/:projectUuid/tabs/:tabUuid',
-                element: (
-                    <TrackPage name={PageName.EMBED_DASHBOARD}>
-                        <EmbedDashboard />
-                    </TrackPage>
-                ),
+                lazy: async () => {
+                    const EmbedDashboard = await loadLazyRouteDefault(
+                        './pages/EmbedDashboard',
+                        () => import('./pages/EmbedDashboard'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.EMBED_DASHBOARD}>
+                                <EmbedDashboard />
+                            </TrackPage>
+                        ),
+                    };
+                },
             },
             {
                 path: '/embed/:projectUuid/chart/:chartUuid',
-                element: (
-                    <TrackPage name={PageName.EMBED_SAVED_CHART}>
-                        <EmbedChart />
-                    </TrackPage>
-                ),
+                lazy: async () => {
+                    const EmbedChart = await loadLazyRouteDefault(
+                        './pages/EmbedChart',
+                        () => import('./pages/EmbedChart'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.EMBED_SAVED_CHART}>
+                                <EmbedChart />
+                            </TrackPage>
+                        ),
+                    };
+                },
+            },
+            {
+                path: '/embed/:projectUuid/app/:appUuid',
+                lazy: async () => {
+                    const EmbedApp = await loadLazyRouteDefault(
+                        './pages/EmbedApp',
+                        () => import('./pages/EmbedApp'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.EMBED_DATA_APP}>
+                                <EmbedApp />
+                            </TrackPage>
+                        ),
+                    };
+                },
+            },
+            {
+                path: '/embed/:projectUuid/metrics',
+                lazy: async () => {
+                    const { default: MetricsCatalog } =
+                        await import('../pages/MetricsCatalog');
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.METRICS_CATALOG}>
+                                <MetricsCatalog />
+                            </TrackPage>
+                        ),
+                    };
+                },
             },
             {
                 path: '/embed/:projectUuid/explore/:exploreId',
-                element: (
-                    <TrackPage name={PageName.EMBED_EXPLORE}>
-                        <EmbedExplore />
-                    </TrackPage>
-                ),
-            },
-        ],
-    },
-];
-
-const COMMERCIAL_AI_AGENTS_ROUTES: RouteObject[] = [
-    {
-        path: '/ai-agents/admin',
-        element: (
-            <PrivateRoute>
-                <NavBar />
-                <Outlet />
-            </PrivateRoute>
-        ),
-        children: [
-            {
-                index: true,
-                element: <Navigate to="threads" replace />,
+                lazy: async () => {
+                    const EmbedExplore = await loadLazyRouteDefault(
+                        './pages/EmbedExplore',
+                        () => import('./pages/EmbedExplore'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.EMBED_EXPLORE}>
+                                <EmbedExplore />
+                            </TrackPage>
+                        ),
+                    };
+                },
             },
             {
-                path: 'threads',
-                element: <AiAgentsAdminPage />,
+                path: '/embed/:projectUuid/ai-agents/:agentUuid/dashboards/:agentDashboardUuid',
+                lazy: async () => {
+                    const EmbedAiAgentDashboard = await loadLazyRouteDefault(
+                        './pages/EmbedAiAgentDashboard',
+                        () => import('./pages/EmbedAiAgentDashboard'),
+                    );
+                    return {
+                        Component: () => (
+                            <TrackPage name={PageName.EMBED_DASHBOARD}>
+                                <EmbedAiAgentDashboard />
+                            </TrackPage>
+                        ),
+                    };
+                },
+                // A child route keeps the dashboard mounted when switching tabs.
+                children: [{ path: 'tabs/:tabUuid' }],
             },
             {
-                path: 'agents',
-                element: <AiAgentsAdminPage />,
-            },
-        ],
-    },
-    {
-        path: '/ai-agents/',
-        element: (
-            <PrivateRoute>
-                <AgentsRedirect />
-            </PrivateRoute>
-        ),
-    },
-    {
-        path: '/projects/:projectUuid/ai-agents',
-        handle: { hideAILauncher: true },
-        element: (
-            <PrivateRoute>
-                <AiAgentsRootLayout />
-            </PrivateRoute>
-        ),
-        children: [
-            {
-                index: true,
-                element: <AgentsWelcome />,
+                path: '/embed/:projectUuid/ai-agents/not-authorized',
+                lazy: async () => {
+                    const AiAgentsNotAuthorizedPage =
+                        await loadLazyRouteDefault(
+                            './pages/AiAgents/AiAgentsNotAuthorizedPage',
+                            () =>
+                                import('./pages/AiAgents/AiAgentsNotAuthorizedPage'),
+                        );
+                    return { Component: AiAgentsNotAuthorizedPage };
+                },
             },
             {
-                path: 'not-authorized',
-                element: <AiAgentsNotAuthorizedPage />,
-            },
-            {
-                path: 'new',
-                element: <ProjectAiAgentEditPage isCreateMode />,
-            },
-            {
-                path: ':agentUuid/edit',
-                element: <ProjectAiAgentEditPage />,
-                children: [
-                    {
-                        path: 'evals',
-                        element: <ProjectAiAgentEditPage />,
-                    },
-                    {
-                        path: 'evals/:evalUuid',
-                        element: <ProjectAiAgentEditPage />,
-                    },
-                    {
-                        path: 'evals/:evalUuid/run/:runUuid',
-                        element: <ProjectAiAgentEditPage />,
-                    },
-                    {
-                        path: 'verified-artifacts',
-                        element: <ProjectAiAgentEditPage />,
-                    },
-                    {
-                        path: 'verified-artifacts/:artifactUuid',
-                        element: <ProjectAiAgentEditPage />,
-                    },
-                ],
-            },
-            {
-                path: ':agentUuid',
-                element: <AgentPage />,
+                path: '/embed/:projectUuid/ai-agents/:agentUuid',
+                lazy: async () => {
+                    const AgentPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/AgentPage',
+                        () => import('./pages/AiAgents/AgentPage'),
+                    );
+                    return { Component: AgentPage };
+                },
                 children: [
                     {
                         index: true,
@@ -152,19 +160,354 @@ const COMMERCIAL_AI_AGENTS_ROUTES: RouteObject[] = [
                         children: [
                             {
                                 index: true,
-                                element: <AiAgentNewThreadPage />,
+                                lazy: async () => {
+                                    const AiAgentNewThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AiAgentNewThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AiAgentNewThreadPage'),
+                                        );
+                                    return {
+                                        Component: AiAgentNewThreadPage,
+                                    };
+                                },
                             },
                             {
                                 path: ':threadUuid/messages/:promptUuid/debug',
-                                element: <AiAgentThreadPage debug />,
+                                lazy: async () => {
+                                    const AiAgentThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AgentThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AgentThreadPage'),
+                                        );
+                                    return {
+                                        Component: () => (
+                                            <AiAgentThreadPage debug />
+                                        ),
+                                    };
+                                },
                             },
                             {
                                 path: ':threadUuid/messages/:promptUuid',
-                                element: <AiAgentThreadPage />,
+                                lazy: async () => {
+                                    const AiAgentThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AgentThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AgentThreadPage'),
+                                        );
+                                    return { Component: AiAgentThreadPage };
+                                },
                             },
                             {
                                 path: ':threadUuid',
-                                element: <AiAgentThreadPage />,
+                                lazy: async () => {
+                                    const AiAgentThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AgentThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AgentThreadPage'),
+                                        );
+                                    return { Component: AiAgentThreadPage };
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    },
+];
+
+const COMMERCIAL_AI_AGENTS_ROUTES: RouteObject[] = [
+    {
+        path: '/ai-agents/admin',
+        element: <Navigate to="/generalSettings/ai/general" replace />,
+    },
+    {
+        path: '/ai-agents/admin/threads',
+        element: <Navigate to="/generalSettings/ai/threads" replace />,
+    },
+    {
+        path: '/ai-agents/admin/agents',
+        element: <Navigate to="/generalSettings/ai/agents" replace />,
+    },
+    {
+        path: '/ai-agents/admin/memories',
+        element: <Navigate to="/generalSettings/ai/memories" replace />,
+    },
+    {
+        path: '/ai-agents/admin/reviews',
+        element: <Navigate to="/generalSettings/ai/issues" replace />,
+    },
+    {
+        path: '/ai-agents/admin/issues',
+        element: <Navigate to="/generalSettings/ai/issues" replace />,
+    },
+    {
+        path: '/ai-agents/',
+        lazy: async () => {
+            const AgentsRedirect = await loadLazyRouteDefault(
+                './pages/AiAgents/AgentsRedirect',
+                () => import('./pages/AiAgents/AgentsRedirect'),
+            );
+            return {
+                Component: () => (
+                    <PrivateRoute>
+                        <AgentsRedirect />
+                    </PrivateRoute>
+                ),
+            };
+        },
+    },
+    {
+        path: '/projects/:projectUuid/ai-agents',
+        handle: { hideAILauncher: true },
+        lazy: async () => {
+            const AiAgentsRootLayout = await loadLazyRouteDefault(
+                './pages/AiAgents/AiAgentsRootLayout',
+                () => import('./pages/AiAgents/AiAgentsRootLayout'),
+            );
+            return {
+                Component: () => (
+                    <PrivateRoute>
+                        <AiAgentsRootLayout />
+                    </PrivateRoute>
+                ),
+            };
+        },
+        children: [
+            {
+                index: true,
+                lazy: async () => {
+                    const AgentsWelcome = await loadLazyRouteDefault(
+                        './pages/AiAgents/AgentsWelcome',
+                        () => import('./pages/AiAgents/AgentsWelcome'),
+                    );
+                    return { Component: AgentsWelcome };
+                },
+            },
+            {
+                path: 'not-authorized',
+                lazy: async () => {
+                    const AiAgentsNotAuthorizedPage =
+                        await loadLazyRouteDefault(
+                            './pages/AiAgents/AiAgentsNotAuthorizedPage',
+                            () =>
+                                import('./pages/AiAgents/AiAgentsNotAuthorizedPage'),
+                        );
+                    return { Component: AiAgentsNotAuthorizedPage };
+                },
+            },
+            {
+                path: 'new',
+                lazy: async () => {
+                    const ProjectAiAgentEditPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/ProjectAiAgentEditPage',
+                        () => import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                    );
+                    return {
+                        Component: () => (
+                            <ProjectAiAgentEditPage isCreateMode />
+                        ),
+                    };
+                },
+            },
+            {
+                path: 'share/:aiThreadShareUuid',
+                lazy: async () => {
+                    const AiAgentThreadSharePage = await loadLazyRouteDefault(
+                        './pages/AiAgents/AiAgentThreadSharePage',
+                        () => import('./pages/AiAgents/AiAgentThreadSharePage'),
+                    );
+                    return { Component: AiAgentThreadSharePage };
+                },
+            },
+            {
+                path: 'memories/:slug',
+                lazy: async () => {
+                    const AiAgentMemoryPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/AiAgentMemoryPage',
+                        () => import('./pages/AiAgents/AiAgentMemoryPage'),
+                    );
+                    return { Component: AiAgentMemoryPage };
+                },
+            },
+            {
+                path: 'deep-research/:runUuid',
+                lazy: async () => {
+                    const DeepResearchReportPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/DeepResearchReportPage',
+                        () => import('./pages/AiAgents/DeepResearchReportPage'),
+                    );
+                    return { Component: DeepResearchReportPage };
+                },
+            },
+            {
+                path: ':agentUuid/memories/:slug',
+                lazy: async () => {
+                    const AiAgentMemoryPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/AiAgentMemoryPage',
+                        () => import('./pages/AiAgents/AiAgentMemoryPage'),
+                    );
+                    return { Component: AiAgentMemoryPage };
+                },
+            },
+            {
+                path: ':agentUuid/edit',
+                lazy: async () => {
+                    const ProjectAiAgentEditPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/ProjectAiAgentEditPage',
+                        () => import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                    );
+                    return { Component: ProjectAiAgentEditPage };
+                },
+                children: [
+                    {
+                        path: 'evals',
+                        lazy: async () => {
+                            const ProjectAiAgentEditPage =
+                                await loadLazyRouteDefault(
+                                    './pages/AiAgents/ProjectAiAgentEditPage',
+                                    () =>
+                                        import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                                );
+                            return { Component: ProjectAiAgentEditPage };
+                        },
+                    },
+                    {
+                        path: 'evals/:evalUuid',
+                        lazy: async () => {
+                            const ProjectAiAgentEditPage =
+                                await loadLazyRouteDefault(
+                                    './pages/AiAgents/ProjectAiAgentEditPage',
+                                    () =>
+                                        import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                                );
+                            return { Component: ProjectAiAgentEditPage };
+                        },
+                    },
+                    {
+                        path: 'evals/:evalUuid/run/:runUuid',
+                        lazy: async () => {
+                            const ProjectAiAgentEditPage =
+                                await loadLazyRouteDefault(
+                                    './pages/AiAgents/ProjectAiAgentEditPage',
+                                    () =>
+                                        import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                                );
+                            return { Component: ProjectAiAgentEditPage };
+                        },
+                    },
+                    {
+                        path: 'verified-artifacts',
+                        lazy: async () => {
+                            const ProjectAiAgentEditPage =
+                                await loadLazyRouteDefault(
+                                    './pages/AiAgents/ProjectAiAgentEditPage',
+                                    () =>
+                                        import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                                );
+                            return { Component: ProjectAiAgentEditPage };
+                        },
+                    },
+                    {
+                        path: 'verified-artifacts/:artifactUuid',
+                        lazy: async () => {
+                            const ProjectAiAgentEditPage =
+                                await loadLazyRouteDefault(
+                                    './pages/AiAgents/ProjectAiAgentEditPage',
+                                    () =>
+                                        import('./pages/AiAgents/ProjectAiAgentEditPage'),
+                                );
+                            return { Component: ProjectAiAgentEditPage };
+                        },
+                    },
+                ],
+            },
+            {
+                path: ':agentUuid',
+                lazy: async () => {
+                    const AgentPage = await loadLazyRouteDefault(
+                        './pages/AiAgents/AgentPage',
+                        () => import('./pages/AiAgents/AgentPage'),
+                    );
+                    return { Component: AgentPage };
+                },
+                children: [
+                    {
+                        index: true,
+                        element: <Navigate to="threads" replace />,
+                    },
+                    {
+                        path: 'threads',
+                        children: [
+                            {
+                                index: true,
+                                lazy: async () => {
+                                    const AiAgentNewThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AiAgentNewThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AiAgentNewThreadPage'),
+                                        );
+                                    return {
+                                        Component: AiAgentNewThreadPage,
+                                    };
+                                },
+                            },
+                            {
+                                path: ':threadUuid/messages/:promptUuid/debug',
+                                lazy: async () => {
+                                    const AiAgentThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AgentThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AgentThreadPage'),
+                                        );
+                                    return {
+                                        Component: () => (
+                                            <AiAgentThreadPage debug />
+                                        ),
+                                    };
+                                },
+                            },
+                            {
+                                path: ':threadUuid/messages/:promptUuid',
+                                lazy: async () => {
+                                    const AiAgentThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AgentThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AgentThreadPage'),
+                                        );
+                                    return { Component: AiAgentThreadPage };
+                                },
+                            },
+                            {
+                                path: 'battle/:threadUuidA/:threadUuidB',
+                                lazy: async () => {
+                                    const AiAgentBattlePage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AiAgentBattlePage',
+                                            () =>
+                                                import('./pages/AiAgents/AiAgentBattlePage'),
+                                        );
+                                    return { Component: AiAgentBattlePage };
+                                },
+                            },
+                            {
+                                path: ':threadUuid',
+                                lazy: async () => {
+                                    const AiAgentThreadPage =
+                                        await loadLazyRouteDefault(
+                                            './pages/AiAgents/AgentThreadPage',
+                                            () =>
+                                                import('./pages/AiAgents/AgentThreadPage'),
+                                        );
+                                    return { Component: AiAgentThreadPage };
+                                },
                             },
                         ],
                     },
@@ -177,17 +520,42 @@ const COMMERCIAL_AI_AGENTS_ROUTES: RouteObject[] = [
 const COMMERCIAL_SLACK_AUTH_ROUTES: RouteObject[] = [
     {
         path: '/auth/slack/success',
-        element: <SlackAuthSuccess />,
+        lazy: async () => {
+            const SlackAuthSuccess = await loadLazyRouteDefault(
+                './pages/SlackAuthSuccess',
+                () => import('./pages/SlackAuthSuccess'),
+            );
+            return { Component: SlackAuthSuccess };
+        },
+    },
+];
+
+const COMMERCIAL_RELEASE_HIGHLIGHTS_ROUTES: RouteObject[] = [
+    {
+        element: (
+            <PrivateRoute>
+                <NavBarLayout />
+            </PrivateRoute>
+        ),
+        children: [
+            {
+                path: '/whats-new',
+                lazy: async () => {
+                    const WhatsNewPage = await loadLazyRouteDefault(
+                        './features/releaseHighlights/WhatsNewPage',
+                        () =>
+                            import('./features/releaseHighlights/WhatsNewPage'),
+                    );
+                    return { Component: WhatsNewPage };
+                },
+            },
+        ],
     },
 ];
 
 export const CommercialWebAppRoutes = [
+    ...COMMERCIAL_RELEASE_HIGHLIGHTS_ROUTES,
     ...COMMERCIAL_EMBED_ROUTES,
     ...COMMERCIAL_AI_AGENTS_ROUTES,
     ...COMMERCIAL_SLACK_AUTH_ROUTES,
-];
-
-export const CommercialMobileRoutes = [
-    ...COMMERCIAL_EMBED_ROUTES,
-    ...COMMERCIAL_AI_AGENTS_ROUTES,
 ];

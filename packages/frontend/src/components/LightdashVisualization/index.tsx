@@ -1,5 +1,5 @@
 import { assertUnreachable, ChartType } from '@lightdash/common';
-import { Anchor, Skeleton, Text } from '@mantine-8/core';
+import { Anchor, Skeleton, Text } from '@mantine/core';
 import { IconChartBarOff } from '@tabler/icons-react';
 import {
     forwardRef,
@@ -15,6 +15,7 @@ import { EmptyState } from '../common/EmptyState';
 import MantineIcon from '../common/MantineIcon';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
 import CustomVisualization from '../CustomVisualization';
+import DataAppVizRenderer from '../DataAppVizRenderer';
 import FunnelChart from '../FunnelChart';
 import SimpleChart from '../SimpleChart';
 import SimpleGauge from '../SimpleGauge';
@@ -23,7 +24,11 @@ import SimpleSankey from '../SimpleSankey';
 import SimpleStatistic from '../SimpleStatistic';
 import SimpleTable from '../SimpleTable';
 import SimpleTreemap from '../SimpleTreemap';
-import { useVisualizationContext } from './useVisualizationContext';
+import classes from './LightdashVisualization.module.css';
+import {
+    useVisualizationConfig,
+    useVisualizationInputs,
+} from './useVisualizationContext';
 
 // Lazy load SimpleMap to avoid bundling Leaflet in the main chunk
 const LazySimpleMap = lazy(() => import('../SimpleMap'));
@@ -77,10 +82,15 @@ interface LightdashVisualizationProps {
     isDashboard?: boolean;
     tileUuid?: string;
     isTitleHidden?: boolean;
+    /** Chart description, surfaced on the big number when the tile title is hidden. */
+    description?: string;
     className?: string;
     'data-testid'?: string;
     onScreenshotReady?: () => void;
     onScreenshotError?: () => void;
+    enableContextMenu?: boolean;
+    /** Tables only: edge to edge, no padding, side borders or radius. */
+    flush?: boolean;
 }
 
 const LightdashVisualization = memo(
@@ -89,16 +99,19 @@ const LightdashVisualization = memo(
             {
                 isDashboard = false,
                 tileUuid,
-                isTitleHidden: _isTitleHidden = false,
+                isTitleHidden = false,
+                description,
                 className,
                 onScreenshotReady,
                 onScreenshotError,
+                enableContextMenu = true,
+                flush = false,
                 ...props
             },
             ref,
         ) => {
-            const { visualizationConfig, minimal, apiErrorDetail } =
-                useVisualizationContext();
+            const visualizationConfig = useVisualizationConfig();
+            const { minimal, apiErrorDetail } = useVisualizationInputs();
 
             const { sentinelRef, isVisible } = useDeferredVisibility(
                 isDashboard && !minimal,
@@ -130,7 +143,7 @@ const LightdashVisualization = memo(
                             title="Unable to load visualization"
                             description={
                                 <Fragment>
-                                    <Text style={{ whiteSpace: 'pre-wrap' }}>
+                                    <Text className={classes.errorMessage}>
                                         {apiErrorDetail.message || ''}
                                     </Text>
                                     {apiErrorDetail.data.documentationUrl && (
@@ -165,6 +178,8 @@ const LightdashVisualization = memo(
                     chartContent = (
                         <SimpleStatistic
                             minimal={minimal}
+                            isTitleHidden={isTitleHidden}
+                            description={description}
                             onScreenshotReady={onScreenshotReady}
                             onScreenshotError={onScreenshotError}
                         />
@@ -176,7 +191,9 @@ const LightdashVisualization = memo(
                             tileUuid={tileUuid}
                             minimal={minimal}
                             isDashboard={!!isDashboard}
+                            flush={flush}
                             $shouldExpand
+                            enableContextMenu={enableContextMenu}
                             onScreenshotReady={onScreenshotReady}
                             onScreenshotError={onScreenshotError}
                         />
@@ -197,6 +214,7 @@ const LightdashVisualization = memo(
                         <SimplePieChart
                             isInDashboard={!!isDashboard}
                             $shouldExpand
+                            enableContextMenu={enableContextMenu}
                             onScreenshotReady={onScreenshotReady}
                             onScreenshotError={onScreenshotError}
                         />
@@ -207,6 +225,7 @@ const LightdashVisualization = memo(
                         <FunnelChart
                             isInDashboard={!!isDashboard}
                             $shouldExpand
+                            enableContextMenu={enableContextMenu}
                             onScreenshotReady={onScreenshotReady}
                             onScreenshotError={onScreenshotError}
                         />
@@ -264,6 +283,15 @@ const LightdashVisualization = memo(
                         <SimpleSankey
                             isInDashboard={!!isDashboard}
                             $shouldExpand
+                            onScreenshotReady={onScreenshotReady}
+                            onScreenshotError={onScreenshotError}
+                        />
+                    );
+                    break;
+                case ChartType.DATA_APP_VIZ:
+                    chartContent = (
+                        <DataAppVizRenderer
+                            isInDashboard={!!isDashboard}
                             onScreenshotReady={onScreenshotReady}
                             onScreenshotError={onScreenshotError}
                         />

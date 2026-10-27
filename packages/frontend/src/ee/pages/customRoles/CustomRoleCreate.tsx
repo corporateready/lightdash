@@ -1,4 +1,5 @@
-import { Stack } from '@mantine-8/core';
+import { rolePresets, type RoleLevel } from '@lightdash/common';
+import { Stack } from '@mantine/core';
 import { useNavigate } from 'react-router';
 import PageBreadcrumbs from '../../../components/common/PageBreadcrumbs';
 import { RoleBuilder } from '../../features/customRoles/components/RoleBuilder';
@@ -11,11 +12,13 @@ export const CustomRoleCreate = () => {
     const handleCreateRole = async (values: {
         name: string;
         description: string;
+        level: RoleLevel;
         scopes: string[];
     }) => {
         await createRole.mutateAsync({
             name: values.name,
             description: values.description || undefined,
+            level: values.level,
             scopes: values.scopes,
         });
         void navigate('/generalSettings/customRoles');
@@ -24,6 +27,7 @@ export const CustomRoleCreate = () => {
     const initialValues = {
         name: '',
         description: '',
+        level: 'project' as const,
         scopes: [],
     };
 
@@ -47,6 +51,7 @@ export const CustomRoleCreate = () => {
                 onSubmit={handleCreateRole}
                 isWorking={createRole.isLoading}
                 mode="create"
+                presets={rolePresets}
             />
         </Stack>
     );

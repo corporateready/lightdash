@@ -2,6 +2,7 @@ import cloneDeep from 'lodash/cloneDeep';
 import { DimensionType } from './field';
 import {
     applyDimensionOverrides,
+    applyMetricOverrides,
     FilterOperator,
     type DashboardFilterRule,
     type DashboardFilters,
@@ -327,6 +328,8 @@ describe('applyDimensionOverrides', () => {
             expect(result[0]).toEqual({
                 ...overrides[0],
                 tileTargets: baseDashboardFilters.dimensions[0].tileTargets,
+                // Requirement flags are owned by the saved dashboard
+                required: undefined,
             });
         });
 
@@ -504,6 +507,443 @@ describe('applyDimensionOverrides', () => {
             expect(result[1].tileTargets).toEqual(
                 baseDashboardFilters.dimensions[1].tileTargets,
             );
+        });
+    });
+
+    // A shared link carries a filter id that no longer matches the saved filter
+    // (the id is regenerated when a filter is deleted and re-added or its field
+    // is changed). The override must fall back to matching by fieldId +
+    // tableName so it merges into the saved filter and inherits its tileTargets,
+    // instead of being appended as a duplicate that applies to every tile.
+    describe('field-match fallback for stale ids', () => {
+        it('reconciles a stale id by field and inherits the saved tileTargets', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter(
+                        'new-id',
+                        'customers_customer_id',
+                        'customers',
+                        ['123'],
+                        {
+                            'tile-1': {
+                                fieldId: 'customers_customer_id',
+                                tableName: 'customers',
+                            },
+                            'tile-2': false,
+                        },
+                    ),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter(
+                    'old-id',
+                    'customers_customer_id',
+                    'customers',
+                    ['789'],
+                ),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            // Merged into the saved filter, not appended as a duplicate.
+            expect(result).toHaveLength(1);
+            expect(result[0].id).toBe('new-id');
+            expect(result[0].values).toEqual(['789']);
+            expect(result[0].tileTargets?.['tile-2']).toBe(false);
+        });
+
+        it('appends an override that matches no saved filter by id or field', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter(
+                        'filter-1',
+                        'customers_customer_id',
+                        'customers',
+                    ),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter('stale', 'orders_status', 'orders', [
+                    'completed',
+                ]),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[1]).toEqual(overrides[0]);
+        });
+
+        it('does not reconcile an override targeting a different tableName', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter('saved', 'status', 'orders'),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter('stale', 'status', 'returns', ['x']),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[0]).toEqual(savedFilters.dimensions[0]);
+            expect(result[1]).toEqual(overrides[0]);
+        });
+
+        it('prefers an id match over a same-field stale override, which is appended', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter('filter-1', 'status', 'orders', [
+                        'orig',
+                    ]),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter('filter-1', 'status', 'orders', [
+                    'id-match',
+                ]),
+                createOverrideFilter('stale', 'status', 'orders', [
+                    'field-match',
+                ]),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[0].values).toEqual(['id-match']);
+            expect(result[1]).toEqual(overrides[1]);
+        });
+
+        it('reserves an exact id match for a later saved filter sharing the field', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter(
+                        'saved-a',
+                        'customers_customer_id',
+                        'customers',
+                        ['1'],
+                    ),
+                    createBaseDashboardFilter(
+                        'saved-b',
+                        'customers_customer_id',
+                        'customers',
+                        ['2'],
+                    ),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter(
+                    'saved-b',
+                    'customers_customer_id',
+                    'customers',
+                    ['exact-b'],
+                ),
+                createOverrideFilter(
+                    'stale-a',
+                    'customers_customer_id',
+                    'customers',
+                    ['stale-a'],
+                ),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[0]).toMatchObject({
+                id: 'saved-a',
+                values: ['stale-a'],
+            });
+            expect(result[1]).toMatchObject({
+                id: 'saved-b',
+                values: ['exact-b'],
+            });
+        });
+
+        it('reconciles only the first of two saved filters sharing a field', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter(
+                        'saved-a',
+                        'customers_customer_id',
+                        'customers',
+                        ['1'],
+                        {
+                            'tile-1': {
+                                fieldId: 'customers_customer_id',
+                                tableName: 'customers',
+                            },
+                        },
+                    ),
+                    createBaseDashboardFilter(
+                        'saved-b',
+                        'customers_customer_id',
+                        'customers',
+                        ['2'],
+                    ),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter(
+                    'stale',
+                    'customers_customer_id',
+                    'customers',
+                    ['99'],
+                ),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[0].id).toBe('saved-a');
+            expect(result[0].values).toEqual(['99']);
+            expect(result[1].id).toBe('saved-b');
+            expect(result[1].values).toEqual(['2']);
+        });
+
+        it('propagates the override disabled state when reconciling by field', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter('saved', 'status', 'orders', [
+                        'orig',
+                    ]),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                {
+                    ...createOverrideFilter('stale', 'status', 'orders', [
+                        'new',
+                    ]),
+                    disabled: true,
+                },
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(1);
+            expect(result[0].disabled).toBe(true);
+            expect(result[0].values).toEqual(['new']);
+        });
+    });
+
+    // required / requiredGroupId are set by the dashboard editor; an override
+    // (shared link, embed JWT, scheduler) must not be able to strip or inject
+    // them.
+    describe('requirement flags are saved-dashboard-owned', () => {
+        it('keeps the saved requirement flags when an override omits them', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    {
+                        ...createBaseDashboardFilter(
+                            'filter-1',
+                            'customers_customer_id',
+                            'customers',
+                        ),
+                        required: true,
+                    },
+                    {
+                        ...createBaseDashboardFilter(
+                            'filter-2',
+                            'orders_status',
+                            'orders',
+                        ),
+                        requiredGroupId: 'group-1',
+                    },
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                createOverrideFilter(
+                    'filter-1',
+                    'customers_customer_id',
+                    'customers',
+                    ['789'],
+                ),
+                // Field-matched override with a stale id
+                createOverrideFilter('stale', 'orders_status', 'orders', [
+                    'completed',
+                ]),
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[0].required).toBe(true);
+            expect(result[0].values).toEqual(['789']);
+            expect(result[1].requiredGroupId).toBe('group-1');
+            expect(result[1].values).toEqual(['completed']);
+        });
+
+        it('ignores requirement flags supplied by the override', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    createBaseDashboardFilter(
+                        'filter-1',
+                        'customers_customer_id',
+                        'customers',
+                    ),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                {
+                    ...createOverrideFilter(
+                        'filter-1',
+                        'customers_customer_id',
+                        'customers',
+                    ),
+                    required: true,
+                    requiredGroupId: 'injected-group',
+                },
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(1);
+            expect(result[0].required).toBeUndefined();
+            expect(result[0].requiredGroupId).toBeUndefined();
+        });
+
+        it('strips requirement flags from appended overrides', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    {
+                        ...createBaseDashboardFilter(
+                            'filter-1',
+                            'orders_status',
+                            'orders',
+                        ),
+                        requiredGroupId: 'group-1',
+                        disabled: true,
+                    },
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            // Matches no saved filter by id or field, so it gets appended
+            const overrides: DashboardFilterRule[] = [
+                {
+                    ...createOverrideFilter(
+                        'new-filter',
+                        'customers_customer_id',
+                        'customers',
+                        ['789'],
+                    ),
+                    required: true,
+                    requiredGroupId: 'group-1',
+                },
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(2);
+            expect(result[1].id).toBe('new-filter');
+            expect(result[1].values).toEqual(['789']);
+            expect(result[1].required).toBeUndefined();
+            expect(result[1].requiredGroupId).toBeUndefined();
+        });
+    });
+
+    describe('section membership is saved-dashboard-owned', () => {
+        it('keeps the saved sectionId and never adopts one from the override', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [
+                    {
+                        ...createBaseDashboardFilter(
+                            'filter-1',
+                            'customers_customer_id',
+                            'customers',
+                        ),
+                        sectionId: 'section-1',
+                    },
+                    createBaseDashboardFilter(
+                        'filter-2',
+                        'orders_status',
+                        'orders',
+                    ),
+                ],
+                metrics: [],
+                tableCalculations: [],
+            };
+            const overrides: DashboardFilterRule[] = [
+                {
+                    ...createOverrideFilter(
+                        'filter-1',
+                        'customers_customer_id',
+                        'customers',
+                    ),
+                    sectionId: 'moved',
+                },
+                {
+                    ...createOverrideFilter(
+                        'filter-2',
+                        'orders_status',
+                        'orders',
+                    ),
+                    sectionId: 'injected',
+                },
+                {
+                    ...createOverrideFilter('new', 'orders_total', 'orders'),
+                    sectionId: 'injected',
+                },
+            ];
+
+            const result = applyDimensionOverrides(savedFilters, overrides);
+
+            expect(result).toHaveLength(3);
+            expect(result[0].sectionId).toBe('section-1');
+            expect(result[1].sectionId).toBeUndefined();
+            expect(result[2].sectionId).toBeUndefined();
+        });
+
+        it('pins the saved sectionId on metric filters too', () => {
+            const savedFilters: DashboardFilters = {
+                dimensions: [],
+                metrics: [
+                    {
+                        ...createBaseDashboardFilter(
+                            'metric-1',
+                            'orders_total',
+                            'orders',
+                        ),
+                        sectionId: 'section-1',
+                    },
+                ],
+                tableCalculations: [],
+            };
+            const result = applyMetricOverrides(savedFilters, [
+                {
+                    ...createOverrideFilter(
+                        'metric-1',
+                        'orders_total',
+                        'orders',
+                    ),
+                    sectionId: 'moved',
+                },
+                {
+                    ...createOverrideFilter('new', 'orders_count', 'orders'),
+                    sectionId: 'injected',
+                },
+            ]);
+
+            // Unmatched metric overrides are never appended
+            expect(result.map((rule) => rule.sectionId)).toEqual(['section-1']);
         });
     });
 });

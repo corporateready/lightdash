@@ -41,8 +41,9 @@ describe('CaslAuditWrapper', () => {
     };
 
     // Use function to create fresh instances for each test
-    const createMockLogger = (): jest.Mock<void, [AuditLogEvent]> =>
-        jest.fn<void, [AuditLogEvent]>();
+    const createMockLogger = (): import('vitest').Mock<
+        (event: AuditLogEvent) => void
+    > => vi.fn<(event: AuditLogEvent) => void>();
 
     // Tests run with a simple set of mock abilities - this does not test the real abilities/permissions in Lightdash
     const createTestAbility = () =>
@@ -71,7 +72,9 @@ describe('CaslAuditWrapper', () => {
         });
 
     // Create a new wrapper for each test - cast ability to avoid complex type issues
-    const createWrapper = (mockLogger: jest.Mock<void, [AuditLogEvent]>) =>
+    const createWrapper = (
+        mockLogger: import('vitest').Mock<(event: AuditLogEvent) => void>,
+    ) =>
         new CaslAuditWrapper(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             createTestAbility() as any,
@@ -85,7 +88,221 @@ describe('CaslAuditWrapper', () => {
         );
 
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
+    });
+
+    describe('direct grant provenance', () => {
+        const grant = {
+            userUuid: mockUser.userUuid,
+            role: 'editor',
+            grantedVia: 'dashboard',
+            grantSourceUuid: 'grant-dashboard',
+        };
+        const provenance = [
+            {
+                grantedVia: 'dashboard',
+                grantSourceUuid: 'grant-dashboard',
+            },
+        ];
+        const createGrantWrapper = (auditEnabled = true) => {
+            const logger = createMockLogger();
+            const ability = defineAbility((can, cannot) => {
+                can(['view', 'update'], 'Dashboard', {
+                    access: {
+                        $elemMatch: {
+                            userUuid: mockUser.userUuid,
+                            role: 'editor',
+                        },
+                    },
+                });
+                can('view', 'Dashboard', {
+                    access: {
+                        $elemMatch: {
+                            userUuid: mockUser.userUuid,
+                            role: 'viewer',
+                        },
+                    },
+                });
+                can(['view', 'update'], 'Dashboard', { isAdmin: true });
+                cannot('update', 'Dashboard', { locked: true });
+            });
+            return {
+                logger,
+                wrapper: new CaslAuditWrapper(ability, mockUser, {
+                    auditLogger: logger,
+                    auditEnabled,
+                }),
+            };
+        };
+
+        it.each(['view', 'update'])(
+            'records the source of a grant-dependent %s',
+            (action) => {
+                const { logger, wrapper } = createGrantWrapper();
+                expect(
+                    wrapper.can(
+                        action,
+                        createDashboard('content', { access: [grant] }),
+                    ),
+                ).toBe(true);
+                expect(logger.mock.calls[0][0].resource.metadata).toEqual({
+                    dashboardUuid: 'content',
+                    directGrants: provenance,
+                });
+            },
+        );
+
+        it('records an editor grant when inherited access only permits viewing', () => {
+            const { logger, wrapper } = createGrantWrapper();
+            const dashboard = createDashboard('content', {
+                access: [
+                    { userUuid: mockUser.userUuid, role: 'viewer' },
+                    grant,
+                ],
+            });
+            expect(wrapper.can('view', dashboard)).toBe(true);
+            expect(logger.mock.calls[0][0].resource.metadata).toEqual({
+                dashboardUuid: 'content',
+            });
+            expect(wrapper.cannot('update', dashboard)).toBe(false);
+            expect(logger.mock.calls[1][0].resource.metadata).toEqual({
+                dashboardUuid: 'content',
+                directGrants: provenance,
+            });
+        });
+
+        it.each([
+            {
+                name: 'administrator',
+                attributes: { isAdmin: true, access: [grant] },
+                allowed: true,
+            },
+            {
+                name: 'inherited editor',
+                attributes: {
+                    access: [
+                        { userUuid: mockUser.userUuid, role: 'editor' },
+                        grant,
+                    ],
+                },
+                allowed: true,
+            },
+            {
+                name: 'denied action',
+                attributes: { locked: true, access: [grant] },
+                allowed: false,
+            },
+            {
+                name: 'another user',
+                attributes: { access: [{ ...grant, userUuid: 'other-user' }] },
+                allowed: false,
+            },
+            {
+                name: 'insufficient role',
+                attributes: { access: [{ ...grant, role: 'viewer' }] },
+                allowed: false,
+            },
+            {
+                name: 'legacy grant without source',
+                attributes: {
+                    access: [{ ...grant, grantSourceUuid: undefined }],
+                },
+                allowed: true,
+            },
+        ])(
+            'does not attribute $name to a direct grant',
+            ({ attributes, allowed }) => {
+                const { logger, wrapper } = createGrantWrapper();
+                expect(
+                    wrapper.can(
+                        'update',
+                        createDashboard('content', attributes),
+                    ),
+                ).toBe(allowed);
+                expect(logger.mock.calls[0][0].resource.metadata).toEqual({
+                    dashboardUuid: 'content',
+                });
+            },
+        );
+
+        it('deduplicates user and group grants and excludes insufficient grants', () => {
+            const { logger, wrapper } = createGrantWrapper();
+            expect(
+                wrapper.can(
+                    'update',
+                    createDashboard('content', {
+                        access: [
+                            grant,
+                            { ...grant },
+                            {
+                                ...grant,
+                                role: 'viewer',
+                                grantSourceUuid: 'unrelated',
+                            },
+                            {
+                                ...grant,
+                                userUuid: 'other-user',
+                                grantSourceUuid: 'other-user-grant',
+                            },
+                        ],
+                    }),
+                ),
+            ).toBe(true);
+            expect(logger.mock.calls[0][0].resource.metadata).toEqual({
+                dashboardUuid: 'content',
+                directGrants: provenance,
+            });
+        });
+
+        it('keeps grant provenance on each resource in a bulk event', () => {
+            const { logger, wrapper } = createGrantWrapper();
+            expect(
+                wrapper.canBulk('update', [
+                    createDashboard('one', { access: [grant] }),
+                    createDashboard('two', {
+                        access: [
+                            { ...grant, grantSourceUuid: 'second-dashboard' },
+                        ],
+                    }),
+                    createDashboard('three', {
+                        access: [
+                            { userUuid: mockUser.userUuid, role: 'editor' },
+                        ],
+                    }),
+                ]),
+            ).toEqual([true, true, true]);
+            expect(logger.mock.calls[0][0].resource.metadata).toEqual({
+                resources: [
+                    { dashboardUuid: 'one', directGrants: provenance },
+                    {
+                        dashboardUuid: 'two',
+                        directGrants: [
+                            {
+                                grantedVia: 'dashboard',
+                                grantSourceUuid: 'second-dashboard',
+                            },
+                        ],
+                    },
+                    { dashboardUuid: 'three' },
+                ],
+            });
+        });
+
+        it('preserves decisions with auditing disabled', () => {
+            const { logger, wrapper } = createGrantWrapper(false);
+            expect(
+                wrapper.can(
+                    'update',
+                    createDashboard('content', { access: [grant] }),
+                ),
+            ).toBe(true);
+            expect(
+                wrapper.canBulk('update', [
+                    createDashboard('content', { access: [grant] }),
+                ]),
+            ).toEqual([true]);
+            expect(logger).not.toHaveBeenCalled();
+        });
     });
 
     describe('can method', () => {
@@ -117,6 +334,21 @@ describe('CaslAuditWrapper', () => {
             expect(wrapper.can('read', privateDashboard)).toBe(
                 ability.can('read', privateDashboard),
             );
+        });
+
+        it('should evaluate the relevant rule only once', () => {
+            const mockLogger = createMockLogger();
+            const ability = createTestAbility();
+            const relevantRuleFor = vi.spyOn(ability, 'relevantRuleFor');
+            const wrapper = new CaslAuditWrapper(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                ability as any,
+                mockUser,
+                { auditLogger: mockLogger },
+            );
+
+            expect(wrapper.can('read', createDashboard('1'))).toBe(true);
+            expect(relevantRuleFor).toHaveBeenCalledTimes(1);
         });
 
         it('should log the audit event with allowed status when permission is granted', () => {
@@ -311,6 +543,143 @@ describe('CaslAuditWrapper', () => {
         });
     });
 
+    describe('canBulk method', () => {
+        it('returns results in subject order and groups audit events by rule', () => {
+            const mockLogger = createMockLogger();
+            const wrapper = createWrapper(mockLogger);
+            const subjects = [
+                createDashboard('allowed-1'),
+                createDashboard('denied', {
+                    inheritsFromOrgOrProject: false,
+                }),
+                createDashboard('allowed-2'),
+            ];
+
+            expect(wrapper.canBulk('read', subjects)).toEqual([
+                true,
+                false,
+                true,
+            ]);
+            expect(mockLogger).toHaveBeenCalledTimes(2);
+
+            const allowedEvent = mockLogger.mock.calls
+                .map(([event]) => event)
+                .find(({ status }) => status === 'allowed');
+            expect(allowedEvent?.resource.metadata).toEqual({
+                resources: [
+                    { dashboardUuid: 'allowed-1' },
+                    { dashboardUuid: 'allowed-2' },
+                ],
+            });
+            expect(allowedEvent?.ruleConditions).toBeUndefined();
+
+            const deniedEvent = mockLogger.mock.calls
+                .map(([event]) => event)
+                .find(({ status }) => status === 'denied');
+            expect(deniedEvent?.resource.metadata).toEqual({
+                resources: [{ dashboardUuid: 'denied' }],
+            });
+            expect(deniedEvent?.reason).toBe(
+                'Private dashboards are not readable',
+            );
+            expect(deniedEvent?.ruleConditions).toBeUndefined();
+        });
+
+        it('omits project scope when a rule group spans projects', () => {
+            const mockLogger = createMockLogger();
+            const ability = defineAbility((can) => can('read', 'Project'));
+            const wrapper = new CaslAuditWrapper(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                ability as any,
+                mockUser,
+                { auditLogger: mockLogger },
+            );
+
+            wrapper.canBulk('read', [
+                subject('Project', {
+                    organizationUuid: 'test-org-uuid',
+                    projectUuid: 'project-1',
+                    metadata: { projectUuid: 'project-1' },
+                }),
+                subject('Project', {
+                    organizationUuid: 'test-org-uuid',
+                    projectUuid: 'project-2',
+                    metadata: { projectUuid: 'project-2' },
+                }),
+            ]);
+
+            expect(mockLogger).toHaveBeenCalledTimes(1);
+            expect(
+                mockLogger.mock.calls[0][0].resource.projectUuid,
+            ).toBeUndefined();
+            expect(mockLogger.mock.calls[0][0].resource.metadata).toEqual({
+                resources: [
+                    { projectUuid: 'project-1' },
+                    { projectUuid: 'project-2' },
+                ],
+            });
+        });
+
+        it('splits rule groups by resource type and organization', () => {
+            const mockLogger = createMockLogger();
+            const ability = defineAbility((can) =>
+                can('read', ['Dashboard', 'SavedChart']),
+            );
+            const wrapper = new CaslAuditWrapper(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                ability as any,
+                mockUser,
+                { auditLogger: mockLogger },
+            );
+
+            wrapper.canBulk('read', [
+                createDashboard('dashboard-1'),
+                createSavedChart('chart-1'),
+                createDashboard('dashboard-2', {
+                    organizationUuid: 'other-org-uuid',
+                }),
+            ]);
+
+            expect(mockLogger).toHaveBeenCalledTimes(3);
+            expect(
+                mockLogger.mock.calls.map(([event]) => ({
+                    type: event.resource.type,
+                    organizationUuid: event.resource.organizationUuid,
+                })),
+            ).toEqual(
+                expect.arrayContaining([
+                    {
+                        type: 'Dashboard',
+                        organizationUuid: 'test-org-uuid',
+                    },
+                    {
+                        type: 'SavedChart',
+                        organizationUuid: 'test-org-uuid',
+                    },
+                    {
+                        type: 'Dashboard',
+                        organizationUuid: 'other-org-uuid',
+                    },
+                ]),
+            );
+        });
+
+        it('does not construct audit events when auditing is disabled', () => {
+            const mockLogger = createMockLogger();
+            const wrapper = new CaslAuditWrapper(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                createTestAbility() as any,
+                mockUser,
+                { auditLogger: mockLogger, auditEnabled: false },
+            );
+
+            expect(
+                wrapper.canBulk('read', [createDashboard('allowed')]),
+            ).toEqual([true]);
+            expect(mockLogger).not.toHaveBeenCalled();
+        });
+    });
+
     describe('rules property', () => {
         it('should expose the original ability rules', () => {
             const mockLogger = createMockLogger();
@@ -343,9 +712,11 @@ describe('CaslAuditWrapper', () => {
 
     describe('audit logging resilience', () => {
         it('should return correct result when audit logger throws on can()', () => {
-            const throwingLogger = jest.fn(() => {
+            const throwingLogger = vi.fn(() => {
                 throw new Error('Logging infrastructure down');
-            }) as unknown as jest.Mock<void, [AuditLogEvent]>;
+            }) as unknown as import('vitest').Mock<
+                (event: AuditLogEvent) => void
+            >;
 
             const wrapper = new CaslAuditWrapper(
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -360,9 +731,11 @@ describe('CaslAuditWrapper', () => {
         });
 
         it('should return correct result when audit logger throws on cannot()', () => {
-            const throwingLogger = jest.fn(() => {
+            const throwingLogger = vi.fn(() => {
                 throw new Error('Logging infrastructure down');
-            }) as unknown as jest.Mock<void, [AuditLogEvent]>;
+            }) as unknown as import('vitest').Mock<
+                (event: AuditLogEvent) => void
+            >;
 
             const wrapper = new CaslAuditWrapper(
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -377,9 +750,11 @@ describe('CaslAuditWrapper', () => {
         });
 
         it('should return denied result correctly when audit logger throws', () => {
-            const throwingLogger = jest.fn(() => {
+            const throwingLogger = vi.fn(() => {
                 throw new Error('Logging infrastructure down');
-            }) as unknown as jest.Mock<void, [AuditLogEvent]>;
+            }) as unknown as import('vitest').Mock<
+                (event: AuditLogEvent) => void
+            >;
 
             const wrapper = new CaslAuditWrapper(
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -516,9 +891,11 @@ describe('CaslAuditWrapper', () => {
         });
 
         it('should not throw when audit logger fails on bare-string subject', () => {
-            const throwingLogger = jest.fn(() => {
+            const throwingLogger = vi.fn(() => {
                 throw new Error('Logging infrastructure down');
-            }) as unknown as jest.Mock<void, [AuditLogEvent]>;
+            }) as unknown as import('vitest').Mock<
+                (event: AuditLogEvent) => void
+            >;
 
             const wrapper = new CaslAuditWrapper(
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any

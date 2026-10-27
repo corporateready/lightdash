@@ -31,6 +31,23 @@ export enum FilterOperator {
     IN_PERIOD_TO_DATE = 'inPeriodToDate',
 }
 
+/**
+ * Date filter operators whose boundaries are relative to "now" and therefore
+ * must be evaluated at query time, not baked in at compile time.
+ */
+const RELATIVE_DATE_FILTER_OPERATORS: ReadonlySet<FilterOperator> = new Set([
+    FilterOperator.IN_THE_PAST,
+    FilterOperator.NOT_IN_THE_PAST,
+    FilterOperator.IN_THE_NEXT,
+    FilterOperator.IN_THE_CURRENT,
+    FilterOperator.NOT_IN_THE_CURRENT,
+    FilterOperator.IN_PERIOD_TO_DATE,
+]);
+
+export const isRelativeDateFilterOperator = (
+    operator: FilterOperator,
+): boolean => RELATIVE_DATE_FILTER_OPERATORS.has(operator);
+
 export type BaseFilterRule<O = FilterOperator, V = unknown> = {
     /** Unique identifier for the filter rule */
     id: string;
@@ -38,6 +55,12 @@ export type BaseFilterRule<O = FilterOperator, V = unknown> = {
     operator: O;
     /** Values to filter by */
     values?: V[];
+    /**
+     * For the `equals` operator on string fields, also match rows where the
+     * field is null (compiles to `field IN (...) OR field IS NULL`). Lets users
+     * combine null with selected values in a single "is" rule.
+     */
+    includeNull?: boolean;
 };
 
 export enum UnitOfTime {
@@ -51,18 +74,6 @@ export enum UnitOfTime {
     quarters = 'quarters',
     years = 'years',
 }
-
-export const unitOfTimeFormat: Record<UnitOfTime, string> = {
-    milliseconds: 'YYYY-MM-DD HH:mm:ss',
-    seconds: 'YYYY-MM-DD HH:mm:ss',
-    minutes: 'YYYY-MM-DD HH:mm',
-    hours: 'YYYY-MM-DD HH',
-    days: 'YYYY-MM-DD',
-    weeks: 'YYYY-MM-DD',
-    months: 'YYYY-MM',
-    quarters: 'YYYY-MM',
-    years: 'YYYY',
-};
 
 export const getUnitsOfTimeGreaterOrEqual = (
     unit: UnitOfTime,
@@ -84,6 +95,21 @@ export const getUnitsOfTimeGreaterOrEqual = (
         return unitsInOrder;
     }
     return unitsInOrder.slice(index);
+};
+
+/** "To date" bounds only narrow units coarser than a day */
+export const unitOfTimeSupportsToDate = (unit: UnitOfTime): boolean =>
+    getUnitsOfTimeGreaterOrEqual(UnitOfTime.weeks).includes(unit);
+
+export type CurrentPeriodBounds = { toDate: boolean; excludeToday: boolean };
+
+export const getCurrentPeriodBounds = (
+    settings: DateFilterSettings | undefined,
+): CurrentPeriodBounds => {
+    const toDate =
+        settings?.toDate === true &&
+        unitOfTimeSupportsToDate(settings.unitOfTime ?? UnitOfTime.days);
+    return { toDate, excludeToday: toDate && settings?.excludeToday === true };
 };
 
 export type FieldTarget = {
@@ -158,15 +184,33 @@ export const isDashboardFieldTarget = (
 
 export type DashboardTileTarget = DashboardFieldTarget | false;
 
+/**
+ * Deliberately an index-signature literal, not `Record<string, ...>`. When
+ * TSOA first resolves `Record<string, DashboardTileTarget>` inside a mapped
+ * type (e.g. `Omit<DashboardFilterRule, 'id'>` in content-as-code types), it
+ * caches an EMPTY model under the shared `Record_string.DashboardTileTarget_`
+ * name, and request validation then strips every tileTargets entry from
+ * bodies — silently breaking dashboard filters on SQL chart tiles. The
+ * index-signature form resolves correctly in every context.
+ */
+export type DashboardTileTargets = {
+    [tileUuid: string]: DashboardTileTarget;
+};
+
 export type DashboardFilterRule<
     O = FilterOperator,
     T extends DashboardFieldTarget = DashboardFieldTarget,
     V = AnyType,
     S = AnyType,
 > = FilterRule<O, T, V, S> & {
-    tileTargets?: Record<string, DashboardTileTarget>;
+    tileTargets?: DashboardTileTargets;
     label: undefined | string;
     singleValue?: boolean;
+    /**
+     * Dashboard filters sharing a requiredGroupId form an "any-one required"
+     * group: the dashboard is locked until at least one member has a value.
+     */
+    requiredGroupId?: string;
     /**
      * Tab UUIDs where this filter is locked. When the active tab is in this
      * list, viewers see the filter but cannot change it, and URL / embed
@@ -174,6 +218,8 @@ export type DashboardFilterRule<
      * Empty or omitted means the filter is not locked anywhere.
      */
     lockedTabUuids?: string[];
+    /** Id of a DashboardConfig.controlSections entry; unsectioned if absent or dangling. */
+    sectionId?: string;
 };
 
 export type FilterDashboardToRule = DashboardFilterRule & {
@@ -184,14 +230,30 @@ export type FilterDashboardToRule = DashboardFilterRule & {
 
 export type DashboardFilterRuleOverride = Omit<
     DashboardFilterRule,
-    'tileTargets' | 'lockedTabUuids'
+    | 'tileTargets'
+    | 'lockedTabUuids'
+    | 'required'
+    | 'requiredGroupId'
+    | 'sectionId'
 >;
 
 export type DateFilterSettings = {
+    /** Original field before a dashboard tile target override. */
+    sourceTarget?: DashboardFieldTarget;
+    /** Calendar period selected on a coarser dashboard source field. */
+    selectedPeriod?:
+        | UnitOfTime.weeks
+        | UnitOfTime.months
+        | UnitOfTime.quarters
+        | UnitOfTime.years;
     /** Time unit for relative date filters */
     unitOfTime?: UnitOfTime;
     /** For date filters, whether to include completed periods */
     completed?: boolean;
+    /** For "in the current" filters, end the range at today instead of the end of the period */
+    toDate?: boolean;
+    /** With `toDate`, end the range at yesterday instead of today. Ignored unless `toDate` is true */
+    excludeToday?: boolean;
 };
 
 export type DateFilterRule = FilterRule<
@@ -203,7 +265,11 @@ export type DateFilterRule = FilterRule<
 
 export const isDateFilterRule = (
     filter: FilterRule<FilterOperator, FieldTarget | unknown, AnyType, AnyType>,
-): filter is DateFilterRule => 'unitOfTime' in (filter.settings || {});
+): filter is DateFilterRule =>
+    'unitOfTime' in (filter.settings || {}) ||
+    'selectedPeriod' in (filter.settings || {}) ||
+    'completed' in (filter.settings || {}) ||
+    'toDate' in (filter.settings || {});
 
 export type FilterGroupItem = FilterGroup | FilterRule;
 
@@ -240,13 +306,13 @@ export type DashboardFilters = {
 
 export type DashboardFiltersFromSearchParam = {
     dimensions: (Omit<DashboardFilterRule, 'tileTargets'> & {
-        tileTargets?: (string | Record<string, DashboardTileTarget>)[];
+        tileTargets?: (string | DashboardTileTargets)[];
     })[];
     metrics: (Omit<DashboardFilterRule, 'tileTargets'> & {
-        tileTargets?: (string | Record<string, DashboardTileTarget>)[];
+        tileTargets?: (string | DashboardTileTargets)[];
     })[];
     tableCalculations: (Omit<DashboardFilterRule, 'tileTargets'> & {
-        tileTargets?: (string | Record<string, DashboardTileTarget>)[];
+        tileTargets?: (string | DashboardTileTargets)[];
     })[];
 };
 
@@ -384,41 +450,133 @@ export const removeFieldFromFilterGroup = (
     };
 };
 
+type DashboardDimensionOverrideMatch = {
+    savedFilterIndex: number;
+    overrideIndex: number;
+};
+
+export const getDashboardDimensionOverrideMatches = (
+    savedFilters: DashboardFilterRule[],
+    overrides: DashboardFilterRuleOverride[],
+): DashboardDimensionOverrideMatch[] => {
+    const savedIds = new Set(savedFilters.map(({ id }) => id));
+    const appliedOverrideIds = new Set<string>();
+
+    return savedFilters.reduce<DashboardDimensionOverrideMatch[]>(
+        (matches, savedFilter, savedFilterIndex) => {
+            const exactMatchIndex = overrides.findIndex(
+                ({ id }) => id === savedFilter.id,
+            );
+            const overrideIndex =
+                exactMatchIndex >= 0
+                    ? exactMatchIndex
+                    : overrides.findIndex(
+                          (override) =>
+                              !savedIds.has(override.id) &&
+                              !appliedOverrideIds.has(override.id) &&
+                              override.target.fieldId ===
+                                  savedFilter.target.fieldId &&
+                              override.target.tableName ===
+                                  savedFilter.target.tableName,
+                      );
+
+            if (overrideIndex >= 0) {
+                appliedOverrideIds.add(overrides[overrideIndex].id);
+                matches.push({ savedFilterIndex, overrideIndex });
+            }
+
+            return matches;
+        },
+        [],
+    );
+};
+
 export const applyDimensionOverrides = (
     dashboardFilters: DashboardFilters,
     overrides: DashboardFilters | DashboardFilterRule[],
 ) => {
     const overrideArray =
         overrides instanceof Array ? overrides : overrides.dimensions;
+    const matches = getDashboardDimensionOverrideMatches(
+        dashboardFilters.dimensions,
+        overrideArray,
+    );
+    const overrideIndexBySavedFilterIndex = new Map(
+        matches.map(({ savedFilterIndex, overrideIndex }) => [
+            savedFilterIndex,
+            overrideIndex,
+        ]),
+    );
+    const savedIds = new Set(dashboardFilters.dimensions.map((d) => d.id));
+    const appliedOverrideIds = new Set(
+        matches.map(({ overrideIndex }) => overrideArray[overrideIndex].id),
+    );
 
-    // Apply overrides to existing dashboard dimensions
     const overriddenDimensions = dashboardFilters.dimensions.map(
-        (dimension) => {
-            const override = overrideArray.find(
-                (overrideDimension) => overrideDimension.id === dimension.id,
-            );
-            if (override) {
-                return {
-                    ...override,
-                    tileTargets: dimension.tileTargets,
-                    // Lock state belongs to the saved dashboard and must not
-                    // be assertable from URL/scheduler overrides — always
-                    // re-apply the saved rule's lockedTabUuids.
-                    lockedTabUuids: dimension.lockedTabUuids,
-                };
-            }
-            return dimension;
+        (dimension, savedFilterIndex) => {
+            const overrideIndex =
+                overrideIndexBySavedFilterIndex.get(savedFilterIndex);
+            if (overrideIndex === undefined) return dimension;
+
+            const override = overrideArray[overrideIndex];
+            return {
+                ...override,
+                // The saved dashboard owns identity, tile targeting, lock
+                // state and requirement flags; the override only carries
+                // value/operator. Forcing the id re-homes a field-matched
+                // override onto the saved filter.
+                id: dimension.id,
+                tileTargets: dimension.tileTargets,
+                lockedTabUuids: dimension.lockedTabUuids,
+                required: dimension.required,
+                requiredGroupId: dimension.requiredGroupId,
+                sectionId: dimension.sectionId,
+            };
         },
     );
 
-    // Add scheduler filters that don't exist in dashboard saved filters
-    const existingIds = new Set(dashboardFilters.dimensions.map((d) => d.id));
-    const newDimensions = overrideArray.filter(
-        (schedulerFilter) => !existingIds.has(schedulerFilter.id),
-    );
+    // Append overrides that matched no saved filter by id or field. Strip
+    // requirement flags: like the matched branch above, overrides cannot
+    // assert requirement metadata, so a stale or crafted rule can't inject
+    // a required filter or satisfy a group.
+    const newDimensions = overrideArray
+        .filter((o) => !savedIds.has(o.id) && !appliedOverrideIds.has(o.id))
+        .map((o) => ({
+            ...o,
+            required: undefined,
+            requiredGroupId: undefined,
+            sectionId: undefined,
+        }));
     overriddenDimensions.push(...newDimensions);
 
     return overriddenDimensions;
+};
+
+export const applyMetricOverrides = (
+    dashboardFilters: DashboardFilters,
+    overrides: DashboardFilters | DashboardFilterRule[],
+) => {
+    const overrideArray =
+        overrides instanceof Array ? overrides : overrides.metrics;
+
+    // Match by id only; unmatched metric overrides are never appended.
+    return dashboardFilters.metrics.map((metric) => {
+        const override = overrideArray.find((o) => o.id === metric.id);
+        if (override) {
+            return {
+                ...override,
+                // Same ownership contract as applyDimensionOverrides: the
+                // saved dashboard owns tile targeting, lock state and
+                // requirement flags; the override only carries value/operator.
+                tileTargets: metric.tileTargets,
+                lockedTabUuids: metric.lockedTabUuids,
+                required: metric.required,
+                requiredGroupId: metric.requiredGroupId,
+                sectionId: metric.sectionId,
+            };
+        }
+        return metric;
+    });
 };
 
 export const isDashboardFilterRule = (

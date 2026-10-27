@@ -1,5 +1,16 @@
+import {
+    RedshiftAuthenticationType,
+    WarehouseDatabaseListingNotSupportedError,
+    WarehouseQueryError,
+    WarehouseTableType,
+    WarehouseTypes,
+    type CreateRedshiftCredentials,
+} from '@lightdash/common';
+/* eslint-disable prefer-arrow-callback, func-names */
 import * as pg from 'pg';
 import { PassThrough } from 'stream';
+import type { Mock } from 'vitest';
+import { warehouseClientFromCredentials } from '../warehouseClientFromCredentials';
 import {
     PostgresSqlBuilder,
     PostgresWarehouseClient,
@@ -9,39 +20,51 @@ import {
     credentials,
     queryColumnsMock,
 } from './PostgresWarehouseClient.mock';
+import { RedshiftWarehouseClient } from './RedshiftWarehouseClient';
 import {
     config,
     expectedFields,
     expectedRow,
-    expectedWarehouseSchema,
+    expectedWarehouseSchemaWithNaiveTimestamp,
 } from './WarehouseClient.mock';
 
-jest.mock('pg', () => ({
-    ...jest.requireActual('pg'),
-    Pool: jest.fn(() => ({
-        connect: jest.fn((callback) => {
-            callback(
-                null,
-                {
-                    query: jest.fn(() => {
-                        const mockedStream = new PassThrough();
-                        setTimeout(() => {
-                            mockedStream.emit('data', {
-                                row: expectedRow,
-                                fields: queryColumnsMock,
-                            });
-                            mockedStream.end();
-                        }, 100);
-                        return mockedStream;
-                    }),
-                    on: jest.fn(async () => undefined),
-                },
-                jest.fn(),
-            );
-        }),
-        end: jest.fn(async () => undefined),
-        on: jest.fn(async () => undefined),
-    })),
+vi.mock('pg', async () => ({
+    ...(await vi.importActual<{ default: typeof import('pg') }>('pg')).default,
+    Pool: vi.fn(function () {
+        return {
+            connect: vi.fn((callback) => {
+                callback(
+                    null,
+                    {
+                        query: vi.fn((arg: unknown) => {
+                            // Session statements (SET statement_timeout / timezone)
+                            // are issued as plain string queries and must return a
+                            // thenable, not a stream.
+                            if (typeof arg === 'string') {
+                                return Promise.resolve({
+                                    rows: [],
+                                    fields: [],
+                                });
+                            }
+                            const mockedStream = new PassThrough();
+                            setTimeout(() => {
+                                mockedStream.emit('data', {
+                                    row: expectedRow,
+                                    fields: queryColumnsMock,
+                                });
+                                mockedStream.end();
+                            }, 100);
+                            return mockedStream;
+                        }),
+                        on: vi.fn(async () => undefined),
+                    },
+                    vi.fn(),
+                );
+            }),
+            end: vi.fn(async () => undefined),
+            on: vi.fn(async () => undefined),
+        };
+    }),
 }));
 
 describe('PostgresWarehouseClient', () => {
@@ -53,64 +76,609 @@ describe('PostgresWarehouseClient', () => {
     });
     it('expect schema with postgres types mapped to dimension types', async () => {
         const warehouse = new PostgresWarehouseClient(credentials);
-        (pg.Pool as unknown as jest.Mock)
-            .mockImplementationOnce(() => ({
-                connect: jest.fn((callback) => {
-                    callback(
-                        null,
-                        {
-                            query: jest.fn(() => {
-                                const mockedStream = new PassThrough();
-                                setTimeout(() => {
-                                    mockedStream.emit('data', {
-                                        row: { version: 'PostgreSQL 15.4' },
-                                        fields: [],
-                                    });
-                                    mockedStream.end();
-                                }, 100);
-                                return mockedStream;
-                            }),
-                            on: jest.fn(async () => undefined),
-                        },
-                        jest.fn(),
-                    );
-                }),
-                end: jest.fn(async () => undefined),
-                on: jest.fn(async () => undefined),
-            }))
-            .mockImplementationOnce(() => ({
-                connect: jest.fn((callback) => {
-                    callback(
-                        null,
-                        {
-                            query: jest.fn(() => {
-                                const mockedStream = new PassThrough();
-                                setTimeout(() => {
-                                    columns.forEach((column) => {
-                                        mockedStream.emit('data', {
-                                            row: column,
+        (pg.Pool as unknown as Mock)
+            .mockImplementationOnce(function () {
+                return {
+                    connect: vi.fn((callback) => {
+                        callback(
+                            null,
+                            {
+                                query: vi.fn((arg: unknown) => {
+                                    if (typeof arg === 'string') {
+                                        return Promise.resolve({
+                                            rows: [],
                                             fields: [],
                                         });
-                                    });
-                                    mockedStream.end();
-                                }, 100);
-                                return mockedStream;
-                            }),
-                            on: jest.fn(async () => undefined),
-                        },
-                        jest.fn(),
-                    );
-                }),
-                end: jest.fn(async () => undefined),
-                on: jest.fn(async () => undefined),
-            }));
+                                    }
+                                    const mockedStream = new PassThrough();
+                                    setTimeout(() => {
+                                        mockedStream.emit('data', {
+                                            row: { version: 'PostgreSQL 15.4' },
+                                            fields: [],
+                                        });
+                                        mockedStream.end();
+                                    }, 100);
+                                    return mockedStream;
+                                }),
+                                on: vi.fn(async () => undefined),
+                            },
+                            vi.fn(),
+                        );
+                    }),
+                    end: vi.fn(async () => undefined),
+                    on: vi.fn(async () => undefined),
+                };
+            })
+            .mockImplementationOnce(function () {
+                return {
+                    connect: vi.fn((callback) => {
+                        callback(
+                            null,
+                            {
+                                query: vi.fn((arg: unknown) => {
+                                    if (typeof arg === 'string') {
+                                        return Promise.resolve({
+                                            rows: [],
+                                            fields: [],
+                                        });
+                                    }
+                                    const mockedStream = new PassThrough();
+                                    setTimeout(() => {
+                                        columns.forEach((column) => {
+                                            mockedStream.emit('data', {
+                                                row: column,
+                                                fields: [],
+                                            });
+                                        });
+                                        mockedStream.end();
+                                    }, 100);
+                                    return mockedStream;
+                                }),
+                                on: vi.fn(async () => undefined),
+                            },
+                            vi.fn(),
+                        );
+                    }),
+                    end: vi.fn(async () => undefined),
+                    on: vi.fn(async () => undefined),
+                };
+            });
         expect(await warehouse.getCatalog(config)).toEqual(
-            expectedWarehouseSchema,
+            expectedWarehouseSchemaWithNaiveTimestamp,
         );
     });
     it('expect empty catalog when dbt project has no references', async () => {
         const warehouse = new PostgresWarehouseClient(credentials);
         expect(await warehouse.getCatalog([])).toEqual({});
+    });
+
+    it('binds catalog filter values as query parameters', async () => {
+        const warehouse = new PostgresWarehouseClient(credentials);
+        const database =
+            "missing') OR (SELECT CAST(current_database() AS integer)=0) OR ('x'='x";
+        const runQuery = vi
+            .spyOn(warehouse, 'runQuery')
+            .mockResolvedValueOnce({
+                rows: [{ version: 'PostgreSQL 15.4' }],
+                fields: {},
+            })
+            .mockResolvedValueOnce({ rows: [], fields: {} });
+
+        await warehouse.getCatalog([
+            { database, schema: 'public', table: 'orders' },
+        ]);
+
+        const catalogQuery = runQuery.mock.calls[1][0];
+        expect(catalogQuery).toContain('table_catalog IN ($1)');
+        expect(catalogQuery).toContain('table_schema IN ($2)');
+        expect(catalogQuery).toContain('table_name IN ($3)');
+        expect(catalogQuery).not.toContain(database);
+        expect(runQuery.mock.calls[1][3]).toEqual([
+            database,
+            'public',
+            'orders',
+        ]);
+    });
+
+    it('queries only the connection database for a manifest naming another database', async () => {
+        const warehouse = new PostgresWarehouseClient({
+            ...credentials,
+            dbname: 'warehouse',
+        });
+        const runQuery = vi
+            .spyOn(warehouse, 'runQuery')
+            .mockResolvedValueOnce({
+                rows: [{ version: 'PostgreSQL 15.4' }],
+                fields: {},
+            })
+            .mockResolvedValueOnce({ rows: [], fields: {} });
+
+        await warehouse.getCatalog([
+            { database: 'warehouse', schema: 'public', table: 'orders' },
+            { database: 'analytics', schema: 'ledger', table: 'invoices' },
+        ]);
+
+        expect(runQuery).toHaveBeenCalledTimes(2);
+        const catalogQuery = runQuery.mock.calls[1][0];
+        expect(catalogQuery).toContain('table_catalog IN ($1,$2)');
+        expect(runQuery.mock.calls[1][3]).toEqual([
+            'warehouse',
+            'analytics',
+            'public',
+            'ledger',
+            'orders',
+            'invoices',
+        ]);
+    });
+
+    describe('database listing', () => {
+        it('queries databases and caps the result', async () => {
+            const warehouse = new PostgresWarehouseClient({
+                ...credentials,
+                dbname: 'warehouse',
+            });
+            const runQuery = vi.spyOn(warehouse, 'runQuery').mockResolvedValue({
+                rows: Array.from({ length: 101 }, (_, index) => ({
+                    datname: `database_${index}`,
+                })),
+                fields: {},
+            });
+
+            const result = await warehouse.listDatabases();
+
+            expect(runQuery).toHaveBeenCalledOnce();
+            expect(runQuery.mock.calls[0][0]).toContain('FROM pg_database');
+            expect(runQuery.mock.calls[0][0]).toContain('datallowconn');
+            expect(runQuery.mock.calls[0][0]).toContain('NOT datistemplate');
+            expect(runQuery.mock.calls[0][0]).toContain(
+                "has_database_privilege(datname, 'CONNECT')",
+            );
+            expect(runQuery.mock.calls[0][0]).toContain('ORDER BY datname');
+            expect(runQuery.mock.calls[0][0]).toMatch(
+                /datname !~ '\[;\/\?:@&=\+\$,#\]'\s+ORDER BY datname\s+LIMIT \$1/,
+            );
+            expect(runQuery.mock.calls[0][0]).toContain('LIMIT $1');
+            expect(runQuery.mock.calls[0][0]).not.toContain('101');
+            expect(runQuery.mock.calls[0][3]).toEqual([101]);
+            expect(result.databases).toHaveLength(100);
+            expect(result.databases[0]).toEqual({
+                name: 'warehouse',
+                database: 'warehouse',
+                schema: null,
+                isDefault: true,
+            });
+            expect(result.databases[1]).toMatchObject({ isDefault: false });
+            expect(result.truncated).toBe(true);
+            expect(result.limit).toBe(100);
+        });
+
+        it('leaves out databases whose names the connection string cannot carry', async () => {
+            const warehouse = new PostgresWarehouseClient({
+                ...credentials,
+                dbname: 'warehouse',
+            });
+            vi.spyOn(warehouse, 'runQuery').mockResolvedValue({
+                rows: [
+                    { datname: 'analytics' },
+                    { datname: 'analytics?sslmode=require' },
+                    { datname: 'finance&host=elsewhere' },
+                    { datname: 'sales#1' },
+                    { datname: 'team/reports' },
+                    { datname: 'my db' },
+                    { datname: 'café' },
+                ],
+                fields: {},
+            });
+
+            const result = await warehouse.listDatabases();
+
+            expect(result.databases.map(({ name }) => name)).toEqual([
+                'warehouse',
+                'analytics',
+                'my db',
+                'café',
+            ]);
+        });
+
+        it('refuses to open a database whose name the connection string cannot carry', async () => {
+            const warehouse = new PostgresWarehouseClient({
+                ...credentials,
+                dbname: 'warehouse',
+            });
+            const getAllTables = vi.spyOn(
+                PostgresWarehouseClient.prototype,
+                'getAllTables',
+            );
+
+            try {
+                await expect(
+                    warehouse.getTablesForDatabase({
+                        name: 'analytics?sslmode=require',
+                        database: 'analytics?sslmode=require',
+                        schema: null,
+                        isDefault: false,
+                    }),
+                ).rejects.toThrow(
+                    'Database "analytics?sslmode=require" cannot be opened: its name contains one of ; / ? : @ & = + $ , #',
+                );
+                expect(getAllTables).not.toHaveBeenCalled();
+            } finally {
+                getAllTables.mockRestore();
+            }
+        });
+
+        it('does not report truncation for exactly 100 databases', async () => {
+            const warehouse = new PostgresWarehouseClient({
+                ...credentials,
+                dbname: 'warehouse',
+            });
+            vi.spyOn(warehouse, 'runQuery').mockResolvedValue({
+                rows: Array.from({ length: 99 }, (_, index) => ({
+                    datname: `database_${index}`,
+                })),
+                fields: {},
+            });
+
+            const result = await warehouse.listDatabases();
+
+            expect(result.databases).toHaveLength(100);
+            expect(result.truncated).toBe(false);
+        });
+
+        it('runs its query against a non-default database', async () => {
+            const warehouse = new PostgresWarehouseClient({
+                ...credentials,
+                dbname: 'warehouse',
+            });
+            const getAllTables = vi
+                .spyOn(PostgresWarehouseClient.prototype, 'getAllTables')
+                .mockImplementation(
+                    async function (this: PostgresWarehouseClient) {
+                        expect(this.credentials.dbname).toBe('analytics');
+                        return [
+                            {
+                                database: 'reported_database',
+                                schema: 'public',
+                                table: 'orders',
+                                tableType: WarehouseTableType.TABLE,
+                            },
+                        ];
+                    },
+                );
+
+            try {
+                const result = await warehouse.getTablesForDatabase({
+                    name: 'analytics',
+                    database: 'analytics',
+                    schema: null,
+                    isDefault: false,
+                });
+
+                expect(getAllTables).toHaveBeenCalledOnce();
+                expect(result).toEqual([
+                    {
+                        database: 'analytics',
+                        schema: 'public',
+                        table: 'orders',
+                        tableType: WarehouseTableType.TABLE,
+                    },
+                ]);
+            } finally {
+                getAllTables.mockRestore();
+            }
+        });
+
+        it('uses the existing client for the default database', async () => {
+            const warehouse = new PostgresWarehouseClient({
+                ...credentials,
+                dbname: 'warehouse',
+            });
+            const clients: PostgresWarehouseClient[] = [];
+            const getAllTables = vi
+                .spyOn(PostgresWarehouseClient.prototype, 'getAllTables')
+                .mockImplementation(
+                    async function (this: PostgresWarehouseClient) {
+                        clients.push(this);
+                        return [];
+                    },
+                );
+
+            try {
+                await warehouse.getTablesForDatabase({
+                    name: 'warehouse',
+                    database: 'warehouse',
+                    schema: null,
+                    isDefault: true,
+                });
+
+                expect(clients).toEqual([warehouse]);
+            } finally {
+                getAllTables.mockRestore();
+            }
+        });
+
+        it('keeps Redshift database listing unsupported', async () => {
+            const redshiftCredentials: CreateRedshiftCredentials = {
+                type: WarehouseTypes.REDSHIFT,
+                host: 'localhost',
+                user: 'analytics',
+                password: 'password',
+                port: 5439,
+                dbname: 'warehouse',
+                schema: 'public',
+                authenticationType: RedshiftAuthenticationType.PASSWORD,
+            };
+            const warehouse = new RedshiftWarehouseClient(redshiftCredentials);
+
+            await expect(warehouse.listDatabases()).rejects.toBeInstanceOf(
+                WarehouseDatabaseListingNotSupportedError,
+            );
+        });
+    });
+
+    describe('getAllTables', () => {
+        it('lists tables, views and materialized views', async () => {
+            const warehouse = new PostgresWarehouseClient(credentials);
+            const runQuery = vi
+                .spyOn(warehouse, 'runQuery')
+                .mockResolvedValueOnce({
+                    rows: [{ version: 'PostgreSQL 15.4' }],
+                    fields: {},
+                })
+                .mockResolvedValueOnce({
+                    rows: [
+                        {
+                            table_catalog: 'warehouse',
+                            table_schema: 'public',
+                            table_name: 'orders_view',
+                            table_type: 'VIEW',
+                        },
+                        {
+                            table_catalog: 'warehouse',
+                            table_schema: 'public',
+                            table_name: 'orders_mv',
+                            table_type: 'MATERIALIZED VIEW',
+                        },
+                    ],
+                    fields: {},
+                });
+
+            const tables = await warehouse.getAllTables();
+
+            const [query] = runQuery.mock.calls[1];
+            expect(query).toContain(
+                "table_type IN ('BASE TABLE', 'VIEW', 'FOREIGN')",
+            );
+            expect(query).toContain('FROM pg_catalog.pg_matviews');
+            expect(tables).toEqual([
+                {
+                    database: 'warehouse',
+                    schema: 'public',
+                    table: 'orders_view',
+                    tableType: 'view',
+                },
+                {
+                    database: 'warehouse',
+                    schema: 'public',
+                    table: 'orders_mv',
+                    tableType: 'materialized_view',
+                },
+            ]);
+        });
+
+        it('skips pg_matviews on servers that predate it', async () => {
+            const warehouse = new PostgresWarehouseClient(credentials);
+            const runQuery = vi
+                .spyOn(warehouse, 'runQuery')
+                .mockResolvedValueOnce({
+                    rows: [{ version: 'PostgreSQL 8.0.2' }],
+                    fields: {},
+                })
+                .mockResolvedValueOnce({ rows: [], fields: {} });
+
+            await warehouse.getAllTables();
+
+            expect(runQuery.mock.calls[1][0]).not.toContain('pg_matviews');
+        });
+    });
+
+    describe('getFields', () => {
+        it('includes materialized view columns and binds filters in order', async () => {
+            const warehouse = new PostgresWarehouseClient(credentials);
+            const runQuery = vi
+                .spyOn(warehouse, 'runQuery')
+                .mockResolvedValueOnce({
+                    rows: [{ version: 'PostgreSQL 15.4' }],
+                    fields: {},
+                })
+                .mockResolvedValueOnce({
+                    rows: [
+                        {
+                            table_catalog: 'warehouse',
+                            table_schema: 'public',
+                            table_name: 'orders_mv',
+                            column_name: 'amount',
+                            data_type: 'numeric',
+                        },
+                    ],
+                    fields: {},
+                });
+
+            const fields = await warehouse.getFields(
+                'orders_mv',
+                undefined,
+                'warehouse',
+            );
+
+            const [query, , , values] = runQuery.mock.calls[1];
+            expect(query).toContain("c.relkind = 'm'");
+            expect(query).toContain('table_catalog = $2');
+            expect(query).not.toContain('$3');
+            expect(values).toEqual(['orders_mv', 'warehouse']);
+            expect(fields).toEqual({
+                warehouse: { public: { orders_mv: { amount: 'number' } } },
+            });
+        });
+    });
+});
+
+describe('PostgresWarehouseClient statement timeout', () => {
+    const mockPoolWithQuery = (queryMock: Mock) => {
+        (pg.Pool as unknown as Mock).mockImplementationOnce(function () {
+            return {
+                connect: vi.fn((callback) => {
+                    callback(null, { query: queryMock, on: vi.fn() }, vi.fn());
+                }),
+                end: vi.fn(async () => undefined),
+                on: vi.fn(),
+            };
+        });
+    };
+
+    const respondingQueryMock = () =>
+        vi.fn((arg: unknown) => {
+            if (typeof arg === 'string') {
+                return Promise.resolve({ rows: [], fields: [] });
+            }
+            const stream = new PassThrough();
+            setTimeout(() => {
+                stream.emit('data', {
+                    row: expectedRow,
+                    fields: queryColumnsMock,
+                });
+                stream.end();
+            }, 10);
+            return stream;
+        });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it.each([false, true])(
+        'sets the Postgres agent session only when enabled: %s',
+        async (agentSession) => {
+            const queryMock = respondingQueryMock();
+            mockPoolWithQuery(queryMock);
+            const warehouse = new PostgresWarehouseClient(credentials, {
+                agentSession,
+            });
+            await warehouse.runQuery('select 1', {}, 'UTC');
+            expect(
+                queryMock.mock.calls
+                    .map(([arg]) => arg)
+                    .filter((arg) => typeof arg === 'string'),
+            ).toEqual([
+                'SET statement_timeout = 540000',
+                ...(agentSession ? ["SET lightdash.agent = 'true'"] : []),
+                "SET timezone TO 'UTC'",
+            ]);
+            expect(warehouse.config.application_name).toBe(
+                agentSession ? 'lightdash-ai' : undefined,
+            );
+            expect(
+                (pg.Pool as unknown as Mock).mock.lastCall?.[0]
+                    .application_name,
+            ).toBe(agentSession ? 'lightdash-ai' : undefined);
+        },
+    );
+
+    it.each([false, true])(
+        'sets the Redshift agent session only when enabled: %s',
+        async (agentSession) => {
+            const queryMock = respondingQueryMock();
+            mockPoolWithQuery(queryMock);
+            const warehouse = new RedshiftWarehouseClient(
+                { ...credentials, type: WarehouseTypes.REDSHIFT },
+                { agentSession },
+            );
+            await warehouse.runQuery('select 1', {}, 'UTC');
+            expect(
+                queryMock.mock.calls
+                    .map(([arg]) => arg)
+                    .filter((arg) => typeof arg === 'string'),
+            ).toEqual([
+                'SET statement_timeout = 540000',
+                ...(agentSession
+                    ? ["SELECT set_config('lightdash.agent', 'true', false)"]
+                    : []),
+                "SET timezone TO 'UTC'",
+            ]);
+            expect(
+                (pg.Pool as unknown as Mock).mock.lastCall?.[0]
+                    .application_name,
+            ).toBe(agentSession ? 'lightdash-ai' : undefined);
+        },
+    );
+
+    it('does not apply Redshift cache settings to Postgres agent jobs', async () => {
+        const queryMock = respondingQueryMock();
+        mockPoolWithQuery(queryMock);
+        const warehouse = warehouseClientFromCredentials(credentials, {
+            agentJobControls: true,
+        });
+        await warehouse.runQuery('select 1', {});
+        expect(
+            queryMock.mock.calls
+                .filter(([arg]) => typeof arg === 'string')
+                .map(([arg]) => arg),
+        ).toEqual(['SET statement_timeout = 540000']);
+    });
+
+    it('sets a server-side statement_timeout using the 9-minute default ceiling', async () => {
+        const queryMock = respondingQueryMock();
+        mockPoolWithQuery(queryMock);
+        const warehouse = new PostgresWarehouseClient(credentials);
+        await warehouse.runQuery('select 1');
+        const sessionStatement = queryMock.mock.calls
+            .map((call) => call[0])
+            .find((arg) => typeof arg === 'string');
+        expect(sessionStatement).toContain('SET statement_timeout = 540000');
+    });
+
+    it('omits the competing pg query_timeout from the pool', async () => {
+        const queryMock = respondingQueryMock();
+        mockPoolWithQuery(queryMock);
+        const warehouse = new PostgresWarehouseClient(credentials);
+        await warehouse.runQuery('select 1');
+
+        const poolConfig = (pg.Pool as unknown as Mock).mock.lastCall?.[0];
+        expect(poolConfig).not.toHaveProperty('query_timeout');
+    });
+
+    it('honors a configured timeoutSeconds for the statement_timeout', async () => {
+        const queryMock = respondingQueryMock();
+        mockPoolWithQuery(queryMock);
+        const warehouse = new PostgresWarehouseClient({
+            ...credentials,
+            timeoutSeconds: 120,
+        });
+        await warehouse.runQuery('select 1');
+        const sessionStatement = queryMock.mock.calls
+            .map((call) => call[0])
+            .find((arg) => typeof arg === 'string');
+        expect(sessionStatement).toContain('SET statement_timeout = 120000');
+    });
+
+    it('rejects with a timeout error when a query stalls past the client backstop', async () => {
+        vi.useFakeTimers();
+        const queryMock = vi.fn((arg: unknown) => {
+            if (typeof arg === 'string') {
+                return Promise.resolve({ rows: [], fields: [] });
+            }
+            // A stream that never emits or ends — simulates a stalled cursor.
+            return new PassThrough();
+        });
+        mockPoolWithQuery(queryMock);
+        const warehouse = new PostgresWarehouseClient(credentials);
+        const resultPromise = warehouse.runQuery('select pg_sleep(9999)');
+        // Attach the rejection handler before advancing the clock so the
+        // rejection is never momentarily unhandled.
+        await Promise.all([
+            expect(resultPromise).rejects.toThrow('Query timed out after 570s'),
+            // 9-minute statement_timeout + 30s client buffer = 570s
+            vi.advanceTimersByTimeAsync(570 * 1000 + 1000),
+        ]);
     });
 });
 
@@ -153,3 +721,26 @@ describe('PostgresSqlBuilder escaping', () => {
         expect(anotherEscaped).toBe("'' OR ''1''=''1");
     });
 });
+
+it.each(['28P01', '28000', '42501'])(
+    'preserves driver SQLSTATE %s as the query error cause',
+    async (code) => {
+        const driverError = Object.assign(new Error('driver failure'), {
+            code,
+        });
+        vi.mocked(pg.Pool).mockImplementationOnce(function () {
+            return {
+                connect: vi.fn((callback) => callback(driverError)),
+                end: vi.fn(async () => undefined),
+                on: vi.fn(),
+            } as unknown as pg.Pool;
+        });
+        const client = new PostgresWarehouseClient(credentials);
+        const error = await client
+            .runQuery('SELECT 1')
+            .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(WarehouseQueryError);
+        expect(error).toHaveProperty('cause', driverError);
+        expect(error).toHaveProperty('cause.code', code);
+    },
+);

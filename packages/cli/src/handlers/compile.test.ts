@@ -1,20 +1,83 @@
+import {
+    DefaultSupportedDbtVersion,
+    DimensionType,
+    isExploreError,
+    MetricType,
+    type DbtManifest,
+    type LightdashModel,
+} from '@lightdash/common';
 import fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import * as styles from '../styles';
-import { compile } from './compile';
+import type { Mock } from 'vitest';
+import * as dbtContext from '../dbt/context';
+import * as dbtManifest from '../dbt/manifest';
+import * as dbtValidation from '../dbt/validation';
+import * as lightdashLoader from '../lightdash/loader';
+import { compile, type CompileHandlerOptions } from './compile';
+import * as apiClient from './dbt/apiClient';
+import * as dbtCompile from './dbt/compile';
+import * as dbtVersion from './dbt/getDbtVersion';
 
-jest.mock('execa');
-jest.mock('../analytics/analytics');
-jest.mock('../config', () => ({
-    getConfig: jest.fn().mockResolvedValue({ user: null, context: null }),
+vi.mock('execa');
+vi.mock('../analytics/analytics');
+vi.mock('../config', () => ({
+    getConfig: vi.fn().mockResolvedValue({ user: null, context: null }),
 }));
+
+const modelWithBrokenMetric = {
+    type: 'model',
+    name: 'test_model',
+    description: 'Test model',
+    sql_from: 'SELECT * FROM test_table',
+    dimensions: [
+        {
+            name: 'id',
+            description: 'ID column',
+            type: DimensionType.NUMBER,
+            sql: 'id',
+        },
+    ],
+    metrics: {
+        broken_metric: {
+            type: MetricType.SUM,
+            sql: `\${missing_dimension}`,
+        },
+    },
+} satisfies LightdashModel;
+
+const getCompileOptions = (projectDir: string): CompileHandlerOptions => ({
+    projectDir,
+    profilesDir: '',
+    target: undefined,
+    profile: undefined,
+    vars: undefined,
+    verbose: false,
+    startOfWeek: 0,
+    skipWarehouseCatalog: true,
+    skipDbtCompile: true,
+    useDbtList: false,
+    select: undefined,
+    models: undefined,
+    threads: undefined,
+    noVersionCheck: false,
+    exclude: undefined,
+    selector: undefined,
+    state: undefined,
+    fullRefresh: false,
+    defer: false,
+    targetPath: undefined,
+    favorState: false,
+    combineManifest: undefined,
+    warehouseCredentials: false,
+    disableTimestampConversion: false,
+});
 
 describe('compile', () => {
     let tempDir: string;
 
     beforeEach(async () => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
         tempDir = await fs.mkdtemp(
             path.join(os.tmpdir(), 'lightdash-compile-test-'),
         );
@@ -49,47 +112,142 @@ dimensions:
     });
 
     afterEach(async () => {
+        vi.restoreAllMocks();
         await fs.rm(tempDir, { recursive: true, force: true });
     });
+
+    test.each(['server', 'explicit'] as const)(
+        'strips local dbt-loom stubs before source inference and combining the %s manifest',
+        async (source) => {
+            const node = (project: string, name: string) => ({
+                unique_id: `model.${project}.${name}`,
+                resource_type: 'model' as const,
+                name,
+                package_name: project,
+                path: `${name}.sql`,
+                original_file_path: `models/${name}.sql`,
+                database: 'warehouse',
+                schema: 'public',
+                alias: name,
+                relation_name: `"warehouse"."public"."${name}"`,
+                compiled: true,
+                compiled_code: 'select 1',
+                raw_code: 'select 1',
+                config: { materialized: 'table', snowflake_warehouse: '' },
+                columns: {},
+                meta: {},
+                fqn: [project, name],
+                checksum: { name: 'sha256', checksum: 'test' },
+            });
+            const localNode = node('local', 'orders');
+            const upstreamNode = {
+                ...node('upstream', 'products'),
+                lightdash_source_name: 'upstream_source',
+            };
+            const localManifest: DbtManifest = {
+                metadata: {
+                    dbt_schema_version: '/v12.json',
+                    generated_at: '',
+                    adapter_type: 'postgres',
+                },
+                nodes: {
+                    [localNode.unique_id]: localNode,
+                    [upstreamNode.unique_id]: {
+                        ...upstreamNode,
+                        path: '',
+                        original_file_path: '',
+                        alias: 'external_stub',
+                    },
+                },
+                metrics: {},
+                docs: {},
+            };
+            const servedManifest: DbtManifest = {
+                ...localManifest,
+                nodes: {
+                    [localNode.unique_id]: {
+                        ...localNode,
+                        lightdash_source_name: 'local_source',
+                    },
+                    [upstreamNode.unique_id]: upstreamNode,
+                },
+            };
+            vi.spyOn(lightdashLoader, 'loadLightdashModels').mockResolvedValue(
+                [],
+            );
+            vi.spyOn(dbtVersion, 'tryGetDbtVersion').mockResolvedValue({
+                success: true,
+                version: {
+                    verboseVersion: '1.12.0',
+                    versionOption: DefaultSupportedDbtVersion,
+                    isDbtCloudCLI: false,
+                    isDbtFusion: false,
+                },
+            });
+            vi.spyOn(dbtContext, 'getDbtContext').mockResolvedValue({
+                projectName: 'local',
+                profileName: 'local',
+                targetDir: tempDir,
+                modelsDir: tempDir,
+            });
+            vi.spyOn(
+                dbtCompile,
+                'maybeCompileModelsAndJoins',
+            ).mockResolvedValue({
+                compiledModelIds: undefined,
+                originallySelectedModelIds: undefined,
+            });
+            vi.spyOn(dbtManifest, 'loadManifest').mockResolvedValue(
+                localManifest,
+            );
+            vi.spyOn(dbtManifest, 'loadCombineManifest').mockResolvedValue(
+                servedManifest,
+            );
+            vi.spyOn(apiClient, 'lightdashRawApi').mockResolvedValue({
+                json: async () => servedManifest,
+            } as Awaited<ReturnType<typeof apiClient.lightdashRawApi>>);
+            const validate = vi
+                .spyOn(dbtValidation, 'validateDbtModel')
+                .mockResolvedValue({ valid: [], invalid: [], skipped: [] });
+            await compile({
+                ...getCompileOptions(tempDir),
+                ...(source === 'server'
+                    ? { combineManifestProjectUuid: 'project-uuid' }
+                    : { combineManifest: 'upstream-manifest.json' }),
+            });
+            expect(validate).toHaveBeenCalledOnce();
+            expect(validate.mock.calls[0][2]).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        unique_id: localNode.unique_id,
+                        ...(source === 'server'
+                            ? { lightdash_source_name: 'local_source' }
+                            : {}),
+                    }),
+                    expect.objectContaining(upstreamNode),
+                ]),
+            );
+            expect(validate.mock.calls[0][2]).toHaveLength(2);
+            expect(localManifest.nodes[upstreamNode.unique_id]).toHaveProperty(
+                'alias',
+                'external_stub',
+            );
+        },
+    );
 
     test('should compile Lightdash YAML project without dbt installed', async () => {
         // Mock analytics to prevent actual tracking
         const { LightdashAnalytics } = await import('../analytics/analytics');
-        (LightdashAnalytics.track as jest.Mock).mockResolvedValue(undefined);
+        (LightdashAnalytics.track as Mock).mockResolvedValue(undefined);
 
-        const result = await compile({
-            projectDir: tempDir,
-            profilesDir: '',
-            target: undefined,
-            profile: undefined,
-            vars: undefined,
-            verbose: false,
-            startOfWeek: 0,
-            skipWarehouseCatalog: true,
-            skipDbtCompile: true,
-            useDbtList: false,
-            select: undefined,
-            models: undefined,
-            threads: undefined,
-            noVersionCheck: false,
-            exclude: undefined,
-            selector: undefined,
-            state: undefined,
-            fullRefresh: false,
-            defer: false,
-            targetPath: undefined,
-            favorState: false,
-            combineManifest: undefined,
-            warehouseCredentials: false,
-            disableTimestampConversion: false,
-        });
+        const result = await compile(getCompileOptions(tempDir));
 
         // Should succeed even though dbt is not installed
         expect(result).toBeDefined();
         expect(result.length).toBeGreaterThan(0);
 
         // Analytics should be called even though dbt is not found
-        const trackCalls = (LightdashAnalytics.track as jest.Mock).mock.calls;
+        const trackCalls = (LightdashAnalytics.track as Mock).mock.calls;
 
         expect(LightdashAnalytics.track).toHaveBeenCalledWith(
             expect.objectContaining({
@@ -110,156 +268,68 @@ dimensions:
         const startedCall = trackCalls.find(
             (call) => call[0].event === 'compile.started',
         );
-        expect(startedCall).toBeDefined();
+        if (startedCall === undefined) {
+            throw new Error('Expected compile.started analytics event');
+        }
         expect(startedCall[0].properties.dbtVersion).toBeUndefined();
     });
 
-    test('should display PARTIAL_SUCCESS with warning messages', () => {
-        // Mock console.error to capture output
-        const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+    test('should allow partial compilation by default and allow it to be disabled explicitly', async () => {
+        vi.spyOn(lightdashLoader, 'loadLightdashModels').mockResolvedValue([
+            { ...modelWithBrokenMetric, sourcePath: 'models/test_model.yml' },
+        ]);
 
-        // Partial compilation is now enabled by default
-        const originalEnv = process.env.PARTIAL_COMPILATION_ENABLED;
-        // No need to set to 'true' as it's enabled by default
+        const errorOutput: string[] = [];
+        vi.spyOn(console, 'error').mockImplementation((...args) => {
+            errorOutput.push(args.map(String).join(' '));
+        });
 
-        try {
-            // Create mock explores array with different statuses
-            const mockExplores = [
-                {
-                    name: 'successful_explore',
-                    label: 'Successful Explore',
-                    tags: [],
-                    baseTable: 'table1',
-                    // No warnings or errors - should be SUCCESS
-                },
-                {
-                    name: 'explore_with_warnings',
-                    label: 'Explore with Warnings',
-                    tags: [],
-                    baseTable: 'table2',
-                    warnings: [
-                        {
-                            type: 'MISSING_TABLE',
-                            message:
-                                'Join to table "missing_table" was skipped',
-                        },
-                        {
-                            type: 'FIELD_ERROR',
-                            message: 'Field compilation warning',
-                        },
-                    ],
-                },
-                {
-                    name: 'failed_explore',
-                    label: 'Failed Explore',
-                    tags: [],
-                    errors: [
-                        {
-                            type: 'NO_DIMENSIONS_FOUND',
-                            message: 'No dimensions found in model',
-                        },
-                    ],
-                },
-            ];
+        const partialResult = await compile(getCompileOptions(tempDir));
+        expect(partialResult.filter(isExploreError)).toHaveLength(0);
+        expect(
+            partialResult.flatMap((explore) =>
+                isExploreError(explore) ? [] : (explore.warnings ?? []),
+            ),
+        ).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    message: expect.stringContaining('broken_metric'),
+                }),
+            ]),
+        );
+        expect(errorOutput).toEqual(
+            expect.arrayContaining([
+                expect.stringContaining('- PARTIAL_SUCCESS> test_model'),
+                expect.stringContaining(
+                    'Compiled 1 explores, SUCCESS=0 PARTIAL_SUCCESS=1 ERRORS=0',
+                ),
+            ]),
+        );
 
-            // Simulate the explore display logic from compile.ts
-            let errors = 0;
-            let partialSuccess = 0;
-            let success = 0;
+        errorOutput.length = 0;
+        const strictResult = await compile({
+            ...getCompileOptions(tempDir),
+            partialCompilation: false,
+        });
+        expect(strictResult.filter(isExploreError)).toHaveLength(1);
+        expect(errorOutput).toEqual(
+            expect.arrayContaining([
+                expect.stringContaining('- ERROR> test_model'),
+                expect.stringContaining(
+                    'Compiled 1 explores, SUCCESS=0 ERRORS=1',
+                ),
+            ]),
+        );
+    });
 
-            mockExplores.forEach((e) => {
-                let status: string;
-                let messages = '';
+    test('rejects malformed native YAML instead of compiling only the valid models', async () => {
+        await fs.writeFile(
+            path.join(tempDir, 'lightdash/models/broken.yml'),
+            'type: model\ndimensions: [',
+        );
 
-                if ('errors' in e && e.errors) {
-                    status = styles.error('ERROR');
-                    messages = `: ${styles.error(e.errors.map((err: { message: string }) => err.message).join(', '))}`;
-                    errors += 1;
-                } else if (
-                    process.env.PARTIAL_COMPILATION_ENABLED !== 'false' &&
-                    'warnings' in e &&
-                    e.warnings &&
-                    e.warnings.length > 0
-                ) {
-                    status = styles.warning('PARTIAL_SUCCESS');
-                    messages = `: ${styles.warning(
-                        e.warnings
-                            .map(
-                                (warning: { message: string }) =>
-                                    warning.message,
-                            )
-                            .join(', '),
-                    )}`;
-                    partialSuccess += 1;
-                } else {
-                    status = styles.success('SUCCESS');
-                    success += 1;
-                }
-
-                console.error(`- ${status}> ${e.name} ${messages}`);
-            });
-            console.error('');
-
-            // Display summary
-            if (
-                process.env.PARTIAL_COMPILATION_ENABLED !== 'false' &&
-                partialSuccess > 0
-            ) {
-                console.error(
-                    `Compiled ${mockExplores.length} explores, SUCCESS=${success} PARTIAL_SUCCESS=${partialSuccess} ERRORS=${errors}`,
-                );
-            } else {
-                console.error(
-                    `Compiled ${mockExplores.length} explores, SUCCESS=${success} ERRORS=${errors}`,
-                );
-            }
-
-            // Verify the output
-            const calls = consoleSpy.mock.calls.map((call) => call[0]);
-
-            // Check that PARTIAL_SUCCESS status is displayed
-            const partialSuccessCall = calls.find(
-                (call) =>
-                    typeof call === 'string' &&
-                    call.includes('PARTIAL_SUCCESS> explore_with_warnings'),
-            );
-            expect(partialSuccessCall).toBeDefined();
-            expect(partialSuccessCall).toContain(
-                'Join to table "missing_table" was skipped',
-            );
-            expect(partialSuccessCall).toContain('Field compilation warning');
-
-            // Check that SUCCESS status is displayed
-            const successCall = calls.find(
-                (call) =>
-                    typeof call === 'string' &&
-                    call.includes('SUCCESS> successful_explore'),
-            );
-            expect(successCall).toBeDefined();
-
-            // Check that ERROR status is displayed
-            const errorCall = calls.find(
-                (call) =>
-                    typeof call === 'string' &&
-                    call.includes('ERROR> failed_explore'),
-            );
-            expect(errorCall).toBeDefined();
-
-            // Check the summary includes PARTIAL_SUCCESS count
-            const summaryCall = calls.find(
-                (call) =>
-                    typeof call === 'string' &&
-                    call.includes('Compiled') &&
-                    call.includes('PARTIAL_SUCCESS='),
-            );
-            expect(summaryCall).toBeDefined();
-            expect(summaryCall).toContain(
-                'SUCCESS=1 PARTIAL_SUCCESS=1 ERRORS=1',
-            );
-        } finally {
-            // Clean up
-            consoleSpy.mockRestore();
-            process.env.PARTIAL_COMPILATION_ENABLED = originalEnv;
-        }
+        await expect(compile(getCompileOptions(tempDir))).rejects.toThrow(
+            /broken.yml/,
+        );
     });
 });

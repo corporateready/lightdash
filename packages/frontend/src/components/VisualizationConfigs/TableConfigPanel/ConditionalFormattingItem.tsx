@@ -13,6 +13,7 @@ import {
     getItemLabelWithoutTableName,
     isConditionalFormattingConfigWithColorRange,
     isConditionalFormattingConfigWithSingleColor,
+    isBooleanItem,
     isConditionalFormattingWithCompareTarget,
     isConditionalFormattingWithValues,
     isNumericItem,
@@ -20,26 +21,34 @@ import {
     type ConditionalFormattingColorRange,
     type ConditionalFormattingConfig,
     type ConditionalFormattingConfigWithColorRange,
+    type ConditionalFormattingTextStyle,
     type ConditionalFormattingWithFilterOperator,
     type FilterableItem,
     type FilterOperator,
 } from '@lightdash/common';
 import {
     Accordion,
+    ActionIcon,
     Button,
     Flex,
     Group,
     SegmentedControl,
     Stack,
-} from '@mantine-8/core';
-import { IconPlus } from '@tabler/icons-react';
+    Tooltip,
+} from '@mantine/core';
+import {
+    IconBold,
+    IconItalic,
+    IconPlus,
+    IconUnderline,
+} from '@tabler/icons-react';
 import { produce } from 'immer';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import FieldSelect from '../../common/FieldSelect';
 import { filterOperatorLabel } from '../../common/Filters/FilterInputs/constants';
 import FiltersProvider from '../../common/Filters/FiltersProvider';
 import MantineIcon from '../../common/MantineIcon';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import { useVisualizationInputs } from '../../LightdashVisualization/useVisualizationContext';
 import ColorSelector from '../ColorSelector';
 import { AccordionControl } from '../common/AccordionControl';
 import { Config } from '../common/Config';
@@ -64,6 +73,16 @@ const ConditionalFormattingRuleLabels = {
     [ConditionalFormattingConfigType.Range]: 'Range',
 };
 
+const TEXT_STYLE_TOGGLES: {
+    key: keyof ConditionalFormattingTextStyle;
+    label: string;
+    icon: typeof IconBold;
+}[] = [
+    { key: 'bold', label: 'Bold', icon: IconBold },
+    { key: 'italic', label: 'Italic', icon: IconItalic },
+    { key: 'underline', label: 'Underline', icon: IconUnderline },
+];
+
 export const ConditionalFormattingItem: FC<Props> = ({
     colorPalette,
     index: configIndex,
@@ -81,7 +100,7 @@ export const ConditionalFormattingItem: FC<Props> = ({
             ? value.rules.map((_, i) => `${i}`)
             : [],
     );
-    const { itemsMap } = useVisualizationContext();
+    const { itemsMap } = useVisualizationInputs();
 
     const field = useMemo(
         () => fields.find((f) => getItemId(f) === config?.target?.fieldId),
@@ -107,13 +126,20 @@ export const ConditionalFormattingItem: FC<Props> = ({
                     const currentField = draft.target?.fieldId
                         ? itemsMap?.[draft.target?.fieldId]
                         : undefined;
-                    // Reset the config if the field type changes
-                    // TODO: move to a helper function
+                    // Reset the config if the field type family changes,
+                    // since operators and values are type-specific
+                    const getTypeFamily = (
+                        f: typeof newField | typeof currentField,
+                    ) => {
+                        if (isNumericItem(f)) return 'numeric';
+                        if (isStringDimension(f)) return 'string';
+                        if (isBooleanItem(f)) return 'boolean';
+                        return undefined;
+                    };
+                    const currentFamily =
+                        getTypeFamily(currentField) ?? 'numeric';
                     const shouldReset =
-                        ((!currentField || isNumericItem(currentField)) &&
-                            isStringDimension(newField)) ||
-                        (isStringDimension(currentField) &&
-                            isNumericItem(newField));
+                        currentFamily !== getTypeFamily(newField);
 
                     if (shouldReset && newField) {
                         // Reset the config if the field type changes
@@ -345,6 +371,18 @@ export const ConditionalFormattingItem: FC<Props> = ({
         [handleChange, config],
     );
 
+    const handleToggleTextStyle = useCallback(
+        (key: keyof ConditionalFormattingTextStyle) => {
+            handleChange(
+                produce(config, (draft) => {
+                    const current = draft.textStyle ?? {};
+                    draft.textStyle = { ...current, [key]: !current[key] };
+                }),
+            );
+        },
+        [handleChange, config],
+    );
+
     const controlLabel = `Rule ${configIndex}`;
     const accordionValue = `${configIndex}`;
 
@@ -475,6 +513,19 @@ export const ConditionalFormattingItem: FC<Props> = ({
                                         value: ConditionalFormattingColorApplyTo.TEXT,
                                         label: 'Text',
                                     },
+                                    // Row fill only applies to single-color rules;
+                                    // color-range (gradient) rules ignore ROW, so
+                                    // don't offer a dead option for them.
+                                    ...(isConditionalFormattingConfigWithSingleColor(
+                                        config,
+                                    )
+                                        ? [
+                                              {
+                                                  value: ConditionalFormattingColorApplyTo.ROW,
+                                                  label: 'Row',
+                                              },
+                                          ]
+                                        : []),
                                 ]}
                                 value={
                                     config.applyTo ??
@@ -486,6 +537,34 @@ export const ConditionalFormattingItem: FC<Props> = ({
                                     )
                                 }
                             />
+                        </Group>
+
+                        <Group gap="xs">
+                            <Config.Label>Text style</Config.Label>
+                            <ActionIcon.Group>
+                                {TEXT_STYLE_TOGGLES.map(
+                                    ({ key, label, icon }) => (
+                                        <Tooltip key={key} label={label}>
+                                            <ActionIcon
+                                                variant={
+                                                    config.textStyle?.[key]
+                                                        ? 'filled'
+                                                        : 'default'
+                                                }
+                                                aria-label={label}
+                                                onClick={() =>
+                                                    handleToggleTextStyle(key)
+                                                }
+                                            >
+                                                <MantineIcon
+                                                    icon={icon}
+                                                    size="sm"
+                                                />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    ),
+                                )}
+                            </ActionIcon.Group>
                         </Group>
 
                         {isConditionalFormattingConfigWithSingleColor(

@@ -14,6 +14,7 @@ import {
 } from '@lightdash/common';
 import inquirer from 'inquirer';
 import path from 'path';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
 import { getConfig, setAnswer } from '../config';
 import { getDbtContext } from '../dbt/context';
 import GlobalState from '../globalState';
@@ -25,6 +26,7 @@ import { tryGetDbtVersion } from './dbt/getDbtVersion';
 import getWarehouseClient, {
     createProgramaticallySnowflakePat,
 } from './dbt/getWarehouseClient';
+import { getFinalJobState } from './dbt/refresh';
 
 const askToRememberAnswer = async (): Promise<void> => {
     const answers = await inquirer.prompt([
@@ -131,17 +133,19 @@ type CreateProjectOptions = {
     upstreamProjectUuid?: string;
     tableConfiguration?: CreateProjectTableConfiguration;
     copyContent?: boolean;
+    asyncCopyContent?: boolean;
     warehouseCredentials?: boolean;
     organizationCredentials?: string;
     targetPath?: string;
     assumeYes?: boolean;
     expiresIn?: number;
+    disableTimestampConversion?: boolean;
 };
 
 const isSnowflakeSsoEnabled = async (): Promise<boolean> => {
     const response = await lightdashApi<HealthState>({
         method: 'GET',
-        url: `/api/v1/health`,
+        url: `/api/v1/health?skipMigrationCheck=true`,
         body: undefined,
     });
 
@@ -304,6 +308,7 @@ export const loadWarehouseCredentialsFromProfiles = async (
 export const createProject = async (
     options: CreateProjectOptions,
 ): Promise<ApiCreateProjectResults | undefined> => {
+    assertAgentCommandAllowed('deploy', { create: true });
     await checkProjectCreationPermission(
         options.upstreamProjectUuid,
         options.type,
@@ -379,6 +384,16 @@ export const createProject = async (
         targetName = loaded.targetName;
         isDbtCloudCLI = loaded.isDbtCloudCLI;
         dbtVersionOption = loaded.dbtVersionOption;
+
+        if (
+            options.disableTimestampConversion !== undefined &&
+            credentials.type === WarehouseTypes.SNOWFLAKE
+        ) {
+            credentials = {
+                ...credentials,
+                disableTimestampConversion: options.disableTimestampConversion,
+            };
+        }
     }
 
     const project: CreateProjectOptionalCredentials = {
@@ -397,15 +412,24 @@ export const createProject = async (
         dbtVersion: dbtVersionOption,
         tableConfiguration: options.tableConfiguration,
         copyContent: options.copyContent,
+        asyncCopyContent: options.asyncCopyContent ?? false,
         organizationWarehouseCredentialsUuid,
         ...(options.expiresIn !== undefined
             ? { expiresInHours: options.expiresIn }
             : {}),
     };
 
-    return lightdashApi<ApiCreateProjectResults>({
+    const result = await lightdashApi<ApiCreateProjectResults>({
         method: 'POST',
         url: `/api/v1/org/projects`,
         body: JSON.stringify(project),
     });
+    if (result.contentCopyJobUuid) {
+        await getFinalJobState(
+            result.contentCopyJobUuid,
+            'Copying preview content',
+        );
+        return { ...result, hasContentCopy: true };
+    }
+    return result;
 };

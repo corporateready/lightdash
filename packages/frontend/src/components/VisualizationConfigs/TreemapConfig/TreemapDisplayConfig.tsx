@@ -1,18 +1,23 @@
-import { Group, NumberInput, Stack, Tooltip } from '@mantine-8/core';
+import { Group, Stack, Tooltip } from '@mantine/core';
 import { IconHelpCircle } from '@tabler/icons-react';
 import React from 'react';
+import {
+    selectTreemapEditor,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
+import { useTreemapEditorActions } from '../../../hooks/useTreemapChartConfig';
 import MantineIcon from '../../common/MantineIcon';
-import { isTreemapVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import { NumberInput } from '../../common/NumberInput';
 import { Config } from '../common/Config';
 
 export const Display: React.FC = () => {
-    const { visualizationConfig } = useVisualizationContext();
-
-    if (!isTreemapVisualizationConfig(visualizationConfig)) return null;
-
-    const { visibleMin, setVisibleMin, leafDepth, setLeafDepth } =
-        visualizationConfig.chartConfig;
+    const { setVisibleMin, setLeafDepth } = useTreemapEditorActions();
+    const visibleMin = useVisualizationSelector(
+        (state) => selectTreemapEditor(state).visibleMin,
+    );
+    const leafDepth = useVisualizationSelector(
+        (state) => selectTreemapEditor(state).leafDepth,
+    );
 
     return (
         <Stack>
@@ -21,10 +26,7 @@ export const Display: React.FC = () => {
                     <Group gap="xs">
                         <Config.Heading>Minimum section size</Config.Heading>
                         <Tooltip
-                            withinPortal={true}
                             maw={350}
-                            variant="xs"
-                            multiline
                             label="Any sections smaller than this will not be displayed. You can zoom in to see smaller sections."
                         >
                             <MantineIcon
@@ -35,6 +37,7 @@ export const Display: React.FC = () => {
                             />
                         </Tooltip>
                         <NumberInput
+                            size="xs"
                             value={visibleMin}
                             onChange={(value) => {
                                 if (typeof value === 'number')
@@ -48,10 +51,7 @@ export const Display: React.FC = () => {
                     <Group gap="xs">
                         <Config.Heading>Max leaf depth</Config.Heading>
                         <Tooltip
-                            withinPortal={true}
                             maw={350}
-                            variant="xs"
-                            multiline
                             label="The maximum depth of the treemap. If set, deeper levels can be viewed by clicking on nodes."
                         >
                             <MantineIcon
@@ -62,6 +62,7 @@ export const Display: React.FC = () => {
                             />
                         </Tooltip>
                         <NumberInput
+                            size="xs"
                             value={leafDepth}
                             onChange={(value) => {
                                 if (typeof value === 'number')

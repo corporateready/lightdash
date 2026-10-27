@@ -10,6 +10,7 @@ import {
     type FieldType,
     type Metric,
 } from './field';
+import { type MetricFilterRule } from './filter';
 import type { KnexPaginatedData } from './knex-paginate';
 import { type ChartSummary } from './savedCharts';
 import { type TraceTaskBase } from './scheduler';
@@ -95,6 +96,8 @@ export type CatalogField = Pick<
         searchRank?: number;
         spotlightFilterBy?: string[]; // dimension IDs allowlist (metrics only)
         spotlightSegmentBy?: string[]; // dimension IDs allowlist (metrics only)
+        spotlightDefaultSegment?: string; // default segment dimension name (metrics only)
+        spotlightDefaultFilter?: MetricFilterRule; // default filter (metrics only)
         owner: CatalogOwner | null; // resolved metric owner
     };
 
@@ -124,7 +127,7 @@ export type CatalogItem = CatalogField | CatalogTable;
 
 export type CatalogMetricsTreeNode = Pick<
     CatalogField,
-    'catalogSearchUuid' | 'name' | 'tableName'
+    'catalogSearchUuid' | 'name' | 'label' | 'tableName'
 >;
 
 export type MetricsTreeSource = 'ui' | 'yaml';
@@ -183,6 +186,7 @@ export type MetricsTreeNodePosition = {
 
 export type MetricsTreeNode = MetricsTreeNodePosition & {
     name: string;
+    label: string;
     tableName: string;
     source: MetricsTreeSource;
 };
@@ -333,6 +337,7 @@ export type CatalogAnalytics = {
     charts: (Pick<
         ChartSummary,
         | 'uuid'
+        | 'slug'
         | 'name'
         | 'description'
         | 'spaceUuid'
@@ -416,6 +421,7 @@ export type CatalogItemsWithIcons = CatalogItemSummary &
     Pick<CatalogItem, 'icon'>;
 
 export type SchedulerIndexCatalogJobPayload = TraceTaskBase & {
+    refreshMetadataBeforeIndex?: boolean;
     prevCatalogItemsWithTags: CatalogItemWithTagUuids[];
     prevCatalogItemsWithIcons: CatalogItemsWithIcons[];
     prevMetricTreeEdges: CatalogMetricsTreeEdge[];

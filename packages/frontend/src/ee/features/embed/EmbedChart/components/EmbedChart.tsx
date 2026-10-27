@@ -1,69 +1,11 @@
 import { Box } from '@mantine/core';
 import { IconUnlink } from '@tabler/icons-react';
-import { memo, useMemo, type FC } from 'react';
+import { type FC } from 'react';
+import LoadingChart from '../../../../../components/common/LoadingChart';
 import SuboptimalState from '../../../../../components/common/SuboptimalState/SuboptimalState';
-import LightdashVisualization from '../../../../../components/LightdashVisualization';
-import VisualizationProvider from '../../../../../components/LightdashVisualization/VisualizationProvider';
-import {
-    selectSavedChart,
-    useExplorerSelector,
-} from '../../../../../features/explorer/store';
-import { useExplorerQuery } from '../../../../../hooks/useExplorerQuery';
 import { useProjectUuid } from '../../../../../hooks/useProjectUuid';
 import { useSavedQuery } from '../../../../../hooks/useSavedQuery';
 import MinimalSavedExplorer from '../../../../../pages/MinimalSavedExplorer';
-import useApp from '../../../../../providers/App/useApp';
-
-const MinimalChartContent = memo(() => {
-    const { health } = useApp();
-
-    // Get query state from hook
-    const { query, queryResults } = useExplorerQuery();
-
-    const resultsData = useMemo(
-        () => ({
-            ...queryResults,
-            metricQuery: query.data?.metricQuery,
-            fields: query.data?.fields,
-            resolvedTimezone: query.data?.resolvedTimezone ?? undefined,
-        }),
-        [queryResults, query.data],
-    );
-
-    // Get savedChart from Redux
-    const savedChart = useExplorerSelector(selectSavedChart);
-
-    const isLoadingQueryResults =
-        query.isFetching || queryResults.isFetchingRows;
-
-    if (!savedChart || health.isInitialLoading || !health.data) {
-        return null;
-    }
-
-    return (
-        <VisualizationProvider
-            minimal
-            chartConfig={savedChart.chartConfig}
-            initialPivotDimensions={savedChart.pivotConfig?.columns}
-            resultsData={resultsData}
-            isLoading={isLoadingQueryResults}
-            columnOrder={savedChart.tableConfig.columnOrder}
-            pivotTableMaxColumnLimit={health.data.pivotTable.maxColumnLimit}
-            savedChartUuid={savedChart.uuid}
-            colorPalette={savedChart.colorPalette}
-            parameters={query.data?.usedParametersValues}
-        >
-            <Box mih="inherit" h="100%">
-                <LightdashVisualization
-                    className="sentry-block ph-no-capture"
-                    data-testid="visualization"
-                />
-            </Box>
-        </VisualizationProvider>
-    );
-});
-
-MinimalChartContent.displayName = 'MinimalChartContent';
 
 type Props = {
     containerStyles?: React.CSSProperties;
@@ -77,8 +19,18 @@ const EmbedChart: FC<Props> = ({ containerStyles, savedQueryUuid }) => {
         projectUuid,
     });
 
+    const containerStyle: React.CSSProperties = containerStyles ?? {
+        height: '100vh',
+        overflowY: 'auto',
+        margin: '16px',
+    };
+
     if (isInitialLoading) {
-        return null;
+        return (
+            <div style={containerStyle}>
+                <LoadingChart />
+            </div>
+        );
     }
 
     if (isError) {
@@ -106,15 +58,7 @@ const EmbedChart: FC<Props> = ({ containerStyles, savedQueryUuid }) => {
     }
 
     return (
-        <div
-            style={
-                containerStyles ?? {
-                    height: '100vh',
-                    overflowY: 'auto',
-                    margin: '16px',
-                }
-            }
-        >
+        <div style={containerStyle}>
             <MinimalSavedExplorer savedQueryUuid={savedQueryUuid} />
         </div>
     );

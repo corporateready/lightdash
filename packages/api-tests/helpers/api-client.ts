@@ -17,7 +17,74 @@ type ApiResponse<T = unknown> = {
     ok: boolean;
     status: number;
     body: T;
+    headers: Headers;
 };
+
+// Errors raised before the request was sent, so any method is safe to retry.
+// The preview ingress can refuse connections for a few seconds.
+const CONNECTION_ERROR_CODES = new Set([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+]);
+const MAX_CONNECTION_ATTEMPTS = 6;
+const UPSTREAM_RESET_BODY =
+    'upstream connect error or disconnect/reset before headers';
+const RETRYABLE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function isConnectionError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const { cause } = error;
+    return (
+        typeof cause === 'object' &&
+        cause !== null &&
+        'code' in cause &&
+        typeof cause.code === 'string' &&
+        CONNECTION_ERROR_CODES.has(cause.code)
+    );
+}
+
+async function fetchAfterConnectionRetry(
+    url: string,
+    init?: RequestInit,
+): Promise<Response> {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            return await fetch(url, init);
+        } catch (error) {
+            if (
+                !isConnectionError(error) ||
+                attempt >= MAX_CONNECTION_ATTEMPTS
+            ) {
+                throw error;
+            }
+            await new Promise<void>((resolve) => {
+                setTimeout(resolve, attempt * 1000);
+            });
+        }
+    }
+}
+
+export async function fetchWithConnectionRetry(
+    url: string,
+    init?: RequestInit,
+): Promise<Response> {
+    let response = await fetchAfterConnectionRetry(url, init);
+    if (
+        response.status === 503 &&
+        RETRYABLE_METHODS.has((init?.method ?? 'GET').toUpperCase()) &&
+        (await response.clone().text()).includes(UPSTREAM_RESET_BODY)
+    ) {
+        process.stderr.write(
+            `Retrying ${init?.method ?? 'GET'} ${url} after preview gateway reset\n`,
+        );
+        await new Promise<void>((resolve) => {
+            setTimeout(resolve, 1000);
+        });
+        response = await fetchAfterConnectionRetry(url, init);
+    }
+    return response;
+}
 
 export class ApiClient {
     private cookies: Map<string, string> = new Map();
@@ -66,7 +133,7 @@ export class ApiClient {
             fetchHeaders.Cookie = cookie;
         }
 
-        const resp = await fetch(url, {
+        const resp = await fetchWithConnectionRetry(url, {
             method,
             headers: fetchHeaders,
             body: body != null ? JSON.stringify(body) : undefined,
@@ -93,6 +160,7 @@ export class ApiClient {
             ok: resp.ok,
             status: resp.status,
             body: respBody,
+            headers: resp.headers,
         };
     }
 

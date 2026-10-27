@@ -15,6 +15,7 @@ export type EmbedDashboardViewed = BaseTrack & {
         canExportImages?: boolean;
         canExportPagePdf: boolean;
         canDateZoom?: boolean;
+        stickyHeader?: boolean;
     };
 };
 
@@ -24,35 +25,6 @@ export type EmbedQueryViewed = BaseTrack & {
         projectId: string;
         dashboardId: string;
         chartId: string;
-    };
-};
-
-export type DashboardSummaryCreated = BaseTrack & {
-    event: 'ai.dashboard_summary.executed';
-    properties: {
-        openAIModelName: string;
-        organizationId: string;
-        projectId: string;
-        dashboardId: string;
-        dashboardSummaryUuid: string;
-        // Track the metadata of the request and response
-        context?: string | null;
-        responseSize: number; // length in chars
-        tokenUsage?: TokenUsage;
-        // Track how long is taking to get the response
-        timeGetCharts: number;
-        timeOpenAi: number;
-        timeTotal: number;
-    };
-};
-
-export type DashboardSummaryViewed = BaseTrack & {
-    event: 'ai.dashboard_summary.viewed';
-    properties: {
-        organizationId: string;
-        projectId: string;
-        dashboardId: string;
-        dashboardSummaryUuid: string;
     };
 };
 
@@ -79,8 +51,40 @@ export type GenerateChartMetadataGenerated = BaseTrack & {
     };
 };
 
+export type ChartTypeFieldsSuggested = BaseTrack & {
+    event: 'ai.chart_type_fields.suggested';
+    properties: {
+        organizationId: string;
+        projectId: string;
+        inputCount: number;
+        suggestedInputCount: number;
+        timedOut: boolean;
+    };
+};
+
+export type ChartTypeExploreSuggested = BaseTrack & {
+    event: 'ai.chart_type_explore.suggested';
+    properties: {
+        organizationId: string;
+        projectId: string;
+        candidateCount: number;
+        withFieldContext: boolean;
+        hasSuggestion: boolean;
+        timedOut: boolean;
+    };
+};
+
 export type GenerateTableCalculationGenerated = BaseTrack & {
     event: 'ai.table_calculation.generated';
+    properties: {
+        organizationId: string;
+        projectId: string;
+        userId: string;
+    };
+};
+
+export type GenerateCustomDimensionGenerated = BaseTrack & {
+    event: 'ai.custom_dimension.generated';
     properties: {
         organizationId: string;
         projectId: string;
@@ -133,9 +137,12 @@ export type ScimAccessTokenEvent = BaseTrack & {
     event:
         | 'scim_access_token.created'
         | 'scim_access_token.deleted'
-        | 'scim_access_token.rotated';
+        | 'scim_access_token.rotated'
+        | 'scim_access_token.updated';
     userId: string;
     properties: {
         organizationId: string;
     };
 };
+
+export * from './externalConnections';

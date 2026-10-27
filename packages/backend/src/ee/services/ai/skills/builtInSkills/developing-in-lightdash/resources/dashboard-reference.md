@@ -58,7 +58,7 @@ Display a chart from your project:
 
 ### SQL Chart Tile
 
-Display a SQL-based chart:
+Display a SQL chart. The SQL chart must exist before the dashboard references it: create it first, then use its persisted slug as `chartSlug`. See `sql-chart-reference` for the SQL chart body, the approval step, and the full workflow.
 
 ```json
 {
@@ -66,8 +66,9 @@ Display a SQL-based chart:
         {
             "h": 6,
             "properties": {
+                "chartName": "Custom SQL chart",
                 "chartSlug": "custom-sql-chart",
-                "savedSqlUuid": "abc123-def456"
+                "title": "Custom SQL chart"
             },
             "type": "sql_chart",
             "w": 12,
@@ -204,25 +205,30 @@ Add section headers:
 
 ## Dashboard Tabs
 
+**IMPORTANT:** Tab `uuid` values must be valid UUIDs (e.g., `"a1b2c3d4-e5f6-7890-abcd-ef1234567890"`), not friendly names. The linter will reject non-UUID values. Native Lightdash agents can use `generateUuids`; MCP clients must generate standard UUID v4 values locally.
+
 Organize tiles into multiple views:
 
 ```json
 {
     "tabs": [
         {
+            "hidden": false,
             "name": "Overview",
             "order": 0,
-            "uuid": "overview-tab"
+            "uuid": "b3f1a2c4-d5e6-4f78-9abc-def012345678"
         },
         {
+            "hidden": false,
             "name": "Details",
             "order": 1,
-            "uuid": "details-tab"
+            "uuid": "c4d2b3e5-f6a7-4089-bcde-f12345678901"
         },
         {
+            "hidden": false,
             "name": "Trends",
             "order": 2,
-            "uuid": "trends-tab"
+            "uuid": "d5e3c4f6-a7b8-4190-cdef-234567890123"
         }
     ],
     "tiles": [
@@ -231,7 +237,7 @@ Organize tiles into multiple views:
             "properties": {
                 "chartSlug": "revenue-summary"
             },
-            "tabUuid": "overview-tab",
+            "tabUuid": "b3f1a2c4-d5e6-4f78-9abc-def012345678",
             "type": "saved_chart",
             "w": 36,
             "x": 0,
@@ -242,11 +248,66 @@ Organize tiles into multiple views:
             "properties": {
                 "chartSlug": "detailed-breakdown"
             },
-            "tabUuid": "details-tab",
+            "tabUuid": "c4d2b3e5-f6a7-4089-bcde-f12345678901",
             "type": "saved_chart",
             "w": 36,
             "x": 0,
             "y": 0
+        }
+    ]
+}
+```
+
+**IMPORTANT:** Tab rendering depends on `tabs` and tile `tabUuid` values:
+
+- If no tabs are defined, all tiles render in a single untabbed dashboard view.
+- If tabs are defined, tiles with `"tabUuid": null` render on the default/first tab.
+- Avoid relying on this defaulting behavior. When using tabs, set each tile's `tabUuid` explicitly.
+
+Example: no tabs, so both tiles render together in one untabbed view.
+
+```json
+{
+    "tabs": [],
+    "tiles": [
+        {
+            "tabUuid": null,
+            "type": "saved_chart"
+        },
+        {
+            "tabUuid": null,
+            "type": "saved_chart"
+        }
+    ]
+}
+```
+
+Example: tabs are defined, so the `null` tile renders on `"Overview"` and the other tile renders on `"Details"`.
+
+```json
+{
+    "tabs": [
+        {
+            "hidden": false,
+            "name": "Overview",
+            "order": 0,
+            "uuid": "b3f1a2c4-d5e6-4f78-9abc-def012345678"
+        },
+        {
+            "hidden": false,
+            "name": "Details",
+            "order": 1,
+            "uuid": "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+        }
+    ],
+    "tiles": [
+        {
+            "tabUuid": null,
+            "type": "saved_chart"
+        },
+        {
+            "tabUuid": "c4d2b3e5-f6a7-4089-bcde-f12345678901",
+            "type": "saved_chart"
         }
     ]
 }
@@ -332,6 +393,47 @@ Organize tiles into multiple views:
 Use `tileTargets` when a single dashboard filter needs to apply to tiles from different explores, mapping the filter to the equivalent field in each explore. This is essential for dashboards that combine data from multiple explores.
 
 **Key concept:** A single conceptual filter like `"Time Period"` can target different physical fields across different explores. The default `target` applies to tiles using that explore; use `tileTargets` keyed by tile slug to override for tiles using different explores.
+
+#### Finding Each Tile's Explore Without Reading Charts
+
+The dashboard JSON from `readContent` already tells you what every chart tile queries: each `saved_chart` tile carries a read-only `chartQuery` with the chart's `exploreName` and the `fieldIds` it selects. Use it to build `tileTargets` directly. Do NOT call `readContent` on each chart to find its explore.
+
+```json
+{
+    "tiles": [
+        {
+            "tileSlug": "revenue-summary",
+            "type": "saved_chart",
+            "properties": {
+                "chartSlug": "revenue-summary",
+                "chartQuery": {
+                    "exploreName": "orders",
+                    "fieldIds": ["orders_created_at", "orders_total_revenue"]
+                }
+            }
+        },
+        {
+            "tileSlug": "customer-metrics",
+            "type": "saved_chart",
+            "properties": {
+                "chartSlug": "customer-metrics",
+                "chartQuery": {
+                    "exploreName": "customers",
+                    "fieldIds": ["customers_signup_date", "customers_count"]
+                }
+            }
+        }
+    ]
+}
+```
+
+Rules for building `tileTargets` from `chartQuery`:
+
+- Pick the filter's `target` from the explore most tiles use (`target.tableName` is that explore, `target.fieldId` a dimension in it).
+- Tiles whose `chartQuery.exploreName` equals `target.tableName` need no `tileTargets` entry: the filter applies to them automatically.
+- Tiles on a different explore need a `tileTargets` entry keyed by their `tileSlug` with the equivalent field in that explore (`{ "fieldId": ..., "tableName": ... }`), or `false` when the filter must not apply to them.
+- Tiles with `chartQuery: null` (chart not found in this project), `sql_chart`, `markdown`, `heading`, `loom` and `data_app` tiles cannot be targeted; leave them out.
+- `chartQuery` is read-only and ignored on write. Never include it in patches; filter edits only touch `/filters`.
 
 #### Cross-Explore Filter Example
 
@@ -550,19 +652,22 @@ When `config` is omitted, date zoom is enabled with all default granularities.
     "spaceSlug": "leadership",
     "tabs": [
         {
+            "hidden": false,
             "name": "Overview",
             "order": 0,
-            "uuid": "overview-tab"
+            "uuid": "e6f4d5a7-b8c9-4201-def0-345678901234"
         },
         {
+            "hidden": false,
             "name": "By Region",
             "order": 1,
-            "uuid": "by-region-tab"
+            "uuid": "f7a5e6b8-c9d0-4312-ef01-456789012345"
         },
         {
+            "hidden": false,
             "name": "By Product",
             "order": 2,
-            "uuid": "by-product-tab"
+            "uuid": "a8b6f7c9-d0e1-4423-f012-567890123456"
         }
     ],
     "tiles": [
@@ -723,7 +828,7 @@ When `config` is omitted, date zoom is enabled with all default granularities.
 3. **Use appropriate operators**: Date ranges vs. exact matches
 4. **Consider required filters**: When context is needed
 5. **Target filters correctly**: Not all filters apply to all charts
-6. **Use tileTargets for multi-explore dashboards**: When tiles come from different explores, use `tileTargets` to map the filter to the equivalent field in each explore
+6. **Use tileTargets for multi-explore dashboards**: When tiles come from different explores, use `tileTargets` to map the filter to the equivalent field in each explore. Read each tile's explore from its `chartQuery` in the dashboard JSON instead of opening each chart
 
 ### Filter Troubleshooting
 

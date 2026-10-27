@@ -1,17 +1,20 @@
 import {
+    type ApiCreateServiceAccountRequest,
     type ApiError,
     type ServiceAccount,
     type ServiceAccountWithProjectAccessCount,
+    type UpdateServiceAccount,
 } from '@lightdash/common';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
-import { lightdashApi } from '../../../api';
 import useToaster from '../../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 
 const CACHE_KEY = 'service-accounts';
 type CreateServiceAccountResult = ServiceAccount & { token: string };
 
 export const useServiceAccounts = () => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { showToastApiError, showToastSuccess } = useToaster();
     const listAccounts = useQuery<ServiceAccountWithProjectAccessCount[]>({
@@ -26,14 +29,15 @@ export const useServiceAccounts = () => {
     const createAccount = useMutation<
         CreateServiceAccountResult,
         ApiError,
-        ServiceAccount
+        ApiCreateServiceAccountRequest
     >({
         mutationKey: [CACHE_KEY],
-        mutationFn: (newAccount: ServiceAccount) => {
+        mutationFn: (newAccount: ApiCreateServiceAccountRequest) => {
             return lightdashApi<CreateServiceAccountResult>({
                 method: 'POST',
                 url: '/service-accounts',
                 body: JSON.stringify(newAccount),
+                sensitive: true,
             });
         },
         onSuccess: async () => {
@@ -71,6 +75,36 @@ export const useServiceAccounts = () => {
         },
     });
 
+    const updateAccount = useMutation<
+        ServiceAccount,
+        ApiError,
+        { uuid: string } & UpdateServiceAccount
+    >({
+        mutationFn: ({ uuid, ...body }) =>
+            lightdashApi<ServiceAccount>({
+                method: 'PATCH',
+                url: `/service-accounts/${uuid}`,
+                body: JSON.stringify(body),
+            }),
+        onSuccess: async () => {
+            await queryClient.invalidateQueries([CACHE_KEY]);
+            // Project-scoped edits change the grants list; refresh it so a
+            // re-open of the edit modal shows the new project access.
+            await queryClient.invalidateQueries([
+                'service-account-project-grants',
+            ]);
+            showToastSuccess({
+                title: `Service account updated`,
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: `Failed to update service account`,
+                apiError: error,
+            });
+        },
+    });
+
     const rotateAccount = useMutation<
         CreateServiceAccountResult,
         ApiError,
@@ -82,6 +116,7 @@ export const useServiceAccounts = () => {
                 method: 'PATCH',
                 url: `/service-accounts/${uuid}/rotate`,
                 body: JSON.stringify({ expiresAt }),
+                sensitive: true,
             }),
         onSuccess: async () => {
             await queryClient.invalidateQueries([CACHE_KEY]);
@@ -101,8 +136,15 @@ export const useServiceAccounts = () => {
         return {
             listAccounts,
             createAccount,
+            updateAccount,
             deleteAccount,
             rotateAccount,
         };
-    }, [listAccounts, createAccount, deleteAccount, rotateAccount]);
+    }, [
+        listAccounts,
+        createAccount,
+        updateAccount,
+        deleteAccount,
+        rotateAccount,
+    ]);
 };

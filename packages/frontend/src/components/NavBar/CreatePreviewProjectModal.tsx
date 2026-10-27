@@ -2,6 +2,7 @@ import { subject } from '@casl/ability';
 import {
     DbtProjectType,
     DbtProjectTypeLabels,
+    getInvalidDbtEnvironmentVariableKeys,
     ProjectType,
     type ApiError,
     type DbtProjectEnvironmentVariable,
@@ -16,11 +17,14 @@ import {
     Loader,
     Select,
     Stack,
+    Switch,
     Text,
     Textarea,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
+    type ComboboxItem,
+    type ComboboxItemGroup,
+} from '@mantine/core';
 import {
     IconExternalLink,
     IconHelpCircle,
@@ -37,18 +41,22 @@ import React, {
     type FC,
 } from 'react';
 import { animals, colors, uniqueNamesGenerator } from 'unique-names-generator';
-import { lightdashApi } from '../../api';
+import { type LightdashApi } from '../../api';
 import { useActiveProjectUuid } from '../../hooks/useActiveProject';
 import { useProject } from '../../hooks/useProject';
 import { useCreatePreviewMutation } from '../../hooks/useProjectPreview';
 import { useProjects } from '../../hooks/useProjects';
 import useApp from '../../providers/App/useApp';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
 import MantineIcon from '../common/MantineIcon';
 import MantineModal from '../common/MantineModal';
 import DocumentationHelpButton from '../DocumentationHelpButton';
 import FormCollapseButton from '../ProjectConnection/FormCollapseButton';
 
-const getProjectGitBranches = async (projectUuid: string) =>
+const getProjectGitBranches = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+) =>
     lightdashApi<string[]>({
         url: `/projects/${projectUuid}/git-integration/branches`,
         method: 'GET',
@@ -56,10 +64,11 @@ const getProjectGitBranches = async (projectUuid: string) =>
     });
 
 const useBranches = (projectUuid?: string) => {
+    const lightdashApi = useLightdashApi();
     return useQuery<string[], ApiError>({
         enabled: !!projectUuid,
         queryKey: ['project_git_branches', projectUuid],
-        queryFn: () => getProjectGitBranches(projectUuid!),
+        queryFn: () => getProjectGitBranches(lightdashApi, projectUuid!),
         retry: false,
     });
 };
@@ -71,6 +80,7 @@ type EnvironmentVariablesInputProps = {
     disabled?: boolean;
     documentationUrl?: string;
     labelHelp?: string | React.ReactNode;
+    error?: string;
 };
 
 const EnvironmentVariablesInput: FC<EnvironmentVariablesInputProps> = ({
@@ -80,6 +90,7 @@ const EnvironmentVariablesInput: FC<EnvironmentVariablesInputProps> = ({
     disabled,
     documentationUrl,
     labelHelp,
+    error,
 }) => {
     const [isLabelInfoOpen, setIsLabelInfoOpen] = useState<boolean>(false);
 
@@ -136,6 +147,7 @@ const EnvironmentVariablesInput: FC<EnvironmentVariablesInputProps> = ({
                 </>
             }
             description={isLabelInfoOpen && labelHelp}
+            error={error}
         >
             <Stack>
                 {value.map((variable, index) => (
@@ -192,9 +204,14 @@ const EnvironmentVariablesInput: FC<EnvironmentVariablesInputProps> = ({
 type Props = {
     isOpened: boolean;
     onClose: () => void;
+    preselectedProjectUuid?: string;
 };
 
-const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
+const CreatePreviewModal: FC<Props> = ({
+    isOpened,
+    onClose,
+    preselectedProjectUuid,
+}) => {
     const { user } = useApp();
 
     const { isInitialLoading: isLoadingProjects, data: projects } =
@@ -209,11 +226,13 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
         string | null
     >(null);
     const [previewName, setPreviewName] = useState('');
+    const [asyncCopyContent, setAsyncCopyContent] = useState(false);
     const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
     const [schema, setSchema] = useState<string>();
     const [environment, setEnvironment] = useState<
         DbtProjectEnvironmentVariable[]
     >([]);
+    const [environmentError, setEnvironmentError] = useState<string>('');
     const [manifestJson, setManifestJson] = useState<string>('');
     const [manifestError, setManifestError] = useState<string>('');
 
@@ -233,42 +252,43 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
         [handleGeneratePreviewName],
     );
 
-    const regularProjectList = useMemo(() => {
+    const projectItems = useMemo(() => {
         if (isLoadingProjects || !projects || !user.data) return [];
 
         return projects
-            .filter((p) => p.type === ProjectType.DEFAULT)
-            .map((project) => {
-                const userCannotCreatePreview = user.data.ability.cannot(
+            .filter(
+                (p) =>
+                    p.type === ProjectType.DEFAULT &&
+                    p.provisioningSource !== 'analytics',
+            )
+            .map((project) => ({
+                value: project.projectUuid,
+                label: project.name,
+                disabled: user.data.ability.cannot(
                     'create',
                     subject('Project', {
                         organizationUuid: user.data.organizationUuid,
                         upstreamProjectUuid: project.projectUuid,
                         type: ProjectType.PREVIEW,
                     }),
-                );
-
-                const item: {
-                    value: string;
-                    label: string;
-                    disabled: boolean;
-                    group?: string;
-                } = {
-                    value: project.projectUuid,
-                    label: project.name,
-                    disabled: userCannotCreatePreview,
-                };
-
-                if (userCannotCreatePreview) {
-                    item.group = 'Requires Developer Access';
-                }
-
-                return item;
-            })
-            .sort((a, b) =>
-                a.disabled === b.disabled ? 0 : a.disabled ? 1 : -1,
-            );
+                ),
+            }));
     }, [isLoadingProjects, projects, user.data]);
+
+    const regularProjectList: (
+        | ComboboxItem
+        | ComboboxItemGroup<ComboboxItem>
+    )[] = useMemo(() => {
+        const available = projectItems.filter((item) => !item.disabled);
+        const restricted = projectItems.filter((item) => item.disabled);
+
+        return restricted.length > 0
+            ? [
+                  ...available,
+                  { group: 'Requires Developer Access', items: restricted },
+              ]
+            : available;
+    }, [projectItems]);
 
     const { data: projectDetails } = useProject(
         selectedProjectUuid ?? undefined,
@@ -280,27 +300,29 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
     }, [projectDetails?.dbtConnection?.type]);
 
     useEffect(() => {
+        const initialProjectUuid = preselectedProjectUuid ?? activeProjectUuid;
         if (
             !isLoadingActiveProjectUuid &&
-            activeProjectUuid &&
+            initialProjectUuid &&
             !selectedProjectUuid &&
             projects
         ) {
-            const activeProjectValue = regularProjectList.find(
-                (project) => project.value === activeProjectUuid,
+            const initialProjectValue = projectItems.find(
+                (project) => project.value === initialProjectUuid,
             );
 
-            if (activeProjectValue && !activeProjectValue.disabled) {
-                setSelectedProjectUuid(activeProjectUuid);
+            if (initialProjectValue && !initialProjectValue.disabled) {
+                setSelectedProjectUuid(initialProjectUuid);
                 setPreviewName(handleGeneratePreviewName());
             }
         }
     }, [
         activeProjectUuid,
+        preselectedProjectUuid,
         handleGeneratePreviewName,
         isLoadingActiveProjectUuid,
         projects,
-        regularProjectList,
+        projectItems,
         selectedProjectUuid,
     ]);
 
@@ -362,6 +384,18 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
             return;
         }
 
+        const invalidEnvironmentKeys =
+            getInvalidDbtEnvironmentVariableKeys(environment);
+        if (invalidEnvironmentKeys.length > 0) {
+            setEnvironmentError(
+                `Environment variable keys cannot change how dbt or its child processes execute. Invalid keys: ${invalidEnvironmentKeys.join(
+                    ', ',
+                )}`,
+            );
+            return;
+        }
+        setEnvironmentError('');
+
         // Reduce manifest size by removing unnecessary keys
         const finalManifest = manifestJson.trim()
             ? reduceManifest(manifestJson.trim())
@@ -370,6 +404,7 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
         await createPreviewProject({
             projectUuid: selectedProjectUuid,
             name: previewName,
+            asyncCopyContent,
             dbtConnectionOverrides: {
                 branch: selectedBranch ?? undefined,
                 environment: environment.length > 0 ? environment : undefined,
@@ -381,6 +416,7 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
     }, [
         selectedProjectUuid,
         previewName,
+        asyncCopyContent,
         createPreviewProject,
         selectedBranch,
         environment,
@@ -454,7 +490,6 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
                         <Tooltip label="Generate unique name">
                             <ActionIcon
                                 color="foreground.9"
-                                variant="subtle"
                                 onClick={() =>
                                     setPreviewName(handleGeneratePreviewName())
                                 }
@@ -506,7 +541,6 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
                                                     ?.message ||
                                                 'Failed to fetch branches'
                                             }
-                                            multiline
                                             w={250}
                                         >
                                             <ActionIcon
@@ -535,14 +569,27 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
                         />
                         {isOpen && (
                             <Stack>
+                                <Switch
+                                    label="Copy content in the background"
+                                    description="Avoid request timeouts when copying large projects."
+                                    checked={asyncCopyContent}
+                                    onChange={(event) =>
+                                        setAsyncCopyContent(
+                                            event.currentTarget.checked,
+                                        )
+                                    }
+                                    disabled={isPreviewCreating}
+                                />
                                 {/* only show if branch changed + check if project dbt connection type has environment + advanced option */}
                                 <EnvironmentVariablesInput
                                     label="Environment Variables"
                                     value={environment}
-                                    onChange={(newVariables) =>
-                                        setEnvironment(newVariables)
-                                    }
+                                    onChange={(newVariables) => {
+                                        setEnvironment(newVariables);
+                                        setEnvironmentError('');
+                                    }}
                                     disabled={isPreviewCreating}
+                                    error={environmentError}
                                 />
 
                                 <Textarea
@@ -573,7 +620,7 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
                     </>
                 ) : (
                     <>
-                        <Text c="ldGray.6" fz="sm">
+                        <Text c="dimmed" fz="sm">
                             This{' '}
                             <Text span fw={600} fz="sm">
                                 {projectDetails?.dbtConnection?.type
@@ -597,6 +644,17 @@ const CreatePreviewModal: FC<Props> = ({ isOpened, onClose }) => {
 
                         {isOpen && (
                             <Stack>
+                                <Switch
+                                    label="Copy content in the background"
+                                    description="Avoid request timeouts when copying large projects."
+                                    checked={asyncCopyContent}
+                                    onChange={(event) =>
+                                        setAsyncCopyContent(
+                                            event.currentTarget.checked,
+                                        )
+                                    }
+                                    disabled={isPreviewCreating}
+                                />
                                 <Textarea
                                     label="Custom manifest.json (optional)"
                                     placeholder="Paste your manifest.json content here..."

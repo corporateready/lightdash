@@ -1,18 +1,23 @@
 ---
 name: developing-in-lightdash
-description: Use when working with Lightdash YAML files, dbt models with Lightdash metadata, the lightdash CLI (deploy, upload, download, preview, lint, sql, set-warehouse), or creating/editing charts, dashboards, metrics, and dimensions as code
+description: Use when working with Lightdash YAML files, dbt models with Lightdash metadata, the lightdash CLI (deploy, upload, download, preview, lint, warehouse-catalog, sql, set-warehouse, apps create/preview/validate), or managing charts, dashboards, spaces and access, AI agents, scheduled content, data apps, custom chart types (Chart Studio, `apps create --chart-type`, `--chart-types`), organization Data App themes, data-app external connections, users, groups, custom roles, metrics, and dimensions as code
 ---
 
 # Developing in Lightdash
+
+For CLI users and writeback sandboxes working with YAML and dbt files.
 
 Build and deploy Lightdash analytics projects. This skill covers the **semantic layer** (metrics, dimensions, joins) and **content** (charts, dashboards).
 
 ## When to Use
 
 - Working with Lightdash YAML files (charts, dashboards, models as code)
-- Using the `lightdash` CLI (`deploy`, `upload`, `download`, `preview`, `lint`, `sql`)
+- Using the `lightdash` CLI (`deploy`, `upload`, `download`, `preview`, `lint`, `warehouse-catalog`, `sql`)
 - Defining metrics, dimensions, joins, or tables in dbt or pure Lightdash projects
 - Creating or editing charts and dashboards as code
+- Downloading, uploading, or locally developing data apps (enterprise)
+- Creating, downloading, editing, or uploading custom chart types built in Chart Studio (enterprise)
+- Creating, editing, migrating, downloading, or uploading organization Data App themes
 
 **Don't use for:** Developing the Lightdash application itself (use the codebase CLAUDE.md), general dbt work without Lightdash metadata, or raw SQL unrelated to Lightdash models.
 
@@ -20,11 +25,18 @@ Build and deploy Lightdash analytics projects. This skill covers the **semantic 
 
 | Task | Commands | References |
 |------|----------|------------|
-| Explore data warehouse | `lightdash sql` to execute raw sql, read .csv results | [CLI Reference](./resources/cli-reference.md) |
+| Create a pure Lightdash project from warehouse metadata | Use Lightdash or an already-authenticated warehouse CLI to inspect catalog metadata and aggregate profiles | [Creating from a Warehouse Catalog](./resources/creating-from-warehouse-catalog.md) |
+| Discover warehouse tables and fields | `lightdash warehouse-catalog --json` | [CLI Reference](./resources/cli-reference.md) |
+| Explore data warehouse values | `lightdash sql` to execute raw sql, read .csv results | [CLI Reference](./resources/cli-reference.md) |
 | Define metrics & dimensions | Edit dbt YAML or Lightdash YAML | [Metrics](./resources/metrics-reference.md), [Dimensions](./resources/dimensions-reference.md) |
-| Create charts | `lightdash download`, edit YAML, `lightdash upload` | [Chart Types](#chart-types) |
+| Create or edit charts | UI, Lightdash AI agent, MCP, or YAML via `lightdash download`/`upload` | [Content Workflow](#content-workflow), [Chart Types](#chart-types) |
 | Add period comparisons | Add PoP additional metrics to chart YAML | [Period over Period](./resources/period-over-period-reference.md) |
-| Build dashboards | `lightdash download`, edit YAML, `lightdash upload` | [Dashboard Reference](./resources/dashboard-reference.md) |
+| Create or edit dashboards | UI, Lightdash AI agent, MCP, or YAML via `lightdash download`/`upload` | [Content Workflow](#content-workflow), [Dashboard Reference](./resources/dashboard-reference.md) |
+| Manage content as code across project and organization resources | `lightdash download`, `lightdash upload` | [Content as Code](./resources/content-as-code-reference.md) |
+| Manage data apps as code (enterprise) | `lightdash download --apps <ref>` (one app) or `--include-apps` (all), edit bundle, `lightdash upload --apps <ref>`; local dev via `lightdash apps create/preview/validate` | [Data Apps](#working-with-data-apps-enterprise), [Content as Code](./resources/content-as-code-reference.md) |
+| Build or edit a custom chart type (enterprise) | `lightdash apps create "<name>" --chart-type` or `lightdash download --chart-types <ref>`, edit `chart-types/<slug>/src/`, `lightdash upload --chart-types <ref>` | [Custom Chart Types](#working-with-custom-chart-types-enterprise) |
+| Manage organization Data App themes as code | `lightdash download --organization`, edit `themes/<slug>/`, `lightdash upload --organization` | [Data App Themes](./resources/data-app-themes-reference.md) |
+| Manage data-app external connections (enterprise) | `lightdash download --include-external-connections`, edit YAML, `lightdash upload` | [Content as Code](./resources/content-as-code-reference.md) |
 | Lint yaml files | `lightdash lint` | [CLI Reference](./resources/cli-reference.md) |
 | Set warehouse connection | `lightdash set-warehouse` from profiles.yml | [CLI Reference](./resources/cli-reference.md) |
 | Deploy changes | `lightdash deploy` (semantic layer), `lightdash upload` (content) | [CLI Reference](./resources/cli-reference.md) |
@@ -35,13 +47,25 @@ Build and deploy Lightdash analytics projects. This skill covers the **semantic 
 | Mistake | Consequence | Prevention |
 |---------|-------------|------------|
 | **Guessing filter values** | Case mismatches (`'Payment'` vs `'payment'`) cause charts to silently return no data | Always run `lightdash sql "SELECT DISTINCT column FROM table LIMIT 50" -o values.csv` and use exact values |
-| **Not updating dashboard tiles after renaming a chart** | Dashboard tile still shows old title — `title` and `chartName` are independent overrides that do NOT auto-update | Download the dashboard, find tiles with matching `chartSlug`, update `title` and `chartName` to match |
+| **Not updating dashboard tiles after renaming a chart** | Dashboard tile still shows old title — `title` and `chartName` are independent overrides that do NOT auto-update | Download the dashboard, find tiles with matching `chartSlug`, update `title` and `chartName` to match (see [checklist](#chart-and-dashboard-checklist)) |
 | **Including unused dimensions in metricQuery** | "Results may be incorrect" warning — extra dimensions change SQL grouping and produce wrong numbers | Every dimension in `metricQuery.dimensions` must appear in the chart config. For cartesian: `layout.xField`, `layout.yField`, or `pivotConfig.columns` |
 | **Unsorted YAML keys** | `lightdash upload` warns "unsorted YAML keys" and diffs become noisy | Always sort keys alphabetically at every nesting level — the CLI writes with `sortKeys: true` |
 | **Deploying to wrong project** | Overwrites production content | Always run `lightdash config get-project` before deploying |
+| **Downloading content into the dbt project and committing it** | The repository gains dashboard, chart, or data app files nobody maintains, and they go stale as soon as someone edits the content in the UI | Download to a scratch directory, upload, then delete it. Commit content only when the user asks or the repository already tracks it (see [Content Workflow](#content-workflow)) |
 | **Missing `contentType` field** | Content type can't be determined without relying on directory structure | Always include `contentType: chart`, `contentType: dashboard`, or `contentType: sql_chart` at the top level |
+| **Adding `--include-apps` to an `--apps <ref>` selection** | `--include-apps` always requests ALL project apps (capped at 50), so the command downloads every app plus the ref — not just the one app | `--apps <ref>` alone downloads/uploads only that app (by slug, app URL, or UUID). Use `--include-apps` only when you want every app |
+| **Editing a data app without reading its bundled skills** | App code violates the SDK-only data access and dependency boundaries (direct `fetch`, `pnpm add`, vendored libraries) and the upload rejects or the app breaks when deployed | Every app bundle ships the `developing-data-apps-locally` and `lightdash-data-app` skills — read them before editing files in an app folder (see [Data Apps](#working-with-data-apps-enterprise)) |
+| **Building a reusable chart as a Vega-Lite `custom` chart** | The visualization lives inside one saved chart and can't be reused or picked from the explorer's chart type picker | For a new reusable visualization, build a custom chart type (see [Custom Chart Types](#working-with-custom-chart-types-enterprise)). Use Vega-Lite only for existing `chartConfig.type: custom` charts or when the project has no custom chart types (enterprise) |
+| **Editing a chart type without reading its bundled skills** | The component queries or fetches data itself, or its `vizSchema` drifts from what `src/` reads, so the chart type breaks or never appears in the chart type picker | Every chart type folder ships `AGENTS.md` plus the `reusable-visualization` and `developing-chart-types-locally` skills — read all three before editing files in `chart-types/<slug>/` |
+| **Inventing a theme-only CLI command or treating a missing folder as deletion** | The command does not exist, or a supposedly deleted remote theme returns on the next download | Use organization download/upload, and read [Data App Themes](./resources/data-app-themes-reference.md) before changing `themes/` |
 
 ## Before You Start
+
+Every `lightdash download` or `lightdash upload` follows the [Content Workflow](#content-workflow): files go in a scratch directory, not the user's repository, and are not committed unless the user asks.
+
+When a task uses `lightdash download` or `lightdash upload`, especially for bulk edits, spaces and access, scheduled content, AI agents, data apps, custom chart types, organization themes, external connections, users, groups, or custom roles, **read and follow [Content as Code](./resources/content-as-code-reference.md) first**. Project and organization content require separate commands, and a default download is not a complete snapshot.
+
+For any task that creates, edits, migrates, downloads, uploads, or tests an organization Data App theme, **always read and follow [Data App Themes](./resources/data-app-themes-reference.md) before touching `themes/`**. Theme packages are strict multi-file resources, organization upload has no theme-only mode, and `lightdash lint` does not validate them.
 
 ### Check Your Target Project
 
@@ -137,6 +161,12 @@ lightdash set-warehouse --project-dir ./dbt --profiles-dir ./profiles --project 
 
 **CRITICAL**: Never guess filter values. Case mismatches (e.g., `'Payment'` vs `'payment'`) cause charts to silently return no data.
 
+Filters are case-sensitive by default. The `case_sensitive` key can override this in order of priority:
+
+- Dimension metadata
+- Model/explore metadata
+- `lightdash.config.yml` `defaults.case_sensitive`
+
 **Before writing any string filter**, query actual values from the warehouse:
 
 ```bash
@@ -154,44 +184,133 @@ Read the CSV and use the **exact values** in your filter YAML. This applies to a
 
 See [Metrics Reference](./resources/metrics-reference.md) and [Dimensions Reference](./resources/dimensions-reference.md) for configuration options.
 
-### Editing Charts
+### Creating a Pure Lightdash Project from a Warehouse Catalog
 
-1. **Download**: `lightdash download --charts chart-slug`
-2. **Edit** the YAML file in `lightdash/` directory
-3. **Verify filter values**: If you added or changed filters, use `lightdash sql` to check actual column values (see [Common Mistakes](#common-mistakes))
-4. **Update dashboard tiles**: If you changed the chart's name or purpose, download any dashboards that reference it and update their tile `title` and `chartName` properties to match (see [Common Mistakes](#common-mistakes))
-5. **Lint**: `lightdash lint` to validate before uploading
-6. **Upload**: `lightdash upload --charts chart-slug` (and any modified dashboards)
+When the prepared project has no usable dbt project and the task is to bootstrap a semantic layer from warehouse metadata, **always read and follow [Creating from a Warehouse Catalog](./resources/creating-from-warehouse-catalog.md) before inspecting data or writing YAML**. This applies whether warehouse access comes from the selected Lightdash project or an already-authenticated warehouse CLI such as Snowflake CLI or `bq`. Do not use that workflow when an existing dbt semantic layer can be extended.
 
-**Dashboard tiles have their own titles.** A `saved_chart` tile's `title` and `chartName` properties are independent overrides — they do NOT auto-update when you rename the chart. If you change a chart from "Total Revenue" to "Gross Profit" but don't update the dashboard tile, the dashboard will still display "Total Revenue". Always download the dashboard, find tiles with matching `chartSlug`, and update their `title` and `chartName` to match.
+### Content Workflow
 
-```yaml
-# Dashboard tile — title and chartName must be updated manually when chart changes
-tiles:
-  - type: saved_chart
-    properties:
-      chartSlug: total-revenue-kpi
-      title: "Gross Profit"        # ← Update this when chart name/purpose changes
-      chartName: "Gross Profit"    # ← Update this too
+This is the one loop for charts, dashboards, data apps, custom chart types, and other content. The sections below add only what is specific to each resource.
+
+**Creating content.** Charts and dashboards can be created in the Lightdash UI, by a Lightdash AI agent, through the Lightdash MCP server, or as YAML with the CLI. All of these are equally valid; follow the user's preference.
+
+**Lightdash is the source of truth.** Downloaded files are temporary working copies, not files to commit. To edit content as files, or to create it as YAML:
+
+1. **Confirm the target**: `lightdash config get-project`
+2. **Download** into a scratch directory outside the user's repository, never into the dbt project:
+   ```bash
+   LD_DIR="$(mktemp -d)/lightdash"
+   lightdash download --dashboards executive-summary --path "$LD_DIR"   # or --charts <slug>, --apps <ref>, ...
+   ```
+   To create content, skip the download and write new YAML in `$LD_DIR`.
+3. **Edit** the files in `$LD_DIR`, working through the [checklist](#chart-and-dashboard-checklist) below
+4. **Lint**: `lightdash lint --path "$LD_DIR"`
+5. **Upload** with the same selectors: `lightdash upload --dashboards executive-summary --path "$LD_DIR"`
+6. **Delete** `$LD_DIR`. Do not copy the files into the repository, `git add` them, or commit them.
+
+For bulk or cross-scope changes (spaces and access, users, groups, roles, scheduled content, AI agents), follow the Agent-Safe Workflow in [Content as Code](./resources/content-as-code-reference.md) instead.
+
+**When content belongs in git.** Only when the user asks for it or the repository already tracks content (for example, `git ls-files lightdash/` returns content files). That covers version-controlled templates, CI/CD deploys of content, and strict change management with code review. See [Edit dashboards with agents](https://docs.lightdash.com/workflow/edit-dashboards-with-agents). This applies only to content: dbt models, metrics, dimensions, and other semantic-layer YAML do live in the repository and ship with `lightdash deploy`.
+
+#### Chart and Dashboard Checklist
+
+- **Filter values**: if you added or changed a string filter, query the real values first (see [Verify Filter Values](#verify-filter-values-before-using-them)).
+- **Dashboard tile titles**: a `saved_chart` tile's `title` and `chartName` are independent overrides and do NOT auto-update when a chart is renamed. If you change a chart's name or purpose, download every dashboard with a tile whose `chartSlug` matches, update both properties, and upload those dashboards too:
+  ```yaml
+  tiles:
+    - type: saved_chart
+      properties:
+        chartSlug: total-revenue-kpi
+        title: "Gross Profit"        # ← Update this when chart name/purpose changes
+        chartName: "Gross Profit"    # ← Update this too
+  ```
+- **Chart config**: see [Chart Types](#chart-types) and the [Dashboard Reference](./resources/dashboard-reference.md).
+
+### Working with Data Apps (Enterprise)
+
+Data apps are multi-file React bundles under `apps/<app-folder>/` with a `lightdash-app.yml` manifest — not single YAML files. Full flag semantics and manifest details: [Content as Code](./resources/content-as-code-reference.md).
+
+Apps follow the [Content Workflow](#content-workflow): work in a scratch directory and do not commit the bundle unless the user asks. The commands below are the app-specific flags.
+
+**Download one app** — `--apps <ref>` alone is the complete command (ref = slug, app URL, or UUID; also finds apps not added to any space):
+
+```bash
+lightdash download --apps revenue-explorer --path "$LD_DIR"
 ```
 
-### Editing Dashboards
+Never add `--include-apps` to "scope" the download — it always requests ALL project apps (see [Common Mistakes](#common-mistakes)).
 
-1. **Download**: `lightdash download --dashboards dashboard-slug`
-2. **Edit** the YAML file in `lightdash/` directory
-3. **Verify filter values**: If you added or changed filters, use `lightdash sql` to check actual column values (see [Common Mistakes](#common-mistakes))
-4. **Lint**: `lightdash lint` to validate before uploading
-5. **Upload**: `lightdash upload --dashboards dashboard-slug`
+**Download all apps**: `lightdash download --include-apps` (capped at 50; raise with `--apps-limit <n>`). Add `--apps-only` to skip charts, dashboards, and spaces.
 
-### Creating New Content
+**Upload**:
 
-Charts and dashboards are typically created in the UI first, then managed as code:
+```bash
+lightdash upload --apps revenue-explorer --path "$LD_DIR"   # one app (slug = folder name, URL, or UUID)
+lightdash upload --include-apps --path "$LD_DIR"            # every app folder on disk
+```
 
-1. Create in UI
-2. `lightdash download` to pull as YAML
-3. Edit and version control
-4. `lightdash lint` to validate before uploading
-5. `lightdash upload` to sync changes
+- `--app-space <spaceRef>` — space (slug or UUID) for apps this upload **creates**; existing apps keep their space.
+- `--create-new` — create a fresh app (new slug) instead of updating the app referenced in `lightdash-app.yml`.
+- `--allow-custom-dependencies` — required for non-interactive uploads of apps that declare custom npm dependencies.
+
+**Develop locally** with the `lightdash apps` subcommand group:
+
+```bash
+lightdash apps create "Revenue Explorer" --path "$LD_DIR"   # scaffold a new app under $LD_DIR/apps/
+lightdash apps preview                     # run the app locally against your real Lightdash instance, authenticated as you
+lightdash apps validate                    # check source, manifest, dependencies, and semantic-layer references
+```
+
+**Every created or downloaded app bundle ships its own skills** inside the app folder:
+
+- `developing-data-apps-locally` — the edit → validate → upload loop, local preview, SDK-only data access, and dependency boundaries
+- `lightdash-data-app` — the `@lightdash/query-sdk` reference for the app's source code
+
+When editing files inside an app folder, **read those bundled skills first**. They are version-matched to the app and authoritative for local development — this skill only covers moving apps between disk and Lightdash.
+
+### Working with Custom Chart Types (Enterprise)
+
+A custom chart type is a reusable visualization built in Chart Studio: one React component that Lightdash hands query results and settings to, offered in the explorer's chart type picker for every chart in the project. On disk it is a multi-file bundle under `chart-types/<slug>/` with a `lightdash-app.yml` manifest whose `vizSchema` declares the fields and options the component reads. It is not a data app (it runs no query of its own) and not the legacy Vega-Lite `custom` chart.
+
+Chart types follow the [Content Workflow](#content-workflow): work in a scratch directory and do not commit the bundle unless the user asks.
+
+**Create one locally:**
+
+```bash
+lightdash apps create "Radial Gauge" --chart-type --path "$LD_DIR"   # scaffolds $LD_DIR/chart-types/radial-gauge/
+```
+
+**Download** — `--chart-types <ref>` alone is the complete command (ref = slug, URL, or UUID):
+
+```bash
+lightdash download --chart-types radial-gauge --path "$LD_DIR"
+lightdash download --include-chart-types   # every chart type in the project (capped at 50; raise with --chart-types-limit <n>)
+lightdash download --chart-types-only      # chart types only, skipping charts, dashboards, and spaces
+```
+
+Downloading a chart that renders with a custom chart type also downloads that chart type. In chart YAML the binding is `chartConfig.type: data_app_viz` with `config.dataAppVizSlug`, `fieldMapping`, and `optionValues`.
+
+**Upload:**
+
+```bash
+lightdash upload --chart-types radial-gauge --path "$LD_DIR"   # one chart type (slug = folder name, URL, or UUID)
+lightdash upload --include-chart-types --path "$LD_DIR"        # every chart type folder on disk
+```
+
+A chart YAML that binds to a chart type by `dataAppVizSlug` fails to upload unless that chart type exists in the target project. Upload the chart type first, or pass `--chart-types <ref>` in the same run (chart types upload before charts).
+
+**Edit inside the folder.** Change into `chart-types/<slug>/` and **read its `AGENTS.md` plus the `reusable-visualization` and `developing-chart-types-locally` skills before touching `src/`**:
+
+- `reusable-visualization` — the component contract: `useVizContext()` is the only channel to the host, and the component never queries or fetches anything itself
+- `developing-chart-types-locally` — keeping `vizSchema` in lockstep with the component, `lightdash apps validate --build`, the fixture preview, and the upload-and-verify loop
+
+Those files are version-matched to the chart type and authoritative for editing it. This skill only covers moving chart types between disk and Lightdash.
+
+### Working with Organization Data App Themes
+
+Organization Data App themes are multi-file packages under `themes/<slug>/` and participate automatically in `lightdash download --organization` and `lightdash upload --organization`. They do not have a standalone command group or theme-specific selectors.
+
+Before creating, editing, migrating, synchronizing, or testing a theme, **read and follow [Data App Themes](./resources/data-app-themes-reference.md)** for the manifest contract, asset rules, synchronization behavior, and generation boundaries.
 
 ### Testing with Preview
 
@@ -212,8 +331,14 @@ lightdash stop-preview --name "my-feature"
 | `lightdash download` | Download charts/dashboards as YAML |
 | `lightdash lint` | Validate YAML locally |
 | `lightdash preview` | Create temporary test project |
+| `lightdash warehouse-catalog --json` | Discover raw warehouse tables |
 | `lightdash sql "..." -o file.csv` | Run SQL queries against warehouse |
 | `lightdash run-chart -p chart.yml` | Execute chart YAML query against warehouse |
+| `lightdash apps create <name>` | Scaffold a new data app locally (enterprise) |
+| `lightdash apps create <name> --chart-type` | Scaffold a new custom chart type locally (enterprise) |
+| `lightdash apps preview` | Run a data app locally against your Lightdash instance |
+| `lightdash apps validate` | Validate data app or chart type source, manifest, and semantic references |
+| `lightdash download --chart-types <ref>` / `lightdash upload --chart-types <ref>` | Move custom chart types between disk and Lightdash (enterprise) |
 
 See [CLI Reference](./resources/cli-reference.md) for full command documentation.
 
@@ -282,7 +407,8 @@ Each path segment must be the slug of an existing (or to-be-created) space at th
 | Geographic data | `map` | Plots data points or regions on a map |
 | Flow between categories | `sankey` | Shows how values move from source to target nodes |
 | Detailed records | `table` | Displays raw data with sorting and formatting |
-| Advanced custom needs | `custom` | Full Vega-Lite spec for custom visualizations |
+| Visualization none of the above cover | Custom chart type | Reusable React component offered in the chart type picker — see [Custom Chart Types](#working-with-custom-chart-types-enterprise) |
+| Vega-Lite chart | `custom` (legacy) | For charts already saved with `chartConfig.type: custom`, or projects without custom chart types (enterprise) |
 
 | Type | Use Case | Reference |
 |------|----------|-----------|
@@ -295,7 +421,10 @@ Each path segment must be the slug of an existing (or to-be-created) space at th
 | `treemap` | Hierarchical data | [Treemap](./resources/treemap-chart-reference.md) |
 | `map` | Geographic data | [Map](./resources/map-chart-reference.md) |
 | `sankey` | Flow diagrams | [Sankey](./resources/sankey-chart-reference.md) |
-| `custom` | Vega-Lite | [Custom Viz](./resources/custom-viz-reference.md) |
+| `custom` | Legacy Vega-Lite custom chart | [Custom Viz](./resources/custom-viz-reference.md) |
+| `data_app_viz` | Chart rendered by a custom chart type | [Custom Chart Types](#working-with-custom-chart-types-enterprise) |
+
+A SQL chart (`contentType: sql_chart`) is saved from raw warehouse SQL instead of an explore. See [SQL Chart Reference](./resources/sql-chart-reference.md).
 
 ## Dashboards
 
@@ -329,6 +458,7 @@ See [Workflows Reference](./resources/workflows-reference.md) for detailed examp
 ## Resources
 
 ### Semantic Layer
+- [Creating from a Warehouse Catalog](./resources/creating-from-warehouse-catalog.md)
 - [Dimensions Reference](./resources/dimensions-reference.md)
 - [Metrics Reference](./resources/metrics-reference.md)
 - [Tables Reference](./resources/tables-reference.md)
@@ -345,12 +475,15 @@ See [Workflows Reference](./resources/workflows-reference.md) for detailed examp
 - [Treemap Chart Reference](./resources/treemap-chart-reference.md)
 - [Map Chart Reference](./resources/map-chart-reference.md)
 - [Sankey Chart Reference](./resources/sankey-chart-reference.md)
-- [Custom Viz Reference](./resources/custom-viz-reference.md)
+- [Custom Viz Reference](./resources/custom-viz-reference.md) - Legacy Vega-Lite `custom` charts
 - [Period over Period Reference](./resources/period-over-period-reference.md) - PoP comparisons (YoY, MoM, etc.)
+- [SQL Chart Reference](./resources/sql-chart-reference.md) - Charts saved from raw warehouse SQL
 
 ### Dashboards & Workflows
 - [Dashboard Reference](./resources/dashboard-reference.md)
 - [Dashboard Best Practices](./resources/dashboard-best-practices.md)
+- [Data App Themes Reference](./resources/data-app-themes-reference.md)
+- [Content as Code Reference](./resources/content-as-code-reference.md)
 - [CLI Reference](./resources/cli-reference.md)
 - [Workflows Reference](./resources/workflows-reference.md)
 

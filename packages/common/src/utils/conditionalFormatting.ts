@@ -18,6 +18,7 @@ import {
     type ConditionalFormattingConfigWithSingleColor,
     type ConditionalFormattingMinMax,
     type ConditionalFormattingMinMaxMap,
+    type ConditionalFormattingTextStyle,
     type ConditionalFormattingWithFilterOperator,
 } from '../types/conditionalFormatting';
 import { LightdashError, NotImplementedError } from '../types/errors';
@@ -31,7 +32,31 @@ import {
 } from '../types/field';
 import { FilterOperator, type FieldTarget } from '../types/filter';
 import assertUnreachable from './assertUnreachable';
-import { getItemId, isNumericItem, isStringDimension } from './item';
+import {
+    getItemId,
+    isBooleanItem,
+    isNumericItem,
+    isStringDimension,
+} from './item';
+
+// Coerces warehouse boolean representations ('true'/'false' strings) to real
+// booleans; leaves anything else (incl. null) untouched so equality fails
+// rather than treating null as false
+const parseBooleanValue = (value: unknown): unknown => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+    }
+    return value;
+};
+
+const parseValueForField = (field: ItemsMap[string], value: unknown) => {
+    if (isNumericItem(field)) return Number(value);
+    if (isBooleanItem(field)) return parseBooleanValue(value);
+    return value;
+};
 
 export const createConditionalFormattingRuleWithValues =
     (): ConditionalFormattingWithFilterOperator => ({
@@ -129,7 +154,7 @@ export const hasMatchingConditionalRules = (
 ) => {
     if (!config) return false;
 
-    const parsedValue = isNumericItem(field) ? Number(value) : value;
+    const parsedValue = parseValueForField(field, value);
     const convertedValue = convertFormattedValue(parsedValue, field);
 
     const currentFieldId = getItemId(field);
@@ -154,9 +179,10 @@ export const hasMatchingConditionalRules = (
 
                 compareField = rowField.field;
 
-                const parsedCompareValue = isNumericItem(compareField)
-                    ? Number(rowField.value)
-                    : rowField.value;
+                const parsedCompareValue = parseValueForField(
+                    compareField,
+                    rowField.value,
+                );
                 convertedCompareValue = convertFormattedValue(
                     parsedCompareValue,
                     compareField,
@@ -524,12 +550,14 @@ export const getConditionalFormattingConfig = ({
     minMaxMap = {},
     conditionalFormattings,
     rowFields,
+    applyTo,
 }: {
     field: ItemsMap[string] | undefined;
     value: unknown | undefined;
     minMaxMap: ConditionalFormattingMinMaxMap | undefined;
     conditionalFormattings: ConditionalFormattingConfig[] | undefined;
     rowFields?: ConditionalFormattingRowFields;
+    applyTo?: ConditionalFormattingColorApplyTo;
 }) => {
     // For backwards compatibility with old table calculations without type
     const isCalculationTypeUndefined =
@@ -539,13 +567,28 @@ export const getConditionalFormattingConfig = ({
         !field ||
         (!isNumericItem(field) &&
             !isStringDimension(field) &&
+            !isBooleanItem(field) &&
             !isCalculationTypeUndefined)
     )
         return undefined;
 
-    return findLast(conditionalFormattings, (config) =>
-        hasMatchingConditionalRules(field, value, minMaxMap, config, rowFields),
-    );
+    return findLast(conditionalFormattings, (config) => {
+        if (
+            applyTo !== undefined &&
+            (config.applyTo ?? ConditionalFormattingColorApplyTo.CELL) !==
+                applyTo
+        ) {
+            return false;
+        }
+
+        return hasMatchingConditionalRules(
+            field,
+            value,
+            minMaxMap,
+            config,
+            rowFields,
+        );
+    });
 };
 
 export const getConditionalFormattingDescription = (
@@ -733,4 +776,102 @@ export const getConditionalFormattingColor = ({
         minMaxMap,
         getColorFromRange,
     });
+};
+
+/**
+ * Row-level conditional formatting (PROD-8058): returns the matching `applyTo:
+ * ROW` config whose trigger field matches, or undefined. Evaluated once per
+ * row, independent of the cell being drawn.
+ */
+export const getRowConditionalFormattingConfig = ({
+    conditionalFormattings,
+    rowFields,
+    minMaxMap = {},
+}: {
+    conditionalFormattings: ConditionalFormattingConfig[] | undefined;
+    rowFields: ConditionalFormattingRowFields;
+    minMaxMap: ConditionalFormattingMinMaxMap | undefined;
+}): ConditionalFormattingConfig | undefined => {
+    if (!conditionalFormattings) return undefined;
+
+    return conditionalFormattings.find((config) => {
+        if (config.applyTo !== ConditionalFormattingColorApplyTo.ROW) {
+            return false;
+        }
+        const targetFieldId = config.target?.fieldId;
+        if (!targetFieldId) return false;
+        const trigger = rowFields[targetFieldId];
+        if (!trigger) return false;
+        return hasMatchingConditionalRules(
+            trigger.field,
+            trigger.value,
+            minMaxMap,
+            config,
+            rowFields,
+        );
+    });
+};
+
+/**
+ * Row-level conditional formatting (PROD-8058): returns the background color to
+ * paint across an entire row when a single `applyTo: ROW` rule's trigger field
+ * matches. Returns null when no ROW rule matches.
+ */
+export const getRowConditionalFormattingColor = (args: {
+    conditionalFormattings: ConditionalFormattingConfig[] | undefined;
+    rowFields: ConditionalFormattingRowFields;
+    minMaxMap: ConditionalFormattingMinMaxMap | undefined;
+}): string | null => {
+    const match = getRowConditionalFormattingConfig(args);
+
+    if (!match) return null;
+    return isConditionalFormattingConfigWithSingleColor(match)
+        ? match.color
+        : null;
+};
+
+/**
+ * Merges the text styling (bold/italic/underline) from every matching config
+ * that applies to a cell — its cell-level, text-level and row-level matches —
+ * into a single style. Returns undefined when no style is set so callers can
+ * skip styling entirely.
+ */
+export const getConditionalFormattingTextStyle = (
+    configs: Array<ConditionalFormattingConfig | undefined>,
+): ConditionalFormattingTextStyle | undefined => {
+    const merged = configs.reduce<ConditionalFormattingTextStyle>(
+        (acc, config) => {
+            const style = config?.textStyle;
+            if (!style) return acc;
+            return {
+                bold: acc.bold || !!style.bold,
+                italic: acc.italic || !!style.italic,
+                underline: acc.underline || !!style.underline,
+            };
+        },
+        { bold: false, italic: false, underline: false },
+    );
+
+    return merged.bold || merged.italic || merged.underline
+        ? merged
+        : undefined;
+};
+
+/**
+ * Canonical key for a pivot cell's dimension context (index + header dims).
+ * Used by both pivotQueryResults (to store hidden values) and the pivot
+ * renderer (to look them up), so the keys cannot drift. Entries are sorted by
+ * fieldId; null and undefined raw values are normalised to the same token.
+ */
+export const getPivotRowContextKey = (
+    dimValues: Record<string, unknown>,
+): string => {
+    const entries = Object.keys(dimValues)
+        .sort()
+        .map((fieldId) => {
+            const raw = dimValues[fieldId];
+            const token = raw === null || raw === undefined ? ' ' : String(raw);
+            return [fieldId, token];
+        });
+    return JSON.stringify(entries);
 };

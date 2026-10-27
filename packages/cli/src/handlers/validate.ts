@@ -1,6 +1,7 @@
 import {
     ApiJobScheduledResponse,
     ApiJobStatusResponse,
+    ApiSpaceSummaryListResponse,
     ApiValidateResponse,
     Explore,
     ExploreError,
@@ -8,21 +9,30 @@ import {
     getErrorMessage,
     isChartValidationError,
     isDashboardValidationError,
+    isDataAppValidationError,
     isTableValidationError,
+    isValidationWarning,
     ParameterError,
     SchedulerJobStatus,
     UnexpectedServerError,
-    ValidationErrorType,
     ValidationTarget,
 } from '@lightdash/common';
 import columnify from 'columnify';
 import { v4 as uuidv4 } from 'uuid';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
 import { categorizeError, LightdashAnalytics } from '../analytics/analytics';
 import { getConfig } from '../config';
 import GlobalState from '../globalState';
 import * as styles from '../styles';
 import { compile, CompileHandlerOptions } from './compile';
 import { checkLightdashVersion, lightdashApi } from './dbt/apiClient';
+import { resolveProjectFlag } from './resolveProjectFlag';
+import { getProjectDisableTimestampConversion } from './timestampConversion';
+import {
+    filterValidationsBySpace,
+    resolveSpaceSelection,
+    SpaceFilterMode,
+} from './validateSpaceFilter';
 
 export const requestValidation = async (
     projectUuid: string,
@@ -49,7 +59,14 @@ export const getValidation = async (projectUuid: string, jobId: string) =>
         body: undefined,
     });
 
-export function delay(ms: number) {
+const getProjectSpaces = async (projectUuid: string) =>
+    lightdashApi<ApiSpaceSummaryListResponse['results']>({
+        method: 'GET',
+        url: `/api/v1/projects/${projectUuid}/spaces`,
+        body: undefined,
+    });
+
+function delay(ms: number) {
     return new Promise((resolve) => {
         setTimeout(resolve, ms);
     });
@@ -62,33 +79,92 @@ function styleTotalErrors(total: number) {
     return styles.success(`${styles.bold(total)} errors`);
 }
 
+function styleIssueCounts(errorCount: number, warningCount: number) {
+    const errorLabel = styleTotalErrors(errorCount);
+    if (warningCount === 0) {
+        return errorLabel;
+    }
+    const warningLabel = styles.warning(
+        `${styles.bold(warningCount)} warning${warningCount === 1 ? '' : 's'}`,
+    );
+    return `${errorLabel}, ${warningLabel}`;
+}
+
 const REFETCH_JOB_INTERVAL = 3000;
+
+export const VALIDATION_SEVERITIES = ['error', 'warning'] as const;
+export type ValidationSeverity = (typeof VALIDATION_SEVERITIES)[number];
+
+export const SHOW_CHART_CONFIGURATION_WARNINGS_DEPRECATION =
+    '`--show-chart-configuration-warnings` is deprecated. Use `--severity warning` instead.';
 
 type ValidateHandlerOptions = CompileHandlerOptions & {
     project?: string;
     verbose: boolean;
     preview: boolean;
     only: ValidationTarget[];
-    showChartConfigurationWarnings: boolean;
+    validateWarehouseColumns: boolean;
+    severity?: ValidationSeverity;
+    showChartConfigurationWarnings?: boolean;
+    includeSpaces?: string[];
+    excludeSpaces?: string[];
 };
 
-export const waitUntilFinished = async (jobUuid: string): Promise<string> => {
+export function resolveValidateSeverity(
+    options: Pick<
+        ValidateHandlerOptions,
+        'severity' | 'showChartConfigurationWarnings'
+    >,
+): ValidationSeverity {
+    if (options.showChartConfigurationWarnings) {
+        return 'warning';
+    }
+    return options.severity ?? 'error';
+}
+
+type WaitUntilFinishedOptions = {
+    jobUuid: string;
+    refetchIntervalMs: number;
+    createError: (jobError: string) => Error;
+};
+
+export const waitUntilFinished = async ({
+    jobUuid,
+    refetchIntervalMs,
+    createError,
+}: WaitUntilFinishedOptions): Promise<string> => {
     const job = await getJobState(jobUuid);
     if (job.status === SchedulerJobStatus.COMPLETED) {
         return job.status;
     }
     if (job.status === SchedulerJobStatus.ERROR) {
-        throw new UnexpectedServerError(
-            `\nValidation failed: ${job.details?.error || 'unknown error'}`,
-        );
+        throw createError(job.details?.error || 'unknown error');
     }
 
-    return delay(REFETCH_JOB_INTERVAL).then(() => waitUntilFinished(jobUuid));
+    return delay(refetchIntervalMs).then(() =>
+        waitUntilFinished({ jobUuid, refetchIntervalMs, createError }),
+    );
 };
 
-export const validateHandler = async (options: ValidateHandlerOptions) => {
+export const validateHandler = async (
+    originalOptions: ValidateHandlerOptions,
+) => {
+    assertAgentCommandAllowed('validate');
+    const options = { ...originalOptions };
     GlobalState.setVerbose(options.verbose);
+    if (options.showChartConfigurationWarnings) {
+        console.error(
+            styles.warning(SHOW_CHART_CONFIGURATION_WARNINGS_DEPRECATION),
+        );
+    }
+    const severity = resolveValidateSeverity(options);
     await checkLightdashVersion();
+
+    if (options.includeSpaces?.length && options.excludeSpaces?.length) {
+        throw new ParameterError(
+            'Cannot use --include-spaces and --exclude-spaces together',
+        );
+    }
 
     const executionId = uuidv4();
     const startTime = Date.now();
@@ -101,12 +177,14 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
     const selectedProject = options.preview
         ? config.context?.previewProject
         : config.context?.project;
-    const projectUuid = options.project || selectedProject;
+    const projectUuid = options.project
+        ? await resolveProjectFlag(options.project)
+        : selectedProject;
 
     if (projectUuid === undefined) {
         throw new ParameterError(
             `No project specified, select a project to validate using ${styles.bold(
-                `--project <projectUuid>`,
+                `--project <project uuid or slug>`,
             )} or create a preview environment using ${styles.bold(
                 `lightdash start-preview`,
             )} or configure your default project using ${styles.bold(
@@ -133,7 +211,13 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
         console.error(`Validating project ${projectUuid}\n`);
     }
 
-    const validationTargets = options.only ? options.only : [];
+    options.disableTimestampConversion =
+        await getProjectDisableTimestampConversion(
+            options.disableTimestampConversion,
+            projectUuid,
+        );
+
+    const validationTargets = options.only ? [...options.only] : [];
 
     await LightdashAnalytics.track({
         event: 'validate.started',
@@ -142,12 +226,47 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
             projectId: projectUuid,
             isPreview,
             validationTargets,
+            validateWarehouseColumns: options.validateWarehouseColumns,
+            includedSpacesCount: options.includeSpaces?.length ?? 0,
+            excludedSpacesCount: options.excludeSpaces?.length ?? 0,
+            severity,
         },
     });
 
     let shouldExitWithError = false;
     try {
-        const explores = await compile(options);
+        let spaceFilter:
+            | { mode: SpaceFilterMode; selectedSpaceUuids: Set<string> }
+            | undefined;
+        const spaceFilterSlugs = options.includeSpaces?.length
+            ? options.includeSpaces
+            : options.excludeSpaces;
+        if (spaceFilterSlugs?.length) {
+            const spaces = await getProjectSpaces(projectUuid);
+            spaceFilter = {
+                mode: options.includeSpaces?.length ? 'include' : 'exclude',
+                selectedSpaceUuids: resolveSpaceSelection(
+                    spaces,
+                    spaceFilterSlugs,
+                ),
+            };
+        }
+
+        const includesTableValidation =
+            validationTargets.length === 0 ||
+            validationTargets.includes(ValidationTarget.TABLES);
+        if (options.validateWarehouseColumns && !includesTableValidation) {
+            console.error(
+                styles.warning(
+                    '> Skipping warehouse column validation because --only does not include the tables validation target',
+                ),
+            );
+        }
+        const explores = await compile({
+            ...options,
+            validateWarehouseColumns:
+                options.validateWarehouseColumns && includesTableValidation,
+        });
         GlobalState.debug(`> Compiled ${explores.length} explores`);
 
         const validationJob = await requestValidation(
@@ -162,23 +281,44 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
             `  Waiting for validation to finish`,
         );
 
-        await waitUntilFinished(jobId);
+        await waitUntilFinished({
+            jobUuid: jobId,
+            refetchIntervalMs: REFETCH_JOB_INTERVAL,
+            createError: (jobError) =>
+                new UnexpectedServerError(`\nValidation failed: ${jobError}`),
+        });
 
         const allValidation = await getValidation(projectUuid, jobId);
 
-        // Filter out chart configuration warnings unless explicitly requested
-        const validation = options.showChartConfigurationWarnings
-            ? allValidation
-            : allValidation.filter(
-                  (v) =>
-                      !isChartValidationError(v) ||
-                      v.errorType !== ValidationErrorType.ChartConfiguration,
-              );
+        const validationWithoutConfigWarnings =
+            severity === 'warning'
+                ? allValidation
+                : allValidation.filter((v) => !isValidationWarning(v));
 
-        const hiddenWarningsCount = allValidation.length - validation.length;
-        const tableErrors = validation.filter(isTableValidationError);
-        const chartErrors = validation.filter(isChartValidationError);
-        const dashboardErrors = validation.filter(isDashboardValidationError);
+        const hiddenWarningsCount =
+            allValidation.length - validationWithoutConfigWarnings.length;
+
+        let validation = validationWithoutConfigWarnings;
+        let spaceFilteredCount = 0;
+        if (spaceFilter) {
+            validation = filterValidationsBySpace(
+                validationWithoutConfigWarnings,
+                spaceFilter.selectedSpaceUuids,
+                spaceFilter.mode,
+            );
+            spaceFilteredCount =
+                validationWithoutConfigWarnings.length - validation.length;
+        }
+        const warningIssues = validation.filter(isValidationWarning);
+        const blockingIssues = validation.filter(
+            (v) => !isValidationWarning(v),
+        );
+        const tableErrors = blockingIssues.filter(isTableValidationError);
+        const chartErrors = blockingIssues.filter(isChartValidationError);
+        const dashboardErrors = blockingIssues.filter(
+            isDashboardValidationError,
+        );
+        const appErrors = blockingIssues.filter(isDataAppValidationError);
 
         await LightdashAnalytics.track({
             event: 'validate.completed',
@@ -187,12 +327,18 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
                 projectId: projectUuid,
                 isPreview,
                 validationTargets,
+                validateWarehouseColumns: options.validateWarehouseColumns,
+                includedSpacesCount: options.includeSpaces?.length ?? 0,
+                excludedSpacesCount: options.excludeSpaces?.length ?? 0,
                 durationMs: Date.now() - startTime,
                 success: validation.length === 0,
-                totalErrors: validation.length,
+                totalErrors: blockingIssues.length,
+                totalWarnings: warningIssues.length,
                 tableErrors: tableErrors.length,
                 chartErrors: chartErrors.length,
                 dashboardErrors: dashboardErrors.length,
+                appErrors: appErrors.length,
+                severity,
             },
         });
 
@@ -202,19 +348,33 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
                 hiddenWarningsCount > 0
                     ? ` (${hiddenWarningsCount} chart configuration warning${
                           hiddenWarningsCount > 1 ? 's' : ''
-                      } hidden, use --show-chart-configuration-warnings to show)`
+                      } hidden, use --severity warning to show)`
+                    : '';
+            const spaceFilteredMessage =
+                spaceFilteredCount > 0
+                    ? ` (${spaceFilteredCount} error${
+                          spaceFilteredCount > 1 ? 's' : ''
+                      } in filtered-out spaces hidden)`
                     : '';
             spinner?.succeed(
                 `  Validation finished without errors in ${Math.trunc(
                     elapsedMs / 1000,
-                )}s${hiddenMessage}`,
+                )}s${hiddenMessage}${spaceFilteredMessage}`,
             );
         } else {
             const elapsedMs = Date.now() - startTime;
             spinner?.fail(
                 `  Validation finished in ${Math.trunc(
                     elapsedMs / 1000,
-                )}s with ${validation.length} errors`,
+                )}s with ${
+                    warningIssues.length > 0
+                        ? `${blockingIssues.length} error${
+                              blockingIssues.length === 1 ? '' : 's'
+                          } and ${warningIssues.length} warning${
+                              warningIssues.length === 1 ? '' : 's'
+                          }`
+                        : `${blockingIssues.length} errors`
+                }`,
             );
 
             const validationTargetsSet = new Set(validationTargets);
@@ -236,7 +396,10 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
                 validationTargetsSet.has(ValidationTarget.CHARTS)
             ) {
                 console.error(
-                    `- Charts: ${styleTotalErrors(chartErrors.length)}`,
+                    `- Charts: ${styleIssueCounts(
+                        chartErrors.length,
+                        warningIssues.length,
+                    )}`,
                 );
             }
 
@@ -249,24 +412,46 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
                 );
             }
 
+            if (
+                !hasValidationTargets ||
+                validationTargetsSet.has(ValidationTarget.APPS)
+            ) {
+                console.error(
+                    `- Data apps: ${styleTotalErrors(appErrors.length)}`,
+                );
+            }
+
+            if (spaceFilteredCount > 0) {
+                console.error(
+                    styles.secondary(
+                        `(${spaceFilteredCount} error${
+                            spaceFilteredCount > 1 ? 's' : ''
+                        } in filtered-out spaces hidden)`,
+                    ),
+                );
+            }
+
             console.error('\n');
 
             const validationOutput = validation.map((v) => ({
-                name: styles.error(v.name),
+                name: isValidationWarning(v)
+                    ? styles.warning(v.name)
+                    : styles.error(v.name),
                 error: styles.warning(
-                    isChartValidationError(v) &&
-                        v.errorType ===
-                            ValidationErrorType.ChartConfiguration &&
-                        v.fieldName
+                    isValidationWarning(v) && v.fieldName
                         ? `Chart configuration warning: '${v.fieldName}' - ${v.error}`
                         : v.error,
                 ),
                 'last updated by':
-                    isChartValidationError(v) || isDashboardValidationError(v)
+                    isChartValidationError(v) ||
+                    isDashboardValidationError(v) ||
+                    isDataAppValidationError(v)
                         ? styles.secondary(v.lastUpdatedBy)
                         : '',
                 'last updated at':
-                    isChartValidationError(v) || isDashboardValidationError(v)
+                    isChartValidationError(v) ||
+                    isDashboardValidationError(v) ||
+                    isDataAppValidationError(v)
                         ? styles.secondary(formatDate(v.lastUpdatedAt))
                         : '',
             }));
@@ -297,7 +482,7 @@ export const validateHandler = async (options: ValidateHandlerOptions) => {
                     `\n${styles.secondary(
                         `Note: ${hiddenWarningsCount} chart configuration warning${
                             hiddenWarningsCount > 1 ? 's' : ''
-                        } hidden. Use --show-chart-configuration-warnings to show.`,
+                        } hidden. Use --severity warning to show.`,
                     )}`,
                 );
             }

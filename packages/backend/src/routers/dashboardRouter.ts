@@ -1,4 +1,6 @@
+import { assertRegisteredAccount } from '@lightdash/common';
 import express, { type Router } from 'express';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -13,6 +15,9 @@ dashboardRouter.get(
     isAuthenticated,
     async (req, res, next) => {
         try {
+            // Embed JWTs authenticate but carry no session user; their
+            // dashboards are served by the embed routes.
+            assertRegisteredAccount(req.account);
             res.json({
                 status: 'ok',
                 results: await req.services
@@ -31,9 +36,33 @@ dashboardRouter.get(
 );
 
 dashboardRouter.get(
+    '/:dashboardUuidOrSlug/view-stats',
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    async (req, res, next) => {
+        try {
+            res.json({
+                status: 'ok',
+                results: await req.services
+                    .getDashboardService()
+                    .getViewStats(req.user!, req.params.dashboardUuidOrSlug, {
+                        projectUuid:
+                            typeof req.query.projectUuid === 'string'
+                                ? req.query.projectUuid
+                                : undefined,
+                    }),
+            });
+        } catch (e) {
+            next(e);
+        }
+    },
+);
+
+dashboardRouter.get(
     '/:dashboardUuid/views',
     allowApiKeyAuthentication,
     isAuthenticated,
+    requireOAuthScopeOperation('dashboardRouter.getDashboardViews'),
     async (req, res, next) => {
         req.services
             .getAnalyticsService()
@@ -51,6 +80,7 @@ dashboardRouter.get(
 dashboardRouter.patch(
     '/:dashboardUuidOrSlug',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('dashboardRouter PATCH /:dashboardUuidOrSlug'),
     isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
@@ -113,6 +143,7 @@ dashboardRouter.delete(
 dashboardRouter.post(
     '/availableFilters',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('dashboardRouter POST /availableFilters'),
     isAuthenticated,
     async (req, res, next) => {
         try {
@@ -133,6 +164,7 @@ dashboardRouter.post(
 dashboardRouter.post(
     '/:dashboardUuid/export',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('dashboardRouter POST /:dashboardUuid/export'),
     isAuthenticated,
     async (req, res, next) => {
         try {

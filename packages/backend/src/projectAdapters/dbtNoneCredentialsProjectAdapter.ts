@@ -5,10 +5,15 @@ import {
     ExploreError,
     LightdashProjectConfig,
     ParameterError,
+    type ProjectContextEntry,
     type RunQueryTags,
 } from '@lightdash/common';
 import { WarehouseClient } from '@lightdash/warehouses';
 import Logger from '../logging/logger';
+import {
+    type DbtManifestFetchOptions,
+    type DbtSourcePreparation,
+} from '../types';
 import { ProjectAdapter } from '../types';
 
 type DbtNoneCredentialsProjectAdapterArgs = {
@@ -18,13 +23,28 @@ type DbtNoneCredentialsProjectAdapterArgs = {
 export class DbtNoneCredentialsProjectAdapter implements ProjectAdapter {
     warehouseClient: WarehouseClient;
 
+    private readonly sourcePreparation: DbtSourcePreparation = {
+        projectDir: null,
+        timings: { gitRefreshMs: null, depsMs: null },
+    };
+
     constructor({ warehouseClient }: DbtNoneCredentialsProjectAdapterArgs) {
         this.warehouseClient = warehouseClient;
     }
 
     // eslint-disable-next-line class-methods-use-this
+    async releaseDisk(): Promise<void> {
+        await this.destroy();
+    }
+
     async destroy(): Promise<void> {
         Logger.debug(`Destroy none project adapter`);
+    }
+
+    public async prepareDbtSource(_options?: {
+        signal?: AbortSignal;
+    }): Promise<DbtSourcePreparation> {
+        return this.sourcePreparation;
     }
 
     public async test(): Promise<void> {
@@ -43,10 +63,30 @@ export class DbtNoneCredentialsProjectAdapter implements ProjectAdapter {
         );
     }
 
+    public async prepareExploreStream(): Promise<
+        AsyncIterable<Explore | ExploreError>
+    > {
+        throw new ParameterError(
+            'Cannot compile explores as this project was created via CLI and has no dbt connection configured. Either configure a dbt connection in project settings or use the CLI to deploy explores.',
+        );
+    }
+
     // eslint-disable-next-line class-methods-use-this
     public async getDbtPackages(): Promise<DbtPackages | undefined> {
         Logger.debug(`Get dbt packages`);
         return undefined;
+    }
+
+    // eslint-disable-next-line class-methods-use-this
+    public async getDbtManifest(
+        options?: DbtManifestFetchOptions,
+    ): Promise<never> {
+        await this.prepareDbtSource(
+            options?.signal ? { signal: options.signal } : undefined,
+        );
+        throw new ParameterError(
+            'Cannot read a dbt manifest as this project was created via CLI and has no dbt connection configured.',
+        );
     }
 
     public async runQuery(sql: string, queryTags: RunQueryTags) {
@@ -60,5 +100,10 @@ export class DbtNoneCredentialsProjectAdapter implements ProjectAdapter {
         return {
             spotlight: DEFAULT_SPOTLIGHT_CONFIG,
         };
+    }
+
+    // eslint-disable-next-line class-methods-use-this
+    public async getProjectContext(): Promise<ProjectContextEntry[]> {
+        return [];
     }
 }

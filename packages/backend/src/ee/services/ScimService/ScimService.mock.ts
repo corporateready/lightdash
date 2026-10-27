@@ -16,7 +16,9 @@ import { OrganizationMemberProfileModel } from '../../../models/OrganizationMemb
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { RolesModel } from '../../../models/RolesModel';
 import { UserModel } from '../../../models/UserModel';
+import { UserService } from '../../../services/UserService';
 import { CommercialFeatureFlagModel } from '../../models/CommercialFeatureFlagModel';
+import { ScimRequestLogModel } from '../../models/ScimRequestLogModel';
 import { ServiceAccountModel } from '../../models/ServiceAccountModel';
 import { ScimService } from './ScimService';
 
@@ -42,6 +44,8 @@ export const mockScimAccount = {
         abilityRules: [] as any, // eslint-disable-line @typescript-eslint/no-explicit-any
         isTrackingAnonymized: false,
         isMarketingOptedIn: false,
+        avatarUrl: null,
+        avatarGradient: null,
         timezone: null,
         isSetupComplete: true,
         userId: 1,
@@ -75,6 +79,8 @@ export const mockUser: OrganizationMemberProfile = {
     userCreatedAt: new Date(),
     userUpdatedAt: new Date(),
     organizationUuid: 'org-uuid',
+    avatarUrl: null,
+    avatarGradient: null,
 };
 
 // Mock projects for testing
@@ -99,12 +105,25 @@ export const mockProjects = [
     },
 ];
 
+export const mockOrganizationCustomRole: Role = {
+    roleUuid: 'custom-organization-role-uuid',
+    name: 'Custom Organization Role',
+    description: 'Custom organization role',
+    level: 'organization',
+    organizationUuid: 'org-uuid',
+    ownerType: 'user',
+    createdBy: 'test-user-uuid',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+};
+
 // Mock custom roles for testing
 export const mockCustomRoles: Role[] = [
     {
         roleUuid: 'custom-role-1-uuid',
         name: 'Data Analyst',
         description: 'Custom data analyst role',
+        level: 'project',
         organizationUuid: 'org-uuid',
         ownerType: 'user',
         createdBy: 'test-user-uuid',
@@ -115,25 +134,27 @@ export const mockCustomRoles: Role[] = [
         roleUuid: 'custom-role-2-uuid',
         name: 'Report Builder',
         description: 'Custom report builder role',
+        level: 'project',
         organizationUuid: 'org-uuid',
         ownerType: 'user',
         createdBy: 'test-user-uuid',
         createdAt: new Date(),
         updatedAt: new Date(),
     },
+    mockOrganizationCustomRole,
 ];
 
 // Mock organization member profile model
 const organizationMemberProfileModelMock = {
-    getOrganizationMemberByUuid: jest.fn().mockResolvedValue(mockUser),
-    updateOrganizationMember: jest.fn().mockResolvedValue(mockUser),
-    createOrganizationMembershipByUuid: jest.fn().mockResolvedValue(mockUser),
+    getOrganizationMemberByUuid: vi.fn().mockResolvedValue(mockUser),
+    updateOrganizationMember: vi.fn().mockResolvedValue(mockUser),
+    createOrganizationMembershipByUuid: vi.fn().mockResolvedValue(mockUser),
 } as unknown as OrganizationMemberProfileModel;
 
 // Mock user model
 const userModelMock = {
-    findUserByEmail: jest.fn().mockResolvedValue(undefined),
-    createUser: jest.fn().mockResolvedValue({
+    findUserByEmail: vi.fn().mockResolvedValue(undefined),
+    createUser: vi.fn().mockResolvedValue({
         userId: 1,
         userUuid: mockUser.userUuid,
         firstName: mockUser.firstName,
@@ -142,7 +163,7 @@ const userModelMock = {
         isActive: mockUser.isActive,
         organizationUuid: mockUser.organizationUuid,
     }),
-    updateUser: jest.fn().mockResolvedValue({
+    updateUser: vi.fn().mockResolvedValue({
         userId: 1,
         userUuid: mockUser.userUuid,
         firstName: mockUser.firstName,
@@ -151,18 +172,18 @@ const userModelMock = {
         isActive: mockUser.isActive,
         organizationUuid: mockUser.organizationUuid,
     }),
-    getUserDetailsByUuid: jest.fn().mockResolvedValue(mockUser),
-    getUserProjectRoles: jest.fn().mockResolvedValue([]),
+    getUserDetailsByUuid: vi.fn().mockResolvedValue(mockUser),
+    getUserProjectRoles: vi.fn().mockResolvedValue([]),
 } as unknown as UserModel;
 
 // Mock analytics
 const analyticsMock = {
-    track: jest.fn(),
+    track: vi.fn(),
 } as unknown as LightdashAnalytics;
 
 // Mock email model
 const emailModelMock = {
-    verifyUserEmailIfExists: jest.fn().mockResolvedValue(undefined),
+    verifyUserEmailIfExists: vi.fn().mockResolvedValue(undefined),
 } as unknown as EmailModel;
 
 export const ScimServiceArgumentsMock: ConstructorParameters<
@@ -171,33 +192,46 @@ export const ScimServiceArgumentsMock: ConstructorParameters<
     lightdashConfig: lightdashConfigMock,
     organizationMemberProfileModel: organizationMemberProfileModelMock,
     userModel: userModelMock,
+    userService: {
+        ensureDefaultUserSpacesForUser: vi.fn().mockResolvedValue(undefined),
+    } as unknown as UserService,
     emailModel: emailModelMock,
     analytics: analyticsMock,
     groupsModel: {
-        removeUserFromAllGroups: jest.fn().mockResolvedValue(2),
+        removeUserFromAllGroups: vi.fn().mockResolvedValue(2),
     } as unknown as GroupsModel,
     serviceAccountModel: {} as ServiceAccountModel,
-    commercialFeatureFlagModel: {} as CommercialFeatureFlagModel,
+    scimRequestLogModel: {
+        create: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ScimRequestLogModel,
+    commercialFeatureFlagModel: {
+        get: vi.fn().mockResolvedValue({ id: 'custom-roles', enabled: false }),
+    } as unknown as CommercialFeatureFlagModel,
     rolesModel: {
-        removeUserProjectAccess: jest.fn().mockResolvedValue(undefined),
-        removeUserAccessFromAllProjects: jest.fn().mockResolvedValue(3),
-        getRolesByOrganizationUuid: jest
+        removeUserProjectAccess: vi.fn().mockResolvedValue(undefined),
+        getOrganizationUserRoleSet: vi
             .fn()
-            .mockResolvedValue(mockCustomRoles),
-        upsertSystemRoleProjectAccess: jest.fn().mockResolvedValue(undefined),
-        upsertCustomRoleProjectAccess: jest.fn().mockResolvedValue(undefined),
+            .mockResolvedValue({ systemRole: 'member', customRoleUuids: [] }),
+        replaceOrganizationUserRoleSet: vi.fn().mockResolvedValue(undefined),
+        replaceProjectUserRoleSet: vi.fn().mockResolvedValue(undefined),
+        getUserProjectRoles: vi.fn().mockResolvedValue([]),
+        setUserOrgAndProjectRoleSets: vi.fn().mockResolvedValue(undefined),
+        removeUserAccessFromAllProjects: vi.fn().mockResolvedValue(3),
+        getRolesByOrganizationUuid: vi.fn().mockResolvedValue(mockCustomRoles),
+        upsertSystemRoleProjectAccess: vi.fn().mockResolvedValue(undefined),
+        upsertCustomRoleProjectAccess: vi.fn().mockResolvedValue(undefined),
         // New unified method used by ScimService to set org and project roles
-        setUserOrgAndProjectRoles: jest.fn().mockResolvedValue(undefined),
+        setUserOrgAndProjectRoles: vi.fn().mockResolvedValue(undefined),
         // Some code paths may still call this directly; keep a mock for safety
-        upsertOrganizationUserRoleAssignment: jest
+        upsertOrganizationUserRoleAssignment: vi
             .fn()
             .mockResolvedValue(undefined),
     } as unknown as RolesModel,
     projectModel: {
-        getAllByOrganizationUuid: jest.fn().mockResolvedValue(mockProjects),
+        getAllByOrganizationUuid: vi.fn().mockResolvedValue(mockProjects),
     } as unknown as ProjectModel,
     openIdIdentityModel: {
-        deleteIdentitiesByEmail: jest.fn().mockResolvedValue(0),
-        deleteIdentitiesByUserUuid: jest.fn().mockResolvedValue(0),
+        deleteIdentitiesByEmail: vi.fn().mockResolvedValue(0),
+        deleteIdentitiesByUserUuid: vi.fn().mockResolvedValue(0),
     } as unknown as OpenIdIdentityModel,
 };

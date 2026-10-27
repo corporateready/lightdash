@@ -3,6 +3,18 @@ import { createContext } from 'react';
 
 export type ProjectFormContext = {
     savedProject?: Project;
+    // True when the dbt form is rendering for an additional dbt source (not the
+    // project's primary connection): restricts providers to git and hides
+    // fields inherited from the project (dbt version, warehouse schema).
+    isDbtSource?: boolean;
+    isProjectExtraConnection?: boolean;
+    inheritsPrimaryCredentialRequirement?: boolean;
+    primaryRequiresUserCredentials?: boolean;
+    // Set with isDbtSource: the project the source is being added to, for the
+    // fields that read the project's own warehouse connection.
+    projectUuid?: string;
+    warehouseConnectionUuid?: string | null;
+    dbtSourceWarehouseConnectionUuid?: string | null;
 };
 
 const Context = createContext<ProjectFormContext | undefined>(undefined);

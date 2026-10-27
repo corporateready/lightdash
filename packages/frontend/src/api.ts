@@ -1,17 +1,30 @@
 import {
+    EMBED_DASHBOARD_HEADER_NAME,
     JWT_HEADER_NAME,
     LightdashRequestMethodHeader,
     LightdashSdkVersionHeader,
     LightdashVersionHeader,
     RequestMethod,
+    isApiError,
     type AnyType,
     type ApiError,
     type ApiResponse,
 } from '@lightdash/common';
-import { spanToTraceHeader, startSpan } from '@sentry/react';
-import fetch from 'isomorphic-fetch';
+import { addBreadcrumb, spanToTraceHeader, startSpan } from '@sentry/react';
+// No fetch import on purpose: `isomorphic-fetch` captures `window.fetch` at
+// module evaluation, so a host page (SDK embeds) that patches and later
+// restores fetch strands us with a stale reference. The global `fetch`
+// resolves at call time instead.
 import { EMBED_KEY, type InMemoryEmbed } from './ee/providers/Embed/types';
+import { recordServerBuildHash } from './features/buildHashHandshake/buildHashHandshake';
 import { getFromInMemoryStorage } from './utils/inMemoryStorage';
+import {
+    diagnoseTransportFailure,
+    GENERIC_NETWORK_FAILURE_MESSAGE,
+    networkFailureMessage,
+    UnexpectedResponseError,
+} from './utils/networkDiagnostics';
+import { getResultsFromStream } from './utils/request';
 
 // TODO: import from common or fix the instantiation of the request module
 const LIGHTDASH_SDK_INSTANCE_URL_LOCAL_STORAGE_KEY =
@@ -65,29 +78,76 @@ const finalizeHeaders = (
 
     if (embed?.token && isSafeToAddEmbedHeader(headers)) {
         requestHeaders[JWT_HEADER_NAME] = embed.token;
+        if (embed.dashboardUuid) {
+            requestHeaders[EMBED_DASHBOARD_HEADER_NAME] = embed.dashboardUuid;
+        }
     }
 
     if (sentryTrace) {
+        const traceparent = sentryTraceToTraceparent(sentryTrace);
         requestHeaders['sentry-trace'] = sentryTrace;
+        if (traceparent) {
+            requestHeaders.traceparent = traceparent;
+        }
     }
 
     return requestHeaders;
 };
 
+const sentryTraceToTraceparent = (sentryTrace: string): string | undefined => {
+    const [traceId, parentId, sampled] = sentryTrace.split('-');
+    if (!traceId?.match(/^[a-f0-9]{32}$/) || !parentId?.match(/^[a-f0-9]{16}$/))
+        return undefined;
+
+    return `00-${traceId}-${parentId}-${sampled === '0' ? '00' : '01'}`;
+};
+
 function finalizeUrl(url: string, embed: InMemoryEmbed | undefined): string {
-    if (embed?.projectUuid && !url.includes('projectUuid')) {
-        const separator = url.includes('?') ? '&' : '?';
-        url += `${separator}projectUuid=${encodeURIComponent(
-            embed.projectUuid,
-        )}`;
+    if (embed?.projectUuid) {
+        const parsedUrl = new URL(url, window.location.origin);
+
+        if (!parsedUrl.searchParams.has('projectUuid')) {
+            parsedUrl.searchParams.set('projectUuid', embed.projectUuid);
+            return parsedUrl.toString();
+        }
     }
+
     return url;
 }
 
-const handleError = (err: any): ApiError => {
-    if (err.error?.statusCode && err.error?.name) {
+const parseJsonBody = (r: Response): Promise<AnyType> =>
+    r.json().catch(() => {
+        throw new UnexpectedResponseError(r.status);
+    });
+
+// An error status with a body that is not the API envelope came from
+// something in front of Lightdash, not from Lightdash.
+const parseErrorBody = (r: Response): Promise<ApiError> =>
+    parseJsonBody(r).then((d) => {
+        if (isApiError(d)) return d;
+        throw new UnexpectedResponseError(r.status);
+    });
+
+type FailedRequest = {
+    method: string;
+    url: string;
+    apiPrefix: string;
+    traceId: string | null;
+    // Rendered inside a host application (SDK or embed): the viewer gets the
+    // generic message and no diagnostics, which would name the Lightdash host.
+    hosted: boolean;
+    // Only flows where a proxy or VPN is a likely culprit (warehouse
+    // connection setup) opt in; everything else keeps the generic message.
+    diagnose: boolean;
+};
+
+const handleError = async (
+    err: unknown,
+    request: FailedRequest,
+): Promise<ApiError> => {
+    if (isApiError(err) && err.error?.statusCode && err.error?.name) {
         if (
-            err.error?.name === 'DeactivatedAccountError' &&
+            err.error.name === 'DeactivatedAccountError' &&
             window.location.pathname !== '/login'
         ) {
             // redirect to login page when account is deactivated
@@ -95,14 +155,37 @@ const handleError = (err: any): ApiError => {
         }
         return err;
     }
+    // Surface the real transport error (abort, CORS, DNS, connection reset)
+    // instead of silently masking it as the generic message below.
+    console.error('Failed to reach the Lightdash server:', err);
+    if (request.hosted || !request.diagnose) {
+        return {
+            status: 'error',
+            error: {
+                name: 'NetworkError',
+                statusCode: 500,
+                message: GENERIC_NETWORK_FAILURE_MESSAGE,
+                data: {},
+            },
+        };
+    }
+    const diagnostics = await diagnoseTransportFailure({
+        ...request,
+        error: err,
+    });
+    addBreadcrumb({
+        category: 'network',
+        level: 'warning',
+        message: `Transport failure: ${diagnostics.kind}`,
+        data: diagnostics,
+    });
     return {
         status: 'error',
         error: {
             name: 'NetworkError',
             statusCode: 500,
-            message:
-                'We are currently unable to reach the Lightdash server. Please try again in a few moments.',
-            data: err,
+            message: networkFailureMessage(diagnostics),
+            data: diagnostics,
         },
     };
 };
@@ -112,6 +195,10 @@ type LightdashApiPropsBase = {
     headers?: Record<string, string> | undefined;
     version?: 'v1' | 'v2';
     signal?: AbortSignal;
+    sensitive?: boolean;
+    // Probe the server on a transport failure and tell the user what blocked
+    // the request. Opt in only where a proxy or VPN is a plausible cause.
+    diagnoseTransportFailures?: boolean;
 };
 
 type LightdashApiPropsGetOrDelete = LightdashApiPropsBase & {
@@ -124,19 +211,35 @@ type LightdashApiPropsWrite = LightdashApiPropsBase & {
     body: BodyInit | null | undefined;
 };
 
-type LightdashApiProps = LightdashApiPropsGetOrDelete | LightdashApiPropsWrite;
+export type LightdashApiProps =
+    | LightdashApiPropsGetOrDelete
+    | LightdashApiPropsWrite;
 
 const MAX_NETWORK_HISTORY = 10;
+const SENSITIVE_DATA_REDACTED = '[REDACTED: sensitive request]';
 export let networkHistory: AnyType[] = [];
 
-export const lightdashApi = async <T extends ApiResponse['results']>({
-    method,
-    url,
-    body,
-    headers,
-    version = 'v1',
-    signal,
-}: LightdashApiProps): Promise<T> => {
+const request = async <T extends ApiResponse['results']>(
+    embed: InMemoryEmbed | undefined,
+    props: LightdashApiProps,
+): Promise<T> => {
+    const response = await requestResponse<ApiResponse<T>>(embed, props);
+    return (response.results ?? null) as T;
+};
+
+const requestResponse = async <T extends ApiResponse>(
+    embed: InMemoryEmbed | undefined,
+    {
+        method,
+        url,
+        body,
+        headers,
+        version = 'v1',
+        signal,
+        sensitive = false,
+        diagnoseTransportFailures = false,
+    }: LightdashApiProps,
+): Promise<T> => {
     const baseUrl = sessionStorage.getItem(
         LIGHTDASH_SDK_INSTANCE_URL_LOCAL_STORAGE_KEY,
     );
@@ -161,7 +264,6 @@ export const lightdashApi = async <T extends ApiResponse['results']>({
         },
     );
 
-    const embed = getFromInMemoryStorage<InMemoryEmbed>(EMBED_KEY);
     return fetch(finalizeUrl(`${apiPrefix}${url}`, embed), {
         method,
         headers: finalizeHeaders(headers, embed, sentryTrace),
@@ -169,60 +271,101 @@ export const lightdashApi = async <T extends ApiResponse['results']>({
         signal,
     })
         .then((r) => {
+            recordServerBuildHash(r);
             if (!r.ok) {
-                return r.json().then((d) => {
+                return parseErrorBody(r).then((d) => {
                     throw d;
                 });
             }
             return r;
         })
         .then(async (r) => {
-            const js = await r.json();
-            networkHistory.push({
-                method,
-                url,
-                body,
-                status: r.status,
-                json: JSON.stringify(js).substring(0, 500),
-            });
+            const js = await parseJsonBody(r);
+            networkHistory.push(
+                sensitive
+                    ? {
+                          method,
+                          url,
+                          body: SENSITIVE_DATA_REDACTED,
+                          status: r.status,
+                          json: SENSITIVE_DATA_REDACTED,
+                      }
+                    : {
+                          method,
+                          url,
+                          body,
+                          status: r.status,
+                          json: JSON.stringify(js).substring(0, 500),
+                      },
+            );
+            if (networkHistory.length > MAX_NETWORK_HISTORY)
+                networkHistory.shift();
             return js;
         })
         .then((d: ApiResponse | ApiError) => {
             switch (d.status) {
                 case 'ok':
-                    // make sure we return null instead of undefined
-                    // otherwise react-query will crash
-                    return (d.results ?? null) as T;
+                    return d as T;
                 case 'error':
                     throw d;
                 default:
                     throw d;
             }
         })
-        .catch((err) => {
-            // TODO do not capture some requests, like passwords or sensitive data
-            networkHistory.push({
+        .catch(async (err) => {
+            const apiError = await handleError(err, {
                 method,
-                status: err.status,
                 url,
-                body,
-                error: JSON.stringify(err).substring(0, 500),
+                apiPrefix,
+                traceId: sentryTrace?.split('-')[0] ?? null,
+                hosted: baseUrl !== null || !!embed?.token,
+                diagnose: diagnoseTransportFailures,
             });
+            networkHistory.push(
+                sensitive
+                    ? {
+                          method,
+                          status: apiError.error.statusCode,
+                          url,
+                          body: SENSITIVE_DATA_REDACTED,
+                          error: SENSITIVE_DATA_REDACTED,
+                      }
+                    : {
+                          method,
+                          status: apiError.error.statusCode,
+                          url,
+                          body,
+                          error: JSON.stringify(apiError.error).substring(
+                              0,
+                              1000,
+                          ),
+                      },
+            );
             // only store last MAX_NETWORK_HISTORY requests
             if (networkHistory.length > MAX_NETWORK_HISTORY)
                 networkHistory.shift();
-            throw handleError(err);
+            throw apiError;
         });
 };
 
-export const lightdashApiStream = ({
-    method,
-    url,
-    body,
-    headers,
-    version = 'v1',
-    signal,
-}: LightdashApiProps) => {
+export class LightdashApiStreamError extends Error {
+    constructor(readonly error: ApiError['error']) {
+        super(error.message);
+    }
+}
+
+const requestStream = (
+    embed: InMemoryEmbed | undefined,
+    {
+        method,
+        url,
+        body,
+        headers,
+        version = 'v1',
+        signal,
+        diagnoseTransportFailures = false,
+    }: LightdashApiProps,
+) => {
     const baseUrl = sessionStorage.getItem(
         LIGHTDASH_SDK_INSTANCE_URL_LOCAL_STORAGE_KEY,
     );
@@ -247,28 +390,55 @@ export const lightdashApiStream = ({
         },
     );
 
-    return fetch(`${apiPrefix}${url}`, {
+    return fetch(finalizeUrl(`${apiPrefix}${url}`, embed), {
         method,
-        headers: {
-            ...getDefaultHeaders(),
-            ...headers,
-            ...(sentryTrace ? { 'sentry-trace': sentryTrace } : {}),
-        },
+        headers: finalizeHeaders(headers, embed, sentryTrace),
         body,
         signal,
     }).then(async (r) => {
         if (!r.ok) {
-            let error: unknown;
-            try {
-                error = await r.json();
-            } catch {
-                throw new Error(
-                    'We are currently unable to reach the Lightdash server. Please try again in a few moments.',
-                );
-            }
-
-            throw new Error(handleError(error).error.message);
+            const error: unknown = await parseErrorBody(r).catch((e) => e);
+            const apiError = await handleError(error, {
+                method,
+                url,
+                apiPrefix,
+                traceId: sentryTrace?.split('-')[0] ?? null,
+                hosted: baseUrl !== null || !!embed?.token,
+                diagnose: diagnoseTransportFailures,
+            });
+            throw new LightdashApiStreamError(apiError.error);
         }
         return r;
     });
 };
+
+export type LightdashApi = {
+    <T extends ApiResponse['results']>(props: LightdashApiProps): Promise<T>;
+    // The whole response envelope, for endpoints that return more than results
+    response: <T extends ApiResponse>(props: LightdashApiProps) => Promise<T>;
+    stream: (props: LightdashApiProps) => Promise<Response>;
+    getResultsFromStream: <T>(url: string | undefined) => Promise<T[]>;
+};
+
+// Each client sends one embed's token; SDK components create their own.
+export const createLightdashApi = (
+    getEmbed: () => InMemoryEmbed | undefined,
+): LightdashApi =>
+    Object.assign(
+        <T extends ApiResponse['results']>(props: LightdashApiProps) =>
+            request<T>(getEmbed(), props),
+        {
+            response: <T extends ApiResponse>(props: LightdashApiProps) =>
+                requestResponse<T>(getEmbed(), props),
+            stream: (props: LightdashApiProps) =>
+                requestStream(getEmbed(), props),
+            getResultsFromStream: <T>(url: string | undefined) =>
+                getResultsFromStream<T>(url, getEmbed()),
+        },
+    );
+
+// The main app and iframe embeds share one token. Code should use
+// useLightdashApi() so embedded SDK components send their own token instead.
+export const sharedLightdashApi = createLightdashApi(() =>
+    getFromInMemoryStorage<InMemoryEmbed>(EMBED_KEY),
+);

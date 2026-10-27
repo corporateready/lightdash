@@ -1,0 +1,19 @@
+.root {
+    container: authoring / inline-size;
+    height: 100%;
+    min-height: 380px;
+    display: flex;
+    flex-direction: column;
+    background: var(--mantine-color-ldGray-0);
+    overflow: hidden;
+}
+
+.configColumn {
+    height: 100%;
+    width: 340px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--mantine-color-ldGray-2);
+    background: var(--mantine-color-body);
+    overflow-y: auto;
+    padding: var(--mantine-spacing-md);
+}

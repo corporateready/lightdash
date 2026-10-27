@@ -9,13 +9,20 @@ import {
 import { ActionIcon, Popover } from '@mantine/core';
 import { IconShare2 } from '@tabler/icons-react';
 import { memo, useCallback } from 'react';
+import DataAppVizDownloadMenu from '../../../features/apps/DataAppVizDownloadMenu';
 import useEchartsCartesianConfig from '../../../hooks/echarts/useEchartsCartesianConfig';
-import { Can } from '../../../providers/Ability';
-import useApp from '../../../providers/App/useApp';
+import { useAccount } from '../../../hooks/user/useAccount';
+import { useCanExportEmbeddedContent } from '../../../hooks/user/useCanExportEmbeddedContent';
+import { useAbilityContext } from '../../../providers/Ability/useAbilityContext';
 import { type Limit } from '../../ExportResults/types';
 import ExportSelector from '../../ExportSelector';
 import { isTableVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationServices,
+    useEditedChartConfig,
+    useVisualizationConfig,
+    useVisualizationInputs,
+} from '../../LightdashVisualization/useVisualizationContext';
 import {
     COLLAPSABLE_CARD_ACTION_ICON_PROPS,
     COLLAPSABLE_CARD_POPOVER_PROPS,
@@ -31,6 +38,7 @@ export type ChartDownloadMenuProps = {
     getDownloadQueryUuid: (
         limit: number | null,
         exportPivotedResults?: boolean,
+        limitType?: Limit,
     ) => Promise<string>;
     projectUuid: string;
     chartName?: string;
@@ -43,14 +51,11 @@ export type ChartDownloadMenuProps = {
 
 const ChartDownloadMenu: React.FC<ChartDownloadMenuProps> = memo(
     ({ getDownloadQueryUuid, getGsheetLink, projectUuid, chartName }) => {
-        const {
-            chartRef,
-            visualizationConfig,
-            resultsData,
-            pivotDimensions,
-            chartConfig,
-            columnOrder,
-        } = useVisualizationContext();
+        const { chartRef } = useVisualizationServices();
+        const visualizationConfig = useVisualizationConfig();
+        const chartConfig = useEditedChartConfig();
+        const { resultsData, pivotDimensions, columnOrder } =
+            useVisualizationInputs();
 
         const eChartsOptions = useEchartsCartesianConfig();
 
@@ -60,37 +65,83 @@ const ChartDownloadMenu: React.FC<ChartDownloadMenuProps> = memo(
             (visualizationConfig.chartType === ChartType.CARTESIAN &&
                 !eChartsOptions);
 
-        const { user } = useApp();
-
+        const { data: account } = useAccount();
+        const ability = useAbilityContext();
+        const organizationUuid = account?.organization.organizationUuid;
+        const isEmbedded = account?.isJwtUser() === true;
+        const canManageExplore = ability.can(
+            'manage',
+            subject('Explore', {
+                organizationUuid,
+                projectUuid,
+            }),
+        );
+        const canEmbedExportCsv = useCanExportEmbeddedContent('csv');
+        const canEmbedExportImages = useCanExportEmbeddedContent('images');
+        const canExportCsv =
+            canEmbedExportCsv ||
+            (canManageExplore &&
+                ability.can(
+                    'manage',
+                    subject('ExportCsv', {
+                        organizationUuid,
+                        projectUuid,
+                    }),
+                ));
+        // Native image export rides on manage:Explore, so embeds must not fall back to it.
+        const canExportImages = isEmbedded
+            ? canEmbedExportImages
+            : canManageExplore;
         const getChartInstance = useCallback(
             () => chartRef.current?.getEchartsInstance(),
             [chartRef],
         );
 
-        // Build pivot config with pivot dimensions
-        const pivotConfig = getPivotConfig({
-            chartConfig,
-            pivotConfig: pivotDimensions
-                ? {
-                      columns: pivotDimensions,
-                  }
-                : undefined,
-            tableConfig: {
-                columnOrder,
-            },
-            metricQuery: resultsData?.metricQuery,
-        });
+        // Build pivot config with pivot dimensions. metricQuery is required to
+        // classify hidden fields; without results there is nothing to pivot yet.
+        const pivotConfig = resultsData?.metricQuery
+            ? getPivotConfig({
+                  chartConfig,
+                  pivotConfig: pivotDimensions
+                      ? {
+                            columns: pivotDimensions,
+                            ...(isTableVisualizationConfig(
+                                visualizationConfig,
+                            ) &&
+                                visualizationConfig.chartConfig
+                                    .configuredRowFieldIds && {
+                                    rows: visualizationConfig.chartConfig
+                                        .configuredRowFieldIds,
+                                }),
+                        }
+                      : undefined,
+                  tableConfig: {
+                      columnOrder,
+                  },
+                  metricQuery: resultsData.metricQuery,
+              })
+            : undefined;
 
         const getChartDownloadQueryUuid = useCallback(
             (
                 limit: number | null,
-                _limitType: Limit,
+                limitType: Limit,
                 exportPivotedData: boolean = true,
             ) => {
-                return getDownloadQueryUuid(limit, exportPivotedData);
+                return getDownloadQueryUuid(
+                    limit,
+                    exportPivotedData,
+                    limitType,
+                );
             },
             [getDownloadQueryUuid],
         );
+
+        if (visualizationConfig.chartType === ChartType.DATA_APP_VIZ) {
+            return canExportImages && !isEmbedded ? (
+                <DataAppVizDownloadMenu projectUuid={projectUuid} />
+            ) : null;
+        }
 
         if (
             CHART_TYPES_WITHOUT_IMAGE_EXPORT.includes(
@@ -104,13 +155,7 @@ const ChartDownloadMenu: React.FC<ChartDownloadMenuProps> = memo(
         }
         return isTableVisualizationConfig(visualizationConfig) &&
             getChartDownloadQueryUuid ? (
-            <Can
-                I="manage"
-                this={subject('ExportCsv', {
-                    organizationUuid: user.data?.organizationUuid,
-                    projectUuid,
-                })}
-            >
+            canExportCsv ? (
                 <Popover
                     {...COLLAPSABLE_CARD_POPOVER_PROPS}
                     disabled={disabled}
@@ -148,8 +193,16 @@ const ChartDownloadMenu: React.FC<ChartDownloadMenuProps> = memo(
                             }
                             chartName={chartName}
                             pivotConfig={pivotConfig}
+                            conditionalFormattings={
+                                visualizationConfig.chartConfig
+                                    .conditionalFormattings
+                            }
+                            showColumnTotals={
+                                visualizationConfig.chartConfig
+                                    .showColumnCalculation
+                            }
                             getGsheetLink={
-                                getGsheetLink === undefined
+                                getGsheetLink === undefined || isEmbedded
                                     ? undefined
                                     : () =>
                                           getGsheetLink(
@@ -167,9 +220,9 @@ const ChartDownloadMenu: React.FC<ChartDownloadMenuProps> = memo(
                         />
                     </Popover.Dropdown>
                 </Popover>
-            </Can>
+            ) : null
         ) : isTableVisualizationConfig(visualizationConfig) &&
-          !getDownloadQueryUuid ? null : (
+          !getDownloadQueryUuid ? null : canExportImages ? (
             <Popover
                 {...COLLAPSABLE_CARD_POPOVER_PROPS}
                 disabled={disabled}
@@ -195,7 +248,7 @@ const ChartDownloadMenu: React.FC<ChartDownloadMenuProps> = memo(
                     ) : null}
                 </Popover.Dropdown>
             </Popover>
-        );
+        ) : null;
     },
 );
 

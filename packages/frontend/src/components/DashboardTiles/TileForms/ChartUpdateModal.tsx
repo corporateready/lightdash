@@ -5,17 +5,19 @@ import {
     type DashboardChartTile,
     type DashboardSqlChartTile,
 } from '@lightdash/common';
-import { ActionIcon, Button, Flex, Loader, TextInput } from '@mantine-8/core';
-import { ScrollArea, Select, type ScrollAreaProps } from '@mantine/core';
+import { ActionIcon, Button, Flex, Loader, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { useDebouncedValue } from '@mantine/hooks';
 import { IconEye, IconEyeOff, IconPencil } from '@tabler/icons-react';
 import uniqBy from 'lodash/uniqBy';
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router';
 import { useChartSummariesV2 } from '../../../hooks/useChartSummariesV2';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import MantineIcon from '../../common/MantineIcon';
 import MantineModal from '../../common/MantineModal';
+import { SelectWithFooter } from '../../common/Select/SelectWithFooter';
+import { groupComboboxItems } from '../../common/Select/utils';
+import classes from './ChartUpdateModal.module.css';
 
 interface ChartUpdateModalProps {
     opened: boolean;
@@ -45,7 +47,7 @@ const ChartUpdateModal = ({
             hideTitle,
         },
     });
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const [searchQuery, setSearchQuery] = useState<string>('');
     const [debouncedSearchQuery] = useDebouncedValue(searchQuery, 300);
     const selectScrollRef = useRef<HTMLDivElement>(null);
@@ -120,8 +122,6 @@ const ChartUpdateModal = ({
                         disabled={form.values.hideTitle}
                     />
                     <ActionIcon
-                        variant="subtle"
-                        color="gray"
                         size="lg"
                         onClick={() =>
                             form.setFieldValue(
@@ -137,37 +137,27 @@ const ChartUpdateModal = ({
                 </Flex>
                 {isDashboardChartTileType(tile) &&
                     tile.properties.belongsToDashboard && (
-                        <Select
-                            styles={(theme) => ({
-                                separator: {
-                                    position: 'sticky',
-                                    top: 0,
-                                    backgroundColor: theme.colors.background[0],
-                                },
-                                separatorLabel: {
-                                    color: theme.colors.ldGray[6],
-                                    fontWeight: 500,
-                                },
-                            })}
+                        <SelectWithFooter
+                            classNames={{ groupLabel: classes.groupLabel }}
                             id="savedChartUuid"
                             name="savedChartUuid"
                             label="Select chart"
                             radius="md"
-                            data={(savedCharts || []).map(
-                                ({ uuid, name, space }) => {
-                                    return {
+                            data={groupComboboxItems(
+                                (savedCharts || []).map(
+                                    ({ uuid, name, space }) => ({
                                         value: uuid,
                                         label: name,
                                         group: space.name,
-                                    };
-                                },
+                                    }),
+                                ),
                             )}
                             disabled={isInitialLoading}
-                            withinPortal
+                            comboboxProps={{ withinPortal: true }}
                             {...form.getInputProps('uuid')}
                             searchable
                             placeholder="Search..."
-                            nothingFound="No charts found"
+                            nothingFoundMessage="No charts found"
                             clearable
                             searchValue={searchQuery}
                             onSearchChange={setSearchQuery}
@@ -175,32 +165,22 @@ const ChartUpdateModal = ({
                             rightSection={
                                 isFetching && <Loader size="xs" color="gray" />
                             }
-                            dropdownComponent={({
-                                children,
-                                ...rest
-                            }: ScrollAreaProps) => (
-                                <ScrollArea
-                                    {...rest}
-                                    viewportRef={selectScrollRef}
-                                >
-                                    <>
-                                        {children}
-                                        {hasNextPage && (
-                                            <Button
-                                                size="xs"
-                                                variant="subtle"
-                                                fullWidth
-                                                onClick={async () => {
-                                                    await fetchNextPage();
-                                                }}
-                                                disabled={isFetching}
-                                            >
-                                                Load more
-                                            </Button>
-                                        )}
-                                    </>
-                                </ScrollArea>
-                            )}
+                            scrollAreaProps={{ viewportRef: selectScrollRef }}
+                            footer={
+                                hasNextPage ? (
+                                    <Button
+                                        size="xs"
+                                        variant="subtle"
+                                        fullWidth
+                                        onClick={async () => {
+                                            await fetchNextPage();
+                                        }}
+                                        disabled={isFetching}
+                                    >
+                                        Load more
+                                    </Button>
+                                ) : null
+                            }
                         />
                     )}
             </form>

@@ -1,16 +1,20 @@
 import {
     AddScopesToRole,
+    ApiCustomRoleAsCodeListResponse,
+    ApiCustomRoleAsCodeUpsertResponse,
     ApiDefaultRoleResponse,
     ApiErrorPayload,
     ApiRemoveScopeFromRoleResponse,
     ApiRoleAssigneesResponse,
     ApiUnassignRoleFromUserResponse,
     CreateRole,
+    CustomRoleAsCode,
     UpdateRole,
 } from '@lightdash/common';
 import {
     Body,
     Delete,
+    Deprecated,
     Get,
     Middlewares,
     OperationId,
@@ -26,6 +30,7 @@ import {
 import express from 'express';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from '../../controllers/authentication';
@@ -174,15 +179,22 @@ export class CustomRolesController extends BaseController {
     /**
      * Add scopes to role
      * @summary Add scopes to role
+     *
+     * @deprecated Use PATCH /api/v2/orgs/{orgUuid}/roles/{roleUuid} with scopes.add instead
      */
     @Middlewares([
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use PATCH /api/v2/orgs/{orgUuid}/roles/{roleUuid} with scopes.add instead.',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Post('/{roleUuid}/scopes')
     @OperationId('AddScopesToRole')
+    @Deprecated()
     async addScopesToRole(
         @Request() req: express.Request,
         @Path() orgUuid: string,
@@ -205,15 +217,22 @@ export class CustomRolesController extends BaseController {
     /**
      * Remove scope from role
      * @summary Remove scope from role
+     *
+     * @deprecated Use PATCH /api/v2/orgs/{orgUuid}/roles/{roleUuid} with scopes.remove instead
      */
     @Middlewares([
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use PATCH /api/v2/orgs/{orgUuid}/roles/{roleUuid} with scopes.remove instead.',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Delete('/{roleUuid}/scopes/{scopeName}')
     @OperationId('RemoveScopeFromRole')
+    @Deprecated()
     async removeScopeFromRole(
         @Request() req: express.Request,
         @Path() orgUuid: string,

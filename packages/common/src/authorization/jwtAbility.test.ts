@@ -2,7 +2,7 @@ import { Ability, AbilityBuilder, subject } from '@casl/ability';
 import { type CreateEmbedJwt } from '../ee';
 import { type OssEmbed } from '../types/auth';
 import { applyEmbeddedAbility } from './jwtAbility';
-import { type MemberAbility } from './types';
+import { type CaslSubjectNames, type MemberAbility } from './types';
 
 const createEmbedJwt = (overrides?: {
     content?: Partial<CreateEmbedJwt['content']>;
@@ -46,6 +46,8 @@ const embed: OssEmbed = {
     allowAllDashboards: false,
     chartUuids: [],
     allowAllCharts: false,
+    allowAllApps: false,
+    appUuids: [],
     createdAt: '2021-01-01',
     user: {
         firstName: 'John',
@@ -141,7 +143,7 @@ describe('Embedded dashboard abilities', () => {
                 ),
             ).toBe(true);
 
-            // Export abilities should default to false
+            // Export abilities default to false, except page PDF
             expect(
                 ability.can(
                     'export',
@@ -157,9 +159,10 @@ describe('Embedded dashboard abilities', () => {
                     subject('Dashboard', {
                         type: 'pdf',
                         organizationUuid: organization.organizationUuid,
+                        metadata: { dashboardUuid },
                     }),
                 ),
-            ).toBe(false);
+            ).toBe(true);
             expect(
                 ability.can(
                     'export',
@@ -234,6 +237,91 @@ describe('Embedded dashboard abilities', () => {
             });
         });
 
+        describe('Dashboard-level CSV/XLSX export (Export all)', () => {
+            it('should allow managing ExportCsv for the bound dashboard when canExportDashboardCsv is true', () => {
+                const embedUser = createEmbedJwt({
+                    content: { canExportDashboardCsv: true },
+                });
+                const ability = defineAbilityForEmbedUser(
+                    embedUser,
+                    dashboardUuid,
+                );
+
+                expect(
+                    ability.can(
+                        'manage',
+                        subject('ExportCsv', {
+                            organizationUuid: organization.organizationUuid,
+                            projectUuid: embed.projectUuid,
+                            metadata: {
+                                dashboardUuid,
+                                dashboardName: 'Dashboard 1',
+                            },
+                        }),
+                    ),
+                ).toBe(true);
+
+                expect(
+                    ability.can(
+                        'view',
+                        subject('JobStatus', {
+                            organizationUuid: organization.organizationUuid,
+                            projectUuid: embed.projectUuid,
+                            createdByUserUuid: 'external-id-1',
+                        }),
+                    ),
+                ).toBe(true);
+            });
+
+            it('should not allow managing ExportCsv for a different dashboard', () => {
+                const embedUser = createEmbedJwt({
+                    content: { canExportDashboardCsv: true },
+                });
+                const ability = defineAbilityForEmbedUser(
+                    embedUser,
+                    dashboardUuid,
+                );
+
+                expect(
+                    ability.can(
+                        'manage',
+                        subject('ExportCsv', {
+                            organizationUuid: organization.organizationUuid,
+                            projectUuid: embed.projectUuid,
+                            metadata: {
+                                dashboardUuid: 'some-other-dashboard',
+                                dashboardName: 'Other dashboard',
+                            },
+                        }),
+                    ),
+                ).toBe(false);
+            });
+
+            it('should not allow managing ExportCsv when canExportDashboardCsv is false', () => {
+                const embedUser = createEmbedJwt({
+                    content: { canExportDashboardCsv: false },
+                });
+                const ability = defineAbilityForEmbedUser(
+                    embedUser,
+                    dashboardUuid,
+                );
+
+                expect(
+                    ability.can(
+                        'manage',
+                        subject('ExportCsv', {
+                            organizationUuid: organization.organizationUuid,
+                            projectUuid: embed.projectUuid,
+                            metadata: {
+                                dashboardUuid,
+                                dashboardName: 'Dashboard 1',
+                            },
+                        }),
+                    ),
+                ).toBe(false);
+            });
+        });
+
         describe('PDF export', () => {
             it('should allow PDF export when canExportPagePdf is true', () => {
                 const embedUser = createEmbedJwt({
@@ -250,6 +338,7 @@ describe('Embedded dashboard abilities', () => {
                         subject('Dashboard', {
                             type: 'pdf',
                             organizationUuid: organization.organizationUuid,
+                            metadata: { dashboardUuid },
                         }),
                     ),
                 ).toBe(true);
@@ -270,9 +359,52 @@ describe('Embedded dashboard abilities', () => {
                         subject('Dashboard', {
                             type: 'pdf',
                             organizationUuid: organization.organizationUuid,
+                            metadata: { dashboardUuid },
                         }),
                     ),
                 ).toBe(false);
+            });
+
+            it('should scope PDF export to the token dashboard', () => {
+                const embedUser = createEmbedJwt({
+                    content: { canExportPagePdf: true },
+                });
+                const ability = defineAbilityForEmbedUser(
+                    embedUser,
+                    dashboardUuid,
+                );
+
+                expect(
+                    ability.can(
+                        'export',
+                        subject('Dashboard', {
+                            type: 'pdf',
+                            organizationUuid: organization.organizationUuid,
+                            metadata: { dashboardUuid: 'other-dashboard' },
+                        }),
+                    ),
+                ).toBe(false);
+            });
+
+            it('should let PDF exporters poll their own export jobs', () => {
+                const embedUser = createEmbedJwt({
+                    content: { canExportPagePdf: true },
+                });
+                const ability = defineAbilityForEmbedUser(
+                    embedUser,
+                    dashboardUuid,
+                );
+
+                expect(
+                    ability.can(
+                        'view',
+                        subject('JobStatus', {
+                            organizationUuid: organization.organizationUuid,
+                            projectUuid: embed.projectUuid,
+                            createdByUserUuid: 'external-id-1',
+                        }),
+                    ),
+                ).toBe(true);
             });
         });
 
@@ -347,6 +479,7 @@ describe('Embedded dashboard abilities', () => {
                         subject('Dashboard', {
                             type: 'pdf',
                             organizationUuid: organization.organizationUuid,
+                            metadata: { dashboardUuid },
                         }),
                     ),
                 ).toBe(true);
@@ -391,6 +524,7 @@ describe('Embedded dashboard abilities', () => {
                         subject('Dashboard', {
                             type: 'pdf',
                             organizationUuid: organization.organizationUuid,
+                            metadata: { dashboardUuid },
                         }),
                     ),
                 ).toBe(true);
@@ -433,6 +567,7 @@ describe('Embedded dashboard abilities', () => {
                         subject('Dashboard', {
                             type: 'pdf',
                             organizationUuid: organization.organizationUuid,
+                            metadata: { dashboardUuid },
                         }),
                     ),
                 ).toBe(false);
@@ -611,6 +746,15 @@ describe('Embedded dashboard abilities', () => {
                     }),
                 ),
             ).toBe(false);
+            expect(
+                ability.can(
+                    'view',
+                    subject('Project', {
+                        organizationUuid: organization.organizationUuid,
+                        projectUuid,
+                    }),
+                ),
+            ).toBe(true);
         });
 
         it('should not allow viewing Explore domains when canExplore is undefined', () => {
@@ -628,6 +772,15 @@ describe('Embedded dashboard abilities', () => {
                     }),
                 ),
             ).toBe(false);
+            expect(
+                ability.can(
+                    'view',
+                    subject('Project', {
+                        organizationUuid: organization.organizationUuid,
+                        projectUuid,
+                    }),
+                ),
+            ).toBe(true);
         });
 
         it('should not allow viewing Explore domains for different projects', () => {
@@ -656,110 +809,478 @@ describe('Embedded dashboard abilities', () => {
             ).toBe(false);
         });
     });
+});
 
-    describe('Explore abilities', () => {
-        it('should allow viewing Explore domains when canExplore is true', () => {
-            const embedUser = createEmbedJwt({
-                content: { canExplore: true },
-            });
-            const ability = defineAbilityForEmbedUser(embedUser, dashboardUuid);
+const defineAbilityForDataAppEmbedUser = (
+    embedUser: CreateEmbedJwt,
+    appUuid: string,
+): MemberAbility => {
+    const builder = new AbilityBuilder<MemberAbility>(Ability);
+    applyEmbeddedAbility(
+        embedUser,
+        { appUuid, type: 'dataApp', chartUuids: [], explores: [] },
+        embed,
+        'external-id-1',
+        builder,
+    );
+    return builder.build();
+};
+
+describe('Embedded data app abilities', () => {
+    const appUuid = 'app-uuid-1';
+    const projectUuid = 'project-uuid-1';
+    const dataAppEmbedUser: CreateEmbedJwt = {
+        content: { type: 'dataApp', appUuid },
+        exp: Date.now() / 1000 + 3600,
+    };
+
+    it('grants unconstrained view:Explore so the app can run arbitrary queries', () => {
+        const ability = defineAbilityForDataAppEmbedUser(
+            dataAppEmbedUser,
+            appUuid,
+        );
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+        // Unconstrained: any explore name is allowed (NOT scoped like the
+        // chart grant's exploreNames: { $all: ... }).
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                    exploreNames: ['some_arbitrary_explore'],
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('grants view:DataApp for the named app (scoped) + view:Project', () => {
+        const ability = defineAbilityForDataAppEmbedUser(
+            dataAppEmbedUser,
+            appUuid,
+        );
+        // Scoped to the named app: the subject must carry metadata.appUuid.
+        expect(
+            ability.can(
+                'view',
+                subject('DataApp', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                    metadata: { appUuid },
+                }),
+            ),
+        ).toBe(true);
+        // A DIFFERENT app is NOT authorized by this JWT (per-app scoping —
+        // prevents a JWT for app A minting app B's preview token).
+        expect(
+            ability.can(
+                'view',
+                subject('DataApp', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                    metadata: { appUuid: 'a-different-app-uuid' },
+                }),
+            ),
+        ).toBe(false);
+        expect(
+            ability.can(
+                'view',
+                subject('Project', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('does not grant access to a different project', () => {
+        const ability = defineAbilityForDataAppEmbedUser(
+            dataAppEmbedUser,
+            appUuid,
+        );
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid: 'different-project-uuid',
+                }),
+            ),
+        ).toBe(false);
+        expect(
+            ability.can(
+                'view',
+                subject('DataApp', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid: 'different-project-uuid',
+                    metadata: { appUuid },
+                }),
+            ),
+        ).toBe(false);
+    });
+});
+
+const defineAbilityForAiAgentEmbedUser = (
+    embedUser: CreateEmbedJwt,
+    agentUuid: string,
+): MemberAbility => {
+    const builder = new AbilityBuilder<MemberAbility>(Ability);
+    applyEmbeddedAbility(
+        embedUser,
+        { agentUuid, type: 'aiAgent', chartUuids: [], explores: [] },
+        embed,
+        'external-id-1',
+        builder,
+    );
+    return builder.build();
+};
+
+describe('Embedded AI agent abilities', () => {
+    const agentUuid = 'agent-uuid-1';
+    const projectUuid = 'project-uuid-1';
+    const aiAgentEmbedUser: CreateEmbedJwt = {
+        content: { type: 'aiAgent', agentUuid },
+        exp: Date.now() / 1000 + 3600,
+    };
+
+    it('grants view:Project for the embedded agent project', () => {
+        const ability = defineAbilityForAiAgentEmbedUser(
+            aiAgentEmbedUser,
+            agentUuid,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Project', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('does not grant view:Explore unless the token enables canExplore', () => {
+        const ability = defineAbilityForAiAgentEmbedUser(
+            aiAgentEmbedUser,
+            agentUuid,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(false);
+    });
+
+    it('grants view:Explore when the token enables canExplore', () => {
+        const ability = defineAbilityForAiAgentEmbedUser(
+            {
+                ...aiAgentEmbedUser,
+                content: {
+                    type: 'aiAgent',
+                    agentUuid,
+                    canExplore: true,
+                },
+            },
+            agentUuid,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it.each([undefined, false])(
+        'does not grant view:EmbedAiAgentDebug when canViewDebugInfo is %s',
+        (canViewDebugInfo) => {
+            const ability = defineAbilityForAiAgentEmbedUser(
+                {
+                    ...aiAgentEmbedUser,
+                    content: { type: 'aiAgent', agentUuid, canViewDebugInfo },
+                },
+                agentUuid,
+            );
 
             expect(
                 ability.can(
                     'view',
-                    subject('Explore', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid,
-                    }),
-                ),
-            ).toBe(true);
-            expect(
-                ability.can(
-                    'view',
-                    subject('Project', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid,
-                    }),
-                ),
-            ).toBe(true);
-        });
-
-        it('should not allow viewing Explore domains when canExplore is false', () => {
-            const embedUser = createEmbedJwt({
-                content: { canExplore: false },
-            });
-            const ability = defineAbilityForEmbedUser(embedUser, dashboardUuid);
-
-            expect(
-                ability.can(
-                    'view',
-                    subject('Explore', {
+                    subject('EmbedAiAgentDebug', {
                         organizationUuid: organization.organizationUuid,
                         projectUuid,
                     }),
                 ),
             ).toBe(false);
-            expect(
-                ability.can(
-                    'view',
-                    subject('Project', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid,
-                    }),
-                ),
-            ).toBe(true);
+        },
+    );
+
+    it('grants view:EmbedAiAgentDebug for the embed project when the token enables canViewDebugInfo', () => {
+        const ability = defineAbilityForAiAgentEmbedUser(
+            {
+                ...aiAgentEmbedUser,
+                content: {
+                    type: 'aiAgent',
+                    agentUuid,
+                    canViewDebugInfo: true,
+                },
+            },
+            agentUuid,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('EmbedAiAgentDebug', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+        expect(
+            ability.can(
+                'view',
+                subject('EmbedAiAgentDebug', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid: 'different-project-uuid',
+                }),
+            ),
+        ).toBe(false);
+    });
+
+    it('ignores canViewDebugInfo in roles mode', () => {
+        const ability = defineAbilityForAiAgentEmbedUser(
+            {
+                ...aiAgentEmbedUser,
+                content: {
+                    type: 'aiAgent',
+                    agentUuid,
+                    canViewDebugInfo: true,
+                },
+                writeActions: {
+                    userUuid: 'actor',
+                    spaceUuid: 'space',
+                    permissionsMode: 'roles',
+                },
+            },
+            agentUuid,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('EmbedAiAgentDebug', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(false);
+    });
+
+    it('does not grant access to a different project', () => {
+        const ability = defineAbilityForAiAgentEmbedUser(
+            aiAgentEmbedUser,
+            agentUuid,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid: 'different-project-uuid',
+                }),
+            ),
+        ).toBe(false);
+        expect(
+            ability.can(
+                'view',
+                subject('Project', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid: 'different-project-uuid',
+                }),
+            ),
+        ).toBe(false);
+    });
+
+    const abilityWithActorScopes = (resources: CaslSubjectNames[]) => {
+        const builder = new AbilityBuilder<MemberAbility>(Ability);
+        resources.forEach((resource) =>
+            builder.can('view', resource, {
+                organizationUuid: organization.organizationUuid,
+                projectUuid,
+            }),
+        );
+        applyEmbeddedAbility(
+            aiAgentEmbedUser,
+            { agentUuid, type: 'aiAgent', chartUuids: [], explores: [] },
+            embed,
+            'external-id-1',
+            builder,
+        );
+        return builder.build();
+    };
+    const ownJob = subject('JobStatus', {
+        organizationUuid: organization.organizationUuid,
+        projectUuid,
+        createdByUserUuid: 'external-id-1',
+    });
+
+    it('lets the embed poll its own jobs when it can download results', () => {
+        const ability = abilityWithActorScopes(['EmbedCsvExport']);
+        expect(ability.can('view', ownJob)).toBe(true);
+        expect(
+            ability.can(
+                'view',
+                subject('JobStatus', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                    createdByUserUuid: 'someone-else',
+                }),
+            ),
+        ).toBe(false);
+    });
+
+    it('does not grant job polling without the download scope', () => {
+        expect(abilityWithActorScopes([]).can('view', ownJob)).toBe(false);
+    });
+});
+
+const defineAbilityForMetricsCatalogEmbedUser = (
+    embedUser: CreateEmbedJwt,
+): MemberAbility => {
+    const builder = new AbilityBuilder<MemberAbility>(Ability);
+    applyEmbeddedAbility(
+        embedUser,
+        { type: 'metricsCatalog', chartUuids: [], explores: [] },
+        embed,
+        'external-id-1',
+        builder,
+    );
+    return builder.build();
+};
+
+describe('Embedded metrics catalog abilities', () => {
+    const projectUuid = 'project-uuid-1';
+    const metricsCatalogEmbedUser: CreateEmbedJwt = {
+        content: { type: 'metricsCatalog' },
+        exp: Date.now() / 1000 + 3600,
+    };
+
+    it('grants view:Project for the embedded metrics catalog project', () => {
+        const ability = defineAbilityForMetricsCatalogEmbedUser(
+            metricsCatalogEmbedUser,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Project', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('grants view:Tags for catalog filters', () => {
+        const ability = defineAbilityForMetricsCatalogEmbedUser(
+            metricsCatalogEmbedUser,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Tags', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('grants view:SpotlightTableConfig for catalog columns', () => {
+        const ability = defineAbilityForMetricsCatalogEmbedUser(
+            metricsCatalogEmbedUser,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('SpotlightTableConfig', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('does not grant view:Explore unless the token enables canExplore', () => {
+        const ability = defineAbilityForMetricsCatalogEmbedUser(
+            metricsCatalogEmbedUser,
+        );
+
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(false);
+    });
+
+    it('grants view:Explore when the token enables canExplore', () => {
+        const ability = defineAbilityForMetricsCatalogEmbedUser({
+            ...metricsCatalogEmbedUser,
+            content: {
+                type: 'metricsCatalog',
+                canExplore: true,
+            },
         });
 
-        it('should not allow viewing Explore domains when canExplore is undefined', () => {
-            const embedUser = createEmbedJwt({
-                content: { canExplore: undefined },
-            });
-            const ability = defineAbilityForEmbedUser(embedUser, dashboardUuid);
+        expect(
+            ability.can(
+                'view',
+                subject('Explore', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid,
+                }),
+            ),
+        ).toBe(true);
+    });
 
-            expect(
-                ability.can(
-                    'view',
-                    subject('Explore', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid,
-                    }),
-                ),
-            ).toBe(false);
-            expect(
-                ability.can(
-                    'view',
-                    subject('Project', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid,
-                    }),
-                ),
-            ).toBe(true);
-        });
+    it('does not grant access to a different project', () => {
+        const ability = defineAbilityForMetricsCatalogEmbedUser(
+            metricsCatalogEmbedUser,
+        );
 
-        it('should not allow viewing Explore domains for different projects', () => {
-            const embedUser = createEmbedJwt({
-                content: { canExplore: true },
-            });
-            const ability = defineAbilityForEmbedUser(embedUser, dashboardUuid);
-
-            expect(
-                ability.can(
-                    'view',
-                    subject('Explore', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid: 'different-project-uuid',
-                    }),
-                ),
-            ).toBe(false);
-            expect(
-                ability.can(
-                    'view',
-                    subject('Project', {
-                        organizationUuid: organization.organizationUuid,
-                        projectUuid: 'different-project-uuid',
-                    }),
-                ),
-            ).toBe(false);
-        });
+        expect(
+            ability.can(
+                'view',
+                subject('Project', {
+                    organizationUuid: organization.organizationUuid,
+                    projectUuid: 'different-project-uuid',
+                }),
+            ),
+        ).toBe(false);
     });
 });

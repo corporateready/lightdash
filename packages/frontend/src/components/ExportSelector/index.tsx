@@ -5,7 +5,7 @@ import {
     type ApiScheduledDownloadCsv,
     type PivotConfig,
 } from '@lightdash/common';
-import { Button, Stack } from '@mantine-8/core';
+import { Button, Stack } from '@mantine/core';
 import { IconArrowLeft, IconFileTypeCsv } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { memo, useState, type FC } from 'react';
@@ -31,6 +31,8 @@ const ExportSelector: FC<
         showTableNames,
         chartName,
         pivotConfig,
+        conditionalFormattings,
+        showColumnTotals,
     }) => {
         const health = useHealth();
         const hasGoogleDrive =
@@ -51,7 +53,6 @@ const ExportSelector: FC<
             return (
                 <>
                     <Button
-                        color="ldGray.6"
                         size="xs"
                         mb="xs"
                         leftSection={<MantineIcon icon={IconArrowLeft} />}
@@ -70,6 +71,8 @@ const ExportSelector: FC<
                         showTableNames={showTableNames}
                         chartName={chartName}
                         pivotConfig={pivotConfig}
+                        conditionalFormattings={conditionalFormattings}
+                        showColumnTotals={showColumnTotals}
                     />
                 </>
             );
@@ -83,6 +86,10 @@ const ExportSelector: FC<
                         leftSection={<MantineIcon icon={IconFileTypeCsv} />}
                         disabled={isExportingGoogleSheets}
                         data-testid="chart-export-csv-button"
+                        // Walkthrough detour (manage:ExportCsv): the way to
+                        // the export form when this chooser is shown.
+                        data-tour-anchor="export-choose-download"
+                        data-tour-hint="Click Download data"
                     >
                         Download data
                     </Button>
@@ -102,6 +109,8 @@ const ExportSelector: FC<
                 showTableNames={showTableNames}
                 chartName={chartName}
                 pivotConfig={pivotConfig}
+                conditionalFormattings={conditionalFormattings}
+                showColumnTotals={showColumnTotals}
             />
         );
     },

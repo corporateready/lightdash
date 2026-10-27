@@ -1,109 +1,247 @@
-import { Box, Drawer, Flex } from '@mantine-8/core';
-import { useMediaQuery } from '@mantine-8/hooks';
+import {
+    assertUnreachable,
+    isAiComposerChartArtifactConfig,
+    type AiArtifact,
+    type ApiError,
+} from '@lightdash/common';
+import { Box, Drawer, Group, Text, Tooltip } from '@mantine/core';
+import { useDisclosure, type UseSplitterReturnValue } from '@mantine/hooks';
 import {
     IconLayoutSidebarLeftCollapse,
     IconLayoutSidebarLeftExpand,
 } from '@tabler/icons-react';
+import { useQuery } from '@tanstack/react-query';
+import clsx from 'clsx';
 import {
-    Fragment,
     useCallback,
+    useEffect,
     useLayoutEffect,
+    useMemo,
     useRef,
-    useState,
     type PropsWithChildren,
 } from 'react';
-import {
-    Panel,
-    PanelGroup,
-    PanelResizeHandle,
-    type ImperativePanelHandle,
-} from 'react-resizable-panels';
+import { useLocation, useParams } from 'react-router';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import { NAVBAR_HEIGHT } from '../../../../../components/common/Page/constants';
+import ResizableSplitter from '../../../../../components/common/ResizableSplitter';
 import ErrorBoundary from '../../../../../features/errorBoundary/ErrorBoundary';
-import { clearArtifact } from '../../store/aiArtifactSlice';
+import { useLightdashApi } from '../../../../../providers/LightdashApi/useLightdashApi';
+import useEmbed from '../../../../providers/Embed/useEmbed';
+import { useAgentMaxWidth } from '../../hooks/useAgentMaxWidth';
+import {
+    AI_AGENT_ARTIFACT_KEY,
+    aiAgentArtifactVersionQuery,
+} from '../../hooks/useAiAgentArtifacts';
+import {
+    clearPreview,
+    selectPreviewForThreads,
+    type AiPreview,
+} from '../../store/aiArtifactSlice';
 import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
 } from '../../store/hooks';
 import { AiArtifactPanel } from '../ChatElements/AiArtifactPanel';
+import { AiDataAppPreviewPanel } from '../ChatElements/AiDataAppPreviewPanel';
+import { AiDocumentPreviewPanel } from '../ChatElements/AiDocumentPreviewPanel';
+import { AiQueryPipelinePreviewPanel } from '../ChatElements/AiQueryPipelinePreviewPanel';
+import { AiSavedChartPreviewPanel } from '../ChatElements/AiSavedChartPreviewPanel';
 import styles from './aiAgentPageLayout.module.css';
+import {
+    PREVIEW_PANE_MAX,
+    PREVIEW_PANE_MIN,
+    previewPaneOf,
+} from './previewPane';
 import { SidebarButton } from './SidebarButton';
+
+const renderPreviewPanel = (preview: AiPreview) => {
+    switch (preview.type) {
+        case 'artifact':
+            return <AiArtifactPanel artifact={preview} />;
+        case 'savedChart':
+            return <AiSavedChartPreviewPanel savedChartPreview={preview} />;
+        case 'dataApp':
+            return (
+                <AiDataAppPreviewPanel dataAppPreview={preview} showInspector />
+            );
+        case 'document':
+            return <AiDocumentPreviewPanel documentPreview={preview} />;
+        case 'queryPipeline':
+            return <AiQueryPipelinePreviewPanel pipelinePreview={preview} />;
+        default:
+            return assertUnreachable(preview, 'Unknown preview type');
+    }
+};
 
 interface Props extends PropsWithChildren {
     Sidebar?: React.ReactNode;
+    SidebarHeader?: React.ReactNode;
     Header?: React.ReactNode;
+    MobileSidebarHeader?: React.ReactNode;
     isAgentSidebarCollapsed?: boolean;
     setIsAgentSidebarCollapsed?: (isAgentSidebarCollapsed: boolean) => void;
+    isEmbed?: boolean;
 }
 
 export const AiAgentPageLayout: React.FC<Props> = ({
     Sidebar,
+    SidebarHeader,
     Header,
+    MobileSidebarHeader,
     children,
     setIsAgentSidebarCollapsed,
     isAgentSidebarCollapsed,
+    isEmbed = false,
 }) => {
+    const lightdashApi = useLightdashApi();
+
     const dispatch = useAiAgentStoreDispatch();
-    const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
+    const splitterRef = useRef<UseSplitterReturnValue>(null);
+    const { mode: embedMode } = useEmbed();
+    // In the SDK the agent lives in a box on the host page, so its drawers
+    // stay inside that box and leave the host's scroll alone
+    const isSdk = isEmbed && embedMode === 'sdk';
 
-    const [isResizing, setIsResizing] = useState(false);
-
-    const artifact = useAiAgentStoreSelector(
-        (state) => state.aiArtifact.artifact,
+    // Thread routes and the battle route name the threads on screen.
+    const { threadUuid, threadUuidA, threadUuidB } = useParams();
+    const selectOnScreenPreview = useMemo(
+        () =>
+            selectPreviewForThreads(
+                [threadUuid, threadUuidA, threadUuidB].filter(
+                    (uuid): uuid is string => uuid !== undefined,
+                ),
+            ),
+        [threadUuid, threadUuidA, threadUuidB],
     );
-    const isMobile = useMediaQuery('(max-width: 768px)');
+    const preview = useAiAgentStoreSelector(selectOnScreenPreview);
+    // Same key as the artifact panel's fetch, so this adds no request; the
+    // panel owns error handling.
+    const artifactQuery =
+        preview?.type === 'artifact'
+            ? aiAgentArtifactVersionQuery(lightdashApi, preview)
+            : null;
+    const { data: previewArtifact } = useQuery<AiArtifact, ApiError>({
+        queryKey: artifactQuery?.queryKey ?? [AI_AGENT_ARTIFACT_KEY, 'none'],
+        queryFn: artifactQuery?.queryFn,
+        enabled: artifactQuery !== null,
+    });
+    const previewPane = preview
+        ? previewPaneOf(
+              preview.type,
+              isAiComposerChartArtifactConfig(previewArtifact?.chartConfig),
+          )
+        : null;
+    // Resolved on first render so the sidebar never flashes open on mobile
+    const isMobile = useAgentMaxWidth(768, {
+        getInitialValueInEffect: false,
+    });
+    const [
+        isMobileSidebarOpened,
+        { close: closeMobileSidebar, toggle: toggleMobileSidebar },
+    ] = useDisclosure(false);
+    const { pathname } = useLocation();
+
+    // Navigating from a thread link inside the drawer should dismiss it
+    useEffect(() => {
+        closeMobileSidebar();
+    }, [pathname, closeMobileSidebar]);
 
     const toggleSidebar = useCallback(() => {
         setIsAgentSidebarCollapsed?.(!isAgentSidebarCollapsed);
-        if (sidebarPanelRef.current?.isCollapsed()) {
-            sidebarPanelRef.current?.expand();
-        } else {
-            sidebarPanelRef.current?.collapse();
-        }
+        splitterRef.current?.toggleCollapse(0);
     }, [setIsAgentSidebarCollapsed, isAgentSidebarCollapsed]);
 
     useLayoutEffect(() => {
-        if (artifact) {
-            sidebarPanelRef.current?.collapse();
+        if (!preview || isMobile) return;
+
+        const frame = requestAnimationFrame(() => {
+            splitterRef.current?.collapse(0);
             setIsAgentSidebarCollapsed?.(true);
+        });
+
+        return () => cancelAnimationFrame(frame);
+    }, [preview, isMobile, setIsAgentSidebarCollapsed]);
+
+    // The pane id is the splitter layout key; when it changes (e.g. an
+    // artifact resolves as a composer one) sizes reset, so re-apply collapse.
+    const previewPaneId = previewPane?.id;
+    useLayoutEffect(() => {
+        if (Sidebar && !isMobile && isAgentSidebarCollapsed) {
+            splitterRef.current?.collapse(0);
         }
-    }, [artifact, setIsAgentSidebarCollapsed]);
+    }, [Sidebar, isMobile, isAgentSidebarCollapsed, previewPaneId]);
 
     return (
         <div
-            className={styles.workspace}
-            style={{ height: `calc(100vh - ${NAVBAR_HEIGHT}px)` }}
+            className={clsx(
+                styles.workspace,
+                isEmbed && styles.workspaceEmbed,
+                isSdk && styles.workspaceSdk,
+            )}
         >
-            <PanelGroup
-                direction="horizontal"
+            <ResizableSplitter
+                orientation="horizontal"
                 className={styles.panelGroup}
+                // Adjacent resizing evaluates collapse before clamping to min.
+                redistribute={undefined}
+                splitterRef={splitterRef}
+                handleLabel="Resize workspace panels"
+                classNames={{ handle: styles.resizeHandle }}
+                onCollapseChange={(index, collapsed) => {
+                    if (index === 0 && Sidebar && !isMobile)
+                        setIsAgentSidebarCollapsed?.(collapsed);
+                }}
                 style={{ flex: 1, minWidth: 0 }}
             >
-                {Sidebar && (
-                    <Fragment>
+                {Sidebar && !isMobile && (
+                    <ResizableSplitter.Pane
+                        id="sidebar"
+                        defaultSize="280px"
+                        min="170px"
+                        max={40}
+                        collapsible
+                        className={styles.sidebar}
+                        data-collapsed={
+                            isAgentSidebarCollapsed ? 'true' : undefined
+                        }
+                    >
                         <ErrorBoundary>
-                            <Panel
-                                id="sidebar"
-                                ref={sidebarPanelRef}
-                                defaultSize={20}
-                                minSize={10}
-                                maxSize={40}
-                                order={1}
-                                collapsible
-                                className={`${styles.sidebar} ${
-                                    !isResizing ? styles.sidebarTransition : ''
-                                }`}
-                                onCollapse={() =>
-                                    setIsAgentSidebarCollapsed?.(true)
-                                }
-                                onExpand={() =>
-                                    setIsAgentSidebarCollapsed?.(false)
+                            <Group
+                                align="center"
+                                justify="space-between"
+                                gap={0}
+                                wrap="nowrap"
+                                className={styles.sidebarHeader}
+                                data-collapsed={
+                                    isAgentSidebarCollapsed ? true : undefined
                                 }
                             >
-                                <Flex justify="flex-end">
+                                {SidebarHeader && (
+                                    <Box
+                                        flex={
+                                            isAgentSidebarCollapsed
+                                                ? undefined
+                                                : 1
+                                        }
+                                        miw={0}
+                                    >
+                                        {SidebarHeader}
+                                    </Box>
+                                )}
+                                <Tooltip
+                                    label={
+                                        isAgentSidebarCollapsed
+                                            ? 'Expand sidebar'
+                                            : 'Collapse sidebar'
+                                    }
+                                    position="right"
+                                >
                                     <SidebarButton
-                                        size="sm"
+                                        aria-label={
+                                            isAgentSidebarCollapsed
+                                                ? 'Expand Ask AI sidebar'
+                                                : 'Collapse Ask AI sidebar'
+                                        }
+                                        size="xs"
                                         leftSection={
                                             <MantineIcon
                                                 size="md"
@@ -118,71 +256,126 @@ export const AiAgentPageLayout: React.FC<Props> = ({
                                         }
                                         onClick={toggleSidebar}
                                     />
-                                </Flex>
+                                </Tooltip>
+                            </Group>
 
-                                {Sidebar}
-                            </Panel>
+                            {Sidebar}
                         </ErrorBoundary>
-
-                        <PanelResizeHandle
-                            className={styles.resizeHandle}
-                            onDragging={(isDragging) =>
-                                setIsResizing(isDragging)
-                            }
-                        />
-                    </Fragment>
+                    </ResizableSplitter.Pane>
                 )}
 
-                <ErrorBoundary>
-                    <Panel
-                        className={styles.chat}
-                        id="chat"
-                        minSize={25}
-                        order={2}
-                    >
-                        {Header && (
-                            <Box className={styles.chatHeader}>{Header}</Box>
+                <ResizableSplitter.Pane
+                    className={styles.chat}
+                    id="chat"
+                    defaultSize={
+                        100 -
+                        (Sidebar && !isMobile ? 20 : 0) -
+                        (!isMobile && previewPane ? previewPane.defaultSize : 0)
+                    }
+                    min={25}
+                >
+                    <ErrorBoundary>
+                        {(Header || (isMobile && Sidebar)) && (
+                            <Box
+                                className={styles.chatHeader}
+                                data-compact={isMobile}
+                            >
+                                <Group gap="xs" wrap="nowrap" align="center">
+                                    {isMobile && Sidebar && (
+                                        <SidebarButton
+                                            aria-label="Open Ask AI sidebar"
+                                            size="sm"
+                                            leftSection={
+                                                <MantineIcon
+                                                    size="md"
+                                                    icon={
+                                                        IconLayoutSidebarLeftExpand
+                                                    }
+                                                    stroke={1.8}
+                                                    color="ldGray.7"
+                                                />
+                                            }
+                                            onClick={toggleMobileSidebar}
+                                        />
+                                    )}
+                                    {Header && (
+                                        <Box flex={1} miw={0}>
+                                            {Header}
+                                        </Box>
+                                    )}
+                                </Group>
+                            </Box>
                         )}
 
                         <Box className={styles.chatContent}>{children}</Box>
-                    </Panel>
-                </ErrorBoundary>
+                    </ErrorBoundary>
+                </ResizableSplitter.Pane>
 
-                {!isMobile && artifact && (
-                    <Fragment>
-                        <PanelResizeHandle
-                            aria-label="Resize artifact panel"
-                            className={`${styles.resizeHandle} ${styles.artifactResizeHandle}`}
-                            hitAreaMargins={{ coarse: 16, fine: 8 }}
-                            onDragging={(isDragging) =>
-                                setIsResizing(isDragging)
-                            }
-                        />
-
+                {!isMobile && preview && previewPane && (
+                    <ResizableSplitter.Pane
+                        key={previewPane.id}
+                        className={styles.floatingArtifactRegion}
+                        defaultSize={previewPane.defaultSize}
+                        id={previewPane.id}
+                        min={PREVIEW_PANE_MIN}
+                        max={PREVIEW_PANE_MAX}
+                    >
                         <ErrorBoundary>
-                            <Panel
-                                className={styles.floatingArtifactRegion}
-                                defaultSize={50}
-                                id="artifact"
-                                minSize={30}
-                                maxSize={70}
-                                order={3}
-                            >
-                                <AiArtifactPanel artifact={artifact} />
-                            </Panel>
+                            <Box className={styles.floatingArtifactWrap}>
+                                {renderPreviewPanel(preview)}
+                            </Box>
                         </ErrorBoundary>
-                    </Fragment>
+                    </ResizableSplitter.Pane>
                 )}
-            </PanelGroup>
+            </ResizableSplitter>
+
+            {isMobile && Sidebar && (
+                <Drawer
+                    opened={isMobileSidebarOpened}
+                    onClose={closeMobileSidebar}
+                    withinPortal={!isSdk}
+                    lockScroll={!isSdk}
+                    closeButtonProps={{
+                        'aria-label': 'Close threads',
+                        size: 44,
+                    }}
+                    position="left"
+                    size="85%"
+                    title={
+                        <Text fw={600} fz="sm">
+                            Threads
+                        </Text>
+                    }
+                    classNames={{
+                        inner: isSdk ? styles.sdkDrawerInner : undefined,
+                        content: styles.mobileSidebarContent,
+                        header: styles.mobileSidebarHeader,
+                        body: styles.mobileSidebarBody,
+                    }}
+                >
+                    {MobileSidebarHeader && (
+                        <Box className={styles.mobileSidebarContext}>
+                            {MobileSidebarHeader}
+                        </Box>
+                    )}
+                    {SidebarHeader && <Box mb="sm">{SidebarHeader}</Box>}
+                    {Sidebar}
+                </Drawer>
+            )}
 
             {isMobile && (
                 <Drawer
-                    opened={!!artifact}
-                    onClose={() => dispatch(clearArtifact())}
+                    opened={!!preview}
+                    onClose={() => dispatch(clearPreview())}
+                    withinPortal={!isSdk}
+                    lockScroll={!isSdk}
                     size="75%"
                     position="bottom"
                     h="75%"
                     withCloseButton={false}
+                    classNames={{
+                        inner: isSdk ? styles.sdkDrawerInner : undefined,
+                    }}
                     transitionProps={{
                         transition: 'slide-up',
                         duration: 200,
@@ -196,7 +389,7 @@ export const AiAgentPageLayout: React.FC<Props> = ({
                         },
                     }}
                 >
-                    {artifact && <AiArtifactPanel artifact={artifact} />}
+                    {preview && renderPreviewPanel(preview)}
                 </Drawer>
             )}
         </div>

@@ -1,28 +1,43 @@
-import { Group, Text } from '@mantine-8/core';
+import { Group, Text } from '@mantine/core';
 import { type DateTimePickerProps, type DayOfWeek } from '@mantine/dates';
 import dayjs from 'dayjs';
-import { useState, type FC } from 'react';
+import { type FC } from 'react';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 import FilterDateTimePicker from './FilterDateTimePicker';
 import styles from './FilterDateTimeRangePicker.module.css';
+import { useDraftDate } from './useDraftDate';
 
 interface Props extends Omit<
     DateTimePickerProps,
-    'firstDayOfWeek' | 'getDayProps' | 'value' | 'onChange'
+    | 'firstDayOfWeek'
+    | 'getDayProps'
+    | 'value'
+    | 'defaultValue'
+    | 'onChange'
+    | 'minDate'
+    | 'maxDate'
 > {
-    value: [Date, Date] | null;
+    startValue: Date | null;
+    endValue: Date | null;
     onChange: (value: [Date, Date] | null) => void;
     firstDayOfWeek: DayOfWeek;
+    invalidStartValue?: string;
+    invalidEndValue?: string;
 }
 
 const FilterDateTimeRangePicker: FC<Props> = ({
-    value,
+    startValue,
+    endValue,
     disabled,
     firstDayOfWeek,
     onChange,
+    invalidStartValue,
+    invalidEndValue,
     ...rest
 }) => {
-    const [date1, setDate1] = useState(value?.[0] ?? null);
-    const [date2, setDate2] = useState(value?.[1] ?? null);
+    const getUiString = useUiStrings();
+    const [date1, setDate1] = useDraftDate(startValue);
+    const [date2, setDate2] = useDraftDate(endValue);
 
     return (
         <Group wrap="nowrap" align="start" w="100%" gap="xs">
@@ -30,9 +45,7 @@ const FilterDateTimeRangePicker: FC<Props> = ({
                 size="xs"
                 withSeconds
                 disabled={disabled}
-                // FIXME: until mantine 7.4: https://github.com/mantinedev/mantine/issues/5401#issuecomment-1874906064
-                // @ts-ignore
-                placeholder="Start date"
+                placeholder={getUiString('filters.inputs.startDate')}
                 showTimezone={false}
                 maxDate={
                     date2
@@ -40,6 +53,7 @@ const FilterDateTimeRangePicker: FC<Props> = ({
                         : undefined
                 }
                 firstDayOfWeek={firstDayOfWeek}
+                invalidValue={invalidStartValue}
                 {...rest}
                 value={date1}
                 onChange={(newDate) => {
@@ -61,13 +75,12 @@ const FilterDateTimeRangePicker: FC<Props> = ({
                 size="xs"
                 withSeconds
                 disabled={disabled}
-                // FIXME: until mantine 7.4: https://github.com/mantinedev/mantine/issues/5401#issuecomment-1874906064
-                // @ts-ignore
-                placeholder="End date"
+                placeholder={getUiString('filters.inputs.endDate')}
                 minDate={
                     date1 ? dayjs(date1).add(1, 'second').toDate() : undefined
                 }
                 firstDayOfWeek={firstDayOfWeek}
+                invalidValue={invalidEndValue}
                 {...rest}
                 value={date2}
                 onChange={(newDate) => {

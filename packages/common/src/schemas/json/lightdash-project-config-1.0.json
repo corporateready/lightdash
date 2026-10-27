@@ -4,6 +4,23 @@
     "type": ["object", "null"],
     "required": ["spotlight"],
     "properties": {
+        "content_as_code": {
+            "type": ["object", "null"],
+            "description": "Settings for content-as-code sync between this repo and Lightdash instances",
+            "properties": {
+                "sync": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, uploaded content is tracked as Git-backed for content review and write-back workflows."
+                },
+                "path": {
+                    "type": "string",
+                    "default": "lightdash",
+                    "description": "Directory that holds the charts/ and dashboards/ folders, relative to the dbt project directory. Write-back pull requests put content files under it."
+                }
+            },
+            "additionalProperties": false
+        },
         "spotlight": {
             "type": ["object", "null"],
             "properties": {
@@ -76,15 +93,34 @@
                             "type": "boolean"
                         },
                         "options": {
-                            "description": "A list of possible values for the parameter",
+                            "description": "A list of possible values for the parameter, either as plain values or as label+value pairs",
                             "type": "array",
                             "minItems": 1,
                             "items": {
-                                "type": ["string", "number"]
+                                "oneOf": [
+                                    {
+                                        "type": ["string", "number"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {
+                                                "description": "Display text shown in the UI",
+                                                "type": "string"
+                                            },
+                                            "value": {
+                                                "description": "Underlying value used in SQL substitution",
+                                                "type": ["string", "number"]
+                                            }
+                                        },
+                                        "required": ["label", "value"],
+                                        "additionalProperties": false
+                                    }
+                                ]
                             }
                         },
                         "default": {
-                            "description": "The default value(s) for the parameter",
+                            "description": "The default value(s) for the parameter. For date parameters, `today` resolves to the current date at query time.",
                             "oneOf": [
                                 { "type": ["string", "number"] },
                                 {
@@ -158,6 +194,45 @@
                         }
                     },
                     "required": ["label", "sql"]
+                }
+            }
+        },
+        "defaults": {
+            "type": ["object", "null"],
+            "description": "Project-wide default settings that can be overridden at explore or field level",
+            "properties": {
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "Default case sensitivity for string filters. Defaults to true."
+                },
+                "column_totals": {
+                    "type": "boolean",
+                    "description": "Default behaviour for column totals in results tables. Defaults to true."
+                },
+                "additional_time_intervals": {
+                    "type": ["object", "null"],
+                    "description": "Extra time intervals appended to the built-in defaults for date/timestamp dimensions that do not declare their own time_intervals. Values may be standard granularities (e.g. hour) or custom_granularities keys.",
+                    "properties": {
+                        "date": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Appended to the built-in DAY/WEEK/MONTH/QUARTER/YEAR defaults for DATE dimensions."
+                        },
+                        "timestamp": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Appended to the built-in RAW/DAY/WEEK/MONTH/QUARTER/YEAR defaults for TIMESTAMP dimensions."
+                        }
+                    }
+                },
+                "granularity_labels": {
+                    "type": ["object", "null"],
+                    "description": "Override the display label of standard granularities (e.g. week: \"Week starting Monday\"). Keyed by standard granularity name.",
+                    "additionalProperties": { "type": "string" }
+                },
+                "pre_aggregate_execution_fallback": {
+                    "type": "boolean",
+                    "description": "Whether a matched query whose pre-aggregate execution fails is served from the source warehouse. When false, the query errors instead. Defaults to true."
                 }
             }
         },

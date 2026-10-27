@@ -18,6 +18,9 @@ models:
               - total_order_amount
             time_dimension: order_date
             granularity: day
+            sorts:
+              - fieldId: orders_order_date_day
+                descending: true
           - name: orders_daily_avg_demo_2
             dimensions:
               - status
@@ -26,6 +29,28 @@ models:
               - customers.first_name
             metrics:
               - average_order_size
+              - total_order_amount
+              - total_completed_order_amount
+            time_dimension: order_date
+            granularity: day
+          # External pre-aggregate candidates. Enable create_external_pre_aggregate_tables
+          # in dbt_project.yml before testing them locally.
+          - name: orders_ext_daily_status
+            table: '"jaffle"."orders_ext_daily_status_mv"'
+            dimensions:
+              - status
+              - order_source
+            metrics:
+              - total_order_amount
+              - average_order_size
+            time_dimension: order_date
+            granularity: day
+          - name: orders_ext_daily_joined
+            table: '"jaffle"."orders_ext_daily_joined_mv"'
+            dimensions:
+              - status
+              - customers.first_name
+            metrics:
               - total_order_amount
               - total_completed_order_amount
             time_dimension: order_date
@@ -46,6 +71,38 @@ models:
               - average_expression_metric
             time_dimension: order_date
             granularity: day
+          # e2e fixtures: count_distinct defs served on exact matches only,
+          # plus day/month twins for the grain-preference tie-break.
+          - name: orders_daily_unique_demo
+            dimensions:
+              - status
+            metrics:
+              - unique_order_count
+              - total_order_amount
+            time_dimension: order_date
+            granularity: day
+          - name: orders_ext_daily_unique
+            table: '"jaffle"."orders_ext_daily_unique_mv"'
+            dimensions:
+              - order_source
+            metrics:
+              - unique_order_count
+            time_dimension: order_date
+            granularity: day
+          - name: orders_source_daily_twin
+            dimensions:
+              - order_source
+            metrics:
+              - total_shipping_revenue
+            time_dimension: order_date
+            granularity: day
+          - name: orders_source_monthly_twin
+            dimensions:
+              - order_source
+            metrics:
+              - total_shipping_revenue
+            time_dimension: order_date
+            granularity: month
           - name: orders_daily_number_metric_refs_demo
             dimensions:
               - shipping_method
@@ -145,6 +202,26 @@ models:
                 type: count_distinct
                 spotlight:
                   categories: ["revenue_growth"]
+                  # Curate the default Metrics Explorer view: open segmented by
+                  # order source and pre-filtered to completed orders. Engineers
+                  # can switch to any of the other allowlisted dimensions.
+                  segment_by:
+                    - order_source
+                    - status
+                    - shipping_method
+                    - order_priority
+                    - fulfillment_center
+                    - is_completed
+                  filter_by:
+                    - status
+                    - order_source
+                    - shipping_method
+                    - order_priority
+                    - fulfillment_center
+                    - is_completed
+                  default_segment: order_source
+                  default_filter:
+                    status: completed
               completed_order_count:
                 label: Completed order count
                 description: Total number of completed orders
@@ -177,7 +254,8 @@ models:
                 round: 1
                 sql: CASE WHEN ${is_completed} THEN 1 ELSE 0 END
                 show_underlying_values:
-                  - amount
+                  - status
+                  - total_order_amount
                   - customers.first_name
                 spotlight:
                   owner: demo2@lightdash.com
@@ -273,6 +351,19 @@ models:
                 # Hex colors are supported in both chart config and echarts
                 "placed": "#e6fa0f"
                 "completed": "#00FF00"
+              filter_autocomplete:
+                fetch_from_warehouse: false
+                values:
+                  - value: placed
+                    label: Placed order
+                  - value: shipped
+                    label: Shipped order
+                  - value: completed
+                    label: Completed order
+                  - value: return_pending
+                    label: Return pending
+                  - value: returned
+                    label: Returned order
         tests:
           - accepted_values:
               values:
@@ -526,6 +617,9 @@ models:
         description: Promotional code applied to the order
         config:
           meta:
+            dimension:
+              filter_autocomplete:
+                fetch_from_warehouse: false
             metrics:
               promo_usage_rate:
                 type: number

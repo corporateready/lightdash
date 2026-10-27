@@ -1,31 +1,37 @@
 import { subject } from '@casl/ability';
 import {
+    getCellUrls,
     hasCustomBinDimension,
     isCustomDimension,
     isDimension,
     isField,
+    isFilterableField,
     type ResultValue,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
+import { Menu } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconCopy, IconStack } from '@tabler/icons-react';
 import mapValues from 'lodash/mapValues';
 import { useCallback, useMemo, type FC } from 'react';
-import { useParams } from 'react-router';
 import useToaster from '../../hooks/toaster/useToaster';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
+import { useAccount } from '../../hooks/user/useAccount';
 import { Can } from '../../providers/Ability';
 import useApp from '../../providers/App/useApp';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
 import MantineIcon from '../common/MantineIcon';
 import { type CellContextMenuProps } from '../common/Table/types';
+import QuickFilterMenuItems from '../Explorer/QuickFilterMenuItems';
 import UrlMenuItems from '../Explorer/ResultsCard/UrlMenuItems';
+import { useVisualizationInputs } from '../LightdashVisualization/useVisualizationContext';
 import DrillDownMenuItem from '../MetricQueryData/DrillDownMenuItem';
 import { useMetricQueryDataContext } from '../MetricQueryData/useMetricQueryDataContext';
 
 const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
-    const { openUnderlyingDataModal, metricQuery } =
+    const { openUnderlyingDataModal, metricQuery, tableName } =
         useMetricQueryDataContext();
+    const { isEditMode, hasExplorerStore } = useVisualizationInputs();
     const { showToastSuccess } = useToaster();
     const meta = cell.column.columnDef.meta;
     const item = meta?.item;
@@ -34,6 +40,11 @@ const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
         () => cell.getValue()?.value || {},
         [cell],
     );
+
+    const urls = useMemo(
+        () => getCellUrls(isField(item) ? item.urls : undefined, value.raw),
+        [item, value],
+    );
     const fieldValues = useMemo(
         () => mapValues(cell.row.original, (v) => v?.value) || {},
         [cell],
@@ -41,7 +52,24 @@ const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
 
     const { track } = useTracking();
     const { user } = useApp();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const { data: account } = useAccount();
+    const projectUuid = useProjectUuid();
+    const isEmbedded = account?.isJwtUser() === true;
+    const organizationUuid =
+        user.data?.organizationUuid ?? account?.organization.organizationUuid;
+    const drillDownPermission = subject(
+        'Explore',
+        isEmbedded
+            ? {
+                  organizationUuid,
+                  projectUuid,
+                  exploreNames: [tableName],
+              }
+            : {
+                  organizationUuid: user.data?.organizationUuid,
+                  projectUuid,
+              },
+    );
     const clipboard = useClipboard({ timeout: 200 });
 
     const handleCopyToClipboard = useCallback(() => {
@@ -58,7 +86,7 @@ const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
         track({
             name: EventName.VIEW_UNDERLYING_DATA_CLICKED,
             properties: {
-                organizationId: user?.data?.organizationUuid,
+                organizationId: organizationUuid,
                 userId: user?.data?.userUuid,
                 projectId: projectUuid,
             },
@@ -69,18 +97,19 @@ const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
         openUnderlyingDataModal,
         projectUuid,
         track,
-        user?.data?.organizationUuid,
+        organizationUuid,
         user?.data?.userUuid,
         value,
     ]);
 
     return (
         <>
-            {item && value.raw && isField(item) ? (
-                <UrlMenuItems urls={item.urls} cell={cell} />
-            ) : null}
-
-            {isField(item) && (item.urls || []).length > 0 && <Menu.Divider />}
+            {urls.length > 0 && (
+                <>
+                    <UrlMenuItems urls={urls} cell={cell} />
+                    <Menu.Divider />
+                </>
+            )}
 
             <Menu.Item
                 leftSection={
@@ -98,7 +127,7 @@ const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
                     <Can
                         I="view"
                         this={subject('UnderlyingData', {
-                            organizationUuid: user.data?.organizationUuid,
+                            organizationUuid,
                             projectUuid: projectUuid,
                         })}
                     >
@@ -120,12 +149,20 @@ const CellContextMenu: FC<Pick<CellContextMenuProps, 'cell'>> = ({ cell }) => {
                     projectUuid: projectUuid,
                 })}
             >
+                {isEditMode &&
+                    hasExplorerStore &&
+                    item &&
+                    isFilterableField(item) && (
+                        <QuickFilterMenuItems item={item} value={value} />
+                    )}
+            </Can>
+            <Can I={isEmbedded ? 'view' : 'manage'} this={drillDownPermission}>
                 <DrillDownMenuItem
                     item={item}
                     fieldValues={fieldValues}
                     pivotReference={meta?.pivotReference}
                     trackingData={{
-                        organizationId: user?.data?.organizationUuid,
+                        organizationId: organizationUuid,
                         userId: user?.data?.userUuid,
                         projectId: projectUuid,
                     }}

@@ -1,6 +1,10 @@
-import { ForbiddenError } from '@lightdash/common';
+import { ForbiddenError, ParameterError } from '@lightdash/common';
 import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
 import { ShareModel } from '../../models/ShareModel';
+import {
+    agentActionTestCases,
+    withAgentActionScope,
+} from '../AiAccessService/agentActionTestUtils.mock';
 import { ShareService } from './ShareService';
 import {
     Account,
@@ -13,20 +17,23 @@ import {
     User,
 } from './ShareService.mock';
 
+const agentActionLogModel = { insert: vi.fn().mockResolvedValue(undefined) };
 const shareModel = {
-    createSharedUrl: jest.fn(async () => SampleShareUrl),
-    getSharedUrl: jest.fn(async () => SampleShareUrl),
+    createSharedUrl: vi.fn(async () => SampleShareUrl),
+    getSharedUrl: vi.fn(async () => SampleShareUrl),
 };
+const unsafeJavascriptUrl = ['javascript', 'alert(1)'].join(':');
 
 describe('share', () => {
     const shareService = new ShareService({
+        agentActionLogModel,
         analytics: analyticsMock,
         shareModel: shareModel as unknown as ShareModel,
         lightdashConfig: Config,
     });
 
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     it('Should save sharedUrl', async () => {
@@ -38,16 +45,70 @@ describe('share', () => {
             ),
         ).toEqual(FullShareUrl);
     });
+
+    it.each([
+        'https://evil.example.com/pwn',
+        'https://test.lightdash.cloud/pwn',
+        unsafeJavascriptUrl,
+        '//evil.example.com/pwn',
+        '//test.lightdash.cloud/pwn',
+        '/\\evil.example.com/pwn',
+        'projects/uuid/tables/customers',
+        '',
+    ])('Should reject unsafe share path %j before saving', async (path) => {
+        await expect(
+            shareService.createShareUrl(User, path, ''),
+        ).rejects.toThrowError(ParameterError);
+        expect(shareModel.createSharedUrl).not.toHaveBeenCalled();
+    });
+
+    it.each(['/evil.example.com/pwn', '\\evil.example.com/pwn'])(
+        'Should reject unsafe share params %j before saving',
+        async (params) => {
+            await expect(
+                shareService.createShareUrl(User, '/', params),
+            ).rejects.toThrowError(ParameterError);
+            expect(shareModel.createSharedUrl).not.toHaveBeenCalled();
+        },
+    );
+
     it('Should get saved sharedUrl', async () => {
         expect(
             await shareService.getShareUrl(Account, SampleShareUrl.nanoid),
         ).toEqual(FullShareUrl);
     });
 
+    it('Should reject an unsafe saved share path', async () => {
+        (
+            shareModel.getSharedUrl as import('vitest').Mock
+        ).mockImplementationOnce(async () => ({
+            ...SampleShareUrl,
+            path: unsafeJavascriptUrl,
+        }));
+
+        await expect(
+            shareService.getShareUrl(Account, SampleShareUrl.nanoid),
+        ).rejects.toThrowError(ParameterError);
+    });
+
+    it('Should reject unsafe params from a saved share URL', async () => {
+        (
+            shareModel.getSharedUrl as import('vitest').Mock
+        ).mockImplementationOnce(async () => ({
+            ...SampleShareUrl,
+            path: '/',
+            params: '/evil.example.com/pwn',
+        }));
+
+        await expect(
+            shareService.getShareUrl(Account, SampleShareUrl.nanoid),
+        ).rejects.toThrowError(ParameterError);
+    });
+
     it('Should get saved sharedUrl without params', async () => {
-        (shareModel.getSharedUrl as jest.Mock).mockImplementationOnce(
-            async () => ShareUrlWithoutParams,
-        );
+        (
+            shareModel.getSharedUrl as import('vitest').Mock
+        ).mockImplementationOnce(async () => ShareUrlWithoutParams);
 
         expect(
             await shareService.getShareUrl(
@@ -66,3 +127,37 @@ describe('share', () => {
         ).rejects.toThrowError(ForbiddenError);
     });
 });
+
+test.each(agentActionTestCases)(
+    'agent share creation: %s',
+    async (_, surface, enabled, count) => {
+        agentActionLogModel.insert.mockClear();
+        const service = new ShareService({
+            agentActionLogModel,
+            analytics: analyticsMock,
+            shareModel: shareModel as unknown as ShareModel,
+            lightdashConfig: Config,
+        });
+        await withAgentActionScope(User, surface, enabled, () =>
+            service.createShareUrl(
+                User,
+                SampleShareUrl.path,
+                SampleShareUrl.params,
+            ),
+        );
+        expect(agentActionLogModel.insert).toHaveBeenCalledTimes(count);
+        if (count)
+            expect(agentActionLogModel.insert).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    object_type: 'share',
+                    object_uuid: null,
+                    object_id: SampleShareUrl.nanoid,
+                    action: 'create',
+                    outcome: 'allowed',
+                }),
+            );
+        expect(
+            JSON.stringify(agentActionLogModel.insert.mock.calls),
+        ).not.toContain(SampleShareUrl.path);
+    },
+);

@@ -60,7 +60,7 @@ describe('ChartAsCodeInternalization', () => {
             );
         });
 
-        it('should throw error for chart with missing eChartsConfig for cartesian type', () => {
+        it('should handle chart with missing eChartsConfig for cartesian type', () => {
             // Create a chart with cartesian type but missing eChartsConfig
             const chartAsCode: ChartAsCode = {
                 dashboardSlug: undefined,
@@ -72,10 +72,8 @@ describe('ChartAsCodeInternalization', () => {
                 spaceSlug: 'test-space',
                 chartConfig: {
                     type: ChartType.CARTESIAN,
-                    config: {
-                        // Missing eChartsConfig
-                    },
-                } as ChartConfig,
+                    config: {},
+                } as unknown as ChartConfig,
                 metricQuery: {
                     exploreName: 'test_explore',
                     dimensions: [],
@@ -95,10 +93,17 @@ describe('ChartAsCodeInternalization', () => {
             };
 
             const chartAsCodeInternalization = new ChartAsCodeInternalization();
-
-            expect(() => {
+            const languageMap =
                 chartAsCodeInternalization.getLanguageMap(chartAsCode);
-            }).toThrow();
+
+            expect(languageMap.chart[chartAsCode.slug]).toMatchObject({
+                name: 'Test Chart',
+                description: '',
+            });
+            expect(languageMap.chart[chartAsCode.slug].chartConfig).toEqual({
+                type: ChartType.CARTESIAN,
+                config: {},
+            });
         });
 
         it('should handle valid pie chart', () => {
@@ -270,6 +275,9 @@ describe('ChartAsCodeInternalization', () => {
                             column1: {
                                 name: 'Column 1',
                             },
+                            column2: {
+                                visible: false,
+                            },
                         },
                     },
                 },
@@ -298,12 +306,16 @@ describe('ChartAsCodeInternalization', () => {
             expect(languageMap).toBeDefined();
             expect(languageMap.chart).toBeDefined();
             expect(languageMap.chart[chartAsCode.slug]).toBeDefined();
-            expect(
-                languageMap.chart[chartAsCode.slug].chartConfig,
-            ).toBeDefined();
-            expect(languageMap.chart[chartAsCode.slug].chartConfig?.type).toBe(
-                ChartType.TABLE,
-            );
+            expect(languageMap.chart[chartAsCode.slug].chartConfig).toEqual({
+                type: ChartType.TABLE,
+                config: {
+                    columns: {
+                        column1: {
+                            name: 'Column 1',
+                        },
+                    },
+                },
+            });
         });
 
         it('should handle custom chart', () => {

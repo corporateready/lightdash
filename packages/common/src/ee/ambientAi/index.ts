@@ -1,16 +1,10 @@
-import { type DashboardSummary } from '../../types/dashboard';
-import { type Field, type TableCalculation } from '../../types/field';
+import {
+    type CustomSqlDimension,
+    type Field,
+    type TableCalculation,
+} from '../../types/field';
 import { type MetricQuery } from '../../types/metricQuery';
-
-export type ApiAiDashboardSummaryResponse = {
-    status: 'ok';
-    results: DashboardSummary;
-};
-
-export type ApiAiGetDashboardSummaryResponse = {
-    status: 'ok';
-    results: DashboardSummary;
-};
+import { type DataAppVizField } from '../apps/types';
 
 export type ApiAiGenerateCustomVizResponse = {
     status: 'ok';
@@ -47,6 +41,7 @@ export type TableCalculationFieldContext = Pick<
 };
 
 export type GenerateTableCalculationRequest = {
+    exploreName: string;
     prompt: string;
     tableName: string;
     fieldsContext: TableCalculationFieldContext[];
@@ -64,6 +59,32 @@ export type GeneratedTableCalculation = {
 export type ApiAiGenerateTableCalculationResponse = {
     status: 'ok';
     results: GeneratedTableCalculation;
+};
+
+export type CustomDimensionFieldContext = Pick<
+    Field,
+    'name' | 'label' | 'description' | 'type' | 'table'
+> & {
+    id: string;
+};
+
+export type GenerateCustomDimensionRequest = {
+    exploreName: string;
+    prompt: string;
+    tableName: string;
+    fieldsContext: CustomDimensionFieldContext[];
+    currentSql?: string;
+};
+
+export type GeneratedCustomDimension = {
+    sql: string;
+    displayName: CustomSqlDimension['name'];
+    dimensionType: CustomSqlDimension['dimensionType'];
+};
+
+export type ApiAiGenerateCustomDimensionResponse = {
+    status: 'ok';
+    results: GeneratedCustomDimension;
 };
 
 export type FormulaAiContext = {
@@ -113,4 +134,56 @@ export type GeneratedTooltip = {
 export type ApiAiGenerateTooltipResponse = {
     status: 'ok';
     results: GeneratedTooltip;
+};
+
+/** Chart Studio: which fields of a table fit a chart type's declared inputs. */
+export type SuggestChartTypeFieldsRequest = {
+    prompt: string;
+    /** Answers to the clarifying questions, in the order they were asked. */
+    clarifications: string[];
+    exploreName: string;
+    /** The declared inputs to pick for. A rebuild sends only the new ones. */
+    fields: DataAppVizField[];
+};
+
+export type SuggestedChartTypeField = {
+    /** The declared input's name. */
+    fieldName: string;
+    /** Item ids in the explore. One unless the input accepts multiple; empty when nothing of the right type exists. */
+    fieldIds: string[];
+    /** One line, shown on hover. */
+    reason: string;
+    /** Item ids of up to two runners-up, shown in the select's Suggested group. */
+    alternatives: string[];
+};
+
+export type SuggestedChartTypeFields = {
+    suggestions: SuggestedChartTypeField[];
+};
+
+export type ApiAiSuggestChartTypeFieldsResponse = {
+    status: 'ok';
+    results: SuggestedChartTypeFields;
+};
+
+/** Chart Studio: which table fits a chart type, before any preview data is attached. */
+export type SuggestChartTypeExploreRequest = {
+    prompt: string;
+    clarifications: string[];
+    fields: DataAppVizField[];
+};
+
+export type SuggestedChartTypeExplore = {
+    exploreName: string;
+    /** One line: what the table has, what the chart wants. */
+    reason: string;
+};
+
+export type SuggestedChartTypeExploreResult = {
+    suggestion: SuggestedChartTypeExplore | null;
+};
+
+export type ApiAiSuggestChartTypeExploreResponse = {
+    status: 'ok';
+    results: SuggestedChartTypeExploreResult;
 };

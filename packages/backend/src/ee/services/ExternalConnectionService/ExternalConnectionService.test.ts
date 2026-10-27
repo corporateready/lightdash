@@ -1,0 +1,1498 @@
+import { Ability } from '@casl/ability';
+import {
+    ForbiddenError,
+    MissingConfigError,
+    NotFoundError,
+    ParameterError,
+    ProjectType,
+    type ExternalConnection,
+    type ExternalConnectionConfigProposal,
+    type ExternalConnectionListItem,
+    type ExternalConnectionSample,
+    type ExternalFetchResponse,
+    type PossibleAbilities,
+    type RegisteredAccount,
+} from '@lightdash/common';
+import { SecureFetchError } from '../../../utils/secureFetch/secureFetch';
+import { generateExternalConnectionConfigProposal } from '../ai/agents/externalConnectionConfigGenerator';
+import { getModel } from '../ai/models';
+import { ExternalConnectionService } from './ExternalConnectionService';
+
+vi.mock('../ai/models', () => ({
+    getModel: vi.fn().mockReturnValue({
+        model: { modelId: 'claude-sonnet-4-5', provider: 'anthropic' },
+        callOptions: {},
+        providerOptions: undefined,
+        keyManagement: 'lightdash-managed',
+    }),
+}));
+
+vi.mock('../ai/agents/externalConnectionConfigGenerator', () => ({
+    generateExternalConnectionConfigProposal: vi.fn(),
+}));
+
+// -------------------------------------------------------------------
+// Shared fixtures
+// -------------------------------------------------------------------
+const projectUuid = 'project-uuid-1';
+const connectionUuid = 'conn-uuid-1';
+const orgUuid = 'org-uuid-1';
+const sampleUuid = 'sample-uuid-1';
+
+const connection: ExternalConnection = {
+    externalConnectionUuid: connectionUuid,
+    projectUuid,
+    organizationUuid: orgUuid,
+    name: 'Test API',
+    slug: 'test-api',
+    type: 'bearer_token',
+    origin: 'https://api.example.com',
+    allowBrowserImages: false,
+    allowDataAppBuilderLinking: true,
+    instructions: null,
+    allowedPathPrefixes: ['/v1/'],
+    allowedMethods: ['GET', 'POST'],
+    allowedContentTypes: ['application/json'],
+    responseMaxBytes: 1_000_000,
+    requestMaxBytes: 262_144,
+    timeoutMs: 10_000,
+    rateLimitPerMinute: null,
+    apiKeyName: null,
+    apiKeyLocation: null,
+    oauthScopes: null,
+    customHeaders: null,
+    hasSecret: true,
+    createdByUserUuid: 'user-1',
+    updatedByUserUuid: 'user-1',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-01T00:00:00Z'),
+};
+
+const listedConnection: ExternalConnectionListItem = {
+    ...connection,
+    linkedDataAppCount: 2,
+    linkedChartTypeCount: 0,
+};
+
+const sampleRequest = {
+    method: 'GET' as const,
+    path: '/v1/weather',
+    query: { city: 'Berlin' },
+};
+
+const sampleResponse = { temp: 21, city: 'Berlin' };
+
+const fakeSample: ExternalConnectionSample = {
+    sampleUuid,
+    externalConnectionUuid: connectionUuid,
+    label: 'Berlin weather',
+    request: sampleRequest,
+    response: sampleResponse,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+};
+
+const fetchResponse: ExternalFetchResponse = {
+    status: 200,
+    contentType: 'application/json',
+    headers: {},
+    body: { temp: 21 },
+    truncated: false,
+};
+
+// A minimal RegisteredAccount with admin abilities
+const makeAccount = (_canManage: boolean): RegisteredAccount => {
+    const account = {
+        user: { id: 'user-1', userUuid: 'user-1' },
+        organization: { organizationUuid: orgUuid },
+    } as unknown as RegisteredAccount;
+    return account;
+};
+
+function buildService(opts: {
+    connection?: ExternalConnection | null;
+    secret?: string | null;
+    updateFn?: import('vitest').Mock;
+    saveSampleFn?: import('vitest').Mock;
+    countSamplesFn?: import('vitest').Mock;
+    listSamplesFn?: import('vitest').Mock;
+    deleteSampleFn?: import('vitest').Mock;
+    getSampleConnectionUuidFn?: import('vitest').Mock;
+    linkToAppFn?: import('vitest').Mock;
+    findAppFn?: import('vitest').Mock;
+    getCopilotConfigFn?: import('vitest').Mock;
+    connections?: ExternalConnectionListItem[];
+    listLinkedAppsFn?: import('vitest').Mock;
+}) {
+    const model = {
+        findByUuid: vi
+            .fn()
+            .mockResolvedValue(
+                opts.connection !== undefined ? opts.connection : connection,
+            ),
+        getProjectOrganizationUuid: vi.fn().mockResolvedValue(orgUuid),
+        findProjectAbilityContext: vi.fn().mockResolvedValue({
+            organizationUuid: orgUuid,
+            projectType: ProjectType.DEFAULT,
+            projectCreatedByUserUuid: null,
+            upstreamProjectUuid: null,
+        }),
+        list: vi.fn().mockResolvedValue(opts.connections ?? [listedConnection]),
+        listLinkedApps:
+            opts.listLinkedAppsFn ??
+            vi.fn().mockResolvedValue({ items: [], total: 0 }),
+        getDecryptedSecret: vi.fn().mockResolvedValue(opts.secret ?? 's3cr3t'),
+        update:
+            opts.updateFn ??
+            vi
+                .fn()
+                .mockImplementation((_uuid, _user, data) =>
+                    Promise.resolve({ ...connection, ...data }),
+                ),
+        saveSample: opts.saveSampleFn ?? vi.fn().mockResolvedValue(fakeSample),
+        countSamples: opts.countSamplesFn ?? vi.fn().mockResolvedValue(0),
+        listSamples:
+            opts.listSamplesFn ?? vi.fn().mockResolvedValue([fakeSample]),
+        deleteSample:
+            opts.deleteSampleFn ?? vi.fn().mockResolvedValue(undefined),
+        getSampleConnectionUuid:
+            opts.getSampleConnectionUuidFn ??
+            vi.fn().mockResolvedValue(connectionUuid),
+        linkToApp: opts.linkToAppFn ?? vi.fn().mockResolvedValue(undefined),
+        findApp:
+            opts.findAppFn ??
+            vi.fn().mockResolvedValue({
+                app_id: 'app-1',
+                project_uuid: projectUuid,
+                space_uuid: null,
+                created_by_user_uuid: 'user-1',
+                organization_uuid: orgUuid,
+            }),
+    };
+    const orgAiCopilotConfigResolver = {
+        getCopilotConfig:
+            opts.getCopilotConfigFn ??
+            vi.fn().mockResolvedValue({
+                defaultProvider: 'anthropic',
+                providers: {},
+            }),
+    };
+    const service = new ExternalConnectionService({
+        allowedPrivateHostCidrs: {},
+        externalConnectionModel: model as never,
+        appModel: {} as never,
+        appGenerateService: {} as never,
+        embedService: {} as never,
+        spacePermissionService: {
+            resolveAccess: vi.fn().mockResolvedValue({
+                organizationUuid: orgUuid,
+                projectUuid,
+                inheritsFromOrgOrProject: false,
+                access: [],
+                admins: [],
+                directOnly: false,
+            }),
+        } as never,
+        analytics: { track: vi.fn() } as never,
+        googleTokenProvider: {
+            getAccessToken: vi.fn().mockResolvedValue('test-access-token'),
+        } as never,
+        oauthClientCredentialsTokenProvider: {
+            getAccessToken: vi.fn().mockResolvedValue('test-oauth-token'),
+            invalidateAccessToken: vi.fn(),
+        } as never,
+        orgAiCopilotConfigResolver: orgAiCopilotConfigResolver as never,
+    });
+    return { service, model, orgAiCopilotConfigResolver };
+}
+
+// Spy on createAuditedAbility to control the CASL decision
+function mockAbility(
+    service: ExternalConnectionService,
+    canManage: boolean,
+): void {
+    vi.spyOn(
+        service as unknown as { createAuditedAbility: () => unknown },
+        'createAuditedAbility',
+    ).mockReturnValue({
+        can: () => canManage,
+        cannot: () => !canManage,
+    });
+}
+
+// Action-aware ability: only the listed actions are allowed. Lets us assert
+// that reads gate on `view` while mutations still gate on `manage`.
+function mockAbilityByActions(
+    service: ExternalConnectionService,
+    allowedActions: string[],
+): void {
+    const allowed = new Set(allowedActions);
+    vi.spyOn(
+        service as unknown as { createAuditedAbility: () => unknown },
+        'createAuditedAbility',
+    ).mockReturnValue({
+        can: (action: string) => allowed.has(action),
+        cannot: (action: string) => !allowed.has(action),
+    });
+}
+
+function mockBuilderAbility(service: ExternalConnectionService): void {
+    const ability = new Ability<PossibleAbilities>([
+        {
+            action: 'manage',
+            subject: 'DataApp',
+            conditions: { projectUuid },
+        },
+        {
+            action: 'view',
+            subject: 'ExternalConnection',
+            conditions: {
+                projectUuid,
+                allowDataAppBuilderLinking: true,
+            },
+        },
+    ]);
+    vi.spyOn(
+        service as unknown as { createAuditedAbility: () => unknown },
+        'createAuditedAbility',
+    ).mockReturnValue(ability);
+}
+
+function mockAdminAbility(service: ExternalConnectionService): void {
+    const ability = new Ability<PossibleAbilities>([
+        {
+            action: 'manage',
+            subject: 'DataApp',
+            conditions: { projectUuid },
+        },
+        {
+            action: 'manage',
+            subject: 'ExternalConnection',
+            conditions: { projectUuid },
+        },
+    ]);
+    vi.spyOn(
+        service as unknown as { createAuditedAbility: () => unknown },
+        'createAuditedAbility',
+    ).mockReturnValue(ability);
+}
+
+const adminAccount = makeAccount(true);
+const viewerAccount = makeAccount(false);
+
+// -------------------------------------------------------------------
+// list / get — reads gate on `view`, not `manage`
+// -------------------------------------------------------------------
+describe('ExternalConnectionService reads (view, not manage)', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('lists connections for a view-only principal (no manage)', async () => {
+        const { service, model } = buildService({});
+        mockAbilityByActions(service, ['view']);
+
+        const result = await service.list(viewerAccount, projectUuid);
+
+        expect(result).toEqual([listedConnection]);
+        expect(model.list).toHaveBeenCalledWith(projectUuid, orgUuid);
+    });
+
+    it('only lists connections enabled for builder linking to a builder', async () => {
+        const privateConnection = {
+            ...connection,
+            externalConnectionUuid: 'private-connection',
+            allowDataAppBuilderLinking: false,
+            linkedDataAppCount: 1,
+            linkedChartTypeCount: 0,
+        };
+        const { service } = buildService({
+            connections: [listedConnection, privateConnection],
+        });
+        mockBuilderAbility(service);
+
+        await expect(service.list(viewerAccount, projectUuid)).resolves.toEqual(
+            [listedConnection],
+        );
+    });
+
+    it('lists builder-enabled and admin-only connections to an admin', async () => {
+        const privateConnection = {
+            ...connection,
+            externalConnectionUuid: 'private-connection',
+            allowDataAppBuilderLinking: false,
+            linkedDataAppCount: 1,
+            linkedChartTypeCount: 0,
+        };
+        const { service } = buildService({
+            connections: [listedConnection, privateConnection],
+        });
+        mockAdminAbility(service);
+
+        await expect(service.list(adminAccount, projectUuid)).resolves.toEqual([
+            listedConnection,
+            privateConnection,
+        ]);
+    });
+
+    it('gets a connection for a view-only principal (no manage)', async () => {
+        const { service } = buildService({});
+        mockAbilityByActions(service, ['view']);
+
+        const result = await service.get(
+            viewerAccount,
+            projectUuid,
+            connectionUuid,
+        );
+
+        expect(result).toEqual(connection);
+    });
+
+    it('rejects a direct read of an admin-only connection by a builder', async () => {
+        const { service } = buildService({
+            connection: {
+                ...connection,
+                allowDataAppBuilderLinking: false,
+            },
+        });
+        mockBuilderAbility(service);
+
+        await expect(
+            service.get(viewerAccount, projectUuid, connectionUuid),
+        ).rejects.toThrow(ForbiddenError);
+    });
+
+    it('rejects list when the principal cannot view', async () => {
+        const { service, model } = buildService({});
+        mockAbilityByActions(service, []);
+
+        await expect(service.list(viewerAccount, projectUuid)).rejects.toThrow(
+            ForbiddenError,
+        );
+        expect(model.list).not.toHaveBeenCalled();
+    });
+
+    it('still requires manage to create — view alone is rejected', async () => {
+        const { service } = buildService({});
+        mockAbilityByActions(service, ['view']);
+
+        await expect(
+            service.create(viewerAccount, projectUuid, {
+                name: 'API',
+                type: 'none',
+                origin: 'https://api.example.com',
+                allowedPathPrefixes: ['/'],
+                allowedMethods: ['GET'],
+                allowedContentTypes: ['application/json'],
+                responseMaxBytes: 1000,
+                secret: null,
+            }),
+        ).rejects.toThrow(ForbiddenError);
+    });
+});
+
+describe('ExternalConnectionService linked app usage', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('returns linked apps to an external connection manager', async () => {
+        const linkedApps = {
+            items: [
+                {
+                    appUuid: 'app-1',
+                    name: 'Revenue dashboard',
+                    slug: 'revenue-dashboard',
+                    kind: 'data_app' as const,
+                    spaceUuid: null,
+                    spaceName: null,
+                    aliases: ['acme'],
+                },
+            ],
+            total: 1,
+        };
+        const listLinkedAppsFn = vi.fn().mockResolvedValue(linkedApps);
+        const { service } = buildService({ listLinkedAppsFn });
+        mockAbilityByActions(service, ['manage']);
+
+        await expect(
+            service.listLinkedApps(adminAccount, projectUuid, connectionUuid),
+        ).resolves.toEqual(linkedApps);
+        expect(listLinkedAppsFn).toHaveBeenCalledWith(connectionUuid);
+    });
+
+    it('does not expose linked app identities to a view-only builder', async () => {
+        const listLinkedAppsFn = vi.fn();
+        const { service } = buildService({ listLinkedAppsFn });
+        mockAbilityByActions(service, ['view']);
+
+        await expect(
+            service.listLinkedApps(viewerAccount, projectUuid, connectionUuid),
+        ).rejects.toThrow(ForbiddenError);
+        expect(listLinkedAppsFn).not.toHaveBeenCalled();
+    });
+});
+
+// -------------------------------------------------------------------
+// update — auth type switches must not carry the old secret/fields across
+// -------------------------------------------------------------------
+describe('ExternalConnectionService.update type switches', () => {
+    const googleConnection: ExternalConnection = {
+        ...connection,
+        type: 'google_service_account',
+        oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+        apiKeyName: null,
+        apiKeyLocation: null,
+        hasSecret: true,
+    };
+    const apiKeyConnection: ExternalConnection = {
+        ...connection,
+        type: 'api_key',
+        apiKeyName: 'X-Api-Key',
+        apiKeyLocation: 'header',
+        oauthScopes: null,
+        hasSecret: true,
+    };
+    const oauthConnection: ExternalConnection = {
+        ...connection,
+        type: 'oauth_client_credentials',
+        oauthScopes: ['read:data'],
+        oauthTokenUrl: 'https://auth.example.com/oauth/token',
+        oauthClientId: 'client-1',
+        oauthClientAuthMethod: 'basic',
+        apiKeyName: null,
+        apiKeyLocation: null,
+        hasSecret: true,
+    };
+    const keyfile = JSON.stringify({
+        type: 'service_account',
+        client_email: 'sa@proj.iam.gserviceaccount.com',
+        private_key:
+            '-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n',
+    });
+
+    it('rejects switching google → bearer_token with a blank secret (no key reuse/leak)', async () => {
+        const { service, model } = buildService({
+            connection: googleConnection,
+        });
+        mockAbility(service, true);
+        await expect(
+            service.update(adminAccount, projectUuid, connectionUuid, {
+                type: 'bearer_token',
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(model.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects switching bearer_token → google without a keyfile', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+        await expect(
+            service.update(adminAccount, projectUuid, connectionUuid, {
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(model.update).not.toHaveBeenCalled();
+    });
+
+    it('clears oauthScopes when switching google → bearer_token with a new secret', async () => {
+        const { service, model } = buildService({
+            connection: googleConnection,
+        });
+        mockAbility(service, true);
+        await service.update(adminAccount, projectUuid, connectionUuid, {
+            type: 'bearer_token',
+            secret: 'new-token',
+        });
+        expect(model.update).toHaveBeenCalledWith(
+            connectionUuid,
+            expect.anything(),
+            expect.objectContaining({
+                oauthScopes: null,
+                apiKeyName: null,
+                apiKeyLocation: null,
+            }),
+        );
+    });
+
+    it('clears api-key fields when switching api_key → google with a keyfile + scopes', async () => {
+        const { service, model } = buildService({
+            connection: apiKeyConnection,
+        });
+        mockAbility(service, true);
+        await service.update(adminAccount, projectUuid, connectionUuid, {
+            type: 'google_service_account',
+            secret: keyfile,
+            oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+        });
+        expect(model.update).toHaveBeenCalledWith(
+            connectionUuid,
+            expect.anything(),
+            expect.objectContaining({
+                apiKeyName: null,
+                apiKeyLocation: null,
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+        );
+    });
+
+    it('rejects changing the origin without a new secret', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+
+        await expect(
+            service.update(adminAccount, projectUuid, connectionUuid, {
+                origin: 'https://attacker.example.com',
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(model.update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        {
+            field: 'token URL',
+            patch: {
+                oauthTokenUrl: 'https://other.example.com/oauth/token',
+            },
+        },
+        { field: 'client ID', patch: { oauthClientId: 'client-2' } },
+    ])(
+        'rejects changing the OAuth $field without a new secret',
+        async ({ patch }) => {
+            const { service, model } = buildService({
+                connection: oauthConnection,
+            });
+            mockAbility(service, true);
+
+            await expect(
+                service.update(
+                    adminAccount,
+                    projectUuid,
+                    connectionUuid,
+                    patch,
+                ),
+            ).rejects.toThrow(ParameterError);
+            expect(model.update).not.toHaveBeenCalled();
+        },
+    );
+
+    it('keeps the OAuth secret when scopes or auth method change', async () => {
+        const { service, model } = buildService({
+            connection: oauthConnection,
+        });
+        mockAbility(service, true);
+
+        await service.update(adminAccount, projectUuid, connectionUuid, {
+            oauthScopes: ['read:other'],
+            oauthClientAuthMethod: 'body',
+        });
+
+        expect(model.update).toHaveBeenCalledWith(
+            connectionUuid,
+            expect.anything(),
+            expect.objectContaining({
+                oauthScopes: ['read:other'],
+                oauthClientAuthMethod: 'body',
+            }),
+        );
+    });
+
+    it('keeps the stored secret for a normalized-equivalent origin', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+
+        await service.update(adminAccount, projectUuid, connectionUuid, {
+            origin: 'https://API.EXAMPLE.COM./',
+        });
+
+        expect(model.update).toHaveBeenCalled();
+    });
+});
+
+// -------------------------------------------------------------------
+// testConnection
+// -------------------------------------------------------------------
+describe('ExternalConnectionService.testConnection', () => {
+    let executeSpy: import('vitest').MockInstance;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('rejects a non-admin account with ForbiddenError', async () => {
+        const { service } = buildService({});
+        mockAbility(service, false);
+
+        await expect(
+            service.testConnection(viewerAccount, projectUuid, connectionUuid, {
+                method: 'GET',
+                path: '/v1/current',
+            }),
+        ).rejects.toThrow(ForbiddenError);
+    });
+
+    it('reuses executeExternalFetch with the decrypted secret and the request', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+
+        executeSpy = vi
+            .spyOn(
+                service as unknown as {
+                    executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+                },
+                'executeExternalFetch',
+            )
+            .mockResolvedValue({
+                response: fetchResponse,
+                requestBytes: 0,
+                responseBytes: 0,
+            });
+
+        const result = await service.testConnection(
+            adminAccount,
+            projectUuid,
+            connectionUuid,
+            { method: 'GET', path: '/v1/current', query: { city: 'Berlin' } },
+        );
+
+        expect(model.getDecryptedSecret).toHaveBeenCalledWith(connectionUuid);
+        expect(executeSpy).toHaveBeenCalledWith(
+            connection,
+            's3cr3t',
+            {
+                method: 'GET',
+                path: '/v1/current',
+                query: { city: 'Berlin' },
+                body: undefined,
+            },
+            { account: adminAccount, appUuid: null },
+        );
+        expect(result).toEqual(fetchResponse);
+    });
+
+    it('tests unsaved policy changes with the stored secret without persisting them', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+
+        executeSpy = vi
+            .spyOn(
+                service as unknown as {
+                    executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+                },
+                'executeExternalFetch',
+            )
+            .mockResolvedValue({
+                response: fetchResponse,
+                requestBytes: 0,
+                responseBytes: 0,
+            });
+
+        await service.testConnection(
+            adminAccount,
+            projectUuid,
+            connectionUuid,
+            {
+                method: 'POST',
+                path: '/v2/items',
+                config: {
+                    allowedMethods: ['POST'],
+                    allowedPathPrefixes: ['/v2/'],
+                    customHeaders: { 'x-api-version': '2' },
+                },
+            },
+        );
+
+        expect(model.getDecryptedSecret).toHaveBeenCalledWith(connectionUuid);
+        expect(model.update).not.toHaveBeenCalled();
+        expect(executeSpy).toHaveBeenCalledWith(
+            expect.objectContaining({
+                allowedMethods: ['POST'],
+                allowedPathPrefixes: ['/v2/'],
+                customHeaders: { 'x-api-version': '2' },
+            }),
+            's3cr3t',
+            expect.objectContaining({ method: 'POST', path: '/v2/items' }),
+            { account: adminAccount, appUuid: null },
+        );
+    });
+
+    it('rejects testing an unsaved origin with the old stored secret', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+        const executeExternalFetchSpy = vi.spyOn(
+            service as unknown as {
+                executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+            },
+            'executeExternalFetch',
+        );
+
+        await expect(
+            service.testConnection(adminAccount, projectUuid, connectionUuid, {
+                method: 'GET',
+                path: '/v1/current',
+                config: { origin: 'https://other.example.com' },
+            }),
+        ).rejects.toThrow('type "bearer_token" requires a secret');
+
+        expect(model.getDecryptedSecret).not.toHaveBeenCalled();
+        expect(executeExternalFetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('uses a replacement secret when testing an unsaved origin', async () => {
+        const { service, model } = buildService({});
+        mockAbility(service, true);
+
+        executeSpy = vi
+            .spyOn(
+                service as unknown as {
+                    executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+                },
+                'executeExternalFetch',
+            )
+            .mockResolvedValue({
+                response: fetchResponse,
+                requestBytes: 0,
+                responseBytes: 0,
+            });
+
+        await service.testConnection(
+            adminAccount,
+            projectUuid,
+            connectionUuid,
+            {
+                method: 'GET',
+                path: '/v1/current',
+                config: {
+                    origin: 'https://other.example.com',
+                    secret: 'replacement-secret',
+                },
+            },
+        );
+
+        expect(model.getDecryptedSecret).not.toHaveBeenCalled();
+        expect(executeSpy).toHaveBeenCalledWith(
+            expect.objectContaining({ origin: 'https://other.example.com' }),
+            'replacement-secret',
+            expect.objectContaining({ method: 'GET', path: '/v1/current' }),
+            { account: adminAccount, appUuid: null },
+        );
+    });
+
+    it('defaults method to GET when omitted', async () => {
+        const { service } = buildService({});
+        mockAbility(service, true);
+
+        executeSpy = vi
+            .spyOn(
+                service as unknown as {
+                    executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+                },
+                'executeExternalFetch',
+            )
+            .mockResolvedValue({
+                response: fetchResponse,
+                requestBytes: 0,
+                responseBytes: 0,
+            });
+
+        await service.testConnection(
+            adminAccount,
+            projectUuid,
+            connectionUuid,
+            {
+                path: '/v1/current',
+            },
+        );
+
+        expect(executeSpy).toHaveBeenCalledWith(
+            connection,
+            's3cr3t',
+            expect.objectContaining({ method: 'GET', path: '/v1/current' }),
+            { account: adminAccount, appUuid: null },
+        );
+    });
+
+    it('rejects a method not in the connection allowlist without fetching', async () => {
+        const { service, model } = buildService({
+            connection: { ...connection, allowedMethods: ['POST'] },
+        });
+        mockAbility(service, true);
+
+        const executeExternalFetchSpy = vi.spyOn(
+            service as unknown as {
+                executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+            },
+            'executeExternalFetch',
+        );
+
+        await expect(
+            service.testConnection(adminAccount, projectUuid, connectionUuid, {
+                method: 'GET',
+                path: '/v1/current',
+            }),
+        ).rejects.toThrow(ParameterError);
+
+        expect(executeExternalFetchSpy).not.toHaveBeenCalled();
+        expect(model.getDecryptedSecret).not.toHaveBeenCalled();
+    });
+
+    it('forwards the blocked reason detail to the admin', async () => {
+        const { service } = buildService({});
+        mockAbility(service, true);
+
+        vi.spyOn(
+            service as unknown as {
+                executeExternalFetch: (...a: unknown[]) => Promise<unknown>;
+            },
+            'executeExternalFetch',
+        ).mockRejectedValue(
+            new SecureFetchError(
+                'disallowed_content_type',
+                'Disallowed content-type: text/html',
+            ),
+        );
+
+        await expect(
+            service.testConnection(adminAccount, projectUuid, connectionUuid, {
+                method: 'GET',
+                path: '/v1/current',
+            }),
+        ).rejects.toThrow(
+            'Upstream request was blocked (disallowed_content_type): Disallowed content-type: text/html',
+        );
+    });
+
+    it('throws NotFoundError for a connection in a different project', async () => {
+        const { service } = buildService({
+            connection: { ...connection, projectUuid: 'other-project' },
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.testConnection(adminAccount, projectUuid, connectionUuid, {
+                method: 'GET',
+                path: '/v1/current',
+            }),
+        ).rejects.toThrow(NotFoundError);
+    });
+
+    it('throws NotFoundError when the connection does not exist', async () => {
+        const { service } = buildService({ connection: null });
+        mockAbility(service, true);
+
+        await expect(
+            service.testConnection(adminAccount, projectUuid, connectionUuid, {
+                method: 'GET',
+                path: '/v1/current',
+            }),
+        ).rejects.toThrow(NotFoundError);
+    });
+});
+
+// -------------------------------------------------------------------
+// saveSample
+// -------------------------------------------------------------------
+describe('ExternalConnectionService.saveSample', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('rejects a non-admin account with ForbiddenError', async () => {
+        const saveSampleFn = vi.fn();
+        const { service } = buildService({ saveSampleFn });
+        mockAbility(service, false);
+
+        await expect(
+            service.saveSample(viewerAccount, projectUuid, connectionUuid, {
+                request: sampleRequest,
+                response: { temp: 21 },
+            }),
+        ).rejects.toThrow(ForbiddenError);
+        expect(saveSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundError for a cross-project connection', async () => {
+        const saveSampleFn = vi.fn();
+        const { service } = buildService({
+            connection: { ...connection, projectUuid: 'other-project' },
+            saveSampleFn,
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.saveSample(adminAccount, projectUuid, connectionUuid, {
+                request: sampleRequest,
+                response: {},
+            }),
+        ).rejects.toThrow(NotFoundError);
+        expect(saveSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('persists the sanitized sample and returns the saved sample', async () => {
+        const saveSampleFn = vi.fn().mockResolvedValue(fakeSample);
+        const { service } = buildService({ saveSampleFn });
+        mockAbility(service, true);
+
+        const result = await service.saveSample(
+            adminAccount,
+            projectUuid,
+            connectionUuid,
+            {
+                label: 'Berlin weather',
+                request: sampleRequest,
+                response: sampleResponse,
+            },
+        );
+
+        expect(result).toEqual(fakeSample);
+        // Model receives (connectionUuid, userUuid, { label, request, response })
+        expect(saveSampleFn).toHaveBeenCalledWith(
+            connectionUuid,
+            'user-1',
+            expect.objectContaining({
+                label: 'Berlin weather',
+                request: sampleRequest,
+                response: sampleResponse,
+            }),
+        );
+    });
+
+    it('truncates a response larger than the byte cap before persisting', async () => {
+        const saveSampleFn = vi.fn().mockResolvedValue(fakeSample);
+        const { service } = buildService({ saveSampleFn });
+        mockAbility(service, true);
+
+        const huge = { blob: 'x'.repeat(200 * 1024) }; // ~200 KB
+        await service.saveSample(adminAccount, projectUuid, connectionUuid, {
+            request: sampleRequest,
+            response: huge,
+        });
+
+        const persistedResponse = saveSampleFn.mock.calls[0][2].response;
+        const persistedBytes = Buffer.byteLength(
+            JSON.stringify(persistedResponse),
+        );
+        expect(persistedBytes).toBeLessThanOrEqual(
+            ExternalConnectionService.MAX_SAMPLE_BYTES,
+        );
+    });
+
+    it('truncates a long array of rows in the response to the row cap', async () => {
+        const saveSampleFn = vi.fn().mockResolvedValue(fakeSample);
+        const { service } = buildService({ saveSampleFn });
+        mockAbility(service, true);
+
+        const rows = Array.from({ length: 500 }, (_, i) => ({ id: i }));
+        await service.saveSample(adminAccount, projectUuid, connectionUuid, {
+            request: sampleRequest,
+            response: rows,
+        });
+
+        const persistedResponse = saveSampleFn.mock.calls[0][2].response;
+        expect(Array.isArray(persistedResponse)).toBe(true);
+        expect((persistedResponse as unknown[]).length).toBeLessThanOrEqual(
+            ExternalConnectionService.MAX_SAMPLE_ROWS,
+        );
+    });
+
+    it('never persists the decrypted secret even if the response body echoes it', async () => {
+        const saveSampleFn = vi.fn().mockResolvedValue(fakeSample);
+        const { service, model } = buildService({
+            saveSampleFn,
+            secret: 'SENTINEL_SECRET_abc123',
+        });
+        mockAbility(service, true);
+
+        await service.saveSample(adminAccount, projectUuid, connectionUuid, {
+            request: sampleRequest,
+            response: {
+                note: 'some data',
+                data_value: 'SENTINEL_SECRET_abc123',
+                authorization: `Bearer SENTINEL_SECRET_abc123`,
+            },
+        });
+
+        const persistedResponse = saveSampleFn.mock.calls[0][2].response;
+        const persistedJson = JSON.stringify(persistedResponse);
+        // The 'authorization' key is in the redact list; its value must be replaced.
+        expect(persistedJson).not.toContain('Bearer SENTINEL_SECRET_abc123');
+        expect(persistedJson).toContain('[redacted]');
+        // saveSample must never call getDecryptedSecret — it never reads the secret.
+        expect(model.getDecryptedSecret).not.toHaveBeenCalled();
+    });
+
+    it('does not call getDecryptedSecret — saveSample never reads the connection secret', async () => {
+        const saveSampleFn = vi.fn().mockResolvedValue(fakeSample);
+        const { service, model } = buildService({ saveSampleFn });
+        mockAbility(service, true);
+
+        await service.saveSample(adminAccount, projectUuid, connectionUuid, {
+            request: sampleRequest,
+            response: { ok: true },
+        });
+
+        expect(model.getDecryptedSecret).not.toHaveBeenCalled();
+    });
+
+    it('rejects a sample whose request method is not allowed by the connection', async () => {
+        const saveSampleFn = vi.fn();
+        const { service } = buildService({
+            connection: { ...connection, allowedMethods: ['GET'] },
+            saveSampleFn,
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.saveSample(adminAccount, projectUuid, connectionUuid, {
+                request: { method: 'POST', path: '/v1/weather' },
+                response: {},
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(saveSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('rejects a sample whose request path is outside the allowed prefixes', async () => {
+        const saveSampleFn = vi.fn();
+        const { service } = buildService({ saveSampleFn });
+        mockAbility(service, true);
+
+        await expect(
+            service.saveSample(adminAccount, projectUuid, connectionUuid, {
+                request: { method: 'GET', path: '/admin/secrets' },
+                response: {},
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(saveSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('rejects saving once the connection is at the sample cap', async () => {
+        const saveSampleFn = vi.fn();
+        const { service } = buildService({
+            saveSampleFn,
+            countSamplesFn: vi
+                .fn()
+                .mockResolvedValue(
+                    ExternalConnectionService.MAX_SAMPLES_PER_CONNECTION,
+                ),
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.saveSample(adminAccount, projectUuid, connectionUuid, {
+                request: sampleRequest,
+                response: {},
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(saveSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('redacts secret-ish keys from the request query/body before persisting', async () => {
+        const saveSampleFn = vi.fn().mockResolvedValue(fakeSample);
+        const { service } = buildService({ saveSampleFn });
+        mockAbility(service, true);
+
+        await service.saveSample(adminAccount, projectUuid, connectionUuid, {
+            request: {
+                method: 'POST',
+                path: '/v1/weather',
+                query: { token: 'sekret', city: 'Berlin' },
+                body: { password: 'hunter2', keep: 'me' },
+            },
+            response: {},
+        });
+
+        const persistedRequest = saveSampleFn.mock.calls[0][2].request;
+        expect(persistedRequest.query.token).toBe('[redacted]');
+        expect(persistedRequest.query.city).toBe('Berlin');
+        expect(persistedRequest.body.password).toBe('[redacted]');
+        expect(persistedRequest.body.keep).toBe('me');
+    });
+});
+
+// -------------------------------------------------------------------
+// listSamples
+// -------------------------------------------------------------------
+describe('ExternalConnectionService.listSamples', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('rejects a non-admin with ForbiddenError', async () => {
+        const listSamplesFn = vi.fn();
+        const { service } = buildService({ listSamplesFn });
+        mockAbility(service, false);
+
+        await expect(
+            service.listSamples(viewerAccount, projectUuid, connectionUuid),
+        ).rejects.toThrow(ForbiddenError);
+        expect(listSamplesFn).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundError for a cross-project connection', async () => {
+        const listSamplesFn = vi.fn();
+        const { service } = buildService({
+            connection: { ...connection, projectUuid: 'other-project' },
+            listSamplesFn,
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.listSamples(adminAccount, projectUuid, connectionUuid),
+        ).rejects.toThrow(NotFoundError);
+        expect(listSamplesFn).not.toHaveBeenCalled();
+    });
+
+    it('returns samples for an admin on the right project', async () => {
+        const listSamplesFn = vi.fn().mockResolvedValue([fakeSample]);
+        const { service } = buildService({ listSamplesFn });
+        mockAbility(service, true);
+
+        const result = await service.listSamples(
+            adminAccount,
+            projectUuid,
+            connectionUuid,
+        );
+
+        expect(result).toEqual([fakeSample]);
+        expect(listSamplesFn).toHaveBeenCalledWith(connectionUuid);
+    });
+});
+
+// -------------------------------------------------------------------
+// deleteSample
+// -------------------------------------------------------------------
+describe('ExternalConnectionService.deleteSample', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('rejects a non-admin with ForbiddenError', async () => {
+        const deleteSampleFn = vi.fn();
+        const { service } = buildService({ deleteSampleFn });
+        mockAbility(service, false);
+
+        await expect(
+            service.deleteSample(
+                viewerAccount,
+                projectUuid,
+                connectionUuid,
+                sampleUuid,
+            ),
+        ).rejects.toThrow(ForbiddenError);
+        expect(deleteSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundError for a cross-project connection', async () => {
+        const deleteSampleFn = vi.fn();
+        const { service } = buildService({
+            connection: { ...connection, projectUuid: 'other-project' },
+            deleteSampleFn,
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.deleteSample(
+                adminAccount,
+                projectUuid,
+                connectionUuid,
+                sampleUuid,
+            ),
+        ).rejects.toThrow(NotFoundError);
+        expect(deleteSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundError when the sample belongs to a different connection', async () => {
+        const deleteSampleFn = vi.fn();
+        const { service } = buildService({
+            deleteSampleFn,
+            getSampleConnectionUuidFn: vi
+                .fn()
+                .mockResolvedValue('different-connection-uuid'),
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.deleteSample(
+                adminAccount,
+                projectUuid,
+                connectionUuid,
+                sampleUuid,
+            ),
+        ).rejects.toThrow(NotFoundError);
+        expect(deleteSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundError when the sample does not exist', async () => {
+        const deleteSampleFn = vi.fn();
+        const { service } = buildService({
+            deleteSampleFn,
+            getSampleConnectionUuidFn: vi.fn().mockResolvedValue(undefined),
+        });
+        mockAbility(service, true);
+
+        await expect(
+            service.deleteSample(
+                adminAccount,
+                projectUuid,
+                connectionUuid,
+                sampleUuid,
+            ),
+        ).rejects.toThrow(NotFoundError);
+        expect(deleteSampleFn).not.toHaveBeenCalled();
+    });
+
+    it('deletes the sample when the connection and sample UUID match', async () => {
+        const deleteSampleFn = vi.fn().mockResolvedValue(undefined);
+        const { service } = buildService({ deleteSampleFn });
+        mockAbility(service, true);
+
+        await expect(
+            service.deleteSample(
+                adminAccount,
+                projectUuid,
+                connectionUuid,
+                sampleUuid,
+            ),
+        ).resolves.toBeUndefined();
+
+        expect(deleteSampleFn).toHaveBeenCalledWith(sampleUuid);
+    });
+});
+
+// -------------------------------------------------------------------
+// linkToApp — alias validation
+// -------------------------------------------------------------------
+describe('ExternalConnectionService.linkToApp alias validation', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('rejects alias containing path-traversal characters (../prompt)', async () => {
+        const linkToAppFn = vi.fn();
+        const { service } = buildService({ linkToAppFn });
+        mockAbility(service, true);
+
+        await expect(
+            service.linkToApp(
+                adminAccount,
+                projectUuid,
+                'app-uuid-1',
+                connectionUuid,
+                '../prompt',
+            ),
+        ).rejects.toThrow(ParameterError);
+        expect(linkToAppFn).not.toHaveBeenCalled();
+    });
+
+    it('rejects alias containing a forward slash (a/b)', async () => {
+        const linkToAppFn = vi.fn();
+        const { service } = buildService({ linkToAppFn });
+        mockAbility(service, true);
+
+        await expect(
+            service.linkToApp(
+                adminAccount,
+                projectUuid,
+                'app-uuid-1',
+                connectionUuid,
+                'a/b',
+            ),
+        ).rejects.toThrow(ParameterError);
+        expect(linkToAppFn).not.toHaveBeenCalled();
+    });
+
+    it('rejects alias longer than 64 characters', async () => {
+        const linkToAppFn = vi.fn();
+        const { service } = buildService({ linkToAppFn });
+        mockAbility(service, true);
+
+        const longAlias = 'a'.repeat(65);
+        await expect(
+            service.linkToApp(
+                adminAccount,
+                projectUuid,
+                'app-uuid-1',
+                connectionUuid,
+                longAlias,
+            ),
+        ).rejects.toThrow(ParameterError);
+        expect(linkToAppFn).not.toHaveBeenCalled();
+    });
+
+    it('accepts a valid alias of letters, numbers, hyphens, and underscores', async () => {
+        const linkToAppFn = vi.fn().mockResolvedValue(undefined);
+        const { service } = buildService({ linkToAppFn });
+        mockAbility(service, true);
+
+        await expect(
+            service.linkToApp(
+                adminAccount,
+                projectUuid,
+                'app-uuid-1',
+                connectionUuid,
+                'my-api_v2',
+            ),
+        ).resolves.toBeUndefined();
+        expect(linkToAppFn).toHaveBeenCalled();
+    });
+
+    it('allows a builder to link an admin-enabled connection', async () => {
+        const linkToAppFn = vi.fn().mockResolvedValue(undefined);
+        const { service } = buildService({ linkToAppFn });
+        mockBuilderAbility(service);
+
+        await expect(
+            service.linkToApp(
+                viewerAccount,
+                projectUuid,
+                'app-uuid-1',
+                connectionUuid,
+                'my-api',
+            ),
+        ).resolves.toBeUndefined();
+        expect(linkToAppFn).toHaveBeenCalledWith(
+            'app-1',
+            connectionUuid,
+            'my-api',
+        );
+    });
+
+    it('rejects builder linking for an admin-only connection', async () => {
+        const linkToAppFn = vi.fn();
+        const { service } = buildService({
+            connection: {
+                ...connection,
+                allowDataAppBuilderLinking: false,
+            },
+            linkToAppFn,
+        });
+        mockBuilderAbility(service);
+
+        await expect(
+            service.linkToApp(
+                viewerAccount,
+                projectUuid,
+                'app-uuid-1',
+                connectionUuid,
+                'my-api',
+            ),
+        ).rejects.toThrow(ForbiddenError);
+        expect(linkToAppFn).not.toHaveBeenCalled();
+    });
+});
+
+// -------------------------------------------------------------------
+// proposeConfig — AI proposal for the create wizard
+// -------------------------------------------------------------------
+describe('ExternalConnectionService proposeConfig', () => {
+    const proposal: ExternalConnectionConfigProposal = {
+        name: 'Example API',
+        origin: 'https://api.example.com',
+        type: 'bearer_token',
+        allowBrowserImages: false,
+        apiKeyName: null,
+        apiKeyLocation: null,
+        oauthScopes: null,
+        customHeaders: null,
+        allowedMethods: ['GET'],
+        allowedPathPrefixes: ['/v1'],
+        instructions: null,
+        credentialGuide: '1. Get a token',
+        docsUrl: null,
+        notes: null,
+    };
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.mocked(getModel).mockReturnValue({
+            model: {
+                modelId: 'claude-sonnet-4-5',
+                provider: 'anthropic',
+            },
+            callOptions: {},
+            providerOptions: undefined,
+            keyManagement: 'lightdash-managed',
+        } as never);
+        vi.mocked(generateExternalConnectionConfigProposal).mockResolvedValue(
+            proposal,
+        );
+    });
+
+    it('rejects callers without manage permission before any AI work', async () => {
+        const { service, orgAiCopilotConfigResolver } = buildService({});
+        mockAbility(service, false);
+
+        await expect(
+            service.proposeConfig(viewerAccount, projectUuid, 'connect to X'),
+        ).rejects.toThrow(ForbiddenError);
+        expect(
+            orgAiCopilotConfigResolver.getCopilotConfig,
+        ).not.toHaveBeenCalled();
+    });
+
+    it('rejects a blank description', async () => {
+        const { service } = buildService({});
+        mockAbility(service, true);
+
+        await expect(
+            service.proposeConfig(adminAccount, projectUuid, '   '),
+        ).rejects.toThrow(ParameterError);
+    });
+
+    it('rejects an oversized description', async () => {
+        const { service } = buildService({});
+        mockAbility(service, true);
+
+        await expect(
+            service.proposeConfig(adminAccount, projectUuid, 'x'.repeat(2001)),
+        ).rejects.toThrow(ParameterError);
+    });
+
+    it('maps an unconfigured provider to MissingConfigError', async () => {
+        const { service } = buildService({});
+        mockAbility(service, true);
+        vi.mocked(getModel).mockImplementationOnce(() => {
+            throw new Error('anthropic api key is not configured');
+        });
+
+        await expect(
+            service.proposeConfig(adminAccount, projectUuid, 'connect to X'),
+        ).rejects.toThrow(MissingConfigError);
+        expect(generateExternalConnectionConfigProposal).not.toHaveBeenCalled();
+    });
+
+    it('generates from the trimmed description', async () => {
+        const { service } = buildService({});
+        mockAbility(service, true);
+
+        const result = await service.proposeConfig(
+            adminAccount,
+            projectUuid,
+            '  connect to Example  ',
+        );
+
+        expect(result).toEqual(proposal);
+        expect(generateExternalConnectionConfigProposal).toHaveBeenCalledWith(
+            expect.anything(),
+            'connect to Example',
+        );
+    });
+
+    it('pins the org-configured provider on bedrock', async () => {
+        const { service } = buildService({
+            getCopilotConfigFn: vi.fn().mockResolvedValue({
+                defaultProvider: 'bedrock',
+                providers: {},
+            }),
+        });
+        mockAbility(service, true);
+
+        await service.proposeConfig(adminAccount, projectUuid, 'connect to X');
+
+        expect(getModel).toHaveBeenCalledWith(expect.anything(), {
+            provider: 'bedrock',
+            modelName: 'claude-sonnet-4-5',
+            enableReasoning: false,
+        });
+    });
+});

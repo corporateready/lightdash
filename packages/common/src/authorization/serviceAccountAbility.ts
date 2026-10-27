@@ -1,7 +1,9 @@
-import { type AbilityBuilder } from '@casl/ability';
+import { Ability, AbilityBuilder } from '@casl/ability';
 import { ServiceAccountScope } from '../ee/serviceAccounts/types';
 import { OrganizationMemberRole } from '../types/organizationMemberProfile';
 import { ProjectType } from '../types/projects';
+import { getPermissionsFromAbilityRules } from './abilityPermissions';
+import { AGENT_DEFAULT_CAPABILITY_SUBJECTS } from './agentCapabilityScopes';
 import { applyOrganizationMemberStaticAbilities } from './organizationMemberAbility';
 import { type MemberAbility } from './types';
 
@@ -24,6 +26,9 @@ const applyServiceAccountStaticAbilities: Record<
         organizationUuid,
         builder: { can },
     }) => {
+        AGENT_DEFAULT_CAPABILITY_SUBJECTS.forEach((resource) => {
+            can('view', resource, { organizationUuid });
+        });
         can('view', 'OrganizationMemberProfile', {
             organizationUuid,
         });
@@ -38,6 +43,7 @@ const applyServiceAccountStaticAbilities: Record<
             organizationUuid,
             inheritsFromOrgOrProject: true,
         });
+        can('view', 'Document', { organizationUuid });
         can('view', 'SavedChart', {
             organizationUuid,
             inheritsFromOrgOrProject: true,
@@ -175,13 +181,22 @@ const applyServiceAccountStaticAbilities: Record<
         can('view', 'AiAgent', {
             organizationUuid,
         });
+        can('view', 'OrganizationAiAgent', {
+            organizationUuid,
+        });
         can('view', 'AiAgentDocument', {
+            organizationUuid,
+        });
+        can('view', 'AiAgentSkill', {
             organizationUuid,
         });
         can('create', 'AiAgentThread', {
             organizationUuid,
         });
         can('view', 'OrganizationDesign', {
+            organizationUuid,
+        });
+        can('view', 'ContentVerification', {
             organizationUuid,
         });
     },
@@ -195,6 +210,7 @@ const applyServiceAccountStaticAbilities: Record<
             userUuid,
             builder: { can },
         });
+        can('manage', 'Document', { organizationUuid });
         can('manage', 'Space', {
             organizationUuid,
             inheritsFromOrgOrProject: true,
@@ -221,6 +237,9 @@ const applyServiceAccountStaticAbilities: Record<
         can('manage', 'MetricsTree', {
             organizationUuid,
         });
+        can('manage', 'ExternalSource', {
+            organizationUuid,
+        });
         // CLI-driven content-as-code upload (`lightdash upload`) runs as an
         // SA with `org:edit`. Pre-Phase-C the auth middleware spoofed the
         // admin user so the call was implicitly allowed; the cutover to a
@@ -240,6 +259,12 @@ const applyServiceAccountStaticAbilities: Record<
             userUuid,
             builder: { can },
         });
+        can('view', 'Roadmap', {
+            organizationUuid,
+        });
+        can('manage', 'Roadmap', {
+            organizationUuid,
+        });
         can('manage', 'PreAggregation', {
             organizationUuid,
         });
@@ -250,6 +275,9 @@ const applyServiceAccountStaticAbilities: Record<
             organizationUuid,
         });
         can('manage', 'CustomFields', {
+            organizationUuid,
+        });
+        can('view', 'CompiledSql', {
             organizationUuid,
         });
         can('manage', 'CustomSqlTableCalculations', {
@@ -305,13 +333,22 @@ const applyServiceAccountStaticAbilities: Record<
         can('manage', 'ContentVerification', {
             organizationUuid,
         });
+        can('manage', 'VerifiedContent', {
+            organizationUuid,
+        });
         can('view', 'JobStatus', {
             organizationUuid,
         });
         can('manage', 'AiAgent', {
             organizationUuid,
         });
+        can('manage', 'OrganizationAiAgent', {
+            organizationUuid,
+        });
         can('manage', 'AiAgentDocument', {
+            organizationUuid,
+        });
+        can('manage', 'AiAgentSkill', {
             organizationUuid,
         });
         can('manage', 'AiAgentThread', {
@@ -319,6 +356,12 @@ const applyServiceAccountStaticAbilities: Record<
             //  userUuid: userUuid,
         });
         can('manage', 'DataApp', {
+            organizationUuid,
+        });
+        can('manage', 'DataAppDependency', {
+            organizationUuid,
+        });
+        can('manage', 'ExternalConnection', {
             organizationUuid,
         });
         can('manage', 'OrganizationDesign', {
@@ -349,13 +392,22 @@ const applyServiceAccountStaticAbilities: Record<
         can('manage', 'Organization', {
             organizationUuid,
         });
+        can('manage', 'OrganizationColorPalette', {
+            organizationUuid,
+        });
         can('view', 'Analytics', {
+            organizationUuid,
+        });
+        can('view', 'SystemAnalytics', {
             organizationUuid,
         });
         can('manage', 'OrganizationMemberProfile', {
             organizationUuid,
         });
         can('manage', 'PinnedItems', {
+            organizationUuid,
+        });
+        can('manage', 'ProjectHomepage', {
             organizationUuid,
         });
         can('manage', 'Group', {
@@ -365,6 +417,9 @@ const applyServiceAccountStaticAbilities: Record<
             organizationUuid,
         });
         can('manage', 'AiAgentThread', {
+            organizationUuid,
+        });
+        can('view', 'AiAgentThreadContext', {
             organizationUuid,
         });
     },
@@ -440,6 +495,26 @@ const applyServiceAccountStaticAbilities: Record<
             { can },
         );
     },
+};
+
+/**
+ * Returns the canonical action/subject footprint emitted by a legacy service
+ * account scope. Deriving this from the ability builder keeps delegation
+ * validation in lockstep with the permissions the token actually receives.
+ * Conditions are intentionally omitted: the resulting unmodified permission
+ * is conservative when compared with a caller's custom-role scopes.
+ */
+export const getServiceAccountScopePermissions = (
+    scope: ServiceAccountScope,
+): string[] => {
+    const builder = new AbilityBuilder<MemberAbility>(Ability);
+    applyServiceAccountStaticAbilities[scope]({
+        organizationUuid: 'delegation-validation-organization',
+        userUuid: 'delegation-validation-user',
+        builder,
+    });
+
+    return getPermissionsFromAbilityRules(builder.rules);
 };
 
 export const applyServiceAccountAbilities = ({

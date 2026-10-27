@@ -1,0 +1,15 @@
+.tabBadge {
+    height: 1.25rem;
+    padding-inline: 0.4375rem;
+    font-size: 0.75rem;
+    color: var(--mantine-color-ldGray-7);
+    background-color: var(--mantine-color-default-hover);
+}
+
+:global([role='tab'][data-active]) .tabBadge {
+    color: var(--mantine-color-white);
+    background-color: light-dark(
+        var(--mantine-color-ldGray-7),
+        var(--mantine-color-dark-6)
+    );
+}

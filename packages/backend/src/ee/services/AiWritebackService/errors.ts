@@ -1,0 +1,103 @@
+import {
+    AiAccessRefusedError,
+    ForbiddenError,
+    InvalidUser,
+    ParameterError,
+    PullRequestProvider,
+    UnexpectedGitError,
+} from '@lightdash/common';
+
+export type WritebackAccessReason =
+    | 'denied_repo'
+    | 'user_intersection'
+    | 'installation'
+    | 'no_org';
+
+export class WritebackAccessError extends ForbiddenError {
+    constructor(
+        readonly reason: WritebackAccessReason,
+        message: string,
+    ) {
+        super(message);
+    }
+}
+
+/** A missing Git app or project token needs provider-specific setup guidance. */
+export class WritebackGitNotConnectedError extends ForbiddenError {
+    readonly provider: PullRequestProvider | null;
+
+    constructor(
+        provider: PullRequestProvider | null = null,
+        message = 'This project is not connected to a supported Git repository',
+    ) {
+        super(message);
+        this.provider = provider;
+    }
+}
+
+/**
+ * Thrown when a resume turn targets a pull/merge request that has since been
+ * merged or closed (here or on the host). Editing it again would push onto a
+ * dead branch and silently orphan the change, so the run bails. The
+ * `editDbtProject` tool catches this (via `instanceof`) and, rather than a
+ * generic failure or a retry, guides the agent to open a fresh PR in the same
+ * thread (a thread can hold several) for any further work.
+ */
+export class WritebackThreadPrClosedError extends ParameterError {
+    readonly reason: 'merged' | 'closed';
+
+    constructor(reason: 'merged' | 'closed') {
+        super(
+            `That pull request has already been ${reason}, so it can't be updated. Tell the user this, and that to make further changes you can open a new pull request in this same thread (call editDbtProject again with startNewPullRequest: true).`,
+        );
+        this.reason = reason;
+    }
+}
+
+/**
+ * Thrown by the pre-side-effect checkpoint in runCodingAgent when the run row
+ * went terminal (cancelled via tasks/cancel, or swept to error) while the
+ * agent was working. A deliberate abort, not a failure: callers log it at
+ * info and skip Sentry, error metrics, and failure analytics.
+ */
+export class WritebackRunAbortedError extends Error {
+    readonly runStatus: string;
+
+    constructor(runStatus: string) {
+        super(
+            `Writeback run is already in terminal status '${runStatus}' — aborting before any commit, push, or pull request is made`,
+        );
+        this.name = 'WritebackRunAbortedError';
+        this.runStatus = runStatus;
+    }
+}
+
+/** A sandbox with unremoved Git credentials must never be resumed. */
+export class WritebackCredentialCleanupError extends UnexpectedGitError {
+    constructor() {
+        super('Could not clear Bitbucket sandbox credentials');
+    }
+}
+
+export const WRITEBACK_AGENT_ACCESS_REFUSED_MESSAGE =
+    'Agent access changed. This task stopped. Ask an admin to review agent access.';
+
+export const WRITEBACK_AGENT_ACCESS_CHECK_FAILED_MESSAGE =
+    'The access check could not run. This task stopped.';
+
+export class WritebackAgentAccessError extends Error {
+    readonly isRefusal: boolean;
+
+    constructor(readonly originalError: unknown) {
+        const isRefusal =
+            originalError instanceof AiAccessRefusedError ||
+            originalError instanceof InvalidUser;
+        super(
+            isRefusal
+                ? WRITEBACK_AGENT_ACCESS_REFUSED_MESSAGE
+                : WRITEBACK_AGENT_ACCESS_CHECK_FAILED_MESSAGE,
+        );
+        this.name = 'WritebackAgentAccessError';
+        this.isRefusal = isRefusal;
+    }
+}

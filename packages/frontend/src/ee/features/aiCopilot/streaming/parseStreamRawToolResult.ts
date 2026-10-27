@@ -1,0 +1,238 @@
+import {
+    agentToolDefinitionsByName,
+    isAiAgentMcpToolName,
+    isComposerQueryToolName,
+    mcpCreateContentArgsSchema,
+    mcpEditContentArgsSchema,
+    parsePartialToolComposerQueriesArgs,
+    toolComposerQueriesArgsSchemaPersisted,
+    toolEditRepoOutputSchema,
+    toolDashboardV2ArgsSchemaPersisted,
+    toolRunQueryArgsSchemaPersisted,
+    toolRunQueryExpressionArgsSchema,
+    toolRunQueryExpressionArgsSchemaV2,
+    toolVisualizeArgsSchemaPersisted,
+    type ToolDefinition,
+    type ToolName,
+} from '@lightdash/common';
+import { z } from 'zod';
+import { getAiAccessRefusal } from '../components/ChatElements/aiAccessRefusal';
+
+type ParsedToolName = ToolName;
+type McpStreamToolName = `mcp_${string}`;
+
+// Streamed args can be wider than the advertised (formula-only) contract:
+// merge-disabled runtimes advertise the wide V2 query contract and models
+// resuming old threads may echo legacy template table calcs the backend still
+// executes. Parse those tools with the wide persisted schemas so they render.
+const wideInputSchemaOverrides = {
+    editRepo: z.looseObject({}),
+    generateVisualization: toolRunQueryArgsSchemaPersisted
+        .or(toolRunQueryExpressionArgsSchema)
+        .or(toolRunQueryExpressionArgsSchemaV2),
+    generateDashboard: toolDashboardV2ArgsSchemaPersisted,
+    // With Documents enabled the agent gets the Documents variant of the
+    // content tools, whose args also accept type "document".
+    createContent: mcpCreateContentArgsSchema,
+    editContent: mcpEditContentArgsSchema,
+    query: toolComposerQueriesArgsSchemaPersisted,
+    runComposerQueries: toolComposerQueriesArgsSchemaPersisted,
+    visualize: toolVisualizeArgsSchemaPersisted,
+} as const;
+
+type ToolArgs<TName extends ToolName> =
+    TName extends keyof typeof wideInputSchemaOverrides
+        ? z.infer<(typeof wideInputSchemaOverrides)[TName]>
+        : TName extends keyof typeof agentToolDefinitionsByName
+          ? z.infer<(typeof agentToolDefinitionsByName)[TName]['inputSchema']>
+          : never;
+type ToolOutputSchema<TName extends ToolName> = TName extends 'editRepo'
+    ? typeof toolEditRepoOutputSchema
+    : TName extends keyof typeof agentToolDefinitionsByName
+      ? (typeof agentToolDefinitionsByName)[TName] extends ToolDefinition<
+            string,
+            z.ZodObject<z.ZodRawShape>,
+            z.ZodType,
+            infer TOutputSchema
+        >
+          ? TOutputSchema
+          : never
+      : never;
+type ToolResult<TName extends ParsedToolName> = z.infer<
+    NonNullable<ToolOutputSchema<TName>>
+>;
+
+export type AiAgentToolOutput = {
+    [K in ParsedToolName]: ToolResult<K>;
+}[ParsedToolName];
+
+type BuiltInToolCall = {
+    [K in ParsedToolName]: {
+        toolName: K;
+        toolArgs: ToolArgs<K>;
+        toolResult?: ToolResult<K> | null;
+        isPreliminary?: boolean;
+        /**
+         * True while the model is still streaming this call's input: toolArgs
+         * is a lenient reconstruction of the partial JSON, good for live
+         * rendering but not final (e.g. SQL strings may be cut off).
+         */
+        isArgsPartial?: boolean;
+    };
+}[ParsedToolName];
+
+type BuiltInToolResult = {
+    [K in ParsedToolName]: {
+        toolName: K;
+        toolArgs: ToolArgs<K>;
+        toolResult: ToolResult<K>;
+        isPreliminary?: boolean;
+    };
+}[ParsedToolName];
+
+type McpToolCall = {
+    toolName: McpStreamToolName;
+    toolArgs: object;
+    toolResult?: unknown;
+    isPreliminary?: boolean;
+    isArgsPartial?: boolean;
+};
+
+type McpToolResult = {
+    toolName: McpStreamToolName;
+    toolArgs: object;
+    toolResult: unknown;
+    isPreliminary?: boolean;
+};
+
+export type AiAgentToolCall = BuiltInToolCall | McpToolCall;
+export type AiAgentToolResult = BuiltInToolResult | McpToolResult;
+export type AiAgentToolCallHandler = (toolCall: AiAgentToolCall) => void;
+export type AiAgentToolResultHandler = (toolResult: AiAgentToolResult) => void;
+
+export type StreamRawToolCall = {
+    toolName: string;
+    toolArgs: unknown;
+    isPreliminary?: boolean;
+};
+
+export type StreamRawToolResult = StreamRawToolCall & {
+    toolOutput: unknown;
+};
+
+const isParsedToolName = (toolName: string): toolName is ParsedToolName =>
+    toolName === 'editRepo' || toolName in agentToolDefinitionsByName;
+
+const isMcpStreamToolName = (toolName: string): toolName is McpStreamToolName =>
+    isAiAgentMcpToolName(toolName);
+
+const parseMcpToolArgs = (toolArgs: unknown): object =>
+    toolArgs && typeof toolArgs === 'object' && !Array.isArray(toolArgs)
+        ? toolArgs
+        : {};
+
+const hasWideInputSchema = (
+    toolName: ParsedToolName,
+): toolName is keyof typeof wideInputSchemaOverrides =>
+    toolName in wideInputSchemaOverrides;
+
+const parseToolArgs = (toolName: ParsedToolName, toolArgs: unknown) =>
+    (hasWideInputSchema(toolName)
+        ? wideInputSchemaOverrides[toolName]
+        : agentToolDefinitionsByName[toolName].inputSchema
+    ).safeParse(toolArgs);
+
+const parseToolOutput = (toolName: ParsedToolName, toolOutput: unknown) => {
+    const outputSchema =
+        toolName === 'editRepo'
+            ? toolEditRepoOutputSchema
+            : agentToolDefinitionsByName[toolName].for('agent').outputSchema;
+
+    return outputSchema?.safeParse(toolOutput) ?? null;
+};
+
+export const parseStreamRawToolCall = (
+    toolCall: StreamRawToolCall,
+): AiAgentToolCall | null => {
+    if (isMcpStreamToolName(toolCall.toolName)) {
+        return {
+            toolName: toolCall.toolName,
+            toolArgs: parseMcpToolArgs(toolCall.toolArgs),
+            isPreliminary: toolCall.isPreliminary,
+        };
+    }
+
+    if (!isParsedToolName(toolCall.toolName)) return null;
+    const toolArgs = parseToolArgs(toolCall.toolName, toolCall.toolArgs);
+    if (!toolArgs.success) return null;
+
+    return {
+        toolName: toolCall.toolName,
+        toolArgs: toolArgs.data,
+        isPreliminary: toolCall.isPreliminary,
+    } as AiAgentToolCall;
+};
+
+/**
+ * Parse a tool call whose input is still streaming. Strict parsing usually
+ * fails on partial JSON, so tools with a lenient partial parser (today only
+ * the composer query tool) fall back to it — letting the pipeline render node by
+ * node while the model writes it. Returns null for tools without partial
+ * support whose partial args don't yet satisfy the strict schema.
+ */
+export const parseStreamRawPartialToolCall = (
+    toolCall: StreamRawToolCall,
+): AiAgentToolCall | null => {
+    if (!isComposerQueryToolName(toolCall.toolName)) return null;
+
+    const strict = parseStreamRawToolCall(toolCall);
+    if (strict) return { ...strict, isArgsPartial: true };
+
+    const partialArgs = parsePartialToolComposerQueriesArgs(toolCall.toolArgs);
+    if (!partialArgs) return null;
+    return {
+        toolName: toolCall.toolName,
+        toolArgs: partialArgs,
+        isPreliminary: toolCall.isPreliminary,
+        isArgsPartial: true,
+    };
+};
+
+export const parseStreamRawToolResult = (
+    toolResult: StreamRawToolResult,
+): AiAgentToolResult | null => {
+    if (isMcpStreamToolName(toolResult.toolName)) {
+        return {
+            toolName: toolResult.toolName,
+            toolArgs: parseMcpToolArgs(toolResult.toolArgs),
+            toolResult: toolResult.toolOutput,
+            isPreliminary: toolResult.isPreliminary,
+        };
+    }
+
+    if (!isParsedToolName(toolResult.toolName)) return null;
+    const toolArgs = parseToolArgs(toolResult.toolName, toolResult.toolArgs);
+    const parsedToolResult = parseToolOutput(
+        toolResult.toolName,
+        toolResult.toolOutput,
+    );
+    if (!toolArgs.success || !parsedToolResult?.success) return null;
+
+    const refusal = getAiAccessRefusal(toolResult.toolOutput);
+    return {
+        toolName: toolResult.toolName,
+        toolArgs: toolArgs.data,
+        toolResult: refusal
+            ? {
+                  ...parsedToolResult.data,
+                  structuredContent: {
+                      ...('structuredContent' in parsedToolResult.data
+                          ? parsedToolResult.data.structuredContent
+                          : {}),
+                      refusal,
+                  },
+              }
+            : parsedToolResult.data,
+        isPreliminary: toolResult.isPreliminary,
+    } as AiAgentToolResult;
+};

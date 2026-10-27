@@ -1,0 +1,222 @@
+# Pre-aggregates
+
+User-defined, pre-computed summaries of explores that serve matching queries
+from materialized files instead of the warehouse.
+
+## Language
+
+**Pre-aggregate**:
+A named, user-defined summary of an explore, declared in model YAML under
+`pre_aggregates`, specifying the dimensions, metrics, filters, and time
+granularity it covers.
+_Avoid_: rollup, view, materialized view, aggregate table, cube, pre-aggregation (noun), summary table
+
+**Materialization**:
+A single built instance of a pre-aggregate — the aggregation results stored as
+a file in object storage. It is never a warehouse table or view. One
+materialization is active per pre-aggregate at a time; statuses are in
+progress, active, superseded, and failed. External pre-aggregates have no
+materializations.
+Not a dbt materialization (`materialized: table/view`) — unrelated concept,
+despite pre-aggregates being defined in dbt YAML.
+_Avoid_: build (noun), snapshot, table, cache entry
+
+**External pre-aggregate**:
+A pre-aggregate served from an external table instead of a Lightdash
+materialization, declared with `table` in YAML. Matching is unchanged; a
+pre-aggregate without `table` is managed (Lightdash materializes it).
+_Avoid_: BYOM, bring-your-own materialization, routed pre-aggregate
+
+**External table**:
+The customer-managed warehouse relation an external pre-aggregate serves from.
+It must conform to the pre-aggregate's generated column contract; its lifecycle
+(build, refresh, freshness) is entirely the customer's.
+_Avoid_: materialized view, rollup table, external materialization
+
+**Materialize**:
+To run a pre-aggregate's aggregation query against the warehouse and store the
+result as a new materialization. The only step that touches the warehouse.
+_Avoid_: build, rebuild, precompute
+
+**Refresh**:
+A user- or schedule-initiated request to materialize a pre-aggregate again.
+The `refresh` YAML key configures the cron schedule for this.
+Not dashboard auto-refresh or dbt `--full-refresh`.
+_Avoid_: rebuild, re-run, sync
+
+**Trigger**:
+What initiated a materialization: compile (dbt project compiled), cron
+(scheduled refresh), or manual (user-requested refresh). Not a scheduler
+delivery trigger or DB trigger. A compile materializes a definition that
+has never completed a materialization, so a new pre-aggregate is live
+without waiting for cron, and one whose definition fingerprint moved,
+unless it sets `refresh.on_change: false` in YAML. Everything else is left
+to cron or a manual refresh; the registry still syncs on every compile.
+There is no page override: YAML is the only source of the trigger
+settings.
+
+**Definition fingerprint**:
+A hash of what a managed pre-aggregate's materialization query reads: the
+YAML definition, the stored metric query, the compiled SQL of the fields it
+selects or filters on, and the source tables and joins those fields reach.
+Field labels, descriptions, formatting, YAML key order, SQL whitespace and
+comments, filter rule ids, sort order and `refresh` settings do not move
+it. Stored on the definition at every compile and copied onto each
+materialization when it starts. When the fingerprint moves, the active
+materialization is superseded on that compile; the definition is rebuilt
+on the same compile unless `refresh.on_change: false`, in which case cron
+or a manual refresh rebuilds it. A materialization started under an older fingerprint
+never becomes active and is never served. Rows written before fingerprints
+existed take the next compile's value as their baseline.
+_Avoid_: checksum, version, hash (bare), signature
+
+**Source explore**:
+The explore a pre-aggregate is defined on and summarizes.
+
+**Pre-aggregate explore**:
+The hidden, generated explore that represents a pre-aggregate's shape and is
+used to query its materialization.
+_Avoid_: materialized explore, virtual explore
+
+**Definition filters**:
+Static filters in a pre-aggregate's YAML that scope which rows are
+materialized. A query matches only if it includes an equivalent or narrower
+filter.
+_Avoid_: static filters, pre-filters
+
+**Time dimension / Granularity**:
+The optional time dimension a pre-aggregate is grouped by, and the grain
+(hour–year) it is stored at. Queries can be served only when their requested
+time frame is safely derivable from the stored grain. For example, day can
+serve month, but week cannot serve calendar month because weeks cross month
+boundaries.
+
+**Materialization role**:
+A fixed identity (email plus user attributes) that materialization runs under,
+so access-controlled models materialize deterministically regardless of who
+triggered the build.
+
+**Match / Matching**:
+The query-time check of whether a query's dimensions, metrics, filters, and
+granularity are all covered by a pre-aggregate. When several match, the
+smallest pre-aggregate wins.
+_Avoid_: routing, resolution
+
+**SQL custom dimension**:
+A query-defined dimension computed by a SQL expression. During matching, every
+semantic dimension referenced by the expression must be covered at a safely
+derivable grain. Expressions with no `${...}` references or with raw
+`${TABLE}.column` references can't be verified against materialized columns and
+never match.
+_Avoid_: custom SQL field, calculated dimension
+
+**Hit**:
+A query (or dashboard tile) served from a pre-aggregate instead of the source
+tables.
+
+**Miss**:
+A pre-aggregate-eligible query that no pre-aggregate matched, so it ran
+against the warehouse. Every miss records a miss reason.
+_Avoid_: fallback, cache miss
+
+**Miss reason**:
+The recorded explanation for a miss (e.g. dimension not in pre-aggregate,
+granularity too fine, non-additive metric).
+
+**Execution fallback**:
+A matched query whose pre-aggregate execution failed (unreadable
+materialization, DuckDB error, external table issue), so results were served
+from the source warehouse. Distinct from a miss: the match succeeded but the
+serve did not. Recorded as a fallback reason on query history, exposed on
+results metadata, and counted in pre-aggregate analytics.
+_Avoid_: miss, retry, cache miss
+
+**Ineligible**:
+A dashboard tile that cannot use pre-aggregates at all (markdown tile, SQL
+chart, broken explore). Distinct from a miss: ineligible tiles never count
+against coverage.
+
+**Serve**:
+To answer a matched query from the pre-aggregate — the active materialization
+(via DuckDB) or an external table (on the project warehouse) — rather than
+from the source tables.
+
+**Serve instance**:
+The warm DuckDB instance that reads a project's managed materializations.
+User-authored SQL (custom SQL dimensions) is inlined into the served query, so
+whoever can run a query on the instance effectively holds its storage
+credentials. The instance is therefore never shared across projects — one per
+project, keyed `pre-aggregate-query-instance:{projectUuid}` — and its S3
+secret is scoped to exactly that project's materialization URIs (read from
+`pre_aggregate_materializations` when the serve client is built, widened in
+place as new materializations appear, never narrowed). The instance itself is
+confined to the storage bucket and a private temp directory for spill
+(`objectStorageOnly`); it has no other use for local disk. This is a per-project,
+cross-tenant boundary only: one project's serve instance cannot read another
+project's or organization's files. It does not enforce per-user access within
+the project — see access policy. See
+`PreAggregationDuckDbClient.createPreAggregateWarehouseClient`.
+
+**Access policy**:
+Pre-aggregates are a project-scoped shared artifact. Any user with SQL access
+to the project can read pre-aggregated data regardless of their own warehouse
+credentials, exactly as raw SQL on the project already reaches past the data
+models. User-attribute row filters continue to apply to normal semantic-layer
+serving of a pre-aggregate, but, as everywhere else, they are not a boundary
+against raw SQL (including custom SQL dimensions), so the serve path does not
+try to block file access in user SQL.
+
+**Additivity**:
+A metric's capacity to be re-aggregated from pre-computed results: additive
+(sum, count), decomposable (average — derivable from stored components), or
+non-additive (count_distinct, median — cannot be re-aggregated, servable only
+on an exact match).
+
+**Exact match**:
+A match where the query's selected dimensions equal the pre-aggregate's
+dimensions, with the time dimension at exactly the pre-aggregate's
+granularity — so each result row is served from a single materialization row
+and no re-aggregation occurs. The only kind of match that can serve
+non-additive metrics. Fields that group identically are interchangeable: a
+date-type base field counts as day grain, and the day alias of a date-type
+dimension counts as its stored raw values. A definition dimension referenced
+only by a query filter, or reached through a custom dimension, does not count
+as selected.
+
+**Audit**:
+A per-dashboard coverage report classifying each tile as hit, miss (with
+reason), or ineligible. Available in the dashboard menu and via
+`lightdash pre-aggregate-audit`. Outside this context, always "pre-aggregate
+audit" — unqualified "audit" elsewhere means audit logging.
+_Avoid_: coverage report, health check
+
+**Analytics**:
+The daily hit/miss statistics for a project, broken down by explore, query
+context, and chart/dashboard. Shown in Project Settings > Pre-aggregates.
+Outside this context, always "pre-aggregate analytics" — unqualified
+"analytics" elsewhere in the repo means product usage tracking.
+_Avoid_: stats, usage, metrics (in this context)
+
+## Enablement
+
+One instance-wide switch, no feature flag. Pre-aggregates are available to
+every organization when the instance has all of:
+
+- `LIGHTDASH_LICENSE_KEY` (a valid licence)
+- `PRE_AGGREGATES_ENABLED=true`
+- pre-aggregate results storage (`PRE_AGGREGATE_RESULTS_S3_*`); startup fails
+  if `PRE_AGGREGATES_ENABLED=true` is set without it
+
+These parse into `lightdashConfig.preAggregates.enabled`. Without them nothing
+runs. Preview mode, `LIGHTDASH_ENABLED_FEATURE_FLAGS` and Console overrides do
+not turn pre-aggregates on or off.
+
+Backend code asks `isPreAggregatesEnabled(lightdashConfig)`
+(`packages/backend/src/ee/preAggregates/isPreAggregatesEnabled.ts`) and never
+reads the env directly. Gated entry points: compile-time registry sync and
+materialization enqueue, CLI deploy explore enhancement, query routing, the
+daily cron generator, the materialize task, manual refresh, the pre-aggregate
+match check, pre-aggregate explore visibility, the autopilot candidates tool,
+and `/api/v1/health`. The compile post-processor that generates virtual
+pre-aggregate explores checks the same config.
+

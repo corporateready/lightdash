@@ -69,7 +69,30 @@ export const timeFrameToDateGranularityMap: Partial<
     [TimeFrames.YEAR]: DateGranularity.YEAR,
 };
 
+export const DEFAULT_TIME_DIMENSION_INTERVALS = [
+    TimeFrames.DAY,
+    TimeFrames.WEEK,
+    TimeFrames.MONTH,
+    TimeFrames.YEAR,
+] as const;
+
+export type DefaultTimeDimensionInterval =
+    (typeof DEFAULT_TIME_DIMENSION_INTERVALS)[number];
+
+export const isDefaultTimeDimensionInterval = (
+    value: unknown,
+): value is DefaultTimeDimensionInterval =>
+    DEFAULT_TIME_DIMENSION_INTERVALS.some((interval) => interval === value);
+
 export type DefaultTimeDimension = {
     field: string;
     interval: TimeFrames;
 };
+
+/**
+ * Single source of truth for the value used to reference a date zoom granularity across
+ * surfaces (custom SQL parameters, chart labels). Lowercased so it reads the same everywhere.
+ */
+export const getGranularityReferenceValue = (
+    granularity: DateGranularity | string,
+): string => granularity.toLowerCase();

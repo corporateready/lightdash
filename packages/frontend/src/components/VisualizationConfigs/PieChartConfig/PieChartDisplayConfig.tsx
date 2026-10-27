@@ -10,36 +10,45 @@ import {
     Stack,
     Switch,
     TextInput,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import React from 'react';
-import { isPieVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import {
+    selectPieEditor,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
+import { usePieEditorActions } from '../../../hooks/usePieChartConfig';
 import { Config } from '../common/Config';
 
 export const Display: React.FC = () => {
-    const { visualizationConfig } = useVisualizationContext();
-
-    if (!isPieVisualizationConfig(visualizationConfig)) return null;
-
+    const showLegend = useVisualizationSelector(
+        (state) => selectPieEditor(state).showLegend,
+    );
+    const legendPosition = useVisualizationSelector(
+        (state) => selectPieEditor(state).legendPosition,
+    );
+    const legendMaxItemLength = useVisualizationSelector(
+        (state) => selectPieEditor(state).legendMaxItemLength,
+    );
     const {
-        showLegend,
         toggleShowLegend,
-        legendPosition,
         legendPositionChange,
-        legendMaxItemLength,
         legendMaxItemLengthChange,
-    } = visualizationConfig.chartConfig;
+    } = usePieEditorActions();
 
     return (
         <Stack>
             <Config>
                 <Group>
                     <Config.Heading>Show legend</Config.Heading>
-                    <Switch checked={showLegend} onChange={toggleShowLegend} />
+                    <Switch
+                        size="xs"
+                        checked={showLegend}
+                        onChange={toggleShowLegend}
+                    />
                 </Group>
             </Config>
 
-            <Collapse in={showLegend}>
+            <Collapse expanded={showLegend}>
                 <Stack gap="xs">
                     <Group gap="xs">
                         <Config.Label>Orientation</Config.Label>
@@ -62,6 +71,7 @@ export const Display: React.FC = () => {
                     <Group>
                         <Config.Label>Label max length</Config.Label>
                         <TextInput
+                            size="xs"
                             type="number"
                             value={legendMaxItemLength}
                             placeholder={PieChartLegendLabelMaxLengthDefault.toString()}

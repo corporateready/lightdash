@@ -6,6 +6,8 @@ import type { GroupByColumn, SortBy, ValuesColumn } from './sqlRunner';
 export type PivotConfig = {
     pivotDimensions: string[];
     metricsAsRows: boolean;
+    /** Ordered dimension and value field IDs rendered once on the row axis. */
+    rowFieldIds?: string[];
     columnOrder?: string[];
     hiddenMetricFieldIds?: string[];
     visibleMetricFieldIds?: string[];
@@ -59,10 +61,21 @@ export type PivotConfiguration = {
      * references would silently resolve to undefined.
      */
     passthroughDimensions?: GroupByColumn[];
+    /**
+     * Declared order of the pivot-column dimensions (visible `groupByColumns`
+     * plus hidden `sortOnlyDimensions`) as they appear in the chart's
+     * `pivotConfig.columns`. `column_ranking` orders columns by this sequence so
+     * a hidden sort-only dim sorts at its DECLARED position — hiding a dim then
+     * leaves column order identical to when it was visible, instead of hoisting
+     * the hidden dim to the front of the ORDER BY. Passthrough (hidden, non-sort)
+     * dims are excluded since they don't drive sort. When omitted, ordering falls
+     * back to hoisting sort-only sort targets to the front (legacy behavior).
+     */
+    pivotColumnsOrder?: GroupByColumn[];
 };
 
 type Field =
-    | { type: FieldType.METRIC; fieldId?: undefined }
+    | { type: FieldType.METRIC; fieldId?: string }
     | { type: FieldType.DIMENSION; fieldId: string };
 
 type FieldValue =
@@ -79,6 +92,11 @@ export type TotalField = null | {
 };
 
 type TotalValue = null | number;
+
+/** Warehouse-computed metric totals keyed by pivot row values. */
+export type PivotRowTotalsByIndex = Record<string, Record<string, number>>;
+
+export type GroupedPivotRowSubtotals = Record<string, PivotRowTotalsByIndex>;
 
 type DataValue = null | ResultValue;
 
@@ -106,6 +124,7 @@ export type PivotData = {
 
     rowTotals?: TotalValue[][];
     columnTotals?: TotalValue[][];
+    grandTotals?: TotalValue[];
     cellsCount: number;
     rowsCount: number;
     pivotConfig: PivotConfig;
@@ -114,5 +133,21 @@ export type PivotData = {
         allCombinedData: ResultRow[];
         pivotColumnInfo: PivotColumn[];
     };
+    /**
+     * Raw values for metrics that are hidden from the pivot output but are
+     * still referenced by conditional-formatting rules (PROD-2372). Keyed by
+     * `getPivotRowContextKey(dimValues)` → (hidden metric fieldId → value).
+     * Absent when no metrics are hidden.
+     */
+    hiddenContextValues?: Record<string, Record<string, ResultValue>>;
+    /**
+     * Per-row values for row-index dims hidden via `hiddenDimensionFieldIds`.
+     * These are excluded from the rendered `indexValues`, but interactive
+     * drill-down ("View underlying data" / "Drill into") needs them to scope
+     * correctly (PROD-7841). Aligned by row index with `indexValues`. Absent
+     * when no index dim is hidden.
+     */
+    hiddenIndexValues?: FieldValue[][];
     groupedSubtotals?: Record<string, Record<string, number>[]>;
+    groupedRowSubtotals?: GroupedPivotRowSubtotals;
 };

@@ -1,10 +1,14 @@
-import { Anchor, Box, Breadcrumbs, Stack, Text } from '@mantine-8/core';
+import { Anchor, Box, Breadcrumbs, Stack, Text } from '@mantine/core';
 import { useEffect, type FC } from 'react';
-import { Panel, PanelGroup } from 'react-resizable-panels';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { NAVBAR_HEIGHT } from '../../../../../components/common/Page/constants';
+import { useProjectUuid } from '../../../../../hooks/useProjectUuid';
 import { useAiAgentArtifact } from '../../hooks/useAiAgentArtifacts';
-import { clearArtifact, setArtifact } from '../../store/aiArtifactSlice';
+import {
+    clearPreview,
+    selectArtifactPreview,
+    setPreview,
+} from '../../store/aiArtifactSlice';
 import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
@@ -13,16 +17,11 @@ import { AiArtifactPanel } from '../ChatElements/AiArtifactPanel';
 
 export const VerifiedArtifactDetail: FC = () => {
     const navigate = useNavigate();
-    const { projectUuid, agentUuid, artifactUuid } = useParams<{
-        projectUuid: string;
-        agentUuid: string;
-        artifactUuid: string;
-    }>();
+    const { agentUuid, artifactUuid } = useParams();
+    const projectUuid = useProjectUuid();
     const [searchParams] = useSearchParams();
     const dispatch = useAiAgentStoreDispatch();
-    const artifact = useAiAgentStoreSelector(
-        (state) => state.aiArtifact.artifact,
-    );
+    const artifact = useAiAgentStoreSelector(selectArtifactPreview);
 
     const versionUuid = searchParams.get('versionUuid');
     const threadUuid = searchParams.get('threadUuid');
@@ -53,7 +52,8 @@ export const VerifiedArtifactDetail: FC = () => {
             promptUuid
         ) {
             dispatch(
-                setArtifact({
+                setPreview({
+                    type: 'artifact',
                     projectUuid,
                     agentUuid,
                     artifactUuid,
@@ -65,7 +65,7 @@ export const VerifiedArtifactDetail: FC = () => {
         }
 
         return () => {
-            dispatch(clearArtifact());
+            dispatch(clearPreview());
         };
     }, [
         dispatch,
@@ -99,36 +99,23 @@ export const VerifiedArtifactDetail: FC = () => {
     ];
 
     return (
-        <PanelGroup
-            direction="horizontal"
-            style={{ height: `calc(100vh - ${NAVBAR_HEIGHT}px)` }}
-        >
-            <Panel
-                id="artifact-preview"
-                defaultSize={60}
-                minSize={25}
-                maxSize={70}
-            >
-                <Stack gap="sm" mt="lg" pr="md">
-                    <Stack gap="xs">
-                        <Breadcrumbs separator="/">
-                            {breadcrumbItems}
-                        </Breadcrumbs>
-                        <Text size="sm" c="dimmed">
-                            {artifactData?.description ||
-                                'View verified answer'}
-                        </Text>
-                    </Stack>
-                    {artifact && (
-                        <Box h="800px" pos="relative" bg="white">
-                            <AiArtifactPanel
-                                artifact={artifact}
-                                showCloseButton={true}
-                            />
-                        </Box>
-                    )}
+        <Box h={`calc(100vh - ${NAVBAR_HEIGHT}px)`}>
+            <Stack gap="sm" mt="lg" pr="md">
+                <Stack gap="xs">
+                    <Breadcrumbs separator="/">{breadcrumbItems}</Breadcrumbs>
+                    <Text size="sm" c="dimmed">
+                        {artifactData?.description || 'View verified answer'}
+                    </Text>
                 </Stack>
-            </Panel>
-        </PanelGroup>
+                {artifact && (
+                    <Box h="800px" pos="relative" bg="white">
+                        <AiArtifactPanel
+                            artifact={artifact}
+                            showCloseButton={true}
+                        />
+                    </Box>
+                )}
+            </Stack>
+        </Box>
     );
 };

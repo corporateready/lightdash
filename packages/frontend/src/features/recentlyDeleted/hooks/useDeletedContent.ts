@@ -1,6 +1,7 @@
 import {
     ContentType,
     type ApiError,
+    type DataAppVizsFilter,
     type DeletedContentItem,
     type DeletedContentWithDescendants,
     type KnexPaginatedData,
@@ -14,6 +15,7 @@ import {
 import { useNavigate } from 'react-router';
 import useToaster from '../../../hooks/toaster/useToaster';
 import { invalidateContent } from '../../../hooks/useContent';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 import {
     getDeletedContent,
     permanentlyDeleteContent,
@@ -28,11 +30,13 @@ type UseInfiniteDeletedContentParams = {
     search?: string;
     contentTypes?: ContentType[];
     deletedByUserUuids?: string[];
+    dataAppVizsFilter?: DataAppVizsFilter;
 };
 
 export function useInfiniteDeletedContent(
     params: UseInfiniteDeletedContentParams,
 ) {
+    const lightdashApi = useLightdashApi();
     return useInfiniteQuery<
         KnexPaginatedData<DeletedContentWithDescendants[]>,
         ApiError
@@ -44,15 +48,17 @@ export function useInfiniteDeletedContent(
             params.search,
             params.contentTypes,
             params.deletedByUserUuids,
+            params.dataAppVizsFilter,
         ],
         queryFn: async ({ pageParam = 1 }) => {
-            return getDeletedContent({
+            return getDeletedContent(lightdashApi, {
                 projectUuids: params.projectUuids,
                 page: pageParam as number,
                 pageSize: params.pageSize ?? DEFAULT_PAGE_SIZE,
                 search: params.search,
                 contentTypes: params.contentTypes,
                 deletedByUserUuids: params.deletedByUserUuids,
+                dataAppVizsFilter: params.dataAppVizsFilter,
             });
         },
         getNextPageParam: (_lastGroup, groups) => {
@@ -65,13 +71,23 @@ export function useInfiniteDeletedContent(
     });
 }
 
+/**
+ * `isChartType` is presentation-only (custom chart types restore to the
+ * builder route, not the app viewer) — it is stripped before the API call.
+ */
+export type RestoreDeletedContentItem = DeletedContentItem & {
+    isChartType?: boolean;
+};
+
 export function useRestoreDeletedContent(projectUuid: string) {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const navigate = useNavigate();
     const { showToastSuccess, showToastApiError } = useToaster();
 
-    return useMutation<undefined, ApiError, DeletedContentItem>({
-        mutationFn: (item) => restoreDeletedContent(projectUuid, item),
+    return useMutation<undefined, ApiError, RestoreDeletedContentItem>({
+        mutationFn: ({ isChartType, ...item }) =>
+            restoreDeletedContent(lightdashApi, projectUuid, item),
         onSuccess: async (_data, item) => {
             showToastSuccess({
                 title: 'Content restored',
@@ -106,14 +122,27 @@ export function useRestoreDeletedContent(projectUuid: string) {
                               }
                             : item.contentType === ContentType.DATA_APP
                               ? {
-                                    children: 'Go to app',
+                                    children: item.isChartType
+                                        ? 'Go to chart type'
+                                        : 'Go to app',
                                     icon: IconArrowRight,
                                     onClick: () =>
                                         navigate(
-                                            `/projects/${projectUuid}/apps/${item.uuid}`,
+                                            item.isChartType
+                                                ? `/projects/${projectUuid}/chart-studio/${item.uuid}`
+                                                : `/projects/${projectUuid}/apps/${item.uuid}`,
                                         ),
                                 }
-                              : undefined,
+                              : item.contentType === ContentType.DOCUMENT
+                                ? {
+                                      children: 'Go to document',
+                                      icon: IconArrowRight,
+                                      onClick: () =>
+                                          navigate(
+                                              `/projects/${projectUuid}/documents/${item.uuid}`,
+                                          ),
+                                  }
+                                : undefined,
             });
             await invalidateContent(queryClient, projectUuid);
             await queryClient.invalidateQueries(['deletedContent']);
@@ -128,11 +157,13 @@ export function useRestoreDeletedContent(projectUuid: string) {
 }
 
 export function usePermanentlyDeleteContent(projectUuid: string) {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
 
     return useMutation<undefined, ApiError, DeletedContentItem>({
-        mutationFn: (item) => permanentlyDeleteContent(projectUuid, item),
+        mutationFn: (item) =>
+            permanentlyDeleteContent(lightdashApi, projectUuid, item),
         onSuccess: async () => {
             showToastSuccess({
                 title: 'Content permanently deleted',

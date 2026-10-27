@@ -1,17 +1,20 @@
 import { ContentType, LightdashMode } from '@lightdash/common';
-import { Button, Group, Stack } from '@mantine/core';
+import { Group, Stack, Button } from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
 import { type FC } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useNavigate } from 'react-router';
 import Page from '../components/common/Page/Page';
 import PageBreadcrumbs from '../components/common/PageBreadcrumbs';
 import InfiniteResourceTable from '../components/common/ResourceView/InfiniteResourceTable';
+import { useContentAuthoringEnabled } from '../hooks/useContentAuthoringEnabled';
+import { useProjectUuid } from '../hooks/useProjectUuid';
 import useCreateInAnySpaceAccess from '../hooks/user/useCreateInAnySpaceAccess';
 import useApp from '../providers/App/useApp';
 import { FavoritesProvider } from '../providers/Favorites/FavoritesProvider';
 
 const SavedQueries: FC = () => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const authoringEnabled = useContentAuthoringEnabled();
+    const projectUuid = useProjectUuid();
     const { health } = useApp();
     const navigate = useNavigate();
     const isDemo = health.data?.mode === LightdashMode.DEMO;
@@ -34,8 +37,8 @@ const SavedQueries: FC = () => {
                 withXLargePaddedContent
                 withLargeContent
             >
-                <Stack spacing="xxl" w="100%">
-                    <Group position="apart">
+                <Stack gap="xxl" w="100%">
+                    <Group justify="space-between">
                         <PageBreadcrumbs
                             items={[
                                 { title: 'Home', to: '/home' },
@@ -44,7 +47,8 @@ const SavedQueries: FC = () => {
                         />
                         {!isDemo && userCanCreateCharts ? (
                             <Button
-                                leftIcon={<IconPlus size={18} />}
+                                display={authoringEnabled ? undefined : 'none'}
+                                leftSection={<IconPlus size={18} />}
                                 onClick={handleCreateChart}
                             >
                                 Create chart

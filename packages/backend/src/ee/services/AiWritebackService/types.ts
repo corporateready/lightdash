@@ -1,0 +1,357 @@
+import type {
+    AiWritebackSource,
+    PullRequestProvider,
+    SessionUser,
+    SupportedDbtVersions,
+    WarehouseTypes,
+} from '@lightdash/common';
+import type { AiWritebackFailureStage } from '../../../analytics/LightdashAnalytics';
+import type { ResumableWritebackThread } from '../../models/AiWritebackThreadModel';
+import type { SandboxHandle } from '../SandboxRuntime';
+import type { GitProvider } from './providers/GitProvider';
+
+/**
+ * The canonical warehouse keys we ship a skill file for. Several
+ * `WarehouseTypes` map onto one key (e.g. `athena` → `trino`); warehouses with
+ * no dedicated file (`clickhouse`, `duckdb`) resolve to `null` and the agent
+ * gets `shared.md` only. Matches the filenames under `skills/warehouses/`.
+ */
+export type WarehouseSkillKey =
+    | 'bigquery'
+    | 'snowflake'
+    | 'postgres'
+    | 'redshift'
+    | 'databricks'
+    | 'trino';
+
+/** Commit author identity stamped on writeback commits, for any git host. */
+export type GitCommitAuthor = {
+    name: string;
+    email: string;
+};
+
+export type GithubConnection = {
+    provider: PullRequestProvider.GITHUB;
+    owner: string;
+    repo: string;
+    projectSubPath: string;
+    /** The project's configured branch, or '' to fall back to the repo default. */
+    branch: string;
+    semanticLayer?: 'dbt' | 'lightdash';
+};
+
+export type GitlabConnection = {
+    provider: PullRequestProvider.GITLAB;
+    owner: string;
+    repo: string;
+    projectSubPath: string;
+    /** `gitlab.com` or a self-hosted instance host, e.g. `gitlab.acme.com`. */
+    hostDomain: string;
+};
+
+/**
+ * The dbt repo a writeback run targets. Discriminated by `provider` so the
+ * service can read the shared fields while each provider narrows for its own.
+ */
+export type BitbucketConnection = {
+    semanticLayer?: 'dbt' | 'lightdash';
+    provider: PullRequestProvider.BITBUCKET;
+    owner: string;
+    repo: string;
+    projectSubPath: string;
+    branch: string;
+    projectUuid: string;
+    projectDbtSourceUuid: string | null;
+    username: string;
+};
+
+export type GitConnection =
+    | GithubConnection
+    | GitlabConnection
+    | BitbucketConnection;
+
+export type AdoptedPullRequest = {
+    prUrl: string;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+    headRef: string;
+};
+
+export type GithubInstallation = {
+    provider: PullRequestProvider.GITHUB;
+    installationId: string;
+    /** Installation access token — authenticates the in-sandbox clone. */
+    token: string;
+    /**
+     * The triggering user's user-to-server token, when they have linked their
+     * GitHub account (feature-flagged) and it can reach this repo. When set,
+     * the API commits and the pull request are authored — and signed — as that
+     * user, and no co-author trailer is added. Null → act as the app bot and
+     * credit the triggering user as a commit co-author instead.
+     */
+    userToken: string | null;
+    /** Author stamped on the (local, never-pushed) writeback commit — the Lightdash app identity. */
+    commitAuthor: GitCommitAuthor;
+    /**
+     * `Co-authored-by:` trailer appended to the commit message to credit the
+     * Lightdash app bot (resolved to its avatar-backed GitHub identity).
+     */
+    coAuthorTrailer: string;
+};
+
+export type GitlabInstallation = {
+    provider: PullRequestProvider.GITLAB;
+    /** OAuth access token for the org's GitLab app install — clone, push, MR API. */
+    token: string;
+    /** Instance base URL, e.g. `https://gitlab.com` or a self-hosted URL. */
+    instanceUrl: string;
+    /** Author stamped on the writeback commits — the GitLab user, or the fallback. */
+    commitAuthor: GitCommitAuthor;
+};
+
+/** Resolved auth for the run's git host. Discriminated by `provider`. */
+export type BitbucketInstallation = {
+    provider: PullRequestProvider.BITBUCKET;
+    token: string;
+    owner: string;
+    repo: string;
+    commitAuthor: GitCommitAuthor;
+};
+
+export type GitInstallation =
+    | GithubInstallation
+    | GitlabInstallation
+    | BitbucketInstallation;
+
+/** HTTPS clone target; credentials are supplied out-of-band, never in the URL. */
+export type CloneTarget = {
+    url: string;
+    username: string;
+    password: string;
+};
+
+export type SetStage = (stage: AiWritebackFailureStage) => void;
+
+export type CodingAgentSetup = {
+    systemPrompt: string;
+    repoContext: RepoContext | null;
+    /** Claude Code `--allowedTools` string for this mode. */
+    allowedTools: string;
+    disallowedTools?: string;
+    /** Extra `--add-dir` mounts beyond the repo CWD (e.g. /tmp, skills dirs). */
+    addDirs: string[];
+    /** Anthropic model the CLI runs with. */
+    model: string;
+};
+
+export type CodingAgentConfig = {
+    /** Tags logs/analytics and selects the few remaining mode branches. */
+    mode: 'dbt-writeback';
+    resolveTemplateRef: () => string;
+    /**
+     * Stage any sandbox prerequisites that inform the prompt (repo context,
+     * profiles, tree listing) and build the system prompt + CLI knobs for this
+     * turn. Runs after the repo is cloned/resumed and before the agent runs.
+     */
+    buildAgentSetup: (input: {
+        sandbox: SandboxHandle;
+        turn: TurnContext;
+        repository: string;
+    }) => Promise<CodingAgentSetup>;
+    /**
+     * Hook run immediately before the Claude CLI invocation — for side effects
+     * that don't belong in the prompt (dbt: install the secret-stripping compile
+     * wrapper, push warehouse skills, reset the compile-timings log).
+     */
+    beforeAgentRun: (
+        sandbox: SandboxHandle,
+        turn: TurnContext,
+    ) => Promise<void>;
+    /**
+     * Hook run immediately after the Claude CLI exits — for diagnostics that
+     * depend on what the agent did (dbt: read + report the compile timings).
+     */
+    afterAgentRun: (sandbox: SandboxHandle) => Promise<void>;
+};
+
+export type TurnContext = {
+    organizationUuid: string;
+    projectName: string;
+    /** Resolved once from the dbt connection type; the service never re-branches. */
+    provider: GitProvider;
+    gitConnection: GitConnection;
+    /**
+     * The dbt source this turn targets: a `project_dbt_sources` row uuid for an
+     * additional source, or null for the project's primary dbt connection.
+     * Persisted on the thread row when a PR is opened so resumes stay bound to
+     * the same source (one thread, one PR).
+     */
+    projectDbtSourceUuid: string | null;
+    existingRow: ResumableWritebackThread | null;
+    isResume: boolean;
+    /**
+     * The project's warehouse dialect, used to pick the warehouse skill file
+     * and stamped on every `ai_writeback.run.*` event for failure-rate-by-
+     * warehouse slicing. `null` when the project has no warehouse connection.
+     */
+    warehouseType: WarehouseTypes | null;
+    /**
+     * The project's configured dbt version, resolved to a concrete version
+     * (`latest` is resolved to the newest supported version here, never passed
+     * downstream). The compile wrapper prepends this version's venv bin to PATH
+     * so the agent compiles with the version the project actually uses.
+     */
+    dbtVersion: SupportedDbtVersions;
+};
+
+export type AppliedChanges = {
+    prUrl: string | null;
+    prCreated: boolean;
+    pauseOnExit: boolean;
+    /** Head commit SHA this turn pushed; null when no commit was made. */
+    commitSha: string | null;
+    /** Lines this turn's commit added/removed; null when no commit was made. */
+    additions: number | null;
+    deletions: number | null;
+};
+
+export type { AiWritebackSource };
+
+export type AgentToolCall = {
+    name: string;
+    input: unknown;
+};
+
+/**
+ * The repo file listing handed to the agent in its system prompt.
+ *
+ * `full` is the complete sorted listing — the agent is told to treat it as the
+ * index and not re-discover paths. `summarised` is a directory-level digest
+ * emitted when the full listing is too large to inject: on a big dbt project
+ * the listing alone can exceed the model's context window, which fails the run
+ * before any work happens. In that case the agent is pointed at `Glob`/`Grep`
+ * instead, which costs turns but actually completes.
+ */
+export type RepoContext =
+    | { kind: 'full'; listing: string }
+    | {
+          kind: 'summarised';
+          /** Directory-level digest, one `path/ (N files)` line per directory. */
+          listing: string;
+          /** Number of files in the full listing this was derived from. */
+          fileCount: number;
+          /** Size of the full listing in bytes, for logging. */
+          bytes: number;
+      };
+
+/**
+ * The meaningful shapes of a Claude Code stream-json line. Everything the host
+ * reacts to (assistant text, tool calls, the final cost summary) is one of
+ * these; every other event type collapses to `ignored`.
+ */
+export type AgentStreamEvent =
+    | { type: 'assistant'; text: string | null; toolCalls: AgentToolCall[] }
+    | ({
+          type: 'result';
+          /** Total agent wall-clock (ms) as reported by Claude Code. */
+          durationMs: number | null;
+          /**
+           * Whether the CLI classified its own run as failed. When `claude -p`
+           * exits non-zero this is the only machine-readable statement of why —
+           * the subprocess writes nothing to stderr in that case.
+           */
+          isError: boolean | null;
+          /**
+           * The CLI's result classification: `success`, `error_max_turns`,
+           * `error_during_execution`, … Retained verbatim rather than mapped to
+           * an enum so a new upstream subtype reaches the logs unchanged.
+           */
+          subtype: string | null;
+      } & AiWritebackUsage)
+    | { type: 'ignored' };
+
+/**
+ * Token/turn/cost usage for one agent run, parsed from the stream-json `result`
+ * event (token counts nested under `usage.*`, the rest top-level). Mirrors the
+ * data-apps `ClaudeGenerationUsage` shape so both features report AI spend with
+ * the same field names. Nullable throughout: a run that crashes before the
+ * `result` event leaves these unknown rather than zero.
+ */
+export type AiWritebackUsage = {
+    /** Total run cost in USD as computed by the CLI from token usage. */
+    costUsd: number | null;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cacheReadInputTokens: number | null;
+    cacheCreationInputTokens: number | null;
+    /** Number of agent turns. */
+    numTurns: number | null;
+    /** Time (ms) spent in LLM API calls — the rest is local tool execution. */
+    durationApiMs: number | null;
+};
+
+/** Title/description/summary parsed out of the agent's final stdout. */
+export type PrMetadata = {
+    title: string | null;
+    description: string | null;
+    summary: string | null;
+    sanitizedStdout: string;
+};
+
+/** Which channel a PR metadata value was ultimately recovered from. */
+export type PrMetadataSource = 'tmp' | 'repo-fallback' | 'default';
+
+export type ResolvedPrMetadata = {
+    source: PrMetadataSource;
+    value: string;
+};
+
+/** Paths parsed from `git diff --cached --name-status -z`, split by op. */
+export type StagedFileChanges = {
+    addPaths: string[];
+    deletions: { path: string }[];
+};
+
+export type GithubIdentity = {
+    login: string;
+    id: number;
+};
+
+export type AiWritebackRunArgs = {
+    agentPermissionsApply: boolean;
+    user: SessionUser;
+    projectUuid: string;
+    prompt: string;
+    /**
+     * Which of the project's dbt sources to target, when it has more than one:
+     * the project's own uuid (or undefined) for the primary dbt connection, or
+     * a `project_dbt_sources` row uuid for an additional source. When undefined
+     * and the project has several sources, the run infers the target from the
+     * prompt and, failing that, returns the choices for the caller to pick from.
+     * Ignored on a resumed thread — it stays bound to its original source.
+     */
+    dbtSourceUuid?: string;
+    // Target a specific pull request to update: one of the thread's own
+    // workstreams (resumed by URL), or an external PR the user pasted that lives
+    // in the project's own repo (validated before adoption).
+    prUrl?: string | null;
+    startNewPullRequest?: boolean;
+    aiThreadUuid?: string;
+    promptUuid?: string;
+    /**
+     * Identifies the trigger surface so logs, metrics, and analytics can
+     * group runs by where they originated. Required so adding new triggers
+     * is a type-system change rather than a silent fallthrough.
+     */
+    source: AiWritebackSource;
+    /**
+     * Fired with a short, user-facing progress message each time the run
+     * advances through a meaningful phase (e.g. "Starting sandbox",
+     * "Discovering models"). Fire-and-forget — the callback should not throw
+     * and the service does not await it. Used by callers that surface
+     * progress live (the Slack agent updates its "Thinking…" message).
+     */
+    onProgress?: (message: string) => void;
+    aiWritebackRunUuid?: string;
+};

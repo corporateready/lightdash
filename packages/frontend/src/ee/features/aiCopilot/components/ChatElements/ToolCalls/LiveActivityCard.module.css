@@ -29,8 +29,7 @@
 
 /* Header + body sit above the shimmer pseudo-element. */
 .header,
-.history,
-.pending {
+.history {
     position: relative;
     z-index: 1;
 }
@@ -250,6 +249,14 @@
     animation: previewSlide 360ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.awaitingApproval {
+    flex: 1;
+    min-width: 0;
+    letter-spacing: -0.005em;
+    color: var(--mantine-color-orange-7);
+    font-weight: 500;
+}
+
 @keyframes previewSlide {
     from {
         opacity: 0;
@@ -306,6 +313,19 @@
     margin-top: 2px;
 }
 
+/* Vertical progress step list — same alignment as .liveTrace so the
+   "Starting sandbox → Cloning project → …" rows hang from the same
+   indent as the parent tool's chip label. */
+.liveStepProgress {
+    position: relative;
+    z-index: 1;
+    padding: 6px 0 4px 18px;
+    margin-top: 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
 /* History rows cascade in with staggered delays (see --row-delay) so opening
  * the bento feels like a deck dealing rather than a flash. */
 .historyRow {
@@ -324,11 +344,6 @@
     }
 }
 
-.pending {
-    margin-left: -18px;
-    animation: pendingPop 360ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
 .latestDescription {
     animation: pendingPop 320ms cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -345,8 +360,15 @@
 }
 
 .reasoningRow {
+    /* Header padding + icon slot + gap; the body indents to the label. */
+    --reasoning-icon-size: 13px;
+    --reasoning-inset: calc(12px + var(--reasoning-icon-size) + 8px);
     border-radius: 10px;
     font-family: var(--mantine-font-family);
+}
+
+.reasoningRow[data-live='true'] {
+    --reasoning-icon-size: 20px;
 }
 
 .reasoningRow:hover .chevron {
@@ -359,6 +381,9 @@
     text-align: left;
     border-radius: 10px;
     padding: 7px 12px;
+    /* <button> doesn't inherit font — without this the preview renders in
+     * the UA sans-serif, whose metrics sit visibly off against the label. */
+    font-family: var(--mantine-font-family);
 }
 
 .reasoningIcon {
@@ -372,11 +397,13 @@
     animation: livePulse 1.6s ease-in-out infinite;
 }
 
+/* Label and preview must share the default line-height — mismatched
+ * line-heights (or the -webkit-box a lineClamp creates) center their boxes
+ * but visibly misalign the glyphs against each other. Font-family comes
+ * from .reasoningHeader so label and preview always share metrics. */
 .reasoningLabel {
     flex-shrink: 0;
-    line-height: 1;
     color: var(--mantine-color-ldGray-8);
-    font-family: var(--mantine-font-family);
     font-weight: 500;
     letter-spacing: -0.005em;
 }
@@ -415,7 +442,11 @@
 }
 
 .reasoningBody {
-    padding: 6px 8px 4px;
+    max-height: var(--reasoning-body-max-height, none);
+    overflow-y: var(--reasoning-body-overflow-y, visible);
+    padding: 2px 12px 6px var(--reasoning-inset);
+    font-style: italic;
+    color: var(--mantine-color-ldGray-7);
 }
 
 @keyframes cardSlideIn {

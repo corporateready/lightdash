@@ -1,0 +1,1586 @@
+import {
+    ChartKind,
+    PullRequestProvider,
+    QuerySourceType,
+    type AgentSuggestion,
+    type AiAgentMessage,
+    type AiAgentThread,
+    type AiPromptContextItem,
+} from '@lightdash/common';
+import {
+    Badge,
+    Box,
+    Group,
+    Paper,
+    SimpleGrid,
+    Stack,
+    Text,
+    Title,
+} from '@mantine/core';
+import type { Meta, StoryObj } from '@storybook/react-vite';
+import { IconTerminal2 } from '@tabler/icons-react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
+import { Provider } from 'react-redux';
+import { MemoryRouter } from 'react-router';
+import { within } from 'storybook/test';
+import { AgentChatDisplay } from '../ee/features/aiCopilot/components/ChatElements/AgentChatDisplay';
+import { AgentSuggestionChips } from '../ee/features/aiCopilot/components/ChatElements/AgentSuggestionChips';
+import {
+    DataAppBuildCard,
+    type DataAppBuildCardState,
+} from '../ee/features/aiCopilot/components/ChatElements/DataAppBuildCard/DataAppBuildCard';
+import { DotsLoader } from '../ee/features/aiCopilot/components/ChatElements/DotsLoader/DotsLoader';
+import { SqlRunToolCallDescription } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/descriptions/SqlRunToolCallDescription';
+import { ToolCallDescription } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/descriptions/ToolCallDescription';
+import { ReasoningHistoryRow } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/LiveActivityCard';
+import { LiveActivityCard } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/LiveActivityCard';
+import type { LiveActivityToolGroup } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/LiveActivityCard';
+import { ToolCallPaper } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/ToolCallPaper';
+import { ToolCallRow } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/ToolCallRow';
+import type { ToolCallSummary } from '../ee/features/aiCopilot/components/ChatElements/ToolCalls/utils/types';
+import { TypingDots } from '../ee/features/aiCopilot/components/ChatElements/TypingDots';
+import { PinnedContextCard } from '../ee/features/aiCopilot/components/PinnedContextCard/PinnedContextCard';
+import { AGENT_AI_MCP_SERVERS_KEY } from '../ee/features/aiCopilot/hooks/useProjectAiMcpServers';
+import { store } from '../ee/features/aiCopilot/store';
+import { AiAgentThreadStreamAbortControllerContextProvider } from '../ee/features/aiCopilot/streaming/AiAgentThreadStreamAbortControllerContextProvider';
+import { createQueryClient } from '../providers/ReactQuery/createQueryClient';
+import AppProviderMock from '../testing/__mocks__/providers/AppProvider.mock';
+
+const projectUuid = '3675b69e-8324-4110-bdca-059031aa8da3';
+
+const contextItems: AiPromptContextItem[] = [
+    {
+        type: 'chart',
+        chartUuid: 'chart-weekly-revenue',
+        chartSlug: 'weekly-revenue',
+        pinnedVersionUuid: null,
+        displayName: 'Revenue by week',
+        runtimeOverrides: null,
+        chartKind: ChartKind.VERTICAL_BAR,
+    },
+    {
+        type: 'dashboard',
+        dashboardUuid: 'dashboard-exec-overview',
+        dashboardSlug: 'executive-overview',
+        pinnedVersionUuid: null,
+        displayName: 'Executive overview',
+        runtimeOverrides: null,
+    },
+    {
+        type: 'thread',
+        threadUuid: 'thread-forecast-notes',
+        promptUuid: 'prompt-forecast-notes',
+        displayName: 'Forecast context thread',
+    },
+    {
+        type: 'file',
+        path: 'analytics/revenue_definitions.md',
+    },
+    {
+        type: 'data_app_element',
+        appUuid: 'app-revenue-explorer',
+        appSlug: 'revenue-explorer',
+        displayName: 'Revenue explorer',
+        version: 3,
+        tag: 'button',
+        text: 'Send',
+        loc: 'src/App.jsx:42',
+    },
+    {
+        type: 'repository',
+        fullName: 'lightdash/customer-analytics',
+    },
+];
+
+const fieldSearchCalls: ToolCallSummary[] = [
+    {
+        toolCallId: 'find-explores',
+        toolName: 'findExplores',
+        toolArgs: { searchQuery: 'revenue orders' },
+    },
+    {
+        toolCallId: 'find-fields',
+        toolName: 'findFields',
+        toolArgs: {
+            fieldSearchQueries: [
+                { label: 'weekly revenue', fieldTypes: ['metric'] },
+            ],
+        },
+    },
+    {
+        toolCallId: 'semantic-layer',
+        toolName: 'searchSemanticLayer',
+        toolArgs: { searchQuery: 'orders revenue', type: 'metric' },
+    },
+];
+
+const contentCalls: ToolCallSummary[] = [
+    {
+        toolCallId: 'read-chart',
+        toolName: 'readContent',
+        toolArgs: { type: 'chart', slug: 'weekly-revenue' },
+    },
+    {
+        toolCallId: 'read-dashboard',
+        toolName: 'readContent',
+        toolArgs: { type: 'dashboard', slug: 'executive-overview' },
+    },
+];
+
+const runSqlCall: ToolCallSummary = {
+    toolCallId: 'run-sql',
+    toolName: 'runSql',
+    toolArgs: {
+        sql: [
+            "select date_trunc('week', ordered_at) as week,",
+            '       sum(total_revenue) as revenue',
+            'from analytics.orders',
+            "where ordered_at >= current_date - interval '90 days'",
+            'group by 1',
+            'order by 1',
+        ].join('\n'),
+        limit: 500,
+    },
+};
+
+const chartCalls: ToolCallSummary[] = [
+    {
+        toolCallId: 'run-query',
+        toolName: 'runQuery',
+        toolArgs: { title: 'Weekly revenue, last 90 days' },
+        toolOutput: { metadata: { status: 'success' } },
+    },
+    {
+        toolCallId: 'generate-viz',
+        toolName: 'generateVisualization',
+        toolArgs: { title: 'Weekly revenue, last 90 days' },
+        toolOutput: { metadata: { status: 'success' } },
+    },
+];
+
+const groupedActivity: LiveActivityToolGroup[] = [
+    {
+        keyId: 'data-model-search',
+        toolName: 'findFields',
+        calls: fieldSearchCalls,
+        display: {
+            liveLabel: 'Searching the data model',
+            doneLabel: 'Searched the data model',
+        },
+    },
+    {
+        keyId: 'content-search',
+        toolName: 'readContent',
+        calls: contentCalls,
+        display: {
+            liveLabel: 'Finding relevant content',
+            doneLabel: 'Found relevant content',
+        },
+    },
+    {
+        keyId: 'chart-build',
+        toolName: 'generateVisualization',
+        calls: chartCalls,
+        display: {
+            liveLabel: 'Building a chart',
+            doneLabel: 'Built a chart',
+        },
+    },
+];
+
+const composerCall: ToolCallSummary = {
+    toolCallId: 'composer-call',
+    toolName: 'runComposerQueries',
+    toolArgs: {
+        title: 'Unique orders vs avg payment by status',
+        description: null,
+        terminalNodeId: null,
+        queries: [
+            {
+                sourceType: QuerySourceType.SEMANTIC_LAYER,
+                nodeId: 'order_counts',
+                title: 'Unique order count by status',
+                description: null,
+                exploreName: 'orders',
+                dimensions: ['orders_status'],
+                metrics: ['orders_unique_order_count'],
+                filters: null,
+                sorts: null,
+                limit: 500,
+            },
+            {
+                sourceType: QuerySourceType.SQL,
+                nodeId: 'payment_averages',
+                title: 'Average payment amount by status',
+                description: null,
+                sql: 'SELECT o.status AS order_status, AVG(p.amount) AS average_payment_amount FROM jaffle.payments AS p JOIN jaffle.orders AS o ON o.order_id = p.order_id GROUP BY o.status',
+                limit: 500,
+            },
+            {
+                sourceType: QuerySourceType.DUCKDB,
+                nodeId: 'result',
+                title: 'Orders and avg payment by status',
+                description: null,
+                sql: 'SELECT c.orders_status AS order_status, c.orders_unique_order_count AS unique_order_count, p.average_payment_amount FROM order_counts AS c LEFT JOIN payment_averages AS p ON c.orders_status = p.order_status ORDER BY unique_order_count DESC',
+                references: ['order_counts', 'payment_averages'],
+                limit: 500,
+            },
+        ],
+    },
+};
+
+const composerActivity: LiveActivityToolGroup[] = [
+    groupedActivity[0],
+    {
+        keyId: 'composer',
+        toolName: 'runComposerQueries',
+        calls: [composerCall],
+    },
+];
+
+const composerProgress = (
+    statuses: Record<string, 'in_progress' | 'complete' | 'error'>,
+) =>
+    Object.entries(statuses).map(([nodeId, progressStatus]) => ({
+        message:
+            progressStatus === 'error'
+                ? `Query "${nodeId}" failed: relation "jaffle.payments" does not exist`
+                : `Running ${nodeId}`,
+        toolName: 'runComposerQueries',
+        progressId: `composer-call:${nodeId}`,
+        progressStatus,
+    }));
+
+const composerApproval = {
+    projectUuid,
+    agentUuid: 'agent-uuid',
+    threadUuid: 'thread-uuid',
+    pendingToolCallIds: ['composer-call'],
+    decidedToolCallIds: [],
+};
+
+const ComposerPipelineScenario = () => (
+    <Provider store={store}>
+        <StorySurface>
+            <Section
+                title="Composer pipeline · awaiting approval"
+                description="Warehouse SQL node waits on the user; approve / reject render under its SQL. Buttons post to a fake API here."
+            >
+                <LiveActivityCard
+                    toolGroups={composerActivity}
+                    isLive
+                    approval={composerApproval}
+                />
+            </Section>
+            <Section
+                title="Composer pipeline · running"
+                description="Only the running node is expanded; finished nodes collapse."
+            >
+                <LiveActivityCard
+                    toolGroups={composerActivity}
+                    isLive
+                    stepProgressMessages={composerProgress({
+                        order_counts: 'complete',
+                        payment_averages: 'complete',
+                        result: 'in_progress',
+                    })}
+                />
+            </Section>
+            <Section
+                title="Composer pipeline · failed node"
+                description="Failed nodes open by default so the error is inspectable."
+            >
+                <LiveActivityCard
+                    toolGroups={composerActivity}
+                    isLive
+                    stepProgressMessages={composerProgress({
+                        order_counts: 'complete',
+                        payment_averages: 'error',
+                    })}
+                />
+            </Section>
+            <Section
+                title="Composer pipeline · done"
+                description="Collapsed once the run finishes; the artifact panel shows the pipeline."
+            >
+                <LiveActivityCard
+                    toolGroups={composerActivity}
+                    isLive={false}
+                />
+            </Section>
+        </StorySurface>
+    </Provider>
+);
+
+const sqlChartSql =
+    'SELECT o.status AS order_status, AVG(p.amount) AS average_payment_amount FROM jaffle.payments AS p JOIN jaffle.orders AS o ON o.order_id = p.order_id GROUP BY o.status';
+
+const sqlChartCall: ToolCallSummary = {
+    toolCallId: 'sql-chart-call',
+    toolName: 'createContent',
+    toolArgs: {
+        type: 'sql_chart',
+        content: {
+            name: 'Average payment by order status',
+            description: null,
+            slug: 'average-payment-by-order-status',
+            spaceSlug: 'sales',
+            sql: sqlChartSql,
+            limit: 500,
+            chartKind: ChartKind.VERTICAL_BAR,
+            version: 1,
+            config: {
+                metadata: { version: 1 },
+                type: ChartKind.VERTICAL_BAR,
+                fieldConfig: {
+                    x: { reference: 'order_status', type: 'category' },
+                    y: [
+                        {
+                            reference: 'average_payment_amount',
+                            aggregation: 'any',
+                        },
+                    ],
+                    groupBy: [],
+                },
+                display: {},
+            },
+        },
+    },
+};
+
+const sqlChartActivity: LiveActivityToolGroup[] = [
+    {
+        keyId: 'sql-chart',
+        toolName: 'createContent',
+        calls: [sqlChartCall],
+    },
+];
+
+const SqlChartApprovalScenario = () => (
+    <Provider store={store}>
+        <StorySurface>
+            <Section
+                title="SQL chart · awaiting approval"
+                description="Saving a SQL chart waits on the user; the card shows the SQL, chart name, space and chart kind. Buttons post to a fake API here."
+            >
+                <LiveActivityCard
+                    toolGroups={sqlChartActivity}
+                    isLive
+                    approval={{
+                        ...composerApproval,
+                        pendingToolCallIds: ['sql-chart-call'],
+                    }}
+                />
+            </Section>
+            <Section
+                title="SQL chart · saved"
+                description="Once approved and saved, the row keeps the chart summary without actions."
+            >
+                <LiveActivityCard
+                    toolGroups={sqlChartActivity}
+                    isLive={false}
+                />
+            </Section>
+        </StorySurface>
+    </Provider>
+);
+
+const SqlApprovalExpandScenario = () => (
+    <Provider store={store}>
+        <StorySurface>
+            <Section
+                title="SQL approval · expand"
+                description="The expand button opens the SQL in a modal with the same approve / reject actions. Close leaves the call pending. Shown at chat panel width."
+            >
+                <Stack maw={420} gap="lg">
+                    <SqlRunToolCallDescription
+                        sql={sqlChartSql}
+                        limit={500}
+                        approval={{
+                            projectUuid,
+                            agentUuid: 'agent-uuid',
+                            threadUuid: 'thread-uuid-expand',
+                            toolCallId: 'run-sql',
+                        }}
+                    />
+                    <LiveActivityCard
+                        toolGroups={sqlChartActivity}
+                        isLive
+                        approval={{
+                            ...composerApproval,
+                            threadUuid: 'thread-uuid-expand',
+                            pendingToolCallIds: ['sql-chart-call'],
+                        }}
+                    />
+                </Stack>
+            </Section>
+        </StorySurface>
+    </Provider>
+);
+
+const SqlCompletedExpandScenario = () => (
+    <Provider store={store}>
+        <StorySurface>
+            <Section
+                title="Completed SQL · expand"
+                description="SQL that already ran or was saved opens in the same modal without approval actions."
+            >
+                <Stack maw={420} gap="lg">
+                    <ToolCallDescription
+                        toolName="runSql"
+                        toolCall={runSqlCall}
+                    />
+                    <ToolCallDescription
+                        toolName="createContent"
+                        toolCall={sqlChartCall}
+                    />
+                </Stack>
+            </Section>
+        </StorySurface>
+    </Provider>
+);
+
+const openExpandedSql =
+    (index: number) =>
+    async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+        const buttons = await within(canvasElement).findAllByRole('button', {
+            name: 'Expand SQL',
+        });
+        buttons[index]?.click();
+    };
+
+const suggestions: AgentSuggestion[] = [
+    {
+        kind: 'prompt',
+        label: 'Split by customer type',
+        tool: 'generateVisualization',
+        defaults: {
+            explore: 'orders',
+            dimensions: ['customers.customer_type'],
+            metrics: ['orders.total_revenue'],
+            timeframe: 'last 90 days',
+        },
+    },
+    {
+        kind: 'prompt',
+        label: 'Check raw SQL',
+        tool: 'runSql',
+        defaults: {
+            explore: null,
+            dimensions: [],
+            metrics: [],
+            timeframe: 'last 90 days',
+        },
+    },
+    {
+        kind: 'navigate',
+        label: 'Open Executive overview',
+        url: `/projects/${projectUuid}/dashboards/dashboard-exec-overview`,
+    },
+];
+
+type ThreadTurn = {
+    role: 'user' | 'assistant';
+    text: string | null;
+    context?: AiPromptContextItem[];
+    activity?: LiveActivityToolGroup[];
+    suggestions?: AgentSuggestion[];
+    reasoning?: string[];
+    status?: 'work' | 'verify' | 'done';
+    assistantStatus?: 'idle' | 'pending' | 'error';
+    errorMessage?: string | null;
+    humanScore?: number | null;
+    humanFeedback?: string | null;
+};
+
+type ThreadScenario = {
+    title: string;
+    subtitle: string;
+    badge: string;
+    turns: ThreadTurn[];
+};
+
+type ThreadScenarioKey = 'analysis' | 'work' | 'verify';
+type PinnedContextDensity = 'none' | 'light' | 'heavy';
+type StreamingState =
+    | 'idle'
+    | 'thinking'
+    | 'tool-running'
+    | 'responding'
+    | 'error';
+type ToolDepth = 'minimal' | 'normal' | 'verbose';
+type FeedbackState = 'none' | 'positive' | 'negative';
+type RemediationStage =
+    | 'finding'
+    | 'proposed-change'
+    | 'pr-open'
+    | 'preview-ready'
+    | 'verified';
+
+type ScenarioPlaygroundArgs = {
+    threadType: ThreadScenarioKey;
+    pinnedContext: PinnedContextDensity;
+    streaming: StreamingState;
+    toolDepth: ToolDepth;
+    feedback: FeedbackState;
+    remediationStage: RemediationStage;
+    longThread: boolean;
+};
+
+const workContext: AiPromptContextItem[] = [
+    {
+        type: 'review_finding',
+        fingerprint: 'finding-revenue-definition',
+        title: 'Revenue metric definition is ambiguous',
+        rootCause: 'semantic_layer',
+        findingCount: 4,
+        evidenceExcerpts: [
+            {
+                source: 'user_prompt',
+                text: 'Is revenue before or after refunds?',
+                redacted: false,
+            },
+            {
+                source: 'assistant_answer',
+                text: 'The answer used total_revenue without explaining refund handling.',
+                redacted: false,
+            },
+        ],
+    },
+    {
+        type: 'proposed_change',
+        fingerprint: 'change-revenue-definition',
+        payload: {
+            changeKind: 'semantic_layer',
+            recommendation: {
+                actionType: 'update_semantic_yaml',
+                title: 'Clarify total_revenue definition',
+                rationale:
+                    'Users need to know whether revenue includes refunds and taxes.',
+                targetRefs: [
+                    {
+                        type: 'metric',
+                        modelName: 'orders',
+                        metricName: 'total_revenue',
+                    },
+                ],
+            },
+        },
+    },
+    {
+        type: 'repository',
+        fullName: 'lightdash/jaffle-shop-dbt',
+    },
+    {
+        type: 'file',
+        path: 'models/marts/orders.yml',
+    },
+    {
+        type: 'thread',
+        threadUuid: 'thread-review-finding',
+        promptUuid: 'prompt-finding',
+        displayName: 'Review finding: ambiguous revenue metric',
+    },
+];
+
+const verifyContext: AiPromptContextItem[] = [
+    {
+        type: 'pull_request',
+        prUrl: 'https://github.com/lightdash/jaffle-shop-dbt/pull/42',
+        prNumber: 42,
+        provider: PullRequestProvider.GITHUB,
+        status: 'open',
+        title: 'Clarify total_revenue semantic definition',
+    },
+    {
+        type: 'preview_environment',
+        previewProjectUuid: 'preview-project-revenue-definition',
+        previewThreadUuid: 'thread-preview-verify',
+        status: 'preview_ready',
+        projectName: 'Preview: Jaffle shop',
+    },
+    {
+        type: 'dashboard',
+        dashboardUuid: 'dashboard-preview-exec-overview',
+        dashboardSlug: 'preview-executive-overview',
+        pinnedVersionUuid: null,
+        displayName: 'Preview Executive overview',
+        runtimeOverrides: null,
+    },
+    {
+        type: 'chart',
+        chartUuid: 'chart-preview-weekly-revenue',
+        chartSlug: 'preview-weekly-revenue',
+        pinnedVersionUuid: null,
+        displayName: 'Preview revenue by week',
+        runtimeOverrides: null,
+        chartKind: ChartKind.VERTICAL_BAR,
+    },
+];
+
+const editProjectCalls: ToolCallSummary[] = [
+    {
+        toolCallId: 'read-content-orders',
+        toolName: 'readContent',
+        toolArgs: { type: 'chart', slug: 'weekly-revenue' },
+    },
+    {
+        toolCallId: 'impact-revenue',
+        toolName: 'analyzeFieldImpact',
+        toolArgs: { fieldId: 'orders.total_revenue' },
+    },
+    {
+        toolCallId: 'edit-dbt-project',
+        toolName: 'editDbtProject',
+        toolArgs: {
+            instructions:
+                'Clarify total_revenue as gross revenue before refunds.',
+        },
+    },
+];
+
+const workActivity: LiveActivityToolGroup[] = [
+    {
+        keyId: 'work-read-content',
+        toolName: 'readContent',
+        calls: [editProjectCalls[0]],
+    },
+    {
+        keyId: 'work-impact',
+        toolName: 'analyzeFieldImpact',
+        calls: [editProjectCalls[1]],
+    },
+    {
+        keyId: 'work-edit-project',
+        toolName: 'editDbtProject',
+        calls: [editProjectCalls[2]],
+    },
+];
+
+const verifyActivity: LiveActivityToolGroup[] = [
+    {
+        keyId: 'verify-query',
+        toolName: 'generateVisualization',
+        calls: chartCalls,
+        display: {
+            liveLabel: 'Testing generated chart',
+            doneLabel: 'Tested generated chart',
+        },
+    },
+];
+
+const workSuggestions: AgentSuggestion[] = [
+    {
+        kind: 'prompt',
+        label: 'Open PR',
+        tool: 'findContent',
+        defaults: {
+            explore: null,
+            dimensions: [],
+            metrics: [],
+            timeframe: null,
+        },
+    },
+    {
+        kind: 'prompt',
+        label: 'Tighten metric copy',
+        tool: 'findContent',
+        defaults: {
+            explore: null,
+            dimensions: [],
+            metrics: [],
+            timeframe: null,
+        },
+    },
+];
+
+const verifySuggestions: AgentSuggestion[] = [
+    {
+        kind: 'prompt',
+        label: 'Retest after latest commit',
+        tool: 'generateVisualization',
+        defaults: {
+            explore: 'orders',
+            dimensions: ['orders.order_week'],
+            metrics: ['orders.total_revenue'],
+            timeframe: 'last 90 days',
+        },
+    },
+    {
+        kind: 'prompt',
+        label: 'Check validation errors',
+        tool: 'runSql',
+        defaults: {
+            explore: null,
+            dimensions: [],
+            metrics: [],
+            timeframe: null,
+        },
+    },
+];
+
+const threadScenarios: Record<ThreadScenarioKey, ThreadScenario> = {
+    analysis: {
+        title: 'Revenue investigation',
+        subtitle: 'Normal chat thread with pinned chart and dashboard context.',
+        badge: 'Chat thread',
+        turns: [
+            {
+                role: 'user',
+                text: 'What changed in revenue this month? Use the pinned dashboard filters.',
+                context: contextItems.slice(0, 3),
+            },
+            {
+                role: 'assistant',
+                text: 'Revenue is up 18% month over month. The lift starts in week 42 and is mostly order volume, not larger basket size.',
+                reasoning: [
+                    'Read the dashboard filters.',
+                    'Compared weekly revenue against the prior period.',
+                ],
+                activity: groupedActivity,
+                suggestions,
+                status: 'done',
+            },
+            {
+                role: 'user',
+                text: 'Can you split that by new vs returning customers?',
+            },
+            {
+                role: 'assistant',
+                text: 'Returning customers explain most of the lift. New-customer revenue is flat, while returning-customer revenue is up 24%.',
+                activity: [
+                    groupedActivity[0],
+                    {
+                        keyId: 'customer-type-chart',
+                        toolName: 'generateVisualization',
+                        calls: [
+                            {
+                                toolCallId: 'customer-type-query',
+                                toolName: 'runQuery',
+                                toolArgs: {
+                                    title: 'Revenue by customer type',
+                                },
+                            },
+                            {
+                                toolCallId: 'customer-type-viz',
+                                toolName: 'generateVisualization',
+                                toolArgs: {
+                                    title: 'Revenue by customer type',
+                                },
+                            },
+                        ],
+                        display: {
+                            liveLabel: 'Building customer split',
+                            doneLabel: 'Built customer split',
+                        },
+                    },
+                ],
+                suggestions,
+                status: 'done',
+            },
+        ],
+    },
+    work: {
+        title: 'Build the fix',
+        subtitle:
+            'Remediation work thread: agent edits dbt metadata and opens a PR.',
+        badge: 'Work thread',
+        turns: [
+            {
+                role: 'user',
+                text: 'Fix the ambiguous revenue metric description from this review finding.',
+                context: workContext,
+            },
+            {
+                role: 'assistant',
+                text: 'I found the metric definition in orders.yml and updated the description to say it is gross revenue before refunds.',
+                reasoning: [
+                    'Mapped the finding to orders.total_revenue.',
+                    'Checked impacted charts before editing dbt metadata.',
+                ],
+                activity: workActivity,
+                suggestions: workSuggestions,
+                status: 'work',
+            },
+            {
+                role: 'user',
+                text: 'Also mention that taxes are excluded.',
+            },
+            {
+                role: 'assistant',
+                text: 'Updated the PR with the tax exclusion note and kept the existing gross-revenue wording intact.',
+                activity: [
+                    {
+                        keyId: 'continue-pr',
+                        toolName: 'editDbtProject',
+                        calls: [
+                            {
+                                toolCallId: 'continue-edit',
+                                toolName: 'editDbtProject',
+                                toolArgs: {
+                                    instructions:
+                                        'Amend the open PR with tax exclusion wording.',
+                                },
+                            },
+                        ],
+                    },
+                ],
+                suggestions: workSuggestions,
+                status: 'work',
+            },
+        ],
+    },
+    verify: {
+        title: 'Verify the fix',
+        subtitle:
+            'Read-only remediation verification thread against preview project.',
+        badge: 'Verify thread',
+        turns: [
+            {
+                role: 'user',
+                text: 'Test the fix on the preview project and confirm the finding is gone.',
+                context: verifyContext,
+            },
+            {
+                role: 'assistant',
+                text: 'The preview project built successfully. I regenerated the affected revenue chart and the metric description is now unambiguous.',
+                reasoning: [
+                    'Built the preview environment from the PR branch.',
+                    'Rendered the affected chart using preview metadata.',
+                ],
+                activity: verifyActivity,
+                suggestions: verifySuggestions,
+                status: 'verify',
+            },
+            {
+                role: 'user',
+                text: 'Check whether any validation warnings remain.',
+            },
+            {
+                role: 'assistant',
+                text: 'No validation warnings remain for the affected fields. The fix is ready to mark as resolved.',
+                activity: [
+                    {
+                        keyId: 'validation-check',
+                        toolName: 'runSql',
+                        calls: [
+                            {
+                                toolCallId: 'validation-sql',
+                                toolName: 'runSql',
+                                toolArgs: {
+                                    sql: 'select count(*) as warning_count from validation_errors where field_id = orders.total_revenue',
+                                },
+                            },
+                        ],
+                    },
+                ],
+                suggestions: verifySuggestions,
+                status: 'done',
+            },
+        ],
+    },
+};
+
+const getPinnedContext = (
+    threadType: ThreadScenarioKey,
+    density: PinnedContextDensity,
+    remediationStage: RemediationStage,
+) => {
+    if (density === 'none') return [];
+
+    const baseContext =
+        threadType === 'work'
+            ? workContext
+            : threadType === 'verify'
+              ? verifyContext
+              : contextItems;
+
+    if (density === 'light') return baseContext.slice(0, 2);
+
+    if (threadType === 'work') {
+        return remediationStage === 'finding'
+            ? workContext.filter((item) => item.type !== 'proposed_change')
+            : workContext;
+    }
+
+    if (threadType === 'verify') {
+        return remediationStage === 'pr-open'
+            ? verifyContext.filter(
+                  (item) => item.type !== 'preview_environment',
+              )
+            : verifyContext;
+    }
+
+    return [...contextItems, ...workContext.slice(0, 2)];
+};
+
+const getToolGroups = (
+    activity: LiveActivityToolGroup[] | undefined,
+    toolDepth: ToolDepth,
+) => {
+    if (!activity) return activity;
+    if (toolDepth === 'minimal') return activity.slice(0, 1);
+    if (toolDepth === 'normal') return activity;
+
+    return [
+        ...activity,
+        {
+            keyId: 'verbose-sql-check',
+            toolName: 'runSql',
+            calls: [runSqlCall],
+            display: {
+                liveLabel: 'Checking generated SQL',
+                doneLabel: 'Checked generated SQL',
+            },
+        },
+    ];
+};
+
+const getScenarioForControls = ({
+    threadType,
+    pinnedContext,
+    streaming,
+    toolDepth,
+    feedback,
+    remediationStage,
+    longThread,
+}: ScenarioPlaygroundArgs): ThreadScenario => {
+    const base = threadScenarios[threadType];
+    const turns = base.turns.map((turn, index): ThreadTurn => {
+        if (index === 0 && turn.role === 'user') {
+            return {
+                ...turn,
+                context: getPinnedContext(
+                    threadType,
+                    pinnedContext,
+                    remediationStage,
+                ),
+            };
+        }
+
+        if (turn.role === 'assistant') {
+            return {
+                ...turn,
+                activity: getToolGroups(turn.activity, toolDepth),
+                humanScore:
+                    feedback === 'positive'
+                        ? 1
+                        : feedback === 'negative'
+                          ? -1
+                          : null,
+                humanFeedback:
+                    feedback === 'negative'
+                        ? 'This needs clearer evidence.'
+                        : null,
+            };
+        }
+
+        return turn;
+    });
+
+    if (longThread) {
+        turns.push(
+            {
+                role: 'user',
+                text: 'Can you also explain the risk if we ship this?',
+            },
+            {
+                role: 'assistant',
+                text: 'The main risk is changing user expectations around metric wording. The underlying SQL is unchanged, so chart values should stay stable.',
+                activity: getToolGroups([groupedActivity[1]], toolDepth),
+                reasoning: ['Checked whether this changes SQL generation.'],
+                assistantStatus: 'idle',
+            },
+        );
+    }
+
+    if (streaming !== 'idle') {
+        turns.push({
+            role: 'assistant',
+            text:
+                streaming === 'thinking'
+                    ? null
+                    : streaming === 'responding'
+                      ? 'I have confirmed the affected chart renders with the preview metadata. I am checking the remaining validation output now.'
+                      : streaming === 'error'
+                        ? null
+                        : 'I am running the validation query against the preview project.',
+            activity:
+                streaming === 'tool-running'
+                    ? getToolGroups(verifyActivity, toolDepth)
+                    : undefined,
+            reasoning:
+                streaming === 'thinking'
+                    ? ['Reading pinned context before choosing tools.']
+                    : undefined,
+            assistantStatus: streaming === 'error' ? 'error' : 'pending',
+            errorMessage:
+                streaming === 'error'
+                    ? 'Permission denied while reading the preview project.'
+                    : null,
+        });
+    }
+
+    return {
+        ...base,
+        title: `${base.title} playground`,
+        subtitle: `${base.subtitle} Controls mutate typed thread data only.`,
+        turns,
+    };
+};
+
+const StorySurface = ({ children }: { children: ReactNode }) => (
+    <Box p="xl" bg="ldGray.0" mih={640}>
+        <Stack maw={1040} mx="auto" gap="lg">
+            {children}
+        </Stack>
+    </Box>
+);
+
+const buildCardStates: DataAppBuildCardState[] = [
+    { kind: 'queued', name: 'Weekly revenue by region' },
+    {
+        kind: 'building',
+        name: 'Weekly revenue by region',
+        statusMessage: 'Building your app',
+        narration: {
+            reasoning: ['Totals should reconcile against the revenue metric.'],
+            activity: ['Ran 5 queries · 26 weeks · 4 regions'],
+        },
+    },
+    {
+        kind: 'ready',
+        name: 'Weekly revenue by region',
+        version: 1,
+        durationMs: 372_000,
+        themeName: null,
+        restoredFromVersion: null,
+        completionMessage:
+            'Your app is ready. Five regional pages, weekly revenue over the last 26 weeks.',
+    },
+    {
+        kind: 'failed',
+        message:
+            'The build failed while generating your app. Nothing was published.',
+    },
+    { kind: 'cancelled' },
+    { kind: 'unavailable' },
+];
+
+const buildCardActions = {
+    onOpenBuilder: () => undefined,
+    onView: () => undefined,
+};
+
+const Section = ({
+    title,
+    description,
+    children,
+}: {
+    title: string;
+    description?: string;
+    children: ReactNode;
+}) => (
+    <Paper withBorder radius="md" p="md" bg="white">
+        <Stack gap="sm">
+            <Box>
+                <Title order={5}>{title}</Title>
+                {description ? (
+                    <Text size="xs" c="dimmed">
+                        {description}
+                    </Text>
+                ) : null}
+            </Box>
+            {children}
+        </Stack>
+    </Paper>
+);
+
+const storyUser = {
+    uuid: 'user-story',
+    name: 'Joao Viana',
+};
+
+const storyQueryClient = createQueryClient({
+    queries: {
+        retry: false,
+        staleTime: Infinity,
+        refetchOnMount: false,
+        refetchOnReconnect: false,
+        refetchOnWindowFocus: false,
+    },
+});
+storyQueryClient.setQueryData(
+    [AGENT_AI_MCP_SERVERS_KEY, projectUuid, 'agent-story'],
+    [],
+);
+
+const flattenToolCalls = (activity?: LiveActivityToolGroup[]) =>
+    activity?.flatMap((group) => group.calls) ?? [];
+
+const makeThread = (scenario: ThreadScenario): AiAgentThread => {
+    const createdAt = '2026-06-23T10:00:00.000Z';
+    const threadUuid = `thread-${scenario.badge.toLowerCase().replaceAll(' ', '-')}`;
+    let assistantIndex = 0;
+    const messages: AiAgentMessage[] = scenario.turns.map((turn, index) => {
+        const promptUuid = `prompt-${index}`;
+        const messageCreatedAt = new Date(
+            Date.parse(createdAt) + index * 60_000,
+        ).toISOString();
+
+        if (turn.role === 'user') {
+            return {
+                role: 'user',
+                uuid: promptUuid,
+                threadUuid,
+                message: turn.text ?? '',
+                createdAt: messageCreatedAt,
+                user: storyUser,
+                context: turn.context ?? [],
+                steers: [],
+                hidden: false,
+            };
+        }
+
+        assistantIndex += 1;
+        const calls = flattenToolCalls(turn.activity);
+        return {
+            role: 'assistant',
+            status: turn.assistantStatus ?? 'idle',
+            uuid: `assistant-${index}`,
+            threadUuid,
+            message: turn.text,
+            errorMessage: turn.errorMessage ?? null,
+            interrupted: false,
+            createdAt: messageCreatedAt,
+            humanScore: turn.humanScore ?? null,
+            humanFeedback: turn.humanFeedback ?? null,
+            toolCalls: calls.map((call) => ({
+                uuid: `tool-${call.toolCallId}`,
+                promptUuid,
+                toolCallId: call.toolCallId,
+                parentToolCallId: null,
+                createdAt: new Date(messageCreatedAt),
+                toolType: 'built-in',
+                toolName: call.toolName,
+                toolArgs:
+                    typeof call.toolArgs === 'object' && call.toolArgs
+                        ? call.toolArgs
+                        : {},
+            })),
+            toolResults: [],
+            reasoning:
+                turn.reasoning?.map((text, reasoningIndex) => ({
+                    uuid: `reasoning-${index}-${reasoningIndex}`,
+                    promptUuid,
+                    reasoningId: `reasoning-${index}-${reasoningIndex}`,
+                    text,
+                    createdAt: new Date(messageCreatedAt),
+                })) ?? [],
+            savedQueryUuid: null,
+            artifacts: null,
+            referencedArtifacts: null,
+            modelConfig: {
+                modelName: assistantIndex === 1 ? 'gpt-5' : 'gpt-5-mini',
+                modelProvider: 'openai',
+                reasoning: true,
+            },
+            tokenUsage: null,
+            responseTiming: null,
+            jevDecision: null,
+            loadout: null,
+        };
+    });
+
+    return {
+        uuid: threadUuid,
+        agentUuid: 'agent-story',
+        createdAt,
+        createdFrom: 'web_app',
+        title: scenario.title,
+        titleGeneratedAt: createdAt,
+        pinnedAt: null,
+        battleProfile: null,
+        liveStatus: null,
+        binding: null,
+        threadContext: null,
+        firstMessage: {
+            uuid: 'prompt-0',
+            message: scenario.turns[0]?.text ?? '',
+        },
+        user: storyUser,
+        compactions: [],
+        messages,
+    };
+};
+
+const ThreadScenarioView = ({ scenario }: { scenario: ThreadScenario }) => (
+    <StorySurface>
+        <Paper withBorder radius="md" bg="white" style={{ overflow: 'hidden' }}>
+            <Group justify="space-between" p="md" bg="ldGray.0">
+                <Box>
+                    <Title order={4}>{scenario.title}</Title>
+                    <Text size="xs" c="dimmed">
+                        {scenario.subtitle}
+                    </Text>
+                </Box>
+                <Badge variant="light" color="blue">
+                    {scenario.badge}
+                </Badge>
+            </Group>
+            <QueryClientProvider client={storyQueryClient}>
+                <AppProviderMock>
+                    <Provider store={store}>
+                        <AiAgentThreadStreamAbortControllerContextProvider>
+                            <AgentChatDisplay
+                                thread={makeThread(scenario)}
+                                agentName="Lightdash agent"
+                                projectUuid={projectUuid}
+                                agentUuid="agent-story"
+                                height={720}
+                                renderArtifactsInline
+                            />
+                        </AiAgentThreadStreamAbortControllerContextProvider>
+                    </Provider>
+                </AppProviderMock>
+            </QueryClientProvider>
+        </Paper>
+    </StorySurface>
+);
+
+const ComponentInventory = () => (
+    <StorySurface>
+        <Section
+            title="PinnedContextCard"
+            description="Real pinned-context component across content kinds."
+        >
+            <Group gap="xs" wrap="wrap">
+                {contextItems.map((item) => (
+                    <PinnedContextCard
+                        key={`${item.type}-${JSON.stringify(item)}`}
+                        item={item}
+                        projectUuid={projectUuid}
+                        previewScope={null}
+                    />
+                ))}
+            </Group>
+        </Section>
+
+        <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
+            <Section
+                title="LiveActivityCard"
+                description="Real grouped tool activity card."
+            >
+                <LiveActivityCard toolGroups={groupedActivity} isLive />
+            </Section>
+
+            <Section
+                title="ToolCallRow"
+                description="Real row variants for running, done, and error states."
+            >
+                <Stack gap="xs">
+                    <ToolCallRow
+                        toolName="findFields"
+                        toolCalls={fieldSearchCalls}
+                        status="running"
+                        display={{
+                            liveLabel: 'Searching the data model',
+                            doneLabel: 'Searched the data model',
+                        }}
+                    />
+                    <ToolCallRow
+                        toolName="readContent"
+                        toolCalls={contentCalls}
+                        status="done"
+                        display={{
+                            liveLabel: 'Finding relevant content',
+                            doneLabel: 'Found relevant content',
+                        }}
+                    />
+                    <ToolCallRow
+                        toolName="runSql"
+                        toolCalls={[runSqlCall]}
+                        status="error"
+                    />
+                </Stack>
+            </Section>
+        </SimpleGrid>
+
+        <Section
+            title="DataAppBuildCard"
+            description="Real build card under an agent reply: the six states, then the compact ready / failed rows used on earlier turns."
+        >
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+                {buildCardStates.map((state) => (
+                    <Box key={state.kind}>
+                        <DataAppBuildCard
+                            state={state}
+                            compact={false}
+                            isActive={state.kind === 'ready'}
+                            {...buildCardActions}
+                        />
+                    </Box>
+                ))}
+                {buildCardStates
+                    .filter((s) => s.kind === 'ready' || s.kind === 'failed')
+                    .map((state) => (
+                        <Box key={`compact-${state.kind}`}>
+                            <DataAppBuildCard
+                                state={state}
+                                compact
+                                isActive={false}
+                                {...buildCardActions}
+                            />
+                        </Box>
+                    ))}
+            </SimpleGrid>
+        </Section>
+
+        <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
+            <Section
+                title="Streaming states"
+                description="Existing loading and reasoning components."
+            >
+                <Stack gap="sm">
+                    <TypingDots label="Querying warehouse" />
+                    <DotsLoader />
+                    <ReasoningHistoryRow
+                        isLive
+                        texts={[
+                            'Reading the pinned dashboard filters.',
+                            'Comparing the saved chart to the current metric definition.',
+                        ]}
+                    />
+                </Stack>
+            </Section>
+
+            <Section
+                title="Suggestions"
+                description="Real suggestion chip row."
+            >
+                <AgentSuggestionChips
+                    chips={suggestions}
+                    align="left"
+                    showPromptAffordance
+                    onChipClick={() => undefined}
+                />
+            </Section>
+        </SimpleGrid>
+    </StorySurface>
+);
+
+const PinnedContextScenario = () => (
+    <StorySurface>
+        <Section
+            title="Pinned context before a prompt"
+            description="What the user sees before sending a context-aware prompt."
+        >
+            <Group gap="xs" wrap="wrap">
+                {contextItems.slice(0, 5).map((item) => (
+                    <PinnedContextCard
+                        key={`${item.type}-${JSON.stringify(item)}`}
+                        item={item}
+                        projectUuid={projectUuid}
+                        previewScope={null}
+                    />
+                ))}
+            </Group>
+        </Section>
+        <Section title="User prompt">
+            <Paper radius="md" withBorder p="sm" bg="ldGray.0">
+                <Text size="sm">
+                    What changed in revenue this month? Use the pinned dashboard
+                    filters.
+                </Text>
+            </Paper>
+        </Section>
+        <Section title="Agent activity">
+            <LiveActivityCard toolGroups={groupedActivity} isLive={false} />
+        </Section>
+    </StorySurface>
+);
+
+const StreamingScenario = () => (
+    <StorySurface>
+        <Section title="Streaming answer">
+            <Stack gap="sm">
+                <ReasoningHistoryRow
+                    isLive
+                    texts={[
+                        'Checking whether the revenue spike is volume or basket size.',
+                    ]}
+                />
+                <LiveActivityCard
+                    toolGroups={groupedActivity.slice(0, 2)}
+                    isLive
+                />
+                <Paper withBorder radius="md" p="sm">
+                    <Text size="sm">
+                        Revenue starts lifting in week 42. I am checking if that
+                        is concentrated in repeat customers before I finalize
+                        the chart.
+                    </Text>
+                </Paper>
+                <AgentSuggestionChips
+                    chips={suggestions}
+                    align="left"
+                    showPromptAffordance
+                    onChipClick={() => undefined}
+                />
+            </Stack>
+        </Section>
+    </StorySurface>
+);
+
+const ApprovalAndFailureScenario = () => (
+    <StorySurface>
+        <Section title="SQL approval pending">
+            <ToolCallPaper title="About to run SQL" icon={IconTerminal2}>
+                <Stack gap="xs" mt="sm">
+                    <ToolCallRow
+                        toolName="runSql"
+                        toolCalls={[runSqlCall]}
+                        status="running"
+                    />
+                    <Text size="xs" c="dimmed">
+                        Approval card is hook-backed in app code; this story
+                        keeps the real tool row visible without firing API
+                        calls.
+                    </Text>
+                </Stack>
+            </ToolCallPaper>
+        </Section>
+        <Section title="Failed tool row">
+            <ToolCallRow
+                toolName="runSql"
+                toolCalls={[runSqlCall]}
+                status="error"
+            />
+        </Section>
+    </StorySurface>
+);
+
+const meta: Meta<typeof ComponentInventory> = {
+    decorators: [(renderStory) => <MemoryRouter>{renderStory()}</MemoryRouter>],
+    component: ComponentInventory,
+    tags: ['autodocs'],
+    title: 'AI Copilot/Agent Chat Workbench',
+};
+
+export default meta;
+type Story = StoryObj<typeof ComponentInventory>;
+type PlaygroundStory = StoryObj<ScenarioPlaygroundArgs>;
+
+export const Inventory: Story = {};
+
+export const ScenarioPlayground: PlaygroundStory = {
+    args: {
+        threadType: 'verify',
+        pinnedContext: 'heavy',
+        streaming: 'idle',
+        toolDepth: 'normal',
+        feedback: 'none',
+        remediationStage: 'preview-ready',
+        longThread: false,
+    },
+    argTypes: {
+        threadType: {
+            control: 'select',
+            options: ['analysis', 'work', 'verify'],
+        },
+        pinnedContext: {
+            control: 'select',
+            options: ['none', 'light', 'heavy'],
+        },
+        streaming: {
+            control: 'select',
+            options: [
+                'idle',
+                'thinking',
+                'tool-running',
+                'responding',
+                'error',
+            ],
+        },
+        toolDepth: {
+            control: 'select',
+            options: ['minimal', 'normal', 'verbose'],
+        },
+        feedback: {
+            control: 'select',
+            options: ['none', 'positive', 'negative'],
+        },
+        remediationStage: {
+            control: 'select',
+            options: [
+                'finding',
+                'proposed-change',
+                'pr-open',
+                'preview-ready',
+                'verified',
+            ],
+        },
+        longThread: {
+            control: 'boolean',
+        },
+    },
+    render: (args) => (
+        <ThreadScenarioView scenario={getScenarioForControls(args)} />
+    ),
+};
+
+export const PinnedContext: Story = {
+    render: () => <PinnedContextScenario />,
+};
+
+export const Streaming: Story = {
+    render: () => <StreamingScenario />,
+};
+
+export const ApprovalAndFailure: Story = {
+    render: () => <ApprovalAndFailureScenario />,
+};
+
+export const ComposerPipeline: Story = {
+    render: () => <ComposerPipelineScenario />,
+};
+
+export const SqlChartApproval: Story = {
+    render: () => <SqlChartApprovalScenario />,
+};
+
+export const SqlApprovalExpand: Story = {
+    render: () => <SqlApprovalExpandScenario />,
+};
+
+export const SqlApprovalExpandedRunSql: Story = {
+    render: () => <SqlApprovalExpandScenario />,
+    play: openExpandedSql(0),
+};
+
+export const SqlApprovalExpandedSqlChart: Story = {
+    render: () => <SqlApprovalExpandScenario />,
+    play: openExpandedSql(1),
+};
+
+export const SqlCompletedExpand: Story = {
+    render: () => <SqlCompletedExpandScenario />,
+};
+
+export const SqlCompletedExpandedRunSql: Story = {
+    render: () => <SqlCompletedExpandScenario />,
+    play: openExpandedSql(0),
+};
+
+export const TwoTurnChatThread: Story = {
+    render: () => <ThreadScenarioView scenario={threadScenarios.analysis} />,
+};
+
+export const TwoTurnWorkThread: Story = {
+    render: () => <ThreadScenarioView scenario={threadScenarios.work} />,
+};
+
+export const TwoTurnVerifyThread: Story = {
+    render: () => <ThreadScenarioView scenario={threadScenarios.verify} />,
+};

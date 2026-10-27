@@ -9,12 +9,15 @@ import {
 } from '@lightdash/common';
 import { useMutation } from '@tanstack/react-query';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { lightdashApi } from '../../../../api';
+import { type LightdashApi } from '../../../../api';
+import { useAiAccessGate } from '../../../../features/aiAccess/useAiAccessGate';
+import { useLightdashApi } from '../../../../providers/LightdashApi/useLightdashApi';
 
 // 5 second timeout for AI metadata generation - anything longer is too disruptive
 const METADATA_GENERATION_TIMEOUT_MS = 6000;
 
 const generateChartMetadataApi = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     payload: GenerateChartMetadataRequest,
     signal?: AbortSignal,
@@ -48,6 +51,8 @@ export const useGenerateChartMetadata = ({
     explore,
     onComplete,
 }: UseGenerateChartMetadataOptions) => {
+    const lightdashApi = useLightdashApi();
+    const { disabled: accessDisabled } = useAiAccessGate(projectUuid);
     const [generatedMetadata, setGeneratedMetadata] =
         useState<ChartMetadata | null>(null);
 
@@ -106,6 +111,7 @@ export const useGenerateChartMetadata = ({
             }, METADATA_GENERATION_TIMEOUT_MS);
 
             return generateChartMetadataApi(
+                lightdashApi,
                 projectUuid,
                 payload,
                 controller.signal,
@@ -133,7 +139,7 @@ export const useGenerateChartMetadata = ({
 
     // Trigger AI metadata generation
     const trigger = useCallback(() => {
-        if (!projectUuid || !itemsMap) return;
+        if (accessDisabled || !projectUuid || !itemsMap) return;
 
         // Skip if we already generated for this exact chart state
         if (lastGeneratedForKey.current === chartStateKey) return;
@@ -176,7 +182,14 @@ export const useGenerateChartMetadata = ({
                 ? JSON.stringify(unsavedChartVersion.chartConfig.config)
                 : undefined,
         });
-    }, [projectUuid, itemsMap, chartStateKey, unsavedChartVersion, mutation]);
+    }, [
+        accessDisabled,
+        projectUuid,
+        itemsMap,
+        chartStateKey,
+        unsavedChartVersion,
+        mutation,
+    ]);
 
     return {
         generatedMetadata,

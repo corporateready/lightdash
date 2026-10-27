@@ -1,5 +1,5 @@
 import { getItemLabel, getItemMap, isField } from '@lightdash/common';
-import { Box, Loader, Text } from '@mantine-8/core';
+import { Box, Loader, Text } from '@mantine/core';
 import { memo, useCallback, useMemo, useState, type FC } from 'react';
 import {
     explorerActions,
@@ -14,10 +14,12 @@ import {
     useExplorerDispatch,
     useExplorerSelector,
 } from '../../../features/explorer/store';
+import { useMergeSafe } from '../../../features/mergeQuery/context/useMerge';
+import { resolveMergeColumnOrder } from '../../../features/mergeQuery/utils/resolveMergeColumnOrder';
+import { useColumnTotalsEnabledByDefault } from '../../../hooks/useAsyncCalculateTotal';
 import { useColumns } from '../../../hooks/useColumns';
 import { useExplore } from '../../../hooks/useExplore';
 import { useExplorerQuery } from '../../../hooks/useExplorerQuery';
-import { useIsHidePivotDimsEnabled } from '../../../hooks/useIsHidePivotDimsEnabled';
 import type {
     useGetReadyQueryResults,
     useInfiniteQueryResults,
@@ -83,6 +85,9 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
             ? chartConfig.config.columns
             : undefined;
 
+    const merge = useMergeSafe();
+    const mergeResults = merge?.mergeResults ?? null;
+
     // Get query state from new hook
     const {
         query,
@@ -91,29 +96,115 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
         unpivotedQueryResults,
         unpivotedEnabled,
         missingRequiredParameters,
+        projectUuid,
     } = useExplorerQuery();
+
+    // Hide the totals footer entirely when the `column_totals` project
+    // default disables totals for the results table
+    const totalsEnabledByDefault = useColumnTotalsEnabledByDefault(projectUuid);
 
     const dimensions = query.data?.metricQuery?.dimensions ?? [];
     const metrics = query.data?.metricQuery?.metrics ?? [];
     const explorerColumnOrder = useExplorerSelector(selectColumnOrder);
+    const resultsColumnOrder = mergeResults
+        ? resolveMergeColumnOrder(mergeResults.columnOrder, explorerColumnOrder)
+        : explorerColumnOrder;
     const columnLimit =
         chartConfig.type === 'cartesian' && chartConfig.config
             ? chartConfig.config.columnLimit
             : undefined;
 
     // Check if grouped view is available
-    const {
-        isSqlPivotEnabled,
-        hasPivotColumns: hasPivotConfig,
-        canShowGroupedResults,
-    } = useGroupedResultsAvailability();
+    const { hasPivotColumns: hasPivotConfig, canShowGroupedResults } =
+        useGroupedResultsAvailability();
 
     const resultsData = useMemo(() => {
+        // A configured merge is the explorer's result, so the table reads it
+        // instead of the query it was built from.
+        if (mergeResults) {
+            const unpivotedRunError = merge?.unpivotedRunError;
+            const unpivotedRunErrors = merge?.unpivotedRunErrors ?? [];
+            if (unpivotedRunError || unpivotedRunErrors.length > 0) {
+                return {
+                    rows: [],
+                    totalResults: 0,
+                    isFetchingRows: false,
+                    fetchMoreRows: () => {},
+                    status: 'error' as const,
+                    apiError:
+                        unpivotedRunError ??
+                        ({
+                            status: 'error',
+                            error: {
+                                name: 'Error',
+                                statusCode: 400,
+                                message: unpivotedRunErrors
+                                    .map((error) => error.message)
+                                    .join(' '),
+                                data: {},
+                            },
+                        } as const),
+                    queryStatus: undefined,
+                };
+            }
+            const rawResults =
+                mergeResults.unpivotedResults ?? mergeResults.results;
+            return {
+                rows: rawResults.rows,
+                totalResults: rawResults.totalResults,
+                isFetchingRows: rawResults.isFetchingRows && !rawResults.error,
+                fetchMoreRows: rawResults.fetchMoreRows,
+                status: rawResults.error
+                    ? ('error' as const)
+                    : ('success' as const),
+                apiError: rawResults.error ?? undefined,
+                queryStatus: rawResults.queryStatus,
+            };
+        }
+
+        if (
+            merge?.isMerging &&
+            (merge.runError || merge.runErrors.length > 0)
+        ) {
+            return {
+                rows: [],
+                totalResults: 0,
+                isFetchingRows: false,
+                fetchMoreRows: () => {},
+                status: 'error' as const,
+                apiError:
+                    merge.runError ??
+                    ({
+                        status: 'error',
+                        error: {
+                            name: 'Error',
+                            statusCode: 400,
+                            message: merge.runErrors
+                                .map((error) => error.message)
+                                .join(' '),
+                            data: {},
+                        },
+                    } as const),
+                queryStatus: undefined,
+            };
+        }
+
+        if (merge?.isMerging && (merge.isRunning || merge.wasRestored)) {
+            return {
+                rows: [],
+                totalResults: undefined,
+                isFetchingRows: true,
+                fetchMoreRows: () => {},
+                status: 'loading' as const,
+                apiError: undefined,
+                queryStatus: undefined,
+            };
+        }
+
         const hasUnpivotedQuery = !!unpivotedQuery?.data?.queryUuid;
 
         // Check if we need unpivoted data (regardless of whether it's ready)
-        const needsUnpivotedData =
-            isSqlPivotEnabled && hasPivotConfig && unpivotedEnabled;
+        const needsUnpivotedData = hasPivotConfig && unpivotedEnabled;
 
         // Only use unpivoted data when it's ready
         const shouldUseUnpivotedData = needsUnpivotedData && hasUnpivotedQuery;
@@ -123,6 +214,21 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
         // The main query has a different row structure (pivoted) that would cause
         // the first column to show "-" because the pivot dimension key is missing.
         if (needsUnpivotedData && !hasUnpivotedQuery) {
+            // If the create-query call itself failed (e.g. table calculation
+            // references an unknown field), neither query will ever produce a
+            // queryUuid. Surface the error instead of waiting forever.
+            const createQueryError = query.error ?? unpivotedQuery.error;
+            if (createQueryError) {
+                return {
+                    rows: [],
+                    totalResults: undefined,
+                    isFetchingRows: false,
+                    fetchMoreRows: () => {},
+                    status: 'error' as const,
+                    apiError: createQueryError,
+                    queryStatus: unpivotedQueryResults.queryStatus,
+                };
+            }
             return {
                 rows: [],
                 totalResults: undefined,
@@ -161,7 +267,14 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
 
         return result;
     }, [
-        isSqlPivotEnabled,
+        mergeResults,
+        merge?.isMerging,
+        merge?.isRunning,
+        merge?.wasRestored,
+        merge?.runError,
+        merge?.runErrors,
+        merge?.unpivotedRunError,
+        merge?.unpivotedRunErrors,
         unpivotedQuery,
         hasPivotConfig,
         unpivotedEnabled,
@@ -186,6 +299,22 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
             return null;
         }
 
+        if (mergeResults) {
+            return {
+                rows: mergeResults.results.rows,
+                totalResults: mergeResults.results.totalResults,
+                isFetchingRows:
+                    mergeResults.results.isFetchingRows &&
+                    !mergeResults.results.error,
+                fetchMoreRows: mergeResults.results.fetchMoreRows,
+                status: mergeResults.results.error
+                    ? ('error' as const)
+                    : ('success' as const),
+                apiError: mergeResults.results.error ?? undefined,
+                pivotDetails: mergeResults.results.pivotDetails,
+            };
+        }
+
         const finalStatus = getQueryStatus(query, queryResults);
         return {
             rows: queryResults.rows,
@@ -196,7 +325,7 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
             apiError: query.error ?? queryResults.error,
             pivotDetails: queryResults.pivotDetails,
         };
-    }, [canShowGroupedResults, query, queryResults]);
+    }, [canShowGroupedResults, mergeResults, query, queryResults]);
 
     const handleColumnOrderChange = useCallback(
         (order: string[]) => {
@@ -227,6 +356,7 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
     };
 
     const itemsMap = useMemo(() => {
+        if (mergeResults) return mergeResults.fields;
         return exploreData
             ? getItemMap(
                   exploreData,
@@ -235,7 +365,13 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
                   customDimensions,
               )
             : undefined;
-    }, [exploreData, additionalMetrics, tableCalculations, customDimensions]);
+    }, [
+        mergeResults,
+        exploreData,
+        additionalMetrics,
+        tableCalculations,
+        customDimensions,
+    ]);
 
     // Field helper functions for PivotTable
     const getField = useCallback(
@@ -267,14 +403,11 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
     // pivot headers / row index; metrics drop out of data columns. Both ship
     // to the pivot reducer worker so the user's "Hide column" toggle takes
     // effect without waiting for a new query.
-    //
-    // PROD-2108 flag gate: unflagged users keep the pre-existing behavior
-    // (no dim filtering) so an existing chart with a stray `visible: false`
-    // on a dim doesn't suddenly start hiding columns.
-    const isHidePivotDimsEnabled = useIsHidePivotDimsEnabled();
-    const queryDimensions = query.data?.metricQuery?.dimensions;
+    const queryDimensions =
+        mergeResults?.metricQuery.dimensions ??
+        query.data?.metricQuery?.dimensions;
     const { hiddenDimensionFieldIds, hiddenMetricFieldIds } = useMemo(() => {
-        if (!columnProperties || !isHidePivotDimsEnabled) {
+        if (!columnProperties) {
             return {
                 hiddenDimensionFieldIds: undefined,
                 hiddenMetricFieldIds: undefined,
@@ -296,15 +429,15 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
             hiddenDimensionFieldIds: hiddenDims,
             hiddenMetricFieldIds: hiddenMets,
         };
-    }, [columnProperties, queryDimensions, isHidePivotDimsEnabled]);
+    }, [columnProperties, queryDimensions]);
 
     // Convert pivoted query results to PivotData format for PivotTable
     // Only process when user is actually viewing grouped results
     const pivotTableQuery = usePivotTableData({
         enabled: canShowGroupedResults && viewMode === ResultsViewMode.GROUPED,
-        rows: queryResults.rows,
-        pivotDetails: queryResults.pivotDetails,
-        columnOrder: explorerColumnOrder,
+        rows: groupedResultsData?.rows ?? [],
+        pivotDetails: groupedResultsData?.pivotDetails,
+        columnOrder: resultsColumnOrder,
         getField,
         getFieldLabel,
         columnLimit,
@@ -362,9 +495,9 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
     );
     const footer = useMemo(
         () => ({
-            show: true,
+            show: totalsEnabledByDefault,
         }),
-        [],
+        [totalsEnabledByDefault],
     );
 
     if (!activeTableName) return <NoTableSelected />;
@@ -385,6 +518,18 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
 
     // Render grouped view content
     const renderGroupedView = () => {
+        // Surface query errors (e.g. table calculation references an unknown
+        // field) before any loading checks, so the user isn't stuck on a
+        // spinner when the query will never produce results.
+        if (groupedResultsData?.apiError) {
+            return (
+                <Text c="red" ta="center">
+                    {groupedResultsData.apiError.error?.message ||
+                        'Error loading grouped results'}
+                </Text>
+            );
+        }
+
         if (pivotTableQuery.isLoading || groupedResultsData?.isFetchingRows) {
             return (
                 <Box
@@ -430,7 +575,20 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
 
     return (
         <TrackSection name={SectionName.RESULTS_TABLE}>
-            <Box px="xs" py="lg" data-testid="results-table-container">
+            <Box
+                px="xs"
+                py="lg"
+                data-testid="results-table-container"
+                // Walkthrough result marker for manage:Explore: the rows a
+                // query of one's own returned.
+                data-tour-scope="manage:Explore"
+                data-tour-step="1"
+                data-tour-route="/projects/:projectUuid/tables/:tableName"
+                data-tour-label="A query is a table, a metric and a dimension"
+                data-tour-docs="get-started/explore-your-data.mdx#3-run-your-own-query:1"
+                data-tour-return="none"
+                data-tour-resultdocs="explore/explore-view.mdx#the-explore-page:li4"
+            >
                 {showGroupedView ? (
                     // Grouped results view - shows pivoted data with hierarchical headers
                     // Match approximate height of the paginated results table
@@ -453,7 +611,7 @@ export const ExplorerResults = memo(({ viewMode }: ExplorerResultsProps) => {
                         isFetchingRows={isFetchingRows}
                         fetchMoreRows={fetchMoreRows}
                         columns={columns}
-                        columnOrder={explorerColumnOrder}
+                        columnOrder={resultsColumnOrder}
                         onColumnOrderChange={handleColumnOrderChange}
                         cellContextMenu={cellContextMenu}
                         headerContextMenu={

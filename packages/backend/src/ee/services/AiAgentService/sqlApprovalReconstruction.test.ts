@@ -1,0 +1,358 @@
+import { assertUnreachable } from '@lightdash/common';
+import { getRecentQueryFieldIds } from '../ai/agents/agentV2';
+import { AiAgentService } from './AiAgentService';
+
+type Row = Parameters<
+    typeof AiAgentService.buildToolCallTurnMessages
+>[0][number];
+
+type History = Parameters<typeof AiAgentService.backfillDanglingToolResults>[0];
+
+const call = (toolCallId: string, sql: string) =>
+    ({ toolCallId, toolName: 'runSql', toolArgs: { sql } }) as Row['toolCall'];
+
+const result = (toolCallId: string, value: string) =>
+    ({
+        toolCallId,
+        toolName: 'runSql',
+        result: value,
+        metadata: {},
+    }) as Row['toolResult'];
+
+const metadataFor = (
+    status: 'success' | 'error',
+): { status: 'success' } | { status: 'error' } => {
+    switch (status) {
+        case 'success':
+            return { status: 'success' };
+        case 'error':
+            return { status: 'error' };
+        default:
+            return assertUnreachable(status, 'Unknown tool status');
+    }
+};
+
+const content = (msg: { content: unknown }) => msg.content as Array<AnyType>;
+
+type AnyType = Record<string, unknown> & { type: string };
+
+describe('AiAgentService SQL-approval history reconstruction', () => {
+    it.each(['success', 'error'] as const)(
+        'only reuses a persisted successful query: %s',
+        (status) => {
+            const messages = AiAgentService.buildToolCallTurnMessages(
+                [
+                    {
+                        toolCall: {
+                            ...call('tc1', ''),
+                            toolName: 'runQuery',
+                            toolArgs: {
+                                queryConfig: { metrics: ['orders_count'] },
+                            },
+                        },
+                        toolResult: {
+                            ...result('tc1', 'output')!,
+                            metadata: metadataFor(status),
+                        },
+                        approvalDecision: null,
+                    },
+                ],
+                false,
+                true,
+            );
+            const history = [
+                { role: 'user' as const, content: 'Count orders' },
+                ...messages,
+                { role: 'user' as const, content: 'As a line chart' },
+            ];
+            expect(getRecentQueryFieldIds(history)).toEqual(
+                status === 'success' ? ['orders_count'] : [],
+            );
+            expect(
+                getRecentQueryFieldIds([
+                    ...history,
+                    {
+                        role: 'assistant',
+                        content: 'No data query in this turn',
+                    },
+                    { role: 'user', content: 'As a bar chart' },
+                ]),
+            ).toEqual([]);
+        },
+    );
+    it.each([false, true])(
+        'preserves tool status only for fast mode: %s',
+        (fastMode) => {
+            const toolResult = {
+                ...result('tc1', 'unknown field')!,
+                metadata: { status: 'error' as const },
+            };
+            const messages = AiAgentService.buildToolCallTurnMessages(
+                [
+                    {
+                        toolCall: call('tc1', 'SELECT 1'),
+                        toolResult,
+                        approvalDecision: null,
+                    },
+                ],
+                false,
+                fastMode,
+            );
+            expect(content(messages[1])[0].output).toEqual({
+                type: 'json',
+                value: fastMode
+                    ? { result: 'unknown field', status: 'error' }
+                    : 'unknown field',
+            });
+        },
+    );
+    it('a normal tool call emits assistant(call) + tool(result), no approval parts', () => {
+        const msgs = AiAgentService.buildToolCallTurnMessages(
+            [
+                {
+                    toolCall: call('tc1', 'SELECT 1'),
+                    toolResult: result('tc1', '3 rows'),
+                    approvalDecision: null,
+                },
+            ],
+            false,
+        );
+
+        expect(msgs).toHaveLength(2);
+        expect(msgs[0].role).toBe('assistant');
+        expect(content(msgs[0])).toEqual([
+            {
+                type: 'tool-call',
+                toolCallId: 'tc1',
+                toolName: 'runSql',
+                input: { sql: 'SELECT 1' },
+            },
+        ]);
+        expect(msgs[1].role).toBe('tool');
+        expect(content(msgs[1])[0].type).toBe('tool-result');
+    });
+
+    it('approved-but-unexecuted call on the CURRENT prompt emits request + response and NO result (the resume input)', () => {
+        const msgs = AiAgentService.buildToolCallTurnMessages(
+            [
+                {
+                    toolCall: call('tc1', 'SELECT 1'),
+                    toolResult: null,
+                    approvalDecision: 'approved',
+                },
+            ],
+            true,
+        );
+
+        expect(msgs).toHaveLength(2);
+        expect(content(msgs[0])).toEqual([
+            {
+                type: 'tool-call',
+                toolCallId: 'tc1',
+                toolName: 'runSql',
+                input: { sql: 'SELECT 1' },
+            },
+            {
+                type: 'tool-approval-request',
+                approvalId: 'sql-approval:tc1',
+                toolCallId: 'tc1',
+            },
+        ]);
+        expect(content(msgs[1])).toEqual([
+            {
+                type: 'tool-approval-response',
+                approvalId: 'sql-approval:tc1',
+                approved: true,
+            },
+        ]);
+    });
+
+    it('rejected call emits an approval-response with approved=false', () => {
+        const msgs = AiAgentService.buildToolCallTurnMessages(
+            [
+                {
+                    toolCall: call('tc1', 'SELECT 1'),
+                    toolResult: null,
+                    approvalDecision: 'rejected',
+                },
+            ],
+            false,
+        );
+
+        expect(content(msgs[1])[0]).toEqual({
+            type: 'tool-approval-response',
+            approvalId: 'sql-approval:tc1',
+            approved: false,
+        });
+    });
+
+    it('a completed approved call emits request + response + result', () => {
+        const msgs = AiAgentService.buildToolCallTurnMessages(
+            [
+                {
+                    toolCall: call('tc1', 'SELECT 1'),
+                    toolResult: result('tc1', '3 rows'),
+                    approvalDecision: 'approved',
+                },
+            ],
+            false,
+        );
+
+        expect(msgs).toHaveLength(3);
+        expect(content(msgs[1])[0].type).toBe('tool-approval-response');
+        expect(content(msgs[2])[0].type).toBe('tool-result');
+    });
+
+    it('a PRIOR approved call whose result was never persisted backfills a synthetic tool-result (no dangling call)', () => {
+        const msgs = AiAgentService.buildToolCallTurnMessages(
+            [
+                {
+                    toolCall: call('tc1', 'SELECT 1'),
+                    toolResult: null,
+                    approvalDecision: 'approved',
+                },
+            ],
+            false,
+        );
+
+        expect(msgs).toHaveLength(3);
+        expect(content(msgs[0])[0].type).toBe('tool-call');
+        expect(content(msgs[1])[0].type).toBe('tool-approval-response');
+        expect(content(msgs[2])[0]).toMatchObject({
+            type: 'tool-result',
+            toolCallId: 'tc1',
+            output: { type: 'json', value: 'Tool result unavailable.' },
+        });
+    });
+
+    it('backfillDanglingToolResults leaves valid history untouched', () => {
+        const history = [
+            { role: 'user', content: 'hi' },
+            {
+                role: 'assistant',
+                content: [
+                    {
+                        type: 'tool-call',
+                        toolCallId: 'tc1',
+                        toolName: 'runSql',
+                        input: {},
+                    },
+                ],
+            },
+            {
+                role: 'tool',
+                content: [
+                    {
+                        type: 'tool-result',
+                        toolCallId: 'tc1',
+                        toolName: 'runSql',
+                        output: { type: 'json', value: '1 row' },
+                    },
+                ],
+            },
+        ] as unknown as History;
+
+        expect(AiAgentService.backfillDanglingToolResults(history)).toEqual(
+            history,
+        );
+    });
+
+    it('backfillDanglingToolResults backfills a blocked mid-history call but keeps the trailing resume input dangling', () => {
+        const approvalPair = (id: string) => [
+            {
+                role: 'assistant',
+                content: [
+                    {
+                        type: 'tool-call',
+                        toolCallId: id,
+                        toolName: 'runSql',
+                        input: {},
+                    },
+                    {
+                        type: 'tool-approval-request',
+                        approvalId: `sql-approval:${id}`,
+                        toolCallId: id,
+                    },
+                ],
+            },
+            {
+                role: 'tool',
+                content: [
+                    {
+                        type: 'tool-approval-response',
+                        approvalId: `sql-approval:${id}`,
+                        approved: true,
+                    },
+                ],
+            },
+        ];
+
+        // A = blocked earlier in the turn (no result), C = trailing resume input.
+        const history = [
+            ...approvalPair('A'),
+            ...approvalPair('C'),
+        ] as unknown as History;
+
+        const out = AiAgentService.backfillDanglingToolResults(history);
+
+        // A's approval-response is followed by a synthetic result.
+        expect(content(out[1])[0].type).toBe('tool-approval-response');
+        expect(out[2]).toMatchObject({
+            role: 'tool',
+            content: [
+                {
+                    type: 'tool-result',
+                    toolCallId: 'A',
+                    output: { type: 'json', value: 'Tool result unavailable.' },
+                },
+            ],
+        });
+        // C (the trailing resume input) stays result-less and last.
+        const last = out[out.length - 1];
+        expect(content(last)[0]).toMatchObject({
+            type: 'tool-approval-response',
+            approvalId: 'sql-approval:C',
+        });
+        expect(
+            out.some(
+                (m) =>
+                    m.role === 'tool' &&
+                    content(m).some(
+                        (p) => p.type === 'tool-result' && p.toolCallId === 'C',
+                    ),
+            ),
+        ).toBe(false);
+    });
+
+    it('hasUnresolvedSqlApproval is true only for a decided, result-less call', () => {
+        expect(
+            AiAgentService.hasUnresolvedSqlApproval([
+                {
+                    toolCall: call('tc1', 'x'),
+                    toolResult: null,
+                    approvalDecision: 'approved',
+                },
+            ]),
+        ).toBe(true);
+
+        expect(
+            AiAgentService.hasUnresolvedSqlApproval([
+                {
+                    toolCall: call('tc1', 'x'),
+                    toolResult: result('tc1', 'y'),
+                    approvalDecision: 'approved',
+                },
+            ]),
+        ).toBe(false);
+
+        expect(
+            AiAgentService.hasUnresolvedSqlApproval([
+                {
+                    toolCall: call('tc1', 'x'),
+                    toolResult: null,
+                    approvalDecision: null,
+                },
+            ]),
+        ).toBe(false);
+    });
+});

@@ -8,21 +8,21 @@ import { Button, Group, Select, Stack, Text } from '@mantine/core';
 import { IconFilter, IconX } from '@tabler/icons-react';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
-import {
-    useFilterSelectStyles,
-    useOperatorSelectStyles,
-} from '../../styles/useFilterStyles';
+import { groupComboboxItems } from '../../../../components/common/Select/utils';
+import filterStyles from '../../styles/filterStyles.module.css';
 import {
     createFilterRule,
     doesDimensionRequireValues,
     getOperatorOptions,
 } from '../../utils/metricExploreFilter';
 import SelectItem from '../SelectItem';
+import styles from './MetricExploreButtons.module.css';
 import { MetricExploreFilterAutoComplete } from './MetricExploreFilterAutoComplete';
 
 type Props = {
     dimensions: CompiledDimension[] | undefined;
     onFilterApply: (filterRule: FilterRule | undefined) => void;
+    initialFilterRule?: FilterRule;
 };
 
 interface FilterState {
@@ -32,20 +32,37 @@ interface FilterState {
     values: string[];
 }
 
+const EMPTY_FILTER_STATE: FilterState = {
+    dimension: null,
+    fieldId: null,
+    operator: null,
+    values: [],
+};
+
 export const MetricExploreFilter: FC<Props> = ({
     dimensions,
     onFilterApply,
+    initialFilterRule,
 }) => {
-    const { classes: filterSelectClasses, theme } = useFilterSelectStyles();
-    const { classes: operatorSelectClasses } = useOperatorSelectStyles();
-
-    const [filterState, setFilterState] = useState<FilterState>({
-        dimension: null,
-        fieldId: null,
-        operator: null,
-        values: [],
-    });
-    const [activeFilter, setActiveFilter] = useState<FilterRule | undefined>();
+    // Seed from the metric's default filter on mount. The parent remounts this
+    // component (via key) per metric, so this initializer re-runs on switch.
+    const [filterState, setFilterState] = useState<FilterState>(() =>
+        initialFilterRule
+            ? {
+                  fieldId: initialFilterRule.target.fieldId,
+                  dimension:
+                      dimensions?.find(
+                          (d) =>
+                              getItemId(d) === initialFilterRule.target.fieldId,
+                      )?.name ?? null,
+                  operator: initialFilterRule.operator,
+                  values: (initialFilterRule.values ?? []) as string[],
+              }
+            : EMPTY_FILTER_STATE,
+    );
+    const [activeFilter, setActiveFilter] = useState<FilterRule | undefined>(
+        initialFilterRule,
+    );
 
     const selectedDimension = dimensions?.find(
         (d) => getItemId(d) === filterState.fieldId,
@@ -93,12 +110,7 @@ export const MetricExploreFilter: FC<Props> = ({
 
     const handleClearFilter = () => {
         setActiveFilter(undefined);
-        setFilterState({
-            dimension: null,
-            fieldId: null,
-            operator: null,
-            values: [],
-        });
+        setFilterState(EMPTY_FILTER_STATE);
         onFilterApply(undefined);
     };
 
@@ -171,36 +183,31 @@ export const MetricExploreFilter: FC<Props> = ({
     }, []);
 
     return (
-        <Stack spacing="xs">
-            <Group position="apart">
-                <Group spacing="xs" align="normal">
+        <Stack gap="xs">
+            <Group justify="space-between">
+                <Group gap="xs" align="normal">
                     <Text fw={500} c="ldGray.7">
                         Filter
                     </Text>
                 </Group>
 
-                <Group spacing="xs">
+                <Group gap="xs">
                     <Button
                         variant="subtle"
-                        compact
-                        color="dark"
-                        size="xs"
-                        radius="md"
-                        rightIcon={
+                        size="compact-xs"
+                        rightSection={
                             <MantineIcon
                                 icon={IconX}
                                 color="ldGray.5"
                                 size={12}
                             />
                         }
-                        sx={{
-                            '&:hover': {
-                                backgroundColor: theme.colors.ldGray[1],
-                            },
+                        className={styles.clearButton}
+                        style={{
                             visibility: showClearButton,
                         }}
                         styles={{
-                            rightIcon: {
+                            section: {
                                 marginLeft: 4,
                             },
                         }}
@@ -211,47 +218,65 @@ export const MetricExploreFilter: FC<Props> = ({
                 </Group>
             </Group>
 
-            <Stack
-                spacing={0}
-                sx={{
-                    boxShadow: theme.shadows.subtle,
-                    borderRadius: theme.radius.md,
-                }}
-            >
-                <Group spacing={0} noWrap>
+            <Stack gap={0} className={filterStyles.filterContainer}>
+                <Group gap={0} wrap="nowrap">
                     <Select
+                        allowDeselect={false}
                         placeholder="Filter by"
-                        icon={<MantineIcon icon={IconFilter} />}
+                        leftSection={<MantineIcon icon={IconFilter} />}
                         searchable
-                        withinPortal
-                        radius="md"
+                        comboboxProps={{ withinPortal: true }}
                         size="xs"
-                        data={
+                        data={groupComboboxItems(
                             dimensions?.map((dimension) => ({
                                 value: getItemId(dimension),
                                 label: dimension.label,
                                 group: dimension.tableLabel,
-                            })) ?? []
-                        }
+                            })) ?? [],
+                        )}
                         disabled={dimensions?.length === 0}
                         value={filterState.fieldId}
-                        itemComponent={SelectItem}
+                        renderOption={({ option, checked }) => (
+                            <SelectItem
+                                value={option.value}
+                                label={option.label}
+                                selected={checked ?? false}
+                            />
+                        )}
                         onChange={handleDimensionChange}
                         data-selected={!!filterState.fieldId}
                         data-no-values={!showValuesSection ? 'true' : 'false'}
-                        classNames={filterSelectClasses}
+                        classNames={{
+                            root: filterStyles.filterRoot,
+                            wrapper: filterStyles.filterWrapper,
+                            input: filterStyles.filterInput,
+                            option: filterStyles.baseItem,
+                            dropdown: filterStyles.filterDropdown,
+                            section: filterStyles.rightSection,
+                        }}
                     />
 
                     {filterState.fieldId && (
                         <Select
+                            allowDeselect={false}
                             placeholder="Condition"
-                            withinPortal
+                            comboboxProps={{ withinPortal: true }}
                             data={operatorOptions}
                             value={filterState.operator}
-                            onChange={handleOperatorChange}
+                            onChange={(value) =>
+                                handleOperatorChange(
+                                    value as FilterOperator | null,
+                                )
+                            }
                             size="xs"
-                            radius="md"
-                            classNames={operatorSelectClasses}
+                            classNames={{
+                                root: filterStyles.operatorRoot,
+                                wrapper: filterStyles.operatorWrapper,
+                                input: filterStyles.operatorInput,
+                                option: filterStyles.baseItem,
+                                dropdown: filterStyles.operatorDropdown,
+                                section: filterStyles.rightSection,
+                            }}
                             data-no-values={
                                 !showValuesSection ? 'true' : 'false'
                             }
@@ -276,14 +301,9 @@ export const MetricExploreFilter: FC<Props> = ({
             </Stack>
             {filterState.fieldId && dimensionMetadata?.requiresValues && (
                 <Button
-                    color={theme.colorScheme === 'dark' ? 'ldGray.2' : 'dark'}
-                    compact
-                    size="xs"
+                    size="compact-xs"
                     disabled={!canApplyFilter}
-                    sx={{
-                        boxShadow: theme.shadows.subtle,
-                        alignSelf: 'flex-end',
-                    }}
+                    className={filterStyles.applyButton}
                     onClick={handleApplyFilter}
                 >
                     Apply

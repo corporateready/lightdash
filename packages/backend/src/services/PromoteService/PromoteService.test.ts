@@ -1,19 +1,33 @@
 import { Ability } from '@casl/ability';
 import {
+    AgentActorSurface,
+    ChartType,
     DashboardTileTypes,
     OrganizationMemberRole,
+    ParameterError,
     PossibleAbilities,
     PromotionAction,
     SessionUser,
+    type PromotionChanges,
 } from '@lightdash/common';
+import type { Knex } from 'knex';
+import { EventEmitter } from 'node:events';
 import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
+import { fromSession } from '../../auth/account';
 import { lightdashConfigMock } from '../../config/lightdashConfig.mock';
+import type { AppGenerateService } from '../../ee/services/AppGenerateService/AppGenerateService';
 import { CaslAuditWrapper } from '../../logging/caslAuditWrapper';
+import * as auditLogger from '../../logging/winston';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import { type OnContentVersionCreated } from '../../models/OnContentVersionCreated';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { SavedChartModel } from '../../models/SavedChartModel';
 import { SavedSqlModel } from '../../models/SavedSqlModel';
 import { SpaceModel } from '../../models/SpaceModel';
+import {
+    agentExecutionContext,
+    createAgentExecutionContext,
+} from '../AiAccessService/agentExecutionContext';
 import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
 import { PromoteService } from './PromoteService';
 import {
@@ -22,77 +36,254 @@ import {
     existingUpstreamSqlChart,
     missingUpstreamChart,
     missingUpstreamDashboard,
+    promotedAppUuid,
     promotedChart,
     promotedChartWithinDashboard,
     promotedDashboard,
     promotedDashboardWithChartWithinDashboard,
+    promotedDashboardWithDataAppTile,
     promotedDashboardWithNewPrivateSpace,
     promotedDashboardWithSqlTile,
     promotedSqlChart,
+    upstreamAppUuid,
     upstreamFullSpace,
     upstreamSpace,
     user,
 } from './PromoteService.mock';
 
+const connectionState = vi.hoisted(() => ({
+    routes: new Map<string, 'single' | 'multi'>(),
+    connections: new Map<
+        string,
+        { warehouseConnectionUuid: string; name: string; isOriginal: boolean }[]
+    >(),
+}));
+
 const projectModel = {
-    getSummary: jest.fn(async () => ({
+    getSummary: vi.fn(async () => ({
         upstreamProjectUuid: existingUpstreamDashboard.projectUuid,
     })),
+    getUpstreamChartUuidFromPreview: vi.fn(async () => null),
+    getUpstreamDashboardUuidFromPreview: vi.fn(
+        async (): Promise<string | null> => null,
+    ),
+    getConnectionRoute: vi.fn(
+        async (projectUuid: string) =>
+            connectionState.routes.get(projectUuid) ?? 'single',
+    ),
+};
+
+const warehouseConnectionModel = {
+    getProject: vi.fn(async (projectUuid: string) => ({ projectUuid })),
+    list: vi.fn(
+        async ({ projectUuid }: { projectUuid: string }) =>
+            connectionState.connections.get(projectUuid) ?? [],
+    ),
+};
+
+const chartTransaction = new EventEmitter() as unknown as Knex.Transaction;
+const runChartTransaction = async <T>(
+    callback: (transaction: Knex.Transaction) => Promise<T>,
+    failCommit = false,
+): Promise<T> => {
+    let commit!: () => void;
+    let rollback!: (error: unknown) => void;
+    chartTransaction.executionPromise = new Promise<unknown[]>(
+        (resolve, reject) => {
+            commit = () => resolve([]);
+            rollback = reject;
+        },
+    );
+    void chartTransaction.executionPromise.catch(() => {});
+    try {
+        const result = await callback(chartTransaction);
+        if (failCommit) throw new Error('commit failed');
+        chartTransaction.emit('query', { sql: 'COMMIT;' });
+        commit();
+        await chartTransaction.executionPromise;
+        return result;
+    } catch (error) {
+        rollback(error);
+        throw error;
+    }
+};
+
+const runVersionCallback = async (
+    onVersionCreated: OnContentVersionCreated | undefined,
+    versionUuid: string,
+    objectUuid: string,
+    trx?: Knex.Transaction,
+): Promise<void> => {
+    if (trx) await onVersionCreated?.(trx, versionUuid, objectUuid);
+    else
+        await runChartTransaction(async (transaction) => {
+            await onVersionCreated?.(transaction, versionUuid, objectUuid);
+        });
+};
+
+const createChart = async (...args: Parameters<SavedChartModel['create']>) => {
+    await runVersionCallback(
+        args[4],
+        'chart-version-uuid',
+        existingUpstreamChart.chart!.uuid,
+    );
+    return existingUpstreamChart.chart;
+};
+const createChartVersion = async (
+    ...args: Parameters<SavedChartModel['createVersion']>
+) => {
+    await runVersionCallback(
+        args[6],
+        'chart-version-uuid',
+        args[0],
+        args[3] as Knex.Transaction | undefined,
+    );
+    return existingUpstreamChart.chart;
 };
 
 const savedChartModel = {
-    get: jest.fn(async () => promotedChart.chart),
-    find: jest.fn(async () => [existingUpstreamChart.chart]),
-    create: jest.fn(async () => existingUpstreamChart.chart),
+    getSummary: vi.fn(async () => ({
+        projectUuid: promotedChart.projectUuid,
+    })),
+    get: vi.fn(async () => promotedChart.chart),
+    find: vi.fn(async () => [existingUpstreamChart.chart]),
+    create: vi.fn(createChart),
+    createVersion: vi.fn(createChartVersion),
+    updateInTransaction: vi.fn(async () => undefined),
+    renameSlug: vi.fn(async () => undefined),
+    transaction: vi.fn(
+        async (callback: (transaction: Knex.Transaction) => Promise<unknown>) =>
+            runChartTransaction(callback),
+    ),
 };
 
+beforeEach(() => {
+    projectModel.getUpstreamDashboardUuidFromPreview
+        .mockReset()
+        .mockResolvedValue(null);
+    projectModel.getUpstreamChartUuidFromPreview
+        .mockReset()
+        .mockResolvedValue(null);
+    savedChartModel.get.mockReset().mockResolvedValue(promotedChart.chart);
+    savedChartModel.find
+        .mockReset()
+        .mockResolvedValue([existingUpstreamChart.chart]);
+    savedChartModel.create.mockReset().mockImplementation(createChart);
+    savedChartModel.createVersion
+        .mockReset()
+        .mockImplementation(createChartVersion);
+    savedChartModel.updateInTransaction
+        .mockReset()
+        .mockResolvedValue(undefined);
+    savedChartModel.renameSlug.mockReset().mockResolvedValue(undefined);
+    savedChartModel.transaction
+        .mockReset()
+        .mockImplementation(
+            async (
+                callback: (transaction: Knex.Transaction) => Promise<unknown>,
+            ) => runChartTransaction(callback),
+        );
+});
+
 const savedSqlModel = {
-    getByUuid: jest.fn(async () => promotedSqlChart),
-    find: jest.fn(async () => []),
-    create: jest.fn(async () => ({
-        savedSqlUuid: existingUpstreamSqlChart.savedSqlUuid,
-        slug: existingUpstreamSqlChart.slug,
-        savedSqlVersionUuid: 'saved-sql-version-uuid',
-    })),
-    update: jest.fn(async () => ({
-        savedSqlUuid: existingUpstreamSqlChart.savedSqlUuid,
-        savedSqlVersionUuid: 'saved-sql-version-uuid',
-    })),
+    getByUuid: vi.fn(async () => promotedSqlChart),
+    find: vi.fn(async () => []),
+    create: vi.fn(async (...args: Parameters<SavedSqlModel['create']>) => {
+        await runVersionCallback(
+            args[6],
+            'saved-sql-version-uuid',
+            existingUpstreamSqlChart.savedSqlUuid,
+        );
+        return {
+            savedSqlUuid: existingUpstreamSqlChart.savedSqlUuid,
+            slug: existingUpstreamSqlChart.slug,
+            savedSqlVersionUuid: 'saved-sql-version-uuid',
+        };
+    }),
+    update: vi.fn(async (...args: Parameters<SavedSqlModel['update']>) => {
+        await runVersionCallback(
+            args[3],
+            'saved-sql-version-uuid',
+            existingUpstreamSqlChart.savedSqlUuid,
+        );
+        return {
+            savedSqlUuid: existingUpstreamSqlChart.savedSqlUuid,
+            savedSqlVersionUuid: 'saved-sql-version-uuid',
+        };
+    }),
 };
 
 const spaceModel = {
-    getSpaceSummary: jest.fn(async () => promotedChart.space),
-    find: jest.fn(),
-    getSpaceAncestors: jest.fn(async () => []),
-    createSpace: jest.fn(async () => existingUpstreamChart.space),
-    createSpaceWithAncestors: jest.fn(async () => existingUpstreamChart.space),
-    addSpaceAccess: jest.fn(async () => {}),
-    addSpaceGroupAccess: jest.fn(async () => {}),
-    update: jest.fn(async () => {}),
-    isRootSpace: jest.fn(async () => true),
+    getSpaceSummary: vi.fn(async () => promotedChart.space),
+    find: vi.fn(),
+    getSpaceAncestors: vi.fn(async () => []),
+    createSpace: vi.fn(async () => existingUpstreamChart.space),
+    createSpaceWithAncestors: vi.fn(async () => existingUpstreamChart.space),
+    addSpaceAccess: vi.fn(async () => {}),
+    addSpaceGroupAccess: vi.fn(async () => {}),
+    update: vi.fn(async () => {}),
+    isRootSpace: vi.fn(async () => true),
 };
 const dashboardModel = {
-    create: jest.fn(async () => existingUpstreamDashboard.dashboard),
-    getByIdOrSlug: jest.fn(async () => promotedDashboardWithSqlTile.dashboard),
-    find: jest.fn(async () => []),
+    create: vi.fn(async (...args: Parameters<DashboardModel['create']>) => {
+        await runVersionCallback(
+            args[5],
+            'dashboard-version-uuid',
+            existingUpstreamDashboard.dashboard!.uuid,
+        );
+        return existingUpstreamDashboard.dashboard;
+    }),
+    getByIdOrSlug: vi.fn(async () => promotedDashboardWithSqlTile.dashboard),
+    find: vi.fn(async () => []),
+    renameSlug: vi.fn(async () => undefined),
+    update: vi.fn(async () => undefined),
+    addVersion: vi.fn(
+        async (...args: Parameters<DashboardModel['addVersion']>) => {
+            await runVersionCallback(
+                args[6],
+                'dashboard-version-uuid',
+                args[0],
+                args[4],
+            );
+            return existingUpstreamDashboard.dashboard!;
+        },
+    ),
 };
 const spacePermissionService = {
-    getSpaceAccessContext: jest.fn(async () => ({
+    resolveAccess: vi.fn(async () => ({
         organizationUuid: 'org-uuid',
         projectUuid: 'project-uuid',
         inheritsFromOrgOrProject: true,
         access: [],
     })),
-    getAllSpaceAccessContext: jest.fn(async () => ({
+    getAllSpaceAccessContext: vi.fn(async () => ({
         organizationUuid: 'org-uuid',
         projectUuid: 'project-uuid',
         inheritsFromOrgOrProject: true,
         access: upstreamFullSpace.access,
     })),
-    getGroupAccess: jest.fn(async () => upstreamFullSpace.groupsAccess),
+    getGroupAccess: vi.fn(async () => upstreamFullSpace.groupsAccess),
 };
+
+const userWithAbilities = (
+    rules: ConstructorParameters<typeof Ability<PossibleAbilities>>[0],
+): SessionUser => ({
+    ...user,
+    role: OrganizationMemberRole.DEVELOPER,
+    ability: new Ability<PossibleAbilities>(rules),
+});
+
+const userWithPromotePermissions = userWithAbilities([
+    { subject: 'Dashboard', action: ['promote', 'manage'] },
+    { subject: 'SavedChart', action: ['promote', 'manage'] },
+    { subject: 'Space', action: ['create', 'manage'] },
+]);
+
+const agentActionLogModel = { insert: vi.fn().mockResolvedValue(undefined) };
+
 describe('PromoteService chart changes', () => {
     const service = new PromoteService({
+        agentActionLogModel,
         lightdashConfig: lightdashConfigMock,
 
         analytics: analyticsMock,
@@ -103,13 +294,18 @@ describe('PromoteService chart changes', () => {
         dashboardModel: {} as DashboardModel,
         spacePermissionService:
             spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionModel: warehouseConnectionModel as never,
+        getDocumentService: () => ({}) as never,
+        appModel: {} as never,
     });
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     test('getChartChanges create chart and space', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
         const changes = await service.getChartChanges(
             promotedChart,
             missingUpstreamChart,
@@ -137,9 +333,9 @@ describe('PromoteService chart changes', () => {
         });
     });
     test('getChartChanges create chart but no space', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            upstreamSpace,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [upstreamSpace],
+        );
         const changes = await service.getChartChanges(promotedChart, {
             ...missingUpstreamChart,
             space: existingUpstreamChart.space,
@@ -167,9 +363,9 @@ describe('PromoteService chart changes', () => {
     });
 
     test('getChartChanges chart with no changes', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            upstreamSpace,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [upstreamSpace],
+        );
         const changes = await service.getChartChanges(
             promotedChart,
             existingUpstreamChart,
@@ -185,9 +381,9 @@ describe('PromoteService chart changes', () => {
 
     test('getChartChanges update chart', async () => {
         const updatedAt = new Date();
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            upstreamSpace,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [upstreamSpace],
+        );
         const changes = await service.getChartChanges(
             {
                 ...promotedChart,
@@ -222,9 +418,96 @@ describe('PromoteService chart changes', () => {
         });
     });
 
+    test('getChartChanges treats a canonical slug rename as an update', async () => {
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [upstreamSpace],
+        );
+
+        const changes = await service.getChartChanges(
+            {
+                ...promotedChart,
+                chart: {
+                    ...promotedChart.chart,
+                    slug: 'renamed-chart',
+                },
+            },
+            existingUpstreamChart,
+        );
+
+        expect(changes.charts[0]).toMatchObject({
+            action: PromotionAction.UPDATE,
+            data: { slug: 'renamed-chart' },
+        });
+    });
+
+    test('getChartChanges treats a repeated promoted rename as idempotent', async () => {
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [upstreamSpace],
+        );
+        const renamedChart = {
+            ...promotedChart.chart,
+            slug: 'renamed-chart',
+        };
+
+        const changes = await service.getChartChanges(
+            {
+                ...promotedChart,
+                chart: renamedChart,
+            },
+            {
+                ...existingUpstreamChart,
+                chart: renamedChart,
+            },
+        );
+
+        expect(changes.charts[0].action).toBe(PromotionAction.NO_CHANGES);
+    });
+
+    test('resolves a renamed preview chart through its original content mapping', async () => {
+        const renamedPreviewChart = {
+            ...promotedChart.chart,
+            slug: 'renamed-chart',
+        };
+        (
+            projectModel.getUpstreamChartUuidFromPreview as import('vitest').Mock
+        ).mockResolvedValueOnce(existingUpstreamChart.chart!.uuid);
+        (savedChartModel.get as import('vitest').Mock).mockImplementation(
+            async (chartUuid: string) =>
+                chartUuid === renamedPreviewChart.uuid
+                    ? renamedPreviewChart
+                    : existingUpstreamChart.chart,
+        );
+        (spaceModel.find as import('vitest').Mock).mockResolvedValueOnce([
+            upstreamSpace,
+        ]);
+
+        const result = await service.getPromoteCharts(
+            user,
+            existingUpstreamChart.projectUuid,
+            renamedPreviewChart.uuid,
+        );
+
+        expect(result.upstreamChart.chart?.uuid).toBe(
+            existingUpstreamChart.chart!.uuid,
+        );
+        expect(savedChartModel.find).not.toHaveBeenCalled();
+        expect(savedChartModel.get).toHaveBeenNthCalledWith(
+            2,
+            existingUpstreamChart.chart!.uuid,
+            undefined,
+            { projectUuid: existingUpstreamChart.projectUuid },
+        );
+
+        (savedChartModel.get as import('vitest').Mock).mockImplementation(
+            async () => promotedChart.chart,
+        );
+    });
+
     test('getChartChanges update chart and create space', async () => {
         const updatedAt = new Date();
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
         const changes = await service.getChartChanges(
             {
                 ...promotedChart,
@@ -270,6 +553,7 @@ describe('PromoteService chart changes', () => {
 
 describe('PromoteService dashboard changes', () => {
     const service = new PromoteService({
+        agentActionLogModel,
         lightdashConfig: lightdashConfigMock,
 
         analytics: analyticsMock,
@@ -277,16 +561,87 @@ describe('PromoteService dashboard changes', () => {
         savedChartModel: savedChartModel as unknown as SavedChartModel,
         savedSqlModel: savedSqlModel as unknown as SavedSqlModel,
         spaceModel: spaceModel as unknown as SpaceModel,
-        dashboardModel: {} as DashboardModel,
+        dashboardModel: dashboardModel as unknown as DashboardModel,
         spacePermissionService:
             spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionModel: warehouseConnectionModel as never,
+        getDocumentService: () => ({}) as never,
+        appModel: {} as never,
     });
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
+    });
+
+    test('resolves a renamed preview dashboard through its original content mapping', async () => {
+        const renamedDashboard = {
+            ...promotedDashboard.dashboard,
+            slug: 'renamed-dashboard',
+        };
+        projectModel.getUpstreamDashboardUuidFromPreview.mockResolvedValueOnce(
+            existingUpstreamDashboard.dashboard!.uuid,
+        );
+        dashboardModel.getByIdOrSlug.mockResolvedValueOnce({
+            ...promotedDashboard.dashboard,
+            ...existingUpstreamDashboard.dashboard!,
+            projectUuid: existingUpstreamDashboard.projectUuid,
+        });
+        spaceModel.find.mockResolvedValueOnce([upstreamSpace]);
+
+        const result = await service.getPromotedDashboard(
+            user,
+            renamedDashboard,
+            existingUpstreamDashboard.projectUuid,
+        );
+
+        expect(result.upstreamDashboard.dashboard?.uuid).toBe(
+            existingUpstreamDashboard.dashboard!.uuid,
+        );
+        expect(dashboardModel.find).not.toHaveBeenCalled();
+        expect(dashboardModel.getByIdOrSlug).toHaveBeenCalledWith(
+            existingUpstreamDashboard.dashboard!.uuid,
+            { projectUuid: existingUpstreamDashboard.projectUuid },
+        );
+    });
+
+    test('promoting a dashboard rename preserves the upstream dashboard and its old slug', async () => {
+        spaceModel.find
+            .mockResolvedValueOnce([upstreamSpace])
+            .mockResolvedValueOnce([upstreamSpace]);
+        const [changes] = await service.getPromotionDashboardChanges(
+            user,
+            {
+                ...promotedDashboard,
+                dashboard: {
+                    ...promotedDashboard.dashboard,
+                    slug: 'renamed-dashboard',
+                },
+            },
+            existingUpstreamDashboard,
+        );
+        dashboardModel.getByIdOrSlug.mockResolvedValueOnce({
+            ...promotedDashboard.dashboard,
+            ...existingUpstreamDashboard.dashboard!,
+            projectUuid: existingUpstreamDashboard.projectUuid,
+        });
+
+        await service.updateDashboard(user, changes);
+
+        expect(dashboardModel.renameSlug).toHaveBeenCalledWith(
+            {
+                projectUuid: existingUpstreamDashboard.projectUuid,
+                dashboardUuid: existingUpstreamDashboard.dashboard!.uuid,
+                from: promotedDashboard.dashboard.slug,
+                to: 'renamed-dashboard',
+            },
+            chartTransaction,
+        );
+        expect(dashboardModel.create).not.toHaveBeenCalled();
     });
 
     test('getPromotionDashboardChanges create empty dashboard and space', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -323,14 +678,18 @@ describe('PromoteService dashboard changes', () => {
         });
     });
     test('getPromotionDashboardChanges create dashboard with chart tiles and space', async () => {
-        (savedChartModel.get as jest.Mock).mockImplementationOnce(
+        (savedChartModel.get as import('vitest').Mock).mockImplementationOnce(
             async () => promotedChart.chart,
         );
-        (savedChartModel.find as jest.Mock).mockImplementationOnce(
+        (savedChartModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
 
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
@@ -374,9 +733,15 @@ describe('PromoteService dashboard changes', () => {
     });
 
     test('getPromotionDashboardChanges create dashboard with chart tiles in different spaces', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
 
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
@@ -419,18 +784,18 @@ describe('PromoteService dashboard changes', () => {
         ]);
     });
 
-    test('getPromotionDashboardChanges update dashboard with chart tiles ', async () => {
+    test('getPromotionDashboardChanges update dashboard with chart tiles', async () => {
         const updatedAt = new Date();
         const updatedPromotedChart = { ...promotedChart.chart, updatedAt };
-        (savedChartModel.get as jest.Mock).mockImplementationOnce(
+        (savedChartModel.get as import('vitest').Mock).mockImplementationOnce(
             async () => updatedPromotedChart,
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
 
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
@@ -468,14 +833,18 @@ describe('PromoteService dashboard changes', () => {
     });
 
     test('getPromotionDashboardChanges create dashboard with new chart within dashboard and space', async () => {
-        (savedChartModel.get as jest.Mock).mockImplementationOnce(
+        (savedChartModel.get as import('vitest').Mock).mockImplementationOnce(
             async () => promotedChartWithinDashboard.chart,
         );
-        (savedChartModel.find as jest.Mock).mockImplementationOnce(
+        (savedChartModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
 
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
@@ -521,15 +890,21 @@ describe('PromoteService dashboard changes', () => {
     });
 
     test('getPromotionDashboardChanges discovers SQL chart tiles and SQL space requirements', async () => {
-        (savedSqlModel.getByUuid as jest.Mock).mockImplementationOnce(
-            async () => promotedSqlChart,
-        );
-        (savedSqlModel.find as jest.Mock).mockImplementationOnce(
+        (
+            savedSqlModel.getByUuid as import('vitest').Mock
+        ).mockImplementationOnce(async () => promotedSqlChart);
+        (savedSqlModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
 
         const [changes, promotedCharts, promotedSqlCharts, sqlChanges] =
             await service.getPromotionDashboardChanges(
@@ -587,14 +962,18 @@ describe('PromoteService dashboard changes', () => {
             },
         };
 
-        (savedChartModel.get as jest.Mock).mockImplementationOnce(
+        (savedChartModel.get as import('vitest').Mock).mockImplementationOnce(
             async () => promotedChart.chart,
         );
-        (savedChartModel.find as jest.Mock).mockImplementationOnce(
+        (savedChartModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
 
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
@@ -631,14 +1010,18 @@ describe('PromoteService dashboard changes', () => {
             },
         };
 
-        (savedSqlModel.getByUuid as jest.Mock).mockImplementationOnce(
-            async () => promotedSqlChart,
-        );
-        (savedSqlModel.find as jest.Mock).mockImplementationOnce(
+        (
+            savedSqlModel.getByUuid as import('vitest').Mock
+        ).mockImplementationOnce(async () => promotedSqlChart);
+        (savedSqlModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
 
         const [changes, , promotedSqlCharts, sqlChanges] =
             await service.getPromotionDashboardChanges(
@@ -657,6 +1040,7 @@ describe('PromoteService dashboard changes', () => {
 
 describe('PromoteService promoting and mutating changes', () => {
     const service = new PromoteService({
+        agentActionLogModel,
         lightdashConfig: lightdashConfigMock,
 
         analytics: analyticsMock,
@@ -667,18 +1051,21 @@ describe('PromoteService promoting and mutating changes', () => {
         dashboardModel: dashboardModel as unknown as DashboardModel,
         spacePermissionService:
             spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionModel: warehouseConnectionModel as never,
+        getDocumentService: () => ({}) as never,
+        appModel: {} as never,
     });
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     test('return same changes if no new space is created', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -700,8 +1087,12 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('create space and update space uuid if a new space is created', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -762,8 +1153,12 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('create private space and add user as admin', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => []);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
         const [changes] = await service.getPromotionDashboardChanges(
             user,
             promotedDashboardWithNewPrivateSpace,
@@ -775,7 +1170,7 @@ describe('PromoteService promoting and mutating changes', () => {
         expect(changes.spaces[0].data.inheritParentPermissions).toBe(false);
 
         (
-            spaceModel.createSpaceWithAncestors as jest.Mock
+            spaceModel.createSpaceWithAncestors as import('vitest').Mock
         ).mockImplementationOnce(async () => ({
             ...promotedDashboardWithNewPrivateSpace.space,
             projectUuid: missingUpstreamDashboard.projectUuid,
@@ -812,12 +1207,12 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('update space should not affect permissions', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -844,12 +1239,12 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('return same changes if no new dashboard is created', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -867,12 +1262,12 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('create dashboard and update dashboard uuid if a new dashboard is created', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -904,18 +1299,18 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('create dashboard and update dashboard uuid if a new dashboard with chart within dashboard is created', async () => {
-        (savedChartModel.get as jest.Mock).mockImplementationOnce(
+        (savedChartModel.get as import('vitest').Mock).mockImplementationOnce(
             async () => promotedChartWithinDashboard.chart,
         );
-        (savedChartModel.find as jest.Mock).mockImplementationOnce(
+        (savedChartModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
 
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
@@ -942,12 +1337,12 @@ describe('PromoteService promoting and mutating changes', () => {
     });
 
     test('create charts returns no changes if no chart is created', async () => {
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -972,27 +1367,171 @@ describe('PromoteService promoting and mutating changes', () => {
         );
     });
 
+    test('renames and updates an upstream chart in one transaction', async () => {
+        const upstreamChart = {
+            ...existingUpstreamChart.chart!,
+            slug: 'original-chart',
+        };
+        const renamedChart = {
+            ...promotedChart.chart,
+            uuid: upstreamChart.uuid,
+            oldUuid: promotedChart.chart.uuid,
+            projectUuid: existingUpstreamChart.projectUuid,
+            spaceUuid: existingUpstreamChart.space!.uuid,
+            spaceSlug: promotedChart.space.slug,
+            spacePath: promotedChart.space.path,
+            slug: 'renamed-chart',
+        };
+        const changes: PromotionChanges = {
+            spaces: [],
+            dashboards: [],
+            charts: [
+                {
+                    action: PromotionAction.UPDATE,
+                    data: renamedChart,
+                },
+            ],
+        };
+        (savedChartModel.get as import('vitest').Mock)
+            .mockResolvedValueOnce(upstreamChart)
+            .mockResolvedValueOnce({
+                ...upstreamChart,
+                slug: renamedChart.slug,
+            });
+
+        await service.upsertCharts(user, changes);
+
+        expect(savedChartModel.transaction).toHaveBeenCalledTimes(1);
+        expect(savedChartModel.renameSlug).toHaveBeenCalledWith(
+            {
+                projectUuid: existingUpstreamChart.projectUuid,
+                savedChartUuid: upstreamChart.uuid,
+                from: 'original-chart',
+                to: 'renamed-chart',
+            },
+            chartTransaction,
+        );
+        expect(savedChartModel.updateInTransaction).toHaveBeenCalledWith(
+            upstreamChart.uuid,
+            expect.objectContaining({ name: renamedChart.name }),
+            chartTransaction,
+        );
+        expect(savedChartModel.createVersion).toHaveBeenCalledWith(
+            upstreamChart.uuid,
+            expect.objectContaining({ slug: 'renamed-chart' }),
+            user,
+            chartTransaction,
+            undefined,
+            null,
+            expect.any(Function),
+        );
+    });
+
+    test('stops before metadata and version writes when a slug collision is rejected', async () => {
+        const upstreamChart = {
+            ...existingUpstreamChart.chart!,
+            slug: 'original-chart',
+        };
+        const renamedChart = {
+            ...promotedChart.chart,
+            uuid: upstreamChart.uuid,
+            oldUuid: promotedChart.chart.uuid,
+            projectUuid: existingUpstreamChart.projectUuid,
+            spaceUuid: existingUpstreamChart.space!.uuid,
+            spaceSlug: promotedChart.space.slug,
+            spacePath: promotedChart.space.path,
+            slug: 'occupied-chart',
+        };
+        const changes: PromotionChanges = {
+            spaces: [],
+            dashboards: [],
+            charts: [
+                {
+                    action: PromotionAction.UPDATE,
+                    data: renamedChart,
+                },
+            ],
+        };
+        (savedChartModel.get as import('vitest').Mock).mockResolvedValueOnce(
+            upstreamChart,
+        );
+        (
+            savedChartModel.renameSlug as import('vitest').Mock
+        ).mockRejectedValueOnce(new Error('slug collision'));
+
+        await expect(service.upsertCharts(user, changes)).rejects.toThrow(
+            'slug collision',
+        );
+
+        expect(savedChartModel.updateInTransaction).not.toHaveBeenCalled();
+        expect(savedChartModel.createVersion).not.toHaveBeenCalled();
+    });
+
+    test('can safely retry when version creation fails after a slug rename', async () => {
+        const upstreamChart = {
+            ...existingUpstreamChart.chart!,
+            slug: 'original-chart',
+        };
+        const renamedChart = {
+            ...promotedChart.chart,
+            uuid: upstreamChart.uuid,
+            oldUuid: promotedChart.chart.uuid,
+            projectUuid: existingUpstreamChart.projectUuid,
+            spaceUuid: existingUpstreamChart.space!.uuid,
+            spaceSlug: promotedChart.space.slug,
+            spacePath: promotedChart.space.path,
+            slug: 'renamed-chart',
+        };
+        const changes: PromotionChanges = {
+            spaces: [],
+            dashboards: [],
+            charts: [
+                {
+                    action: PromotionAction.UPDATE,
+                    data: renamedChart,
+                },
+            ],
+        };
+        (savedChartModel.get as import('vitest').Mock).mockResolvedValue(
+            upstreamChart,
+        );
+        (
+            savedChartModel.createVersion as import('vitest').Mock
+        ).mockRejectedValueOnce(new Error('version write failed'));
+
+        await expect(service.upsertCharts(user, changes)).rejects.toThrow(
+            'version write failed',
+        );
+        await expect(
+            service.upsertCharts(user, changes),
+        ).resolves.toBeDefined();
+
+        expect(savedChartModel.transaction).toHaveBeenCalledTimes(2);
+        expect(savedChartModel.renameSlug).toHaveBeenCalledTimes(2);
+        expect(savedChartModel.createVersion).toHaveBeenCalledTimes(2);
+    });
+
     test('create charts and update dashboard tile uuids if a new chart created', async () => {
-        (savedChartModel.get as jest.Mock).mockImplementationOnce(
+        (savedChartModel.get as import('vitest').Mock).mockImplementationOnce(
             async () => promotedChartWithinDashboard.chart,
         );
-        (savedChartModel.find as jest.Mock).mockImplementationOnce(
+        (savedChartModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
         const createdChart = {
             ...promotedChartWithinDashboard.chart,
             uuid: 'new-chart-uuid',
         };
 
-        (savedChartModel.create as jest.Mock).mockImplementationOnce(
-            async () => createdChart,
-        );
+        (
+            savedChartModel.create as import('vitest').Mock
+        ).mockImplementationOnce(async () => createdChart);
         const [changes, promotedCharts] =
             await service.getPromotionDashboardChanges(
                 user,
@@ -1037,19 +1576,19 @@ describe('PromoteService promoting and mutating changes', () => {
             },
         };
 
-        (savedSqlModel.getByUuid as jest.Mock).mockImplementationOnce(
-            async () => promotedSqlChart,
-        );
-        (savedSqlModel.find as jest.Mock).mockImplementationOnce(
+        (
+            savedSqlModel.getByUuid as import('vitest').Mock
+        ).mockImplementationOnce(async () => promotedSqlChart);
+        (savedSqlModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (savedSqlModel.create as jest.Mock).mockImplementationOnce(
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (savedSqlModel.create as import('vitest').Mock).mockImplementationOnce(
             async () => ({
                 savedSqlUuid: 'new-upstream-sql-chart-uuid',
                 slug: promotedSqlChart.slug,
@@ -1083,6 +1622,10 @@ describe('PromoteService promoting and mutating changes', () => {
                 config: promotedSqlChart.config,
                 slug: promotedSqlChart.slug,
             },
+            undefined,
+            { slugMode: 'exact' },
+            null,
+            expect.any(Function),
         );
 
         const sqlTile = newChanges.dashboards[0].data.tiles.find(
@@ -1106,52 +1649,57 @@ describe('PromoteService promoting and mutating changes', () => {
             },
         };
 
-        (savedSqlModel.getByUuid as jest.Mock).mockImplementationOnce(
-            async () => ({
-                ...promotedSqlChart,
-                lastUpdatedAt: new Date('2025-01-01T00:00:00.000Z'),
-                name: 'new sql chart title',
-            }),
+        (
+            savedSqlModel.getByUuid as import('vitest').Mock
+        ).mockImplementationOnce(async () => ({
+            ...promotedSqlChart,
+            lastUpdatedAt: new Date('2025-01-01T00:00:00.000Z'),
+            name: 'new sql chart title',
+        }));
+        (savedSqlModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [
+                {
+                    saved_sql_uuid: existingUpstreamSqlChart.savedSqlUuid,
+                    agent_identity: null,
+                    name: 'old sql chart title',
+                    description: promotedSqlChart.description,
+                    slug: existingUpstreamSqlChart.slug,
+                    dashboard_uuid: null,
+                    created_at: existingUpstreamSqlChart.createdAt,
+                    last_version_updated_at: new Date(
+                        '2024-01-01T00:00:00.000Z',
+                    ),
+                    views_count: existingUpstreamSqlChart.views,
+                    first_viewed_at: existingUpstreamSqlChart.firstViewedAt,
+                    last_viewed_at: existingUpstreamSqlChart.lastViewedAt,
+                    sql: existingUpstreamSqlChart.sql,
+                    limit: existingUpstreamSqlChart.limit,
+                    config: existingUpstreamSqlChart.config,
+                    chart_kind: existingUpstreamSqlChart.chartKind,
+                    space_uuid: existingUpstreamSqlChart.space.uuid,
+                    path: promotedDashboard.space.path,
+                    project_uuid: missingUpstreamDashboard.projectUuid,
+                    organization_uuid: user.organizationUuid,
+                    updated_at: new Date('2024-01-01T00:00:00.000Z'),
+                    spaceName: existingUpstreamSqlChart.space.name,
+                    space_inherit_parent_permissions:
+                        upstreamSpace!.inheritParentPermissions,
+                    dashboardName: null,
+                    created_by_user_uuid: user.userUuid,
+                    created_by_user_first_name: user.firstName,
+                    created_by_user_last_name: user.lastName,
+                    last_version_updated_by_user_uuid: user.userUuid,
+                    last_version_updated_by_user_first_name: user.firstName,
+                    last_version_updated_by_user_last_name: user.lastName,
+                },
+            ],
         );
-        (savedSqlModel.find as jest.Mock).mockImplementationOnce(async () => [
-            {
-                saved_sql_uuid: existingUpstreamSqlChart.savedSqlUuid,
-                name: 'old sql chart title',
-                description: promotedSqlChart.description,
-                slug: existingUpstreamSqlChart.slug,
-                dashboard_uuid: null,
-                created_at: existingUpstreamSqlChart.createdAt,
-                last_version_updated_at: new Date('2024-01-01T00:00:00.000Z'),
-                views_count: existingUpstreamSqlChart.views,
-                first_viewed_at: existingUpstreamSqlChart.firstViewedAt,
-                last_viewed_at: existingUpstreamSqlChart.lastViewedAt,
-                sql: existingUpstreamSqlChart.sql,
-                limit: existingUpstreamSqlChart.limit,
-                config: existingUpstreamSqlChart.config,
-                chart_kind: existingUpstreamSqlChart.chartKind,
-                space_uuid: existingUpstreamSqlChart.space.uuid,
-                path: promotedDashboard.space.path,
-                project_uuid: missingUpstreamDashboard.projectUuid,
-                organization_uuid: user.organizationUuid,
-                updated_at: new Date('2024-01-01T00:00:00.000Z'),
-                spaceName: existingUpstreamSqlChart.space.name,
-                space_inherit_parent_permissions:
-                    upstreamSpace!.inheritParentPermissions,
-                dashboardName: null,
-                created_by_user_uuid: user.userUuid,
-                created_by_user_first_name: user.firstName,
-                created_by_user_last_name: user.lastName,
-                last_version_updated_by_user_uuid: user.userUuid,
-                last_version_updated_by_user_first_name: user.firstName,
-                last_version_updated_by_user_last_name: user.lastName,
-            },
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
-        (spaceModel.find as jest.Mock).mockImplementationOnce(async () => [
-            existingUpstreamDashboard.space,
-        ]);
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
 
         const [changes, , , sqlChanges] =
             await service.getPromotionDashboardChanges(
@@ -1174,22 +1722,27 @@ describe('PromoteService promoting and mutating changes', () => {
 
         expect(savedSqlModel.create).toHaveBeenCalledTimes(0);
         expect(savedSqlModel.update).toHaveBeenCalledTimes(1);
-        expect(savedSqlModel.update).toHaveBeenCalledWith({
-            userUuid: user.userUuid,
-            savedSqlUuid: existingUpstreamSqlChart.savedSqlUuid,
-            sqlChart: {
-                unversionedData: {
-                    name: 'new sql chart title',
-                    description: promotedSqlChart.description,
-                    spaceUuid: existingUpstreamDashboard.space?.uuid,
-                },
-                versionedData: {
-                    sql: promotedSqlChart.sql,
-                    limit: promotedSqlChart.limit,
-                    config: promotedSqlChart.config,
+        expect(savedSqlModel.update).toHaveBeenCalledWith(
+            {
+                userUuid: user.userUuid,
+                savedSqlUuid: existingUpstreamSqlChart.savedSqlUuid,
+                sqlChart: {
+                    unversionedData: {
+                        name: 'new sql chart title',
+                        description: promotedSqlChart.description,
+                        spaceUuid: existingUpstreamDashboard.space?.uuid,
+                    },
+                    versionedData: {
+                        sql: promotedSqlChart.sql,
+                        limit: promotedSqlChart.limit,
+                        config: promotedSqlChart.config,
+                    },
                 },
             },
-        });
+            undefined,
+            null,
+            expect.any(Function),
+        );
 
         const sqlTile = newChanges.dashboards[0].data.tiles.find(
             (tile) => tile.type === DashboardTileTypes.SQL_CHART,
@@ -1209,28 +1762,31 @@ describe('PromoteService promoting and mutating changes', () => {
             ),
         };
 
-        (projectModel.getSummary as jest.Mock).mockImplementationOnce(
-            async () => ({
-                upstreamProjectUuid: existingUpstreamDashboard.projectUuid,
-            }),
-        );
-        (dashboardModel.getByIdOrSlug as jest.Mock).mockImplementationOnce(
-            async () => dashboardWithOnlySqlTile,
-        );
-        (dashboardModel.find as jest.Mock).mockImplementationOnce(
+        (
+            projectModel.getSummary as import('vitest').Mock
+        ).mockImplementationOnce(async () => ({
+            upstreamProjectUuid: existingUpstreamDashboard.projectUuid,
+        }));
+        (
+            dashboardModel.getByIdOrSlug as import('vitest').Mock
+        ).mockImplementationOnce(async () => dashboardWithOnlySqlTile);
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
-        (spaceModel.find as jest.Mock).mockImplementation(async () => []);
-        (savedSqlModel.getByUuid as jest.Mock).mockImplementationOnce(
-            async () => promotedSqlChart,
+        (spaceModel.find as import('vitest').Mock).mockImplementation(
+            async () => [],
         );
-        (savedSqlModel.find as jest.Mock).mockImplementationOnce(
+        (
+            savedSqlModel.getByUuid as import('vitest').Mock
+        ).mockImplementationOnce(async () => promotedSqlChart);
+        (savedSqlModel.find as import('vitest').Mock).mockImplementationOnce(
             async () => [],
         );
 
         const changes = await service.getPromoteDashboardDiff(
-            user,
+            userWithPromotePermissions,
             dashboardWithOnlySqlTile.uuid,
+            { projectUuid: promotedDashboardWithSqlTile.projectUuid },
         );
 
         expect(changes.sqlCharts).toEqual([
@@ -1248,6 +1804,442 @@ describe('PromoteService promoting and mutating changes', () => {
                 },
             },
         ]);
+    });
+
+    test('getPromoteChartDiff rejects users without chart promote permissions', async () => {
+        const userWithoutPromotePermissions = userWithAbilities([
+            { subject: 'Project', action: ['view'] },
+        ]);
+
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamChart.space],
+        );
+
+        await expect(
+            service.getPromoteChartDiff(
+                userWithoutPromotePermissions,
+                promotedChart.chart.uuid,
+            ),
+        ).rejects.toThrow(
+            /you don't have access to edit this chart in the origin project/,
+        );
+    });
+
+    test('getPromoteSqlChartDiff rejects users without SQL chart promote permissions', async () => {
+        const userWithoutPromotePermissions = userWithAbilities([
+            { subject: 'Project', action: ['view'] },
+        ]);
+
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamSqlChart.space],
+        );
+
+        await expect(
+            service.getPromoteSqlChartDiff(
+                userWithoutPromotePermissions,
+                promotedSqlChart.project.projectUuid,
+                promotedSqlChart.savedSqlUuid,
+            ),
+        ).rejects.toThrow(
+            /you don't have access to edit this SQL chart in the origin project/,
+        );
+    });
+
+    test('getPromoteDashboardDiff rejects users without dashboard promote permissions', async () => {
+        const userWithoutPromotePermissions = userWithAbilities([
+            { subject: 'Project', action: ['view'] },
+        ]);
+        const dashboardWithoutTiles = {
+            ...promotedDashboard.dashboard,
+            tiles: [],
+        };
+
+        (
+            dashboardModel.getByIdOrSlug as import('vitest').Mock
+        ).mockImplementationOnce(async () => dashboardWithoutTiles);
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.dashboard],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+
+        await expect(
+            service.getPromoteDashboardDiff(
+                userWithoutPromotePermissions,
+                dashboardWithoutTiles.uuid,
+                { projectUuid: promotedDashboard.projectUuid },
+            ),
+        ).rejects.toThrow(
+            /You do not have the right access permissions on the origin space and dashboard/,
+        );
+    });
+
+    test('getPromoteDashboardDiff rejects an unscoped slug matching multiple dashboards', async () => {
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [
+                { uuid: 'dashboard-uuid-1' },
+                { uuid: 'dashboard-uuid-2' },
+            ],
+        );
+
+        await expect(
+            service.getPromoteDashboardDiff(
+                userWithPromotePermissions,
+                'duplicated-slug',
+            ),
+        ).rejects.toThrow(/Multiple dashboards match slug 'duplicated-slug'/);
+
+        expect(dashboardModel.find).toHaveBeenCalledWith({
+            slug: 'duplicated-slug',
+            organizationUuid: user.organizationUuid,
+        });
+        expect(dashboardModel.getByIdOrSlug).not.toHaveBeenCalled();
+    });
+
+    test('getPromoteDashboardDiff throws not found for an unscoped slug with no matches', async () => {
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [],
+        );
+
+        await expect(
+            service.getPromoteDashboardDiff(
+                userWithPromotePermissions,
+                'unknown-slug',
+            ),
+        ).rejects.toThrow(/Dashboard not found/);
+    });
+
+    test('getPromoteDashboardDiff resolves an unscoped slug that is unique within the organization', async () => {
+        const dashboardWithoutTiles = {
+            ...promotedDashboard.dashboard,
+            tiles: [],
+        };
+
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [{ uuid: dashboardWithoutTiles.uuid }],
+        );
+        (
+            dashboardModel.getByIdOrSlug as import('vitest').Mock
+        ).mockImplementationOnce(async () => dashboardWithoutTiles);
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.dashboard],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+
+        await expect(
+            service.getPromoteDashboardDiff(
+                userWithAbilities([{ subject: 'Project', action: ['view'] }]),
+                dashboardWithoutTiles.slug,
+            ),
+        ).rejects.toThrow(
+            /You do not have the right access permissions on the origin space and dashboard/,
+        );
+
+        expect(dashboardModel.getByIdOrSlug).toHaveBeenCalledWith(
+            dashboardWithoutTiles.uuid,
+        );
+    });
+
+    test('getPromoteDashboardDiff scopes slug resolution when projectUuid is provided', async () => {
+        const dashboardWithoutTiles = {
+            ...promotedDashboard.dashboard,
+            tiles: [],
+        };
+
+        (
+            dashboardModel.getByIdOrSlug as import('vitest').Mock
+        ).mockImplementationOnce(async () => dashboardWithoutTiles);
+        (dashboardModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.dashboard],
+        );
+        (spaceModel.find as import('vitest').Mock).mockImplementationOnce(
+            async () => [existingUpstreamDashboard.space],
+        );
+
+        await expect(
+            service.getPromoteDashboardDiff(
+                userWithAbilities([{ subject: 'Project', action: ['view'] }]),
+                dashboardWithoutTiles.slug,
+                { projectUuid: promotedDashboard.projectUuid },
+            ),
+        ).rejects.toThrow(
+            /You do not have the right access permissions on the origin space and dashboard/,
+        );
+
+        expect(dashboardModel.getByIdOrSlug).toHaveBeenCalledWith(
+            dashboardWithoutTiles.slug,
+            { projectUuid: promotedDashboard.projectUuid },
+        );
+    });
+
+    test('getPromoteDashboardDiff error mentions dashboard when project has no upstream', async () => {
+        const dashboardWithoutTiles = {
+            ...promotedDashboard.dashboard,
+            tiles: [],
+        };
+
+        (
+            dashboardModel.getByIdOrSlug as import('vitest').Mock
+        ).mockImplementationOnce(async () => dashboardWithoutTiles);
+        (
+            projectModel.getSummary as import('vitest').Mock
+        ).mockImplementationOnce(async () => ({
+            upstreamProjectUuid: undefined,
+        }));
+
+        await expect(
+            service.getPromoteDashboardDiff(
+                userWithPromotePermissions,
+                dashboardWithoutTiles.uuid,
+                { projectUuid: promotedDashboard.projectUuid },
+            ),
+        ).rejects.toThrow(
+            /This dashboard's project does not have an upstream project/,
+        );
+    });
+
+    describe('SQL chart connections', () => {
+        const sourceProjectUuid = promotedSqlChart.project.projectUuid;
+        const targetProjectUuid = existingUpstreamDashboard.projectUuid;
+        const sourceFinance = {
+            warehouseConnectionUuid: 'source-finance-uuid',
+            name: 'Finance',
+            isOriginal: false,
+        };
+        const targetFinance = {
+            warehouseConnectionUuid: 'target-finance-uuid',
+            name: 'Finance',
+            isOriginal: false,
+        };
+        const original = (warehouseConnectionUuid: string) => ({
+            warehouseConnectionUuid,
+            name: 'Warehouse',
+            isOriginal: true,
+        });
+
+        const setProject = (
+            projectUuid: string,
+            connections: (typeof sourceFinance)[] | null,
+        ) => {
+            if (connections === null) {
+                connectionState.routes.set(projectUuid, 'single');
+                connectionState.connections.delete(projectUuid);
+            } else {
+                connectionState.routes.set(projectUuid, 'multi');
+                connectionState.connections.set(projectUuid, connections);
+            }
+        };
+
+        const sourceChartOn = (warehouseConnectionUuid: string | null) =>
+            savedSqlModel.getByUuid.mockResolvedValue({
+                ...promotedSqlChart,
+                warehouseConnectionUuid,
+            });
+
+        const expectNoUpstreamWrites = () => {
+            expect(savedSqlModel.create).not.toHaveBeenCalled();
+            expect(savedSqlModel.update).not.toHaveBeenCalled();
+            expect(spaceModel.createSpace).not.toHaveBeenCalled();
+            expect(spaceModel.createSpaceWithAncestors).not.toHaveBeenCalled();
+            expect(dashboardModel.create).not.toHaveBeenCalled();
+            expect(dashboardModel.addVersion).not.toHaveBeenCalled();
+            expect(savedChartModel.create).not.toHaveBeenCalled();
+        };
+
+        const promoteSql = () =>
+            service
+                .promoteSqlChart(
+                    userWithPromotePermissions,
+                    sourceProjectUuid,
+                    promotedSqlChart.savedSqlUuid,
+                )
+                .then(
+                    () => null,
+                    (e: unknown) => e,
+                );
+
+        const promoteSqlTile = () =>
+            service
+                .promoteDashboard(
+                    userWithPromotePermissions,
+                    promotedDashboardWithSqlTile.dashboard.uuid,
+                    { projectUuid: promotedDashboardWithSqlTile.projectUuid },
+                )
+                .then(
+                    () => null,
+                    (e: unknown) => e,
+                );
+
+        beforeEach(() => {
+            (spaceModel.find as import('vitest').Mock).mockImplementation(
+                async () => [],
+            );
+        });
+
+        afterEach(() => {
+            connectionState.routes.clear();
+            connectionState.connections.clear();
+            savedSqlModel.getByUuid.mockReset();
+            savedSqlModel.getByUuid.mockResolvedValue(promotedSqlChart);
+        });
+
+        test('a SQL chart on an extra connection is promoted onto the connection with the same name', async () => {
+            setProject(sourceProjectUuid, [
+                original('source-original'),
+                sourceFinance,
+            ]);
+            setProject(targetProjectUuid, [
+                original('target-original'),
+                targetFinance,
+            ]);
+            sourceChartOn(sourceFinance.warehouseConnectionUuid);
+
+            await promoteSql();
+            expect(savedSqlModel.create).toHaveBeenCalledWith(
+                expect.any(String),
+                targetProjectUuid,
+                expect.objectContaining({ slug: promotedSqlChart.slug }),
+                {
+                    kind: 'connection',
+                    warehouseConnectionUuid:
+                        targetFinance.warehouseConnectionUuid,
+                },
+                { slugMode: 'exact' },
+                null,
+                expect.any(Function),
+            );
+        });
+
+        test('a SQL chart on the original is promoted onto the original of a multi upstream', async () => {
+            setProject(targetProjectUuid, [
+                original('target-original'),
+                targetFinance,
+            ]);
+            sourceChartOn(null);
+
+            await promoteSql();
+            expect(savedSqlModel.create).toHaveBeenCalledWith(
+                expect.any(String),
+                targetProjectUuid,
+                expect.objectContaining({ slug: promotedSqlChart.slug }),
+                { kind: 'connection', warehouseConnectionUuid: null },
+                { slugMode: 'exact' },
+                null,
+                expect.any(Function),
+            );
+        });
+
+        test('a promotion between single projects writes the way main does', async () => {
+            sourceChartOn(null);
+
+            await promoteSql();
+            expect(savedSqlModel.create).toHaveBeenCalledWith(
+                expect.any(String),
+                targetProjectUuid,
+                expect.objectContaining({ slug: promotedSqlChart.slug }),
+                undefined,
+                { slugMode: 'exact' },
+                null,
+                expect.any(Function),
+            );
+        });
+
+        test.each([
+            ['a single upstream', null],
+            ['a multi upstream without it', [original('target-original')]],
+        ])(
+            'refuses to promote a SQL chart on an extra connection into %s, before any write (D4)',
+            async (_name, targetConnections) => {
+                setProject(sourceProjectUuid, [
+                    original('source-original'),
+                    sourceFinance,
+                ]);
+                setProject(targetProjectUuid, targetConnections);
+                sourceChartOn(sourceFinance.warehouseConnectionUuid);
+
+                expect(await promoteSql()).toEqual(
+                    new ParameterError(
+                        'The upstream project has no connection named "Finance".',
+                    ),
+                );
+                expectNoUpstreamWrites();
+            },
+        );
+
+        test('a dashboard SQL tile on an extra connection is promoted onto the connection with the same name', async () => {
+            setProject(sourceProjectUuid, [
+                original('source-original'),
+                sourceFinance,
+            ]);
+            setProject(targetProjectUuid, [
+                original('target-original'),
+                targetFinance,
+            ]);
+            sourceChartOn(sourceFinance.warehouseConnectionUuid);
+            const passThrough = async (
+                _user: unknown,
+                changes: PromotionChanges,
+            ) => changes;
+            const internals = service as unknown as Record<
+                | 'getOrCreateDashboard'
+                | 'upsertDataApps'
+                | 'upsertCharts'
+                | 'updateDashboard'
+                | 'upsertSqlCharts',
+                (...args: unknown[]) => Promise<PromotionChanges>
+            >;
+            (
+                [
+                    'getOrCreateDashboard',
+                    'upsertDataApps',
+                    'upsertCharts',
+                    'updateDashboard',
+                    'upsertSqlCharts',
+                ] as const
+            ).forEach((method) =>
+                vi
+                    .spyOn(internals, method)
+                    .mockImplementation(passThrough as never),
+            );
+
+            await promoteSqlTile();
+
+            expect(internals.upsertSqlCharts).toHaveBeenCalledWith(
+                expect.anything(),
+                expect.anything(),
+                expect.any(Array),
+                new Map([
+                    [
+                        promotedSqlChart.savedSqlUuid,
+                        {
+                            kind: 'connection',
+                            warehouseConnectionUuid:
+                                targetFinance.warehouseConnectionUuid,
+                        },
+                    ],
+                ]),
+            );
+            vi.restoreAllMocks();
+        });
+
+        test('a dashboard whose SQL tile names a connection the upstream lacks is refused before any write (D4)', async () => {
+            setProject(sourceProjectUuid, [
+                original('source-original'),
+                sourceFinance,
+            ]);
+            setProject(targetProjectUuid, null);
+            sourceChartOn(sourceFinance.warehouseConnectionUuid);
+
+            expect(await promoteSqlTile()).toEqual(
+                new ParameterError(
+                    'The upstream project has no connection named "Finance".',
+                ),
+            );
+            expectNoUpstreamWrites();
+        });
     });
 });
 
@@ -1329,5 +2321,609 @@ describe('PromoteService permission checks', () => {
                 missingUpstreamDashboard,
             ),
         ).not.toThrow();
+    });
+});
+
+describe('PromoteService data app promotion', () => {
+    const appGenerateService = {
+        promoteAppsForDashboard: vi.fn(async () => [
+            {
+                sourceAppUuid: promotedAppUuid,
+                upstreamAppUuid,
+                upstreamAppVersion: 12,
+            },
+        ]),
+    };
+
+    const baseArgs = {
+        agentActionLogModel,
+        lightdashConfig: lightdashConfigMock,
+        analytics: analyticsMock,
+        projectModel: projectModel as unknown as ProjectModel,
+        savedChartModel: savedChartModel as unknown as SavedChartModel,
+        savedSqlModel: savedSqlModel as unknown as SavedSqlModel,
+        spaceModel: spaceModel as unknown as SpaceModel,
+        dashboardModel: dashboardModel as unknown as DashboardModel,
+        spacePermissionService:
+            spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionModel: warehouseConnectionModel as never,
+        getDocumentService: () => ({}) as never,
+        appModel: {} as never,
+    };
+
+    const serviceWithApps = new PromoteService({
+        ...baseArgs,
+        getAppGenerateService: () =>
+            appGenerateService as unknown as AppGenerateService,
+    });
+
+    const serviceWithoutApps = new PromoteService(baseArgs);
+
+    const dataAppChanges = (): PromotionChanges => ({
+        spaces: [],
+        charts: [],
+        dashboards: [
+            {
+                action: PromotionAction.CREATE,
+                data: {
+                    ...promotedDashboardWithDataAppTile.dashboard,
+                    spaceSlug: promotedDashboard.space.slug,
+                    spacePath: promotedDashboard.space.path,
+                },
+            },
+        ],
+    });
+
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    test('promotes referenced apps and remaps the DATA_APP tile appUuid', async () => {
+        const newChanges = await serviceWithApps.upsertDataApps(
+            user,
+            dataAppChanges(),
+            promotedDashboard.projectUuid,
+        );
+
+        expect(
+            appGenerateService.promoteAppsForDashboard,
+        ).toHaveBeenCalledTimes(1);
+        expect(appGenerateService.promoteAppsForDashboard).toHaveBeenCalledWith(
+            user,
+            promotedDashboard.projectUuid,
+            [promotedAppUuid],
+        );
+
+        const dataAppTile = newChanges.dashboards[0].data.tiles.find(
+            (tile) => tile.type === DashboardTileTypes.DATA_APP,
+        );
+        expect(
+            dataAppTile?.type === DashboardTileTypes.DATA_APP
+                ? dataAppTile.properties.appUuid
+                : undefined,
+        ).toBe(upstreamAppUuid);
+        expect(
+            dataAppTile?.type === DashboardTileTypes.DATA_APP
+                ? dataAppTile.properties.appDeletedAt
+                : undefined,
+        ).toBeNull();
+    });
+
+    test('leaves the tile untouched when the referenced app was skipped (soft-deleted)', async () => {
+        appGenerateService.promoteAppsForDashboard.mockResolvedValueOnce([]);
+
+        const newChanges = await serviceWithApps.upsertDataApps(
+            user,
+            dataAppChanges(),
+            promotedDashboard.projectUuid,
+        );
+
+        const dataAppTile = newChanges.dashboards[0].data.tiles.find(
+            (tile) => tile.type === DashboardTileTypes.DATA_APP,
+        );
+        expect(
+            dataAppTile?.type === DashboardTileTypes.DATA_APP
+                ? dataAppTile.properties.appUuid
+                : undefined,
+        ).toBe(promotedAppUuid);
+    });
+
+    test('returns changes unchanged and skips the app service when there are no DATA_APP tiles', async () => {
+        const changesWithoutApps: PromotionChanges = {
+            spaces: [],
+            charts: [],
+            dashboards: [
+                {
+                    action: PromotionAction.CREATE,
+                    data: {
+                        ...promotedDashboard.dashboard,
+                        spaceSlug: promotedDashboard.space.slug,
+                        spacePath: promotedDashboard.space.path,
+                    },
+                },
+            ],
+        };
+
+        const newChanges = await serviceWithApps.upsertDataApps(
+            user,
+            changesWithoutApps,
+            promotedDashboard.projectUuid,
+        );
+
+        expect(newChanges).toEqual(changesWithoutApps);
+        expect(
+            appGenerateService.promoteAppsForDashboard,
+        ).not.toHaveBeenCalled();
+    });
+
+    test('throws when a DATA_APP tile is promoted without the EE app service', async () => {
+        await expect(
+            serviceWithoutApps.upsertDataApps(
+                user,
+                dataAppChanges(),
+                promotedDashboard.projectUuid,
+            ),
+        ).rejects.toThrow(/Data apps are not available/);
+    });
+
+    const vizChartChanges = (): PromotionChanges => ({
+        spaces: [],
+        dashboards: [],
+        charts: [
+            {
+                action: PromotionAction.CREATE,
+                data: {
+                    uuid: 'chart-uuid',
+                    chartConfig: {
+                        type: ChartType.DATA_APP_VIZ,
+                        config: {
+                            dataAppVizUuid: promotedAppUuid,
+                            dataAppVizVersion: 3,
+                            fieldMapping: {},
+                        },
+                    },
+                } as unknown as PromotionChanges['charts'][number]['data'],
+            },
+        ],
+    });
+
+    test('promotes the chart-bound custom chart type and remaps dataAppVizUuid', async () => {
+        const newChanges = await serviceWithApps.upsertDataApps(
+            user,
+            vizChartChanges(),
+            promotedDashboard.projectUuid,
+        );
+
+        expect(appGenerateService.promoteAppsForDashboard).toHaveBeenCalledWith(
+            user,
+            promotedDashboard.projectUuid,
+            [promotedAppUuid],
+        );
+
+        const { chartConfig } = newChanges.charts[0].data;
+        expect(
+            chartConfig.type === ChartType.DATA_APP_VIZ
+                ? chartConfig.config?.dataAppVizUuid
+                : undefined,
+        ).toBe(upstreamAppUuid);
+        expect(
+            chartConfig.type === ChartType.DATA_APP_VIZ
+                ? chartConfig.config?.dataAppVizVersion
+                : undefined,
+        ).toBe(12);
+    });
+
+    test('keeps the chart binding when the referenced viz was skipped (soft-deleted)', async () => {
+        appGenerateService.promoteAppsForDashboard.mockResolvedValueOnce([]);
+
+        const newChanges = await serviceWithApps.upsertDataApps(
+            user,
+            vizChartChanges(),
+            promotedDashboard.projectUuid,
+        );
+
+        const { chartConfig } = newChanges.charts[0].data;
+        expect(
+            chartConfig.type === ChartType.DATA_APP_VIZ
+                ? chartConfig.config?.dataAppVizUuid
+                : undefined,
+        ).toBe(promotedAppUuid);
+        expect(
+            chartConfig.type === ChartType.DATA_APP_VIZ
+                ? chartConfig.config?.dataAppVizVersion
+                : undefined,
+        ).toBe(3);
+    });
+});
+
+describe('agent content writes', () => {
+    const service = new PromoteService({
+        agentActionLogModel,
+        lightdashConfig: lightdashConfigMock,
+        analytics: analyticsMock,
+        projectModel: projectModel as unknown as ProjectModel,
+        savedChartModel: savedChartModel as unknown as SavedChartModel,
+        savedSqlModel: savedSqlModel as unknown as SavedSqlModel,
+        spaceModel: spaceModel as unknown as SpaceModel,
+        dashboardModel: dashboardModel as unknown as DashboardModel,
+        spacePermissionService:
+            spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionModel: warehouseConnectionModel as never,
+        getDocumentService: () => ({}) as never,
+        appModel: {} as never,
+    });
+    afterEach(() => vi.restoreAllMocks());
+    test.each([
+        [AgentActorSurface.MCP, true],
+        [AgentActorSurface.IN_APP_AGENT, true],
+        [AgentActorSurface.SLACK_AGENT, true],
+        [AgentActorSurface.IN_APP_AGENT, false],
+        [null, true],
+    ] as const)(
+        '%s enabled=%s attributes every committed version once',
+        async (surface, enabled) => {
+            const log = vi
+                .spyOn(auditLogger, 'logAuditEvent')
+                .mockImplementation(() => {});
+            const scope = createAgentExecutionContext({
+                account: fromSession(user),
+                surface: surface ?? AgentActorSurface.IN_APP_AGENT,
+                clientId: 'trusted-client',
+                agentUuid: 'agent',
+                agentIdentityEnabled: enabled,
+            });
+            const expectedClaim = surface && enabled ? scope.claim : null;
+            agentActionLogModel.insert.mockClear();
+            const run = async () => {
+                const changes = await service.getChartChanges(
+                    promotedChart,
+                    missingUpstreamChart,
+                );
+                await service.upsertCharts(user, changes);
+                expect(savedChartModel.create).toHaveBeenLastCalledWith(
+                    expect.any(String),
+                    user.userUuid,
+                    expect.any(Object),
+                    expectedClaim,
+                    expect.any(Function),
+                );
+                expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                    expectedClaim ? 1 : 0,
+                );
+                if (expectedClaim)
+                    expect(agentActionLogModel.insert).toHaveBeenLastCalledWith(
+                        expect.objectContaining({
+                            agent_identity: expectedClaim,
+                            version_uuid: 'chart-version-uuid',
+                            outcome: 'allowed',
+                            policy_layer: null,
+                            reason_code: null,
+                        }),
+                        chartTransaction,
+                    );
+                agentActionLogModel.insert.mockClear();
+                expect(log).toHaveBeenCalledTimes(expectedClaim ? 1 : 0);
+                log.mockClear();
+                const dashboardChanges: PromotionChanges = {
+                    charts: [],
+                    spaces: [],
+                    dashboards: [
+                        {
+                            action: PromotionAction.CREATE,
+                            data: {
+                                ...promotedDashboard.dashboard,
+                                spaceSlug: 'reports',
+                                spacePath: 'reports',
+                            },
+                        },
+                    ],
+                };
+                await service.getOrCreateDashboard(user, dashboardChanges);
+                expect(dashboardModel.create).toHaveBeenLastCalledWith(
+                    expect.any(String),
+                    expect.any(Object),
+                    user,
+                    expect.any(String),
+                    expectedClaim,
+                    expect.any(Function),
+                );
+                expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                    expectedClaim ? 1 : 0,
+                );
+                if (expectedClaim)
+                    expect(agentActionLogModel.insert).toHaveBeenLastCalledWith(
+                        expect.objectContaining({
+                            agent_identity: expectedClaim,
+                            outcome: 'allowed',
+                            policy_layer: null,
+                            reason_code: null,
+                        }),
+                        chartTransaction,
+                    );
+                agentActionLogModel.insert.mockClear();
+                expect(log).toHaveBeenCalledTimes(expectedClaim ? 1 : 0);
+                log.mockClear();
+                await service.upsertSqlCharts(
+                    user,
+                    {
+                        charts: [],
+                        dashboards: [],
+                        spaces: [
+                            {
+                                action: PromotionAction.NO_CHANGES,
+                                data: upstreamSpace!,
+                            },
+                        ],
+                    },
+                    [
+                        {
+                            action: PromotionAction.CREATE,
+                            data: {
+                                uuid: promotedSqlChart.savedSqlUuid,
+                                oldUuid: promotedSqlChart.savedSqlUuid,
+                                projectUuid:
+                                    promotedSqlChart.project.projectUuid,
+                                slug: promotedSqlChart.slug,
+                                spacePath: upstreamSpace!.path,
+                                spaceSlug: upstreamSpace!.slug,
+                                unversionedData: {
+                                    name: 'SQL',
+                                    description: '',
+                                    spaceUuid: upstreamSpace!.uuid,
+                                },
+                                versionedData: {
+                                    sql: 'select 1',
+                                    limit: 10,
+                                    config: promotedSqlChart.config,
+                                },
+                            },
+                        },
+                    ],
+                );
+                expect(savedSqlModel.create).toHaveBeenLastCalledWith(
+                    user.userUuid,
+                    expect.any(String),
+                    expect.any(Object),
+                    undefined,
+                    { slugMode: 'exact' },
+                    expectedClaim,
+                    expect.any(Function),
+                );
+                expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                    expectedClaim ? 1 : 0,
+                );
+                if (expectedClaim)
+                    expect(agentActionLogModel.insert).toHaveBeenLastCalledWith(
+                        expect.objectContaining({
+                            agent_identity: expectedClaim,
+                            outcome: 'allowed',
+                            policy_layer: null,
+                            reason_code: null,
+                        }),
+                        chartTransaction,
+                    );
+                agentActionLogModel.insert.mockClear();
+                expect(log).toHaveBeenCalledTimes(expectedClaim ? 1 : 0);
+                if (expectedClaim)
+                    expect(log).toHaveBeenLastCalledWith(
+                        expect.objectContaining({
+                            status: 'allowed',
+                            resource: expect.objectContaining({
+                                metadata: {
+                                    event: 'agent_content.write',
+                                    objectType: 'sql_chart',
+                                    objectUuid:
+                                        existingUpstreamSqlChart.savedSqlUuid,
+                                    versionUuid: 'saved-sql-version-uuid',
+                                    action: 'create',
+                                    surface,
+                                    clientId: expectedClaim.act.client_id,
+                                    agentUuid: expectedClaim.act.agent_uuid,
+                                    personUuid: user.userUuid,
+                                    subjectType: 'user',
+                                    policyLayer: null,
+                                    reasonCode: null,
+                                },
+                            }),
+                        }),
+                    );
+            };
+            if (surface) await agentExecutionContext.run(scope, run);
+            else await run();
+        },
+    );
+    test.each([
+        [AgentActorSurface.MCP, true],
+        [AgentActorSurface.IN_APP_AGENT, true],
+        [AgentActorSurface.SLACK_AGENT, true],
+        [AgentActorSurface.IN_APP_AGENT, false],
+        [null, true],
+    ] as const)(
+        '%s enabled=%s attributes chart, dashboard and SQL updates',
+        async (surface, enabled) => {
+            const scope = createAgentExecutionContext({
+                account: fromSession(user),
+                surface: surface ?? AgentActorSurface.IN_APP_AGENT,
+                clientId: 'trusted-client',
+                agentUuid: 'agent',
+                agentIdentityEnabled: enabled,
+            });
+            const claim = surface && enabled ? scope.claim : null;
+            const log = vi
+                .spyOn(auditLogger, 'logAuditEvent')
+                .mockImplementation(() => {});
+            agentActionLogModel.insert.mockClear();
+            const run = async () => {
+                await service.upsertCharts(user, {
+                    spaces: [],
+                    dashboards: [],
+                    charts: [
+                        {
+                            action: PromotionAction.UPDATE,
+                            data: {
+                                ...promotedChart.chart,
+                                oldUuid: 'old-chart',
+                                spaceSlug: 'reports',
+                                spacePath: 'reports',
+                            },
+                        },
+                    ],
+                });
+                expect(savedChartModel.createVersion).toHaveBeenLastCalledWith(
+                    expect.any(String),
+                    expect.any(Object),
+                    user,
+                    chartTransaction,
+                    undefined,
+                    claim,
+                    expect.any(Function),
+                );
+                expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                    claim ? 1 : 0,
+                );
+                expect(log).toHaveBeenCalledTimes(claim ? 1 : 0);
+                if (claim)
+                    expect(agentActionLogModel.insert).toHaveBeenLastCalledWith(
+                        expect.objectContaining({
+                            version_uuid: 'chart-version-uuid',
+                            agent_identity: claim,
+                            action: 'update',
+                        }),
+                        chartTransaction,
+                    );
+                agentActionLogModel.insert.mockClear();
+                log.mockClear();
+                await service.updateDashboard(user, {
+                    spaces: [],
+                    charts: [],
+                    dashboards: [
+                        {
+                            action: PromotionAction.UPDATE,
+                            data: {
+                                ...promotedDashboard.dashboard,
+                                spaceSlug: 'reports',
+                                spacePath: 'reports',
+                            },
+                        },
+                    ],
+                });
+                expect(dashboardModel.addVersion).toHaveBeenLastCalledWith(
+                    expect.any(String),
+                    expect.any(Object),
+                    user,
+                    expect.any(String),
+                    undefined,
+                    claim,
+                    expect.any(Function),
+                );
+                expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                    claim ? 1 : 0,
+                );
+                expect(log).toHaveBeenCalledTimes(claim ? 1 : 0);
+                agentActionLogModel.insert.mockClear();
+                log.mockClear();
+                await service.upsertSqlCharts(
+                    user,
+                    {
+                        charts: [],
+                        dashboards: [],
+                        spaces: [
+                            {
+                                action: PromotionAction.NO_CHANGES,
+                                data: upstreamSpace!,
+                            },
+                        ],
+                    },
+                    [
+                        {
+                            action: PromotionAction.UPDATE,
+                            data: {
+                                uuid: promotedSqlChart.savedSqlUuid,
+                                oldUuid: promotedSqlChart.savedSqlUuid,
+                                projectUuid:
+                                    promotedSqlChart.project.projectUuid,
+                                slug: promotedSqlChart.slug,
+                                spacePath: upstreamSpace!.path,
+                                spaceSlug: upstreamSpace!.slug,
+                                unversionedData: {
+                                    name: 'SQL',
+                                    description: '',
+                                    spaceUuid: upstreamSpace!.uuid,
+                                },
+                                versionedData: {
+                                    sql: 'select 2',
+                                    limit: 10,
+                                    config: promotedSqlChart.config,
+                                },
+                            },
+                        },
+                    ],
+                );
+                expect(savedSqlModel.update).toHaveBeenLastCalledWith(
+                    expect.any(Object),
+                    undefined,
+                    claim,
+                    expect.any(Function),
+                );
+                expect(agentActionLogModel.insert).toHaveBeenCalledTimes(
+                    claim ? 1 : 0,
+                );
+                expect(log).toHaveBeenCalledTimes(claim ? 1 : 0);
+                if (claim)
+                    expect(agentActionLogModel.insert).toHaveBeenLastCalledWith(
+                        expect.objectContaining({
+                            agent_identity: claim,
+                            action: 'update',
+                            outcome: 'allowed',
+                        }),
+                        chartTransaction,
+                    );
+            };
+            if (surface) await agentExecutionContext.run(scope, run);
+            else await run();
+        },
+    );
+    test('does not audit a chart version when the outer transaction rolls back', async () => {
+        agentActionLogModel.insert.mockClear();
+        const log = vi
+            .spyOn(auditLogger, 'logAuditEvent')
+            .mockImplementation(() => {});
+        savedChartModel.transaction.mockImplementationOnce((callback) =>
+            runChartTransaction(async (trx) => {
+                await callback(trx);
+                expect(log).not.toHaveBeenCalled();
+                expect(agentActionLogModel.insert).toHaveBeenCalledWith(
+                    expect.any(Object),
+                    trx,
+                );
+            }, true),
+        );
+        const scope = createAgentExecutionContext({
+            account: fromSession(user),
+            surface: AgentActorSurface.IN_APP_AGENT,
+            clientId: 'lightdash-chat',
+            agentUuid: 'agent',
+            agentIdentityEnabled: true,
+        });
+        await expect(
+            agentExecutionContext.run(scope, () =>
+                service.upsertCharts(user, {
+                    spaces: [],
+                    dashboards: [],
+                    charts: [
+                        {
+                            action: PromotionAction.UPDATE,
+                            data: {
+                                ...promotedChart.chart,
+                                oldUuid: 'old-chart',
+                                spaceSlug: 'reports',
+                                spacePath: 'reports',
+                            },
+                        },
+                    ],
+                }),
+            ),
+        ).rejects.toThrow('commit failed');
+        expect(log).not.toHaveBeenCalled();
     });
 });

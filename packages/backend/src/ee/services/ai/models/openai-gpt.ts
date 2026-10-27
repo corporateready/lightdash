@@ -1,7 +1,12 @@
 import { createOpenAI } from '@ai-sdk/openai';
+import { DEFAULT_OPENAI_BASE_URL } from '../../../../config/aiConfigSchema';
 import { LightdashConfig } from '../../../../config/parseConfig';
+import {
+    getReasoningProviderOptions,
+    withChatCompletionsDefaults,
+} from './chatCompletions';
 import { ModelPreset } from './presets';
-import { AiModel } from './types';
+import { AiModel, ProviderOptionsMap } from './types';
 
 const PROVIDER = 'openai';
 
@@ -14,39 +19,52 @@ export const getOpenaiGptmodel = (
 ): AiModel<typeof PROVIDER> => {
     const openai = createOpenAI({
         apiKey: config.apiKey,
-        ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+        baseURL: config.baseUrl || DEFAULT_OPENAI_BASE_URL,
         headers: config.customHeaders,
     });
     const { supportsReasoning, modelId } = preset;
 
-    const model = openai(modelId);
-
-    const reasoningEnabled = supportsReasoning;
-    const reasoningEffort = options?.enableReasoning ? 'medium' : 'low';
+    const model = config.useChatCompletions
+        ? withChatCompletionsDefaults(openai.chat(modelId))
+        : openai(modelId);
+    const extendedReasoningEnabled =
+        options?.enableReasoning === true && supportsReasoning;
+    const { reasoningEffort: presetReasoningEffort, ...presetProviderOptions } =
+        preset.providerOptions ?? {};
+    const reasoningProviderOptions = supportsReasoning
+        ? ({
+              ...getReasoningProviderOptions({
+                  useChatCompletions: config.useChatCompletions,
+                  responsesEffort: extendedReasoningEnabled ? 'medium' : 'low',
+                  includeSummary: extendedReasoningEnabled,
+              }),
+              // Presets pin the effort their model accepts (gpt-5-mini rejects 'none').
+              ...(presetReasoningEffort && {
+                  reasoningEffort: presetReasoningEffort,
+              }),
+          } satisfies ProviderOptionsMap[typeof PROVIDER])
+        : undefined;
 
     return {
         model,
-        callOptions: {
-            ...preset.callOptions,
-            // temperature is not supported when reasoning is enabled
-            ...(reasoningEnabled
-                ? { temperature: undefined }
-                : { temperature: 0.2 }),
-        },
+        callOptions: preset.callOptions,
         providerOptions: {
             [PROVIDER]: {
-                // Defaulting to Low as GPT-5 models without reasoning are not better than GPT-4.1
-                ...(reasoningEnabled && {
-                    reasoningSummary: 'auto',
-                    reasoningEffort,
-                }),
-                // ZDR: use encrypted reasoning items instead of server-stored IDs
+                ...presetProviderOptions,
+                // Force sequential tool execution: parallel tool calls in one
+                // step can drop some executions (no query, no result), so the
+                // agent stalls.
+                parallelToolCalls: false,
+                ...reasoningProviderOptions,
+                // OpenAI Zero Data Retention (ZDR) organizations do not persist
+                // reasoning IDs; return encrypted content for stateless follow-ups.
+                // Chat Completions is stateless already and rejects `include`.
                 ...(config.zeroDataRetention &&
-                    reasoningEnabled && {
+                    supportsReasoning &&
+                    !config.useChatCompletions && {
                         store: false,
                         include: ['reasoning.encrypted_content'],
                     }),
-                ...(preset.providerOptions || {}),
             },
         },
     };

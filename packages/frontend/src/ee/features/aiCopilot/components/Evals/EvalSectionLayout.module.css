@@ -6,10 +6,14 @@
     background-color: var(--mantine-color-ldGray-2) !important;
 }
 
-.resizeHandle[data-resize-handle-state='drag'] {
+.resizeHandle[data-active] {
     background-color: var(--mantine-color-ldGray-3) !important;
 }
 
 .threadPanel {
     max-height: 100%;
+}
+
+.breadcrumbLink {
+    cursor: pointer;
 }

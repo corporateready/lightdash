@@ -1,4 +1,6 @@
 import { Liquid } from 'liquidjs';
+import { CompileError } from '../types/errors';
+import { escapeParameterValue, type ParameterValue } from '../types/parameters';
 
 /**
  * Liquid template engine for SQL rendering.
@@ -24,7 +26,14 @@ const liquidSqlEngine = new Liquid({
 const LIGHTDASH_LIQUID_PATTERN =
     /\{%[^%]*(?:ld|lightdash)\.(?:parameters|query)\b/;
 
-type ParameterValue = string | number | string[] | number[];
+const UNSAFE_PARAMETER_KEY_PARTS = new Set([
+    '__proto__',
+    'constructor',
+    'prototype',
+]);
+
+const isSafeParameterKey = (key: string) =>
+    !key.split('.').some((part) => UNSAFE_PARAMETER_KEY_PARTS.has(part));
 
 /**
  * Query-time field introspection for a single field.
@@ -53,6 +62,7 @@ export type FieldsContext = Record<string, Record<string, FieldIntrospection>>;
 export const buildLiquidContext = (
     parameterValuesMap: Record<string, ParameterValue>,
     fieldsContext?: FieldsContext,
+    escapeString?: (value: string) => string,
 ): {
     ld: {
         parameters: Record<
@@ -75,27 +85,31 @@ export const buildLiquidContext = (
     > = {};
 
     for (const [key, value] of Object.entries(parameterValuesMap)) {
-        parameters[key] = value;
+        if (isSafeParameterKey(key)) {
+            const escapedValue = escapeParameterValue(value, { escapeString });
 
-        // For dotted names like "model.grain":
-        // - expose as short name ("grain") for backwards compatibility
-        // - expose as nested object ({ model: { grain: value } }) so Liquid
-        //   dot access like ld.parameters.model.grain works
-        const parts = key.split('.');
-        const shortName = parts[parts.length - 1];
-        if (shortName !== key) {
-            parameters[shortName] = value;
+            parameters[key] = escapedValue;
 
-            const [tableName, paramName] = parts;
-            const existing = parameters[tableName];
-            if (
-                existing !== undefined &&
-                typeof existing === 'object' &&
-                !Array.isArray(existing)
-            ) {
-                existing[paramName] = value;
-            } else {
-                parameters[tableName] = { [paramName]: value };
+            // For dotted names like "model.grain":
+            // - expose as short name ("grain") for backwards compatibility
+            // - expose as nested object ({ model: { grain: value } }) so Liquid
+            //   dot access like ld.parameters.model.grain works
+            const parts = key.split('.');
+            const shortName = parts[parts.length - 1];
+            if (shortName !== key) {
+                parameters[shortName] = escapedValue;
+
+                const [tableName, paramName] = parts;
+                const existing = parameters[tableName];
+                if (
+                    existing !== undefined &&
+                    typeof existing === 'object' &&
+                    !Array.isArray(existing)
+                ) {
+                    existing[paramName] = escapedValue;
+                } else {
+                    parameters[tableName] = { [paramName]: escapedValue };
+                }
             }
         }
     }
@@ -153,6 +167,7 @@ export const renderLiquidSql = (
     sql: string,
     parameterValuesMap: Record<string, ParameterValue>,
     fieldsContext?: FieldsContext,
+    escapeString?: (value: string) => string,
 ): string => {
     // Only process SQL that contains Lightdash parameter or field references in Liquid tags.
     // This avoids accidentally processing unrelated {% %} syntax.
@@ -161,9 +176,17 @@ export const renderLiquidSql = (
     }
 
     try {
-        const context = buildLiquidContext(parameterValuesMap, fieldsContext);
+        const context = buildLiquidContext(
+            parameterValuesMap,
+            fieldsContext,
+            escapeString,
+        );
         return liquidSqlEngine.parseAndRenderSync(sql, context);
-    } catch {
+    } catch (error) {
+        if (error instanceof CompileError) {
+            throw error;
+        }
+
         // If Liquid parsing fails (e.g., malformed syntax or unrelated {% in SQL),
         // fall back to the original SQL so we don't break existing queries
         return sql;

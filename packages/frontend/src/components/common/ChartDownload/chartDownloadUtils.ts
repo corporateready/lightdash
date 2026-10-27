@@ -1,5 +1,6 @@
-import { ChartType } from '@lightdash/common';
+import { ChartType, type ParametersValuesMap } from '@lightdash/common';
 import JsPDF from 'jspdf';
+import isEqual from 'lodash/isEqual';
 
 const FILE_NAME = 'lightdash_chart';
 export const CHART_TYPES_WITHOUT_IMAGE_EXPORT = [
@@ -7,11 +8,70 @@ export const CHART_TYPES_WITHOUT_IMAGE_EXPORT = [
     ChartType.BIG_NUMBER,
     ChartType.TABLE,
     ChartType.MAP,
+    // Sandboxed iframe — the echarts capture path can't reach it.
+    ChartType.DATA_APP_VIZ,
 ];
 
 export const CHART_TYPES_WITHOUT_DATA_EXPORT: ChartType[] = Object.values(
     ChartType,
 ).filter((type) => type !== ChartType.TABLE);
+
+/**
+ * Whether a dashboard tile matches the saved custom chart the backend exports.
+ */
+export const isSavedDataAppVizDashboardImageExportAvailable = ({
+    chartType,
+    canExportData,
+    hasDashboardFilters,
+    hasParameterOverrides,
+    hasUnpublishedChanges,
+    hasDateZoom,
+    hasDashboardColorPalette,
+    isEmbedded,
+    isMinimal,
+}: {
+    chartType: ChartType;
+    canExportData: boolean;
+    hasDashboardFilters: boolean;
+    hasParameterOverrides: boolean;
+    hasUnpublishedChanges: boolean;
+    hasDateZoom: boolean;
+    hasDashboardColorPalette: boolean;
+    isEmbedded: boolean;
+    isMinimal: boolean;
+}) =>
+    chartType === ChartType.DATA_APP_VIZ &&
+    canExportData &&
+    !hasDashboardFilters &&
+    !hasParameterOverrides &&
+    !hasUnpublishedChanges &&
+    !hasDateZoom &&
+    !hasDashboardColorPalette &&
+    !isEmbedded &&
+    !isMinimal;
+
+/**
+ * Whether a tile ran with parameter values other than the ones saved on its chart.
+ */
+export const hasDashboardTileParameterOverrides = ({
+    usedParameterValues,
+    dashboardValues,
+    chartSavedValues,
+}: {
+    usedParameterValues: ParametersValuesMap;
+    dashboardValues: ParametersValuesMap;
+    chartSavedValues: ParametersValuesMap;
+}): boolean =>
+    Object.entries(usedParameterValues).some(([key, usedValue]) => {
+        if (key in dashboardValues) {
+            return !isEqual(dashboardValues[key], chartSavedValues[key]);
+        }
+        // A definition default takes precedence over the chart-saved value.
+        return (
+            chartSavedValues[key] !== undefined &&
+            !isEqual(usedValue, chartSavedValues[key])
+        );
+    });
 
 export enum DownloadType {
     JPEG = 'JPEG',
@@ -72,6 +132,20 @@ export function downloadImage(base64: string, name?: string) {
     document.body.removeChild(link);
 }
 
+/**
+ * Fetch an image URL, then download it using a temporary same-origin blob URL.
+ */
+export async function downloadImageUrl(url: string, name?: string) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error('Unable to download chart image');
+    }
+
+    const objectUrl = URL.createObjectURL(await response.blob());
+    downloadImage(objectUrl, name);
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
 export function downloadJson(object: Object) {
     const data = JSON.stringify(object);
     const blob = new Blob([data], { type: 'application/json' });
@@ -83,7 +157,12 @@ export function downloadJson(object: Object) {
     document.body.removeChild(link);
 }
 
-export function downloadPdf(base64: string, width: number, height: number) {
+export function downloadPdf(
+    base64: string,
+    width: number,
+    height: number,
+    name?: string,
+) {
     const padding: number = 20;
     let doc: JsPDF;
     if (width > height) {
@@ -98,5 +177,5 @@ export function downloadPdf(base64: string, width: number, height: number) {
         width,
         height,
     });
-    doc.save(FILE_NAME);
+    doc.save(name || FILE_NAME);
 }

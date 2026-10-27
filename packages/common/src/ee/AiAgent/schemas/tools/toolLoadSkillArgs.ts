@@ -1,0 +1,87 @@
+import { z } from 'zod';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
+
+export const TOOL_LOAD_SKILL_DESCRIPTION =
+    "Load a skill by name. The result lists the skill's resources; load only the one you need with `resourceName`.";
+
+export const toolLoadSkillArgsSchema = z.object({
+    name: z.string().min(1).describe('Exact name of the skill to load.'),
+    arguments: z
+        .string()
+        .nullish()
+        .describe(
+            "What the user asked for, in their words, e.g. the period or region. Fills the skill's $ARGUMENTS placeholder.",
+        ),
+    resourceName: z
+        .string()
+        .min(1)
+        .nullish()
+        .describe(
+            'Name of a resource listed in the loaded skill, to load that resource instead of the skill.',
+        ),
+});
+
+/** Which skill and version the model was served; a thread reviewer reads this. */
+// Declared as a plain type so TSOA can resolve it in API responses.
+export type ServedSkillMetadata = {
+    name: string;
+    builtIn: boolean;
+    uuid: string | null;
+    versionNumber: number | null;
+    contentHash: string | null;
+};
+
+export const servedSkillMetadataSchema = z.object({
+    name: z.string(),
+    builtIn: z.boolean(),
+    uuid: z.string().nullable(),
+    versionNumber: z.number().nullable(),
+    contentHash: z.string().nullable(),
+}) satisfies z.ZodType<ServedSkillMetadata>;
+const toolLoadSkillResourceReferenceSchema = z.object({
+    name: z
+        .string()
+        .describe('Resource name to pass as `resourceName` to load it.'),
+    description: z.string(),
+});
+
+export const toolLoadSkillStructuredContentSchema = z.discriminatedUnion(
+    'kind',
+    [
+        z.object({
+            kind: z.literal('skill'),
+            skill: z.string().describe('Name of the loaded skill.'),
+            body: z.string().describe('The skill instructions.'),
+            resources: z
+                .array(toolLoadSkillResourceReferenceSchema)
+                .describe(
+                    'Sub-resources the skill offers; empty when it has none.',
+                ),
+        }),
+        z.object({
+            kind: z.literal('resource'),
+            skill: z
+                .string()
+                .describe('Name of the skill the resource belongs to.'),
+            resource: z.object({
+                name: z.string(),
+                content: z.string().describe('The resource file contents.'),
+            }),
+        }),
+    ],
+);
+export const toolLoadSkillOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema.extend({
+        skill: servedSkillMetadataSchema.optional(),
+    }),
+    structuredContent: toolLoadSkillStructuredContentSchema,
+});
+
+export type ToolLoadSkillArgs = z.infer<typeof toolLoadSkillArgsSchema>;
+export type ToolLoadSkillStructuredContent = z.infer<
+    typeof toolLoadSkillStructuredContentSchema
+>;
+export type ToolLoadSkillOutput = z.infer<typeof toolLoadSkillOutputSchema>;

@@ -1,41 +1,82 @@
 import {
+    JobStatusType,
+    JobStepStatusType,
+    sleep,
+    type Job,
     type ApiCreatePreviewResults,
     type ApiError,
     type DbtProjectEnvironmentVariable,
 } from '@lightdash/common';
 import { IconArrowRight } from '@tabler/icons-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
 import useActiveJob from '../providers/ActiveJob/useActiveJob';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import useToaster from './toaster/useToaster';
 
-const createPreviewProject = async ({
-    projectUuid,
-    name,
-    dbtConnectionOverrides,
-    warehouseConnectionOverrides,
-}: {
-    projectUuid: string;
-    name: string;
-    dbtConnectionOverrides?: {
-        branch?: string;
-        environment?: DbtProjectEnvironmentVariable[];
-        manifest?: string;
-    };
-    warehouseConnectionOverrides?: { schema?: string };
-}) =>
-    lightdashApi<ApiCreatePreviewResults>({
+const createPreviewProject = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        name,
+        asyncCopyContent,
+        dbtConnectionOverrides,
+        warehouseConnectionOverrides,
+    }: {
+        projectUuid: string;
+        name: string;
+        asyncCopyContent: boolean;
+        dbtConnectionOverrides?: {
+            branch?: string;
+            environment?: DbtProjectEnvironmentVariable[];
+            manifest?: string;
+        };
+        warehouseConnectionOverrides?: { schema?: string };
+    },
+) => {
+    const preview = await lightdashApi<ApiCreatePreviewResults>({
         url: `/projects/${projectUuid}/createPreview`,
         method: 'POST',
         body: JSON.stringify({
             name,
             copyContent: true, // TODO add this option to the UI
+            asyncCopyContent,
             dbtConnectionOverrides,
             warehouseConnectionOverrides,
         }),
     });
+    if (preview.contentCopyJobUuid) {
+        while (true) {
+            const job = await lightdashApi<Job>({
+                url: `/jobs/${preview.contentCopyJobUuid}`,
+                method: 'GET',
+                body: undefined,
+            });
+            if (job.jobStatus === JobStatusType.DONE) break;
+            if (job.jobStatus === JobStatusType.ERROR) {
+                const error: ApiError = {
+                    status: 'error',
+                    error: {
+                        name: 'PreviewContentCopyError',
+                        data: {},
+                        statusCode: 500,
+                        message:
+                            job.steps.find(
+                                (step) =>
+                                    step.stepStatus === JobStepStatusType.ERROR,
+                            )?.stepError ?? 'Failed to copy preview project',
+                    },
+                };
+                throw error;
+            }
+            await sleep(1000);
+        }
+    }
+    return preview;
+};
 
 export const useCreatePreviewMutation = () => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { setActiveJobId } = useActiveJob();
     const { showToastApiError, showToastSuccess } = useToaster();
@@ -45,6 +86,7 @@ export const useCreatePreviewMutation = () => {
         {
             projectUuid: string;
             name: string;
+            asyncCopyContent: boolean;
             dbtConnectionOverrides?: {
                 branch?: string;
                 environment?: DbtProjectEnvironmentVariable[];
@@ -52,7 +94,7 @@ export const useCreatePreviewMutation = () => {
             };
             warehouseConnectionOverrides?: { schema?: string };
         }
-    >((data) => createPreviewProject(data), {
+    >((data) => createPreviewProject(lightdashApi, data), {
         mutationKey: ['preview_project_create'],
         onSuccess: async ({ projectUuid, compileJobUuid }) => {
             await queryClient.invalidateQueries(['projects']);

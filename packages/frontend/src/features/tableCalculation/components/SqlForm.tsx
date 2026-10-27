@@ -2,11 +2,11 @@ import type {
     ApiError,
     GeneratedFormulaTableCalculation,
 } from '@lightdash/common';
-import { Button } from '@mantine-8/core';
 import {
     Alert,
     Anchor,
     Box,
+    Button,
     Flex,
     ScrollArea,
     Text,
@@ -14,9 +14,8 @@ import {
 } from '@mantine/core';
 import { useLocalStorage } from '@mantine/hooks';
 import { IconAlertCircle, IconSparkles, IconWand } from '@tabler/icons-react';
-import { useCallback, type FC } from 'react';
+import { useCallback, type CSSProperties, type FC } from 'react';
 import AceEditor, { type IAceEditorProps } from 'react-ace';
-import styled, { css } from 'styled-components';
 import MantineIcon from '../../../components/common/MantineIcon';
 import { SqlEditorActions } from '../../../components/SqlRunner/SqlEditorActions';
 import {
@@ -24,13 +23,22 @@ import {
     AiTableCalculationInputBody,
 } from '../../../ee/features/ambientAi/components/tableCalculation';
 import { useAmbientAiEnabled } from '../../../ee/features/ambientAi/hooks/useAmbientAiEnabled';
+import useIsEmbedded from '../../../ee/providers/Embed/useIsEmbedded';
+import { useEditorTheme } from '../../../hooks/useEditorTheme';
 import { useTableCalculationAceEditorCompleter } from '../../../hooks/useExplorerAceEditorCompleter';
+import {
+    useExploreWarehouseConnection,
+    useMixedWarehouseConnectionsEnabled,
+} from '../../../hooks/useExploreWarehouseConnection';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { getWarehouseSqlCaption } from '../../../utils/mixedWarehouseConnections';
+import { selectTableName, useExplorerSelector } from '../../explorer/store';
 import { type TableCalculationForm } from '../types';
 import FormulaConversionPreviewBody from './FormulaConversionPreview';
-import classes from './SqlForm.module.css';
 import 'ace-builds/src-noconflict/mode-sql';
 import 'ace-builds/src-noconflict/theme-github';
 import 'ace-builds/src-noconflict/theme-tomorrow_night';
+import classes from './SqlForm.module.css';
 
 const SQL_PLACEHOLDER = '${table_name.field_name} + ${table_name.metric_name}';
 const SOFT_WRAP_LOCAL_STORAGE_KEY = 'lightdash-sql-form-soft-wrap';
@@ -59,23 +67,41 @@ type Props = {
     conversionState?: SqlFormConversionState;
 };
 
-export const SqlEditor = styled(AceEditor)<
-    IAceEditorProps & { isFullScreen: boolean; gutterBackgroundColor: string }
->`
-    width: 100%;
-    & > .ace_gutter {
-        background-color: ${({ gutterBackgroundColor }) =>
-            gutterBackgroundColor};
-    }
-    ${({ isFullScreen }) =>
-        isFullScreen
-            ? css`
-                  min-height: 100px;
-              `
-            : css`
-                  min-height: 250px;
-              `}
-`;
+type SqlEditorProps = IAceEditorProps & {
+    isFullScreen: boolean;
+    gutterBackgroundColor: string;
+};
+
+type SqlEditorStyle = CSSProperties & {
+    '--ace-gutter-background': string;
+};
+
+export const SqlEditor: FC<SqlEditorProps> = ({
+    isFullScreen,
+    gutterBackgroundColor,
+    className,
+    style,
+    width = '100%',
+    ...props
+}) => (
+    <AceEditor
+        className={[
+            classes.sqlEditor,
+            isFullScreen ? classes.sqlEditorFullScreen : undefined,
+            className,
+        ]
+            .filter(Boolean)
+            .join(' ')}
+        style={
+            {
+                '--ace-gutter-background': gutterBackgroundColor,
+                ...style,
+            } as SqlEditorStyle
+        }
+        width={width}
+        {...props}
+    />
+);
 
 export const SqlForm: FC<Props> = ({
     form,
@@ -87,13 +113,25 @@ export const SqlForm: FC<Props> = ({
     conversionState,
 }) => {
     const theme = useMantineTheme();
+    const { ace: aceTheme } = useEditorTheme();
     const [isSoftWrapEnabled, setSoftWrapEnabled] = useLocalStorage({
         key: SOFT_WRAP_LOCAL_STORAGE_KEY,
         defaultValue: true,
     });
 
     const { setAceEditor } = useTableCalculationAceEditorCompleter();
-    const isAmbientAiEnabled = useAmbientAiEnabled();
+    const projectUuid = useProjectUuid();
+    const tableName = useExplorerSelector(selectTableName);
+    const { warehouseType } = useExploreWarehouseConnection(
+        tableName,
+        projectUuid,
+    );
+    const sqlCaption = getWarehouseSqlCaption(
+        warehouseType,
+        useMixedWarehouseConnectionsEnabled(),
+    );
+    const isAmbientAiEnabled = useAmbientAiEnabled(projectUuid);
+    const isEmbedded = useIsEmbedded();
 
     const handleEditorLoad = useCallback(
         (editor: any) => {
@@ -183,16 +221,17 @@ export const SqlForm: FC<Props> = ({
     return (
         <Flex direction="column" h="100%">
             <ScrollArea
-                style={{ flex: 1 }}
+                flex={1}
                 className={conversionState ? classes.editorBlurred : undefined}
             >
+                {sqlCaption !== null && (
+                    <Text size="xs" c="dimmed">
+                        {sqlCaption}
+                    </Text>
+                )}
                 <SqlEditor
                     mode="sql"
-                    theme={
-                        theme.colorScheme === 'dark'
-                            ? 'tomorrow_night'
-                            : 'github'
-                    }
+                    theme={aceTheme}
                     width="100%"
                     placeholder={SQL_PLACEHOLDER}
                     maxLines={Infinity}
@@ -218,8 +257,10 @@ export const SqlForm: FC<Props> = ({
                 />
             </ScrollArea>
 
-            <Box style={{ flexShrink: 0 }}>
-                {readOnly && !conversionState ? null : !isAmbientAiEnabled ? (
+            <Box flex="0 0 auto">
+                {(readOnly && !conversionState) ||
+                (!isAmbientAiEnabled &&
+                    isEmbedded) ? null : !isAmbientAiEnabled ? (
                     <Alert
                         radius={0}
                         icon={<MantineIcon icon={IconSparkles} />}
@@ -227,6 +268,7 @@ export const SqlForm: FC<Props> = ({
                             <Text fz="xs">
                                 Need inspiration?{' '}
                                 <Anchor
+                                    inherit
                                     target="_blank"
                                     href="https://docs.lightdash.com/guides/table-calculations/sql-templates"
                                     rel="noreferrer"
@@ -244,13 +286,8 @@ export const SqlForm: FC<Props> = ({
                             wrapper: {
                                 alignItems: 'center',
                             },
-                            title: {
-                                marginBottom: 0,
-                            },
                         }}
-                    >
-                        <></>
-                    </Alert>
+                    />
                 ) : (
                     <AiSlot
                         icon={slotIcon}

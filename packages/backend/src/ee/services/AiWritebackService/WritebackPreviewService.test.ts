@@ -1,0 +1,255 @@
+import { Ability, AbilityBuilder } from '@casl/ability';
+import {
+    AnyType,
+    DbtProjectType,
+    ForbiddenError,
+    type MemberAbility,
+    type SessionUser,
+} from '@lightdash/common';
+import { WritebackAgentAccessError } from './errors';
+import {
+    WritebackPreviewService,
+    type WritebackPreviewGithubClient,
+} from './WritebackPreviewService';
+
+const ORG = 'org-1';
+const PROJECT = 'project-1';
+const PR_URL = 'https://github.com/acme/analytics/pull/42';
+
+const openPullRequest = () => ({
+    state: 'open' as const,
+    merged: false,
+    headRef: 'feature/writeback',
+    headRepoFullName: 'acme/analytics',
+    mergeable: true,
+    mergeableState: 'clean',
+    draft: false,
+    title: 'Add metric',
+    additions: 9,
+    deletions: 1,
+    changedFiles: 1,
+});
+
+const userWithSourceCodeAccess = (canViewSourceCode: boolean): SessionUser => {
+    const { build, can } = new AbilityBuilder<MemberAbility>(Ability);
+    if (canViewSourceCode) {
+        can('view', 'SourceCode', {
+            organizationUuid: ORG,
+            projectUuid: PROJECT,
+        });
+    }
+
+    return {
+        userUuid: 'user-1',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        email: 'ada@example.com',
+        organizationUuid: ORG,
+        organizationName: 'Acme',
+        organizationCreatedAt: new Date(),
+        role: 'admin',
+        ability: build(),
+    } as AnyType;
+};
+
+const githubProject = (): AnyType => ({
+    organizationUuid: ORG,
+    projectUuid: PROJECT,
+    dbtConnection: {
+        type: DbtProjectType.GITHUB,
+        repository: 'acme/analytics',
+    },
+});
+
+const makeGithubClient =
+    (): import('vitest').Mocked<WritebackPreviewGithubClient> =>
+        ({
+            getInstallationToken: vi
+                .fn()
+                .mockResolvedValue('installation-token'),
+            getPullRequest: vi.fn().mockResolvedValue(openPullRequest()),
+            createPullRequestComment: vi.fn().mockResolvedValue(undefined),
+        }) as AnyType;
+
+const buildService = (overrides: Record<string, AnyType> = {}) =>
+    new WritebackPreviewService({
+        lightdashConfig: {
+            siteUrl: 'https://lightdash.example.com',
+        } as AnyType,
+        projectModel: {
+            get: vi.fn().mockResolvedValue(githubProject()),
+        } as AnyType,
+        projectService: {
+            createPreview: vi.fn().mockResolvedValue({
+                projectUuid: 'preview-project-1',
+                compileJobUuid: 'compile-job-1',
+            }),
+        } as AnyType,
+        githubAppInstallationsModel: {
+            getInstallationId: vi.fn().mockResolvedValue('installation-1'),
+        } as AnyType,
+        githubClient: makeGithubClient(),
+        ...overrides,
+    });
+
+describe('WritebackPreviewService.createPreviewForPullRequest', () => {
+    it('throws before GitHub or preview side effects without source code access', async () => {
+        const githubClient = makeGithubClient();
+        const projectService = {
+            createPreview: vi.fn(),
+        };
+        const githubAppInstallationsModel = {
+            getInstallationId: vi.fn(),
+        };
+        const service = buildService({
+            githubClient,
+            projectService: projectService as AnyType,
+            githubAppInstallationsModel: githubAppInstallationsModel as AnyType,
+        });
+
+        await expect(
+            service.createPreviewForPullRequest({
+                user: userWithSourceCodeAccess(false),
+                projectUuid: PROJECT,
+                prUrl: PR_URL,
+            }),
+        ).rejects.toThrow(ForbiddenError);
+        expect(
+            githubAppInstallationsModel.getInstallationId,
+        ).not.toHaveBeenCalled();
+        expect(githubClient.getInstallationToken).not.toHaveBeenCalled();
+        expect(githubClient.createPullRequestComment).not.toHaveBeenCalled();
+        expect(projectService.createPreview).not.toHaveBeenCalled();
+    });
+
+    it.each(['dbt', 'lightdash'])(
+        'creates a %s preview and posts its URL for authorized users',
+        async (semanticLayer) => {
+            const githubClient = makeGithubClient();
+            const projectService = {
+                createPreview: vi.fn().mockResolvedValue({
+                    projectUuid: 'preview-project-1',
+                    compileJobUuid: 'compile-job-1',
+                }),
+            };
+            const service = buildService({
+                githubClient,
+                projectService: projectService as AnyType,
+                projectModel: {
+                    get: vi.fn().mockResolvedValue({
+                        ...githubProject(),
+                        dbtConnection: {
+                            ...githubProject().dbtConnection,
+                            semanticLayer,
+                        },
+                    }),
+                } as AnyType,
+            });
+
+            const result = await service.createPreviewForPullRequest({
+                user: userWithSourceCodeAccess(true),
+                projectUuid: PROJECT,
+                prUrl: PR_URL,
+            });
+
+            expect(result).toEqual({
+                previewProjectUuid: 'preview-project-1',
+                previewUrl:
+                    'https://lightdash.example.com/projects/preview-project-1/home',
+                compileJobUuid: 'compile-job-1',
+            });
+            expect(projectService.createPreview).toHaveBeenCalledWith(
+                expect.anything(),
+                PROJECT,
+                expect.objectContaining({
+                    copyContent: true,
+                    validateAfterCompile: true,
+                    dbtConnectionOverrides: { branch: 'feature/writeback' },
+                }),
+                expect.anything(),
+            );
+        },
+    );
+
+    it('returns null when the PR URL repo does not match the project repo', async () => {
+        const githubClient = makeGithubClient();
+        const projectService = {
+            createPreview: vi.fn(),
+        };
+        const service = buildService({
+            githubClient,
+            projectService: projectService as AnyType,
+        });
+
+        const result = await service.createPreviewForPullRequest({
+            user: userWithSourceCodeAccess(true),
+            projectUuid: PROJECT,
+            prUrl: 'https://github.com/acme/other-repo/pull/42',
+        });
+
+        expect(result).toBeNull();
+        expect(githubClient.getPullRequest).not.toHaveBeenCalled();
+        expect(githubClient.createPullRequestComment).not.toHaveBeenCalled();
+        expect(projectService.createPreview).not.toHaveBeenCalled();
+    });
+
+    it('returns null when the PR branch comes from a fork', async () => {
+        const githubClient = makeGithubClient();
+        githubClient.getPullRequest.mockResolvedValue({
+            ...openPullRequest(),
+            headRepoFullName: 'fork/analytics',
+        });
+        const projectService = {
+            createPreview: vi.fn(),
+        };
+        const service = buildService({
+            githubClient,
+            projectService: projectService as AnyType,
+        });
+
+        const result = await service.createPreviewForPullRequest({
+            user: userWithSourceCodeAccess(true),
+            projectUuid: PROJECT,
+            prUrl: PR_URL,
+        });
+
+        expect(result).toBeNull();
+        expect(githubClient.createPullRequestComment).not.toHaveBeenCalled();
+        expect(projectService.createPreview).not.toHaveBeenCalled();
+    });
+});
+
+it.each([1, 2])(
+    'propagates an access-check failure unchanged at preview publication %s',
+    async (failAt) => {
+        const githubClient = makeGithubClient();
+        const projectService = {
+            createPreview: vi.fn().mockResolvedValue({
+                projectUuid: 'preview',
+                compileJobUuid: 'compile',
+            }),
+        };
+        const service = buildService({ githubClient, projectService });
+        const error = new WritebackAgentAccessError(
+            new Error('access check unavailable'),
+        );
+        let checks = 0;
+        const assertPublishAllowed = vi.fn(async () => {
+            checks += 1;
+            if (checks === failAt) throw error;
+        });
+        await expect(
+            service.createPreviewForPullRequest({
+                user: userWithSourceCodeAccess(true),
+                projectUuid: PROJECT,
+                prUrl: PR_URL,
+                assertPublishAllowed,
+            }),
+        ).rejects.toBe(error);
+        expect(projectService.createPreview).toHaveBeenCalledTimes(
+            failAt === 2 ? 1 : 0,
+        );
+        expect(githubClient.createPullRequestComment).not.toHaveBeenCalled();
+        expect(assertPublishAllowed).toHaveBeenCalledTimes(failAt);
+    },
+);

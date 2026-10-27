@@ -1,0 +1,222 @@
+import {
+    ChartType,
+    ECHARTS_DEFAULT_COLORS,
+    getDocumentRuntimeChartConfig,
+    isWarehouseResourceLimitError,
+    type ApiError,
+    type ApiExecuteAsyncMetricQueryResults,
+    type DocumentQueryReference,
+    type SemanticChartAsCode,
+} from '@lightdash/common';
+import { Box } from '@mantine/core';
+import { type UseQueryResult } from '@tanstack/react-query';
+import { useEffect, useMemo, type ReactNode } from 'react';
+import EmptyStateLoader from '../../components/common/EmptyStateLoader';
+import InlineErrorState from '../../components/common/InlineErrorState';
+import LightdashVisualization from '../../components/LightdashVisualization';
+import VisualizationProvider from '../../components/LightdashVisualization/VisualizationProvider';
+import MetricQueryDataProvider from '../../components/MetricQueryData/MetricQueryDataProvider';
+import { useProjectColorPalette } from '../../hooks/appearance/useProjectColorPalette';
+import { computeChartSeries } from '../../hooks/cartesianChartConfig/computeChartSeries';
+import usePivotDimensions from '../../hooks/usePivotDimensions';
+import { useInfiniteQueryResults } from '../../hooks/useQueryResults';
+import { useResizeObserver } from '../../hooks/useResizeObserver';
+import { DocumentRenderTargetContext } from '../chartTypes/documentRenderTarget/context';
+import { useDocumentExportStatus } from './documentExportStatus';
+import ReportChartFrame from './presentation/ReportChartFrame';
+
+type Props = {
+    projectUuid: string;
+    spaceUuid: string | null;
+    chart: SemanticChartAsCode;
+    query: Pick<
+        UseQueryResult<ApiExecuteAsyncMetricQueryResults, ApiError>,
+        'data' | 'error' | 'isFetching' | 'refetch'
+    >;
+    actions?: ReactNode;
+    showTitle?: boolean;
+    /** The saved cell being rendered; unsaved drafts have none. */
+    renderTarget?: DocumentQueryReference;
+};
+
+const DocumentChartVisualization = ({
+    projectUuid,
+    spaceUuid,
+    chart,
+    query,
+    actions,
+    showTitle = false,
+    renderTarget,
+}: Props) => {
+    const chartConfig = useMemo(
+        () => getDocumentRuntimeChartConfig(chart.chartConfig),
+        [chart.chartConfig],
+    );
+    const palette = useProjectColorPalette(projectUuid, {
+        spaceUuid: spaceUuid ?? undefined,
+    });
+    const results = useInfiniteQueryResults(
+        projectUuid,
+        query.data?.queryUuid,
+        chart.name,
+    );
+    const { validPivotDimensions } = usePivotDimensions(
+        chart.pivotConfig?.columns,
+        query.data?.metricQuery,
+    );
+    const computedSeries = useMemo(
+        () =>
+            computeChartSeries(
+                { chartConfig, metricQuery: chart.metricQuery },
+                validPivotDimensions,
+                results,
+                query.data?.fields ?? {},
+            ),
+        [
+            chartConfig,
+            chart.metricQuery,
+            validPivotDimensions,
+            results,
+            query.data?.fields,
+        ],
+    );
+    const [measureRef, { width, height }] = useResizeObserver<HTMLDivElement>();
+    const error = query.error ?? results.error;
+    const isResourceLimitError = isWarehouseResourceLimitError(
+        error?.error.message ?? '',
+    );
+    const exportStatus = useDocumentExportStatus();
+    const exportChartId = exportStatus ? renderTarget?.chartId : undefined;
+    const screenshotCallbacks = useMemo(
+        () =>
+            exportStatus && exportChartId !== undefined
+                ? {
+                      onScreenshotReady: () =>
+                          exportStatus.markReady(exportChartId),
+                      onScreenshotError: () =>
+                          exportStatus.markErrored(exportChartId),
+                  }
+                : {},
+        [exportStatus, exportChartId],
+    );
+    const hasError = !!error;
+    useEffect(() => {
+        if (hasError) {
+            screenshotCallbacks.onScreenshotError?.();
+        }
+    }, [hasError, screenshotCallbacks]);
+    const isExporting = exportStatus !== null;
+    if (error) {
+        return (
+            <ReportChartFrame
+                ariaLabel={chart.name}
+                title={showTitle ? chart.name : undefined}
+                description={showTitle ? undefined : chart.description}
+            >
+                <InlineErrorState
+                    message={
+                        isResourceLimitError
+                            ? 'This chart exceeds the warehouse query limit.'
+                            : 'The live data for this chart could not be loaded.'
+                    }
+                    onRetry={
+                        isResourceLimitError || isExporting
+                            ? undefined
+                            : () => {
+                                  void query.refetch();
+                                  if (results.error) {
+                                      void results.refetchRows();
+                                  }
+                              }
+                    }
+                />
+            </ReportChartFrame>
+        );
+    }
+    const isLoading = query.isFetching || results.isFetchingRows || !query.data;
+    return (
+        <ReportChartFrame
+            ariaLabel={chart.name}
+            title={showTitle ? chart.name : undefined}
+            description={showTitle ? undefined : chart.description}
+            actions={isExporting ? undefined : actions}
+            // Tables hug their rows; other charts need a fixed canvas to draw in
+            fit={
+                !isLoading && chart.chartConfig.type === ChartType.TABLE
+                    ? 'content'
+                    : 'fixed'
+            }
+        >
+            {isLoading ? (
+                // The busy surface a walkthrough's closing step waits on; the
+                // loader's words are the status the step shows meanwhile
+                <Box data-tour-anchor="document-chart-loading">
+                    <EmptyStateLoader
+                        title="Loading live chart data"
+                        data-tour-status="true"
+                    />
+                </Box>
+            ) : (
+                <MetricQueryDataProvider
+                    tableName={chart.tableName}
+                    explore={undefined}
+                    metricQuery={query.data?.metricQuery}
+                    queryUuid={query.data?.queryUuid}
+                    parameters={query.data?.usedParametersValues}
+                    resolvedTimezone={query.data?.resolvedTimezone}
+                >
+                    <VisualizationProvider
+                        minimal
+                        chartConfig={chartConfig}
+                        initialPivotDimensions={chart.pivotConfig?.columns}
+                        initialPivotRows={chart.pivotConfig?.rows}
+                        computedSeries={computedSeries}
+                        resultsData={{
+                            ...results,
+                            metricQuery: query.data?.metricQuery,
+                            fields: query.data?.fields,
+                            resolvedTimezone:
+                                query.data?.resolvedTimezone ?? undefined,
+                        }}
+                        isLoading={isLoading}
+                        columnOrder={chart.tableConfig?.columnOrder ?? []}
+                        colorPalette={
+                            palette.data?.colors ?? ECHARTS_DEFAULT_COLORS
+                        }
+                        parameters={query.data?.usedParametersValues}
+                        containerWidth={width}
+                        containerHeight={height}
+                    >
+                        <DocumentRenderTargetContext.Provider
+                            value={renderTarget}
+                        >
+                            <Box
+                                h="100%"
+                                ref={measureRef}
+                                // Walkthrough: read a document. The jump
+                                // from the rail lands on a section's first
+                                // chart, so the walkthrough ends here. See
+                                // scripts/scope-tours.
+                                data-tour-scope="view:Document"
+                                data-tour-step="1"
+                                data-tour-route="/projects/:projectUuid/documents/:documentUuidOrSlug"
+                                data-tour-label="Charts show live results"
+                                data-tour-docs="explore/documents.mdx#intro:1"
+                                data-tour-return="none"
+                                data-tour-busy='[data-tour-anchor="document-chart-loading"]'
+                                data-tour-resultdocs="explore/documents.mdx#intro:3"
+                            >
+                                <LightdashVisualization
+                                    enableContextMenu={false}
+                                    {...screenshotCallbacks}
+                                />
+                            </Box>
+                        </DocumentRenderTargetContext.Provider>
+                    </VisualizationProvider>
+                </MetricQueryDataProvider>
+            )}
+        </ReportChartFrame>
+    );
+};
+
+export default DocumentChartVisualization;

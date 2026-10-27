@@ -9,22 +9,29 @@ import {
     Stack,
     Text,
     Title,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconBulb,
     IconChartHistogram,
     IconClipboardData,
     IconMessageChatbot,
     IconPlus,
-    IconRobot,
 } from '@tabler/icons-react';
-import { Link, Navigate, useParams } from 'react-router';
+import { Link, Navigate, useSearchParams } from 'react-router';
 import MantineIcon from '../../../components/common/MantineIcon';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import {
+    AI_ROUTING_AUTO_VALUE,
+    AI_ROUTING_SEARCH_PARAM,
+} from '../../features/aiCopilot/components/AgentSelector/AgentSelectorUtils';
+import { AiAgentIcon } from '../../features/aiCopilot/components/AiAgentIcon';
 import { AiAgentPageLayout } from '../../features/aiCopilot/components/AiAgentPageLayout/AiAgentPageLayout';
 import { useAiAgentPermission } from '../../features/aiCopilot/hooks/useAiAgentPermission';
 import { useAiOrganizationSettings } from '../../features/aiCopilot/hooks/useAiOrganizationSettings';
+import { useAiRouterConfig } from '../../features/aiCopilot/hooks/useAiRouter';
 import { useProjectAiAgents } from '../../features/aiCopilot/hooks/useProjectAiAgents';
 import { useGetUserAgentPreferences } from '../../features/aiCopilot/hooks/useUserAgentPreferences';
+import AgentsRouterPage from './AgentsRouterPage';
 
 const AGENT_FEATURES = [
     {
@@ -65,8 +72,22 @@ const AiPageLoading = () => (
     </AiAgentPageLayout>
 );
 
+/**
+ * Index of `/ai-agents`. Decides where to start, in priority order:
+ *
+ * 1. No agents — render the welcome / empty state.
+ * 2. Exactly one agent — open it; there's no routing decision to make.
+ * 3. A valid default agent preference — open it, unless the user explicitly
+ *    asked for Auto (`?routing=auto`, set by the agent selector). A preference
+ *    pointing at a deleted agent is ignored.
+ * 4. Router enabled — show the auto-router (`AgentsRouterPage`).
+ * 5. Otherwise — open the first agent in the list.
+ */
 const AgentsWelcome = () => {
-    const { projectUuid } = useParams();
+    const projectUuid = useProjectUuid();
+    const [searchParams] = useSearchParams();
+    const forceRouter =
+        searchParams.get(AI_ROUTING_SEARCH_PARAM) === AI_ROUTING_AUTO_VALUE;
     const canCreateAgent = useAiAgentPermission({
         action: 'manage',
         projectUuid,
@@ -88,6 +109,7 @@ const AgentsWelcome = () => {
     const userAgentPreferencesQuery = useGetUserAgentPreferences(projectUuid, {
         enabled: isAiCopilotEnabledOrTrial,
     });
+    const aiRouterConfigQuery = useAiRouterConfig();
 
     if (aiOrganizationSettingsQuery.isLoading) {
         return <AiPageLoading />;
@@ -100,20 +122,41 @@ const AgentsWelcome = () => {
         return <div>something went wrong...</div>;
     }
 
-    if (agentsQuery.isLoading || userAgentPreferencesQuery.isLoading) {
+    if (
+        agentsQuery.isLoading ||
+        userAgentPreferencesQuery.isLoading ||
+        // Router config: wait until we know whether it's enabled.
+        // 404 / other errors mean "not configured" — that resolves the query.
+        aiRouterConfigQuery.isLoading
+    ) {
         return <AiPageLoading />;
     }
 
-    if (userAgentPreferencesQuery.data?.defaultAgentUuid) {
+    const userDefaultAgentUuid =
+        userAgentPreferencesQuery.data?.defaultAgentUuid;
+    const hasValidUserDefault =
+        userDefaultAgentUuid !== undefined &&
+        agentsQuery.data.some((agent) => agent.uuid === userDefaultAgentUuid);
+
+    if (agentsQuery.data.length === 0) {
+        // Fall through to the empty state below.
+    } else if (agentsQuery.data.length === 1) {
         return (
             <Navigate
-                to={`/projects/${projectUuid}/ai-agents/${userAgentPreferencesQuery.data.defaultAgentUuid}`}
+                to={`/projects/${projectUuid}/ai-agents/${agentsQuery.data[0].uuid}`}
                 replace
             />
         );
-    }
-
-    if (agentsQuery.data.length > 0) {
+    } else if (hasValidUserDefault && !forceRouter) {
+        return (
+            <Navigate
+                to={`/projects/${projectUuid}/ai-agents/${userDefaultAgentUuid}`}
+                replace
+            />
+        );
+    } else if (aiRouterConfigQuery.data?.enabled) {
+        return <AgentsRouterPage />;
+    } else {
         return (
             <Navigate
                 to={`/projects/${projectUuid}/ai-agents/${agentsQuery.data[0].uuid}`}
@@ -127,16 +170,14 @@ const AgentsWelcome = () => {
             <Center mt="xl">
                 <Stack gap={32}>
                     <Stack align="center" gap="xxs">
-                        <Avatar size="lg" color="gray">
-                            <MantineIcon icon={IconRobot} size="xxl" />
-                        </Avatar>
+                        <AiAgentIcon size={48} />
                         <Title order={2}>Welcome to AI Agents</Title>
                         <Text c="dimmed" size="sm">
                             Your AI-powered BI assistants
                         </Text>
                     </Stack>
 
-                    <Paper p="xl" shadow="subtle">
+                    <Paper p="xl">
                         <Stack>
                             <Title order={5}>
                                 What you can do with AI Agents:
@@ -186,7 +227,6 @@ const AgentsWelcome = () => {
                     <Paper
                         variant="dotted"
                         p="xl"
-                        shadow="subtle"
                         component={Stack}
                         gap="xxs"
                         align="center"
@@ -199,7 +239,6 @@ const AgentsWelcome = () => {
                         <Box mt="lg">
                             {canCreateAgent ? (
                                 <Button
-                                    variant="dark"
                                     leftSection={
                                         <MantineIcon icon={IconPlus} />
                                     }

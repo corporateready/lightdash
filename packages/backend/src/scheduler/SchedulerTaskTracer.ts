@@ -15,6 +15,7 @@ import {
     noopOrganizationNameResolver,
     type OrganizationNameResolver,
 } from '../sentry/organizationNameResolver';
+import { continueTrace, traceSpan } from '../tracing/tracing';
 import { TypedTask, type TypedTaskList } from './types';
 
 const getTagsForTask: {
@@ -89,6 +90,11 @@ const getTagsForTask: {
         'project.uuid': payload.projectUuid,
     }),
 
+    [SCHEDULER_TASKS.COPY_PREVIEW_CONTENT]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
     [SCHEDULER_TASKS.COMPILE_PROJECT]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
@@ -130,6 +136,12 @@ const getTagsForTask: {
         'project.uuid': payload.projectUuid,
     }),
 
+    [SCHEDULER_TASKS.BACKFILL_DEFAULT_USER_SPACES]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+
     [SCHEDULER_TASKS.INDEX_CATALOG]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
@@ -144,16 +156,102 @@ const getTagsForTask: {
         'project.uuid': payload.projectUuid,
     }),
 
-    [SCHEDULER_TASKS.SLACK_AI_PROMPT]: (payload) => ({
+    [SCHEDULER_TASKS.EXPORT_CONTENT]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
         'project.uuid': payload.projectUuid,
     }),
 
+    [SCHEDULER_TASKS.EXPORT_DOCUMENT_PDF]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+        'document.uuid': payload.documentUuid,
+    }),
+
+    [SCHEDULER_TASKS.SLACK_AI_PROMPT]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.SLACK_AI_ARTIFACT_IMAGES]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+        'ai_agent.prompt_uuid': payload.slackPromptUuid,
+    }),
+    [SCHEDULER_TASKS.SWEEP_SLACK_AI_ARTIFACT_IMAGES]: () => ({}),
+
     [SCHEDULER_TASKS.AI_AGENT_EVAL_RESULT]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
         'project.uuid': payload.projectUuid,
+    }),
+
+    [SCHEDULER_TASKS.AI_AGENT_REVIEW_CLASSIFIER]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'agent.uuid': payload.agentUuid,
+        'thread.uuid': payload.threadUuid,
+        'prompt.uuid': payload.promptUuid,
+        'ai_agent_review.event_type': payload.eventType,
+    }),
+
+    [SCHEDULER_TASKS.AI_AGENT_REVIEW_WRITEBACK]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+    }),
+
+    [SCHEDULER_TASKS.AI_AGENT_REVIEW_REMEDIATION_PREVIEW]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+        'ai_agent_review.fingerprint': payload.fingerprint,
+        'ai_agent_review.remediation_uuid': payload.remediationUuid,
+    }),
+
+    [SCHEDULER_TASKS.AI_AGENT_REVIEW_REMEDIATION_COMPILE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+        'ai_agent_review.fingerprint': payload.fingerprint,
+        'ai_agent_review.remediation_uuid': payload.remediationUuid,
+    }),
+
+    [SCHEDULER_TASKS.AI_AGENT_REVIEW_REMEDIATION_RUN]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+        'agent.uuid': payload.agentUuid,
+        'thread.uuid': payload.threadUuid,
+        'ai_agent_review.fingerprint': payload.fingerprint,
+        'ai_agent_review.remediation_uuid': payload.remediationUuid,
+    }),
+
+    [SCHEDULER_TASKS.SEND_REVIEW_NOTIFICATION]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid ?? '',
+    }),
+
+    [SCHEDULER_TASKS.SEND_CONTENT_REVIEW_NOTIFICATION]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+        'content_review_request.uuid': payload.requestUuid,
+    }),
+
+    [SCHEDULER_TASKS.CREATE_REVIEW_JIRA_ISSUE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid ?? '',
+    }),
+
+    [SCHEDULER_TASKS.CREATE_REVIEW_LINEAR_ISSUE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid ?? '',
     }),
 
     [SCHEDULER_TASKS.EMBED_ARTIFACT_VERSION]: (payload) => ({
@@ -186,6 +284,9 @@ const getTagsForTask: {
     [SCHEDULER_TASKS.GENERATE_SLACK_CHANNEL_SYNC_JOBS]: () => ({}),
     [SCHEDULER_TASKS.CHECK_FOR_STUCK_JOBS]: () => ({}),
     [SCHEDULER_TASKS.CLEAN_DEPLOY_SESSIONS]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_WAREHOUSE_CONNECT_CODES]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_AGENT_CONNECTION_APPROVAL_REQUESTS]: () => ({}),
+    [SCHEDULER_TASKS.RECONCILE_PLAYGROUND_BUNDLES]: () => ({}),
     [SCHEDULER_TASKS.MANAGED_AGENT_HEARTBEAT]: (payload) => ({
         'project.uuid': payload.projectUuid,
         'managed_agent.triggered_by': payload.triggeredBy ?? 'cron',
@@ -195,8 +296,122 @@ const getTagsForTask: {
         'user.uuid': payload.userUuid,
         'project.uuid': payload.projectUuid,
     }),
+    [SCHEDULER_TASKS.APP_BUILD_FROM_SOURCE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.APP_CAPTURE_THUMBNAIL]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.PUBLISH_ANNOUNCEMENT]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+        'announcement.uuid': payload.announcementUuid,
+    }),
+    [SCHEDULER_TASKS.SWEEP_DUE_ANNOUNCEMENTS]: () => ({}),
+    [SCHEDULER_TASKS.SEND_AI_CREDIT_ALLOWANCE_ALERTS]: () => ({}),
     [SCHEDULER_TASKS.SWEEP_STALE_APP_LOCKS]: () => ({}),
+    [SCHEDULER_TASKS.SWEEP_STALE_AI_WRITEBACK_RUNS]: () => ({}),
+    [SCHEDULER_TASKS.SWEEP_STALE_AI_DEEP_RESEARCH_RUNS]: () => ({}),
+    [SCHEDULER_TASKS.SWEEP_STALE_AI_EVAL_RUNS]: () => ({}),
+    [SCHEDULER_TASKS.SWEEP_AI_AGENT_MEMORY_THREADS]: () => ({}),
+    [SCHEDULER_TASKS.MOBILE_PUSH_LIVE_ACTIVITY_START]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+        'mobile_push.live_activity_start_attempt_uuid':
+            payload.liveActivityStartAttemptUuid,
+    }),
+    [SCHEDULER_TASKS.MOBILE_PUSH_LIVE_ACTIVITY]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid,
+        'mobile_push.live_activity_uuid': payload.liveActivityUuid,
+    }),
+    [SCHEDULER_TASKS.SWEEP_MOBILE_PUSH_LIVE_ACTIVITIES]: () => ({}),
+    [SCHEDULER_TASKS.AI_AGENT_MEMORY_DISTILL]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'ai_agent_memory.thread_uuid': payload.threadUuid,
+    }),
+    [SCHEDULER_TASKS.CONSOLIDATE_AI_AGENT_MEMORIES]: () => ({}),
+    [SCHEDULER_TASKS.CONSOLIDATE_AI_AGENT_MEMORY_PARTITION]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'ai_agent_memory.owner_user_uuid': payload.ownerUserUuid,
+    }),
+    [SCHEDULER_TASKS.CLEAN_AI_USAGE_LEDGER]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_MCP_TOOL_CALLS]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_RATE_COUNTERS]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_DATA_APP_ANALYSES]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_AI_DEEP_RESEARCH_REPORTS]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_AI_AGENT_THREADS]: () => ({}),
+    [SCHEDULER_TASKS.CLEAN_SCIM_REQUEST_LOGS]: () => ({}),
+    [SCHEDULER_TASKS.AI_WRITEBACK_PIPELINE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.AI_DEEP_RESEARCH]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.DATA_APP_INVESTIGATE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+        ...(payload.target?.kind === 'dashboard'
+            ? { 'dashboard.uuid': payload.target.dashboardUuid }
+            : {
+                  'app.uuid':
+                      payload.target?.kind === 'app'
+                          ? payload.target.appUuid
+                          : (payload.appUuid ?? ''),
+              }),
+        'agent.uuid': payload.agentUuid,
+    }),
+    [SCHEDULER_TASKS.AGENT_ONBOARDING_RUN]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+        'agent_onboarding.run_uuid': payload.agentOnboardingRunUuid,
+    }),
+    [SCHEDULER_TASKS.AI_AGENT_EDIT_DBT_PROJECT_PIPELINE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
     [SCHEDULER_TASKS.CLEAN_EXPIRED_PREVIEWS]: () => ({}),
+    [SCHEDULER_TASKS.COMPACT_USAGE_EVENTS]: () => ({}),
+    [SCHEDULER_TASKS.BACKFILL_USAGE_QUERY_HISTORY]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+    }),
+    [SCHEDULER_TASKS.POLL_EMAIL_WHITELABEL]: () => ({}),
+    [SCHEDULER_TASKS.INGEST_PROJECT_CONTEXT]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.INGEST_EXTERNAL_SOURCE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.INGEST_EXTERNAL_SOURCE_ATTACHMENT]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.MAINTAIN_EXTERNAL_SOURCES]: () => ({}),
+    [SCHEDULER_TASKS.SWEEP_UNCLAIMED_AI_THREAD_FILES]: () => ({}),
+    [SCHEDULER_TASKS.LEARN_SANDBOX_COMMAND]: (payload) => ({
+        projectUuid: payload.projectUuid,
+    }),
 } as const;
 
 const getTagsFromPayload = <T extends SchedulerTaskName>(
@@ -229,12 +444,17 @@ export const traceTask = <T extends SchedulerTaskName>(
         payload: TaskPayloadMap[T] & QueueTraceProperties,
         helpers: JobHelpers,
     ) => void = async (payload, helpers) => {
-        const { traceHeader, baggageHeader } = payload;
+        const { traceHeader, baggageHeader, otelTraceparent, otelBaggage } =
+            payload;
 
-        await Sentry.continueTrace(
-            { sentryTrace: traceHeader, baggage: baggageHeader },
-            async () => {
-                await Sentry.startSpan(
+        await continueTrace(
+            {
+                sentryTrace: traceHeader,
+                traceparent: otelTraceparent,
+                baggage: otelBaggage ?? baggageHeader,
+            },
+            async () =>
+                traceSpan(
                     {
                         name: `worker.task.${taskName}`,
                         attributes: {
@@ -261,6 +481,16 @@ export const traceTask = <T extends SchedulerTaskName>(
                                   organizationUuid,
                               ).catch(() => undefined)
                             : undefined;
+
+                        // Sentry tags below are error-scope only; stamp the
+                        // attribution on the task span so it's queryable in
+                        // the trace backend.
+                        span.setAttributes({
+                            ...payloadTags,
+                            ...(organizationName && {
+                                'organization.name': organizationName,
+                            }),
+                        });
 
                         if ('user.uuid' in payloadTags) {
                             Sentry.setUser({
@@ -372,8 +602,7 @@ export const traceTask = <T extends SchedulerTaskName>(
                             throw e;
                         }
                     },
-                );
-            },
+                ),
         );
     };
     return tracedTask;

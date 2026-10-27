@@ -3,13 +3,13 @@ import {
     ChartType,
     type PieChartConfig,
 } from '../../../../../../types/savedCharts';
-import { type ToolRunQueryArgsTransformed } from '../../../../schemas';
+import { type RunQueryBuiltinChartInput } from '../../types';
 
 export const getPieChartConfig = ({
     queryTool,
     metricQuery,
 }: {
-    queryTool: ToolRunQueryArgsTransformed;
+    queryTool: RunQueryBuiltinChartInput;
     metricQuery: MetricQuery;
 }): PieChartConfig => {
     const { dimensions } = queryTool.queryConfig;

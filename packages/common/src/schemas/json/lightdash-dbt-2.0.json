@@ -183,9 +183,13 @@
                             "format": {
                                 "type": "string"
                             },
+                            "separator": {
+                                "$ref": "#/$defs/separator"
+                            },
                             "compact": {
                                 "type": "string",
                                 "enum": [
+                                    "auto",
                                     "thousands",
                                     "millions",
                                     "billions",
@@ -325,6 +329,16 @@
                                         },
                                         "description": "An array of dimension names that are allowed for segmenting this metric in the Metrics Explorer"
                                     },
+                                    "default_segment": {
+                                        "type": "string",
+                                        "description": "A dimension name pre-selected in the Segment by picker when this metric is opened in the Metrics Explorer. Must be one of segment_by (if set) and a segmentable dimension."
+                                    },
+                                    "default_filter": {
+                                        "type": "object",
+                                        "description": "A single filter pre-applied when this metric is opened in the Metrics Explorer, e.g. { status: active } or { status: [active, pending] }. Uses the metric filter syntax; only is / is not operators are supported here.",
+                                        "additionalProperties": true,
+                                        "maxProperties": 1
+                                    },
                                     "owner": {
                                         "type": "string",
                                         "description": "Email of the metric owner"
@@ -406,6 +420,30 @@
     "additionalProperties": false,
     "required": [],
     "$defs": {
+        "separator": {
+            "type": "string",
+            "enum": [
+                "default",
+                "commaPeriod",
+                "spacePeriod",
+                "periodComma",
+                "noSeparatorPeriod",
+                "apostrophePeriod"
+            ]
+        },
+        "aiHint": {
+            "oneOf": [
+                {
+                    "type": "string"
+                },
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            ]
+        },
         "filterItem": {
             "type": "object",
             "additionalProperties": {
@@ -481,16 +519,16 @@
                 },
                 "groups": {
                     "type": "array",
-                    "description": "Groups are used to group tables in the sidebar. You can create nested groups up to 3 levels. Define labels & descriptions for the group keys in lightdash.config.yml under table_groups.",
+                    "description": "Groups are used to group tables in the sidebar. You can create nested groups up to 5 levels. Define labels & descriptions for the group keys in lightdash.config.yml under table_groups.",
                     "items": {
                         "type": "string",
                         "minLength": 1
                     },
-                    "maxItems": 3
+                    "maxItems": 5
                 },
                 "group_details": {
                     "type": "object",
-                    "description": "Set up group_details so you can group your dimensions and metrics in the sidebar using the groups parameter. You can create nested groups up to 3 levels",
+                    "description": "Set up group_details so you can group your dimensions and metrics in the sidebar using the groups parameter. You can create nested groups up to 5 levels",
                     "patternProperties": {
                         "^[a-zA-Z0-9_]+$": {
                             "type": "object",
@@ -501,11 +539,19 @@
                                 },
                                 "description": {
                                     "type": "string"
+                                },
+                                "ai_hint": {
+                                    "$ref": "#/$defs/aiHint",
+                                    "description": "Hints inherited by fields in this group for AI-powered query generation"
                                 }
                             },
                             "required": ["label"]
                         }
                     }
+                },
+                "ai_hint": {
+                    "$ref": "#/$defs/aiHint",
+                    "description": "Hints for AI-powered query generation"
                 },
                 "metrics": {
                     "type": "object",
@@ -543,6 +589,10 @@
                                     "type": "string",
                                     "minLength": 1
                                 },
+                                "ai_hint": {
+                                    "$ref": "#/$defs/aiHint",
+                                    "description": "Hints for AI-powered query generation"
+                                },
                                 "sql": {
                                     "type": "string",
                                     "minLength": 1
@@ -571,12 +621,16 @@
                                 "format": {
                                     "type": "string"
                                 },
+                                "separator": {
+                                    "$ref": "#/$defs/separator"
+                                },
                                 "percentile": {
                                     "type": "number"
                                 },
                                 "compact": {
                                     "type": "string",
                                     "enum": [
+                                        "auto",
                                         "thousands",
                                         "millions",
                                         "billions",
@@ -677,12 +731,12 @@
                                 },
                                 "groups": {
                                     "type": "array",
-                                    "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 3 levels",
+                                    "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 5 levels",
                                     "items": {
                                         "type": "string",
                                         "minLength": 1
                                     },
-                                    "maxItems": 3
+                                    "maxItems": 5
                                 },
                                 "default_time_dimension": {
                                     "type": "object",
@@ -704,6 +758,40 @@
                                         }
                                     },
                                     "required": ["field", "interval"]
+                                },
+                                "required_attributes": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": {
+                                        "oneOf": [
+                                            {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            {
+                                                "type": "string"
+                                            }
+                                        ]
+                                    }
+                                },
+                                "any_attributes": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": {
+                                        "oneOf": [
+                                            {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            {
+                                                "type": "string"
+                                            }
+                                        ]
+                                    }
                                 },
                                 "spotlight": {
                                     "type": "object",
@@ -733,6 +821,16 @@
                                                 "type": "string"
                                             },
                                             "description": "An array of dimension names that are allowed for segmenting this metric in the Metrics Explorer"
+                                        },
+                                        "default_segment": {
+                                            "type": "string",
+                                            "description": "A dimension name pre-selected in the Segment by picker when this metric is opened in the Metrics Explorer. Must be one of segment_by (if set) and a segmentable dimension."
+                                        },
+                                        "default_filter": {
+                                            "type": "object",
+                                            "description": "A single filter pre-applied when this metric is opened in the Metrics Explorer, e.g. { status: active } or { status: [active, pending] }. Uses the metric filter syntax; only is / is not operators are supported here.",
+                                            "additionalProperties": true,
+                                            "maxProperties": 1
                                         },
                                         "owner": {
                                             "type": "string",
@@ -812,6 +910,41 @@
                                     "type": "string"
                                 }
                             },
+                            "table": {
+                                "type": "string",
+                                "minLength": 1,
+                                "pattern": "^(?:[A-Za-z_][A-Za-z0-9_$]*|\"(?:\"\"|[^\"\\u0000-\\u001F])+\"|`[^`\\u0000-\\u001F]+`)(?:\\.(?:[A-Za-z_][A-Za-z0-9_$]*|\"(?:\"\"|[^\"\\u0000-\\u001F])+\"|`[^`\\u0000-\\u001F]+`))*$",
+                                "description": "External table: a qualified identifier for a customer-managed warehouse table or view that Lightdash does not create or refresh. It must expose the pre-aggregate's generated column names. When set, Lightdash never materializes this pre-aggregate; materialization keys (refresh, sorts, max_rows, materialization_role) are ignored."
+                            },
+                            "sorts": {
+                                "description": "Materialization sort order. When omitted, Lightdash automatically sorts the time dimension first and descending, then all remaining materialized dimensions ascending. Set to false or [] to disable sorting, or provide canonical query sort entries with a compiled Lightdash fieldId and explicit descending value. Compiled time-dimension IDs include granularity (for example, orders_order_date_day) and must be updated when granularity changes. Sort order determines which rows are retained when max_rows truncates results.",
+                                "oneOf": [
+                                    {
+                                        "const": false
+                                    },
+                                    {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "fieldId": {
+                                                    "type": "string",
+                                                    "minLength": 1
+                                                },
+                                                "descending": {
+                                                    "description": "Whether to sort descending. Must be an unquoted YAML boolean.",
+                                                    "enum": [true, false]
+                                                }
+                                            },
+                                            "required": [
+                                                "fieldId",
+                                                "descending"
+                                            ],
+                                            "additionalProperties": false
+                                        }
+                                    }
+                                ]
+                            },
                             "filters": {
                                 "type": "array",
                                 "items": {
@@ -831,7 +964,13 @@
                                 "type": "object",
                                 "properties": {
                                     "cron": {
-                                        "type": "string"
+                                        "type": "string",
+                                        "description": "Cron expression for scheduled materialization"
+                                    },
+                                    "on_change": {
+                                        "type": "boolean",
+                                        "description": "Whether the project compile that changes this pre-aggregate's definition, or the fields it reads, rebuilds it. Defaults to true. Set to false to leave the rebuild to the cron schedule or a manual refresh; the old materialization stops serving either way. Compiles that leave the definition unchanged never rebuild it.",
+                                        "default": true
                                     }
                                 }
                             },
@@ -988,7 +1127,7 @@
                                     }
                                 },
                                 "default": {
-                                    "description": "The default value(s) for the parameter",
+                                    "description": "The default value(s) for the parameter. For date parameters, `today` resolves to the current date at query time.",
                                     "oneOf": [
                                         {
                                             "type": ["string", "number"]
@@ -1058,6 +1197,10 @@
                     "description": "Alias for default_filters (deprecated, use default_filters instead)",
                     "items": { "$ref": "#/$defs/filterItem" }
                 },
+                "hidden": {
+                    "type": "boolean",
+                    "description": "When true, no explore is generated for the model itself. The model is still available as a join target and as the base table for explores defined under `explores`."
+                },
                 "explores": {
                     "type": "object",
                     "description": "Defines custom explores for this model",
@@ -1075,6 +1218,20 @@
                                     "description": "Alias for default_filters (deprecated, use default_filters instead)",
                                     "items": { "$ref": "#/$defs/filterItem" }
                                 },
+                                "tags": {
+                                    "oneOf": [
+                                        {
+                                            "type": "string"
+                                        },
+                                        {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    ],
+                                    "description": "Tags for organizing and filtering this explore. Overrides model tags when set."
+                                },
                                 "sql_filter": {
                                     "type": "string",
                                     "description": "SQL filter applied to the WHERE clause of all queries using this explore"
@@ -1090,12 +1247,12 @@
                                 },
                                 "groups": {
                                     "type": "array",
-                                    "description": "Groups are used to group tables in the sidebar. You can create nested groups up to 3 levels. Define labels & descriptions for the group keys in lightdash.config.yml under table_groups.",
+                                    "description": "Groups are used to group tables in the sidebar. You can create nested groups up to 5 levels. Define labels & descriptions for the group keys in lightdash.config.yml under table_groups.",
                                     "items": {
                                         "type": "string",
                                         "minLength": 1
                                     },
-                                    "maxItems": 3
+                                    "maxItems": 5
                                 }
                             }
                         }
@@ -1142,6 +1299,10 @@
                                     "type": "string",
                                     "minLength": 1
                                 },
+                                "ai_hint": {
+                                    "$ref": "#/$defs/aiHint",
+                                    "description": "Hints for AI-powered query generation"
+                                },
                                 "sql": {
                                     "type": "string",
                                     "minLength": 1
@@ -1169,12 +1330,16 @@
                                 "format": {
                                     "type": "string"
                                 },
+                                "separator": {
+                                    "$ref": "#/$defs/separator"
+                                },
                                 "percentile": {
                                     "type": "number"
                                 },
                                 "compact": {
                                     "type": "string",
                                     "enum": [
+                                        "auto",
                                         "thousands",
                                         "millions",
                                         "billions",
@@ -1266,12 +1431,12 @@
                                 },
                                 "groups": {
                                     "type": "array",
-                                    "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 3 levels",
+                                    "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 5 levels",
                                     "items": {
                                         "type": "string",
                                         "minLength": 1
                                     },
-                                    "maxItems": 3
+                                    "maxItems": 5
                                 },
                                 "default_time_dimension": {
                                     "type": "object",
@@ -1293,6 +1458,40 @@
                                         }
                                     },
                                     "required": ["field", "interval"]
+                                },
+                                "required_attributes": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": {
+                                        "oneOf": [
+                                            {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            {
+                                                "type": "string"
+                                            }
+                                        ]
+                                    }
+                                },
+                                "any_attributes": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": {
+                                        "oneOf": [
+                                            {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            {
+                                                "type": "string"
+                                            }
+                                        ]
+                                    }
                                 },
                                 "spotlight": {
                                     "type": "object",
@@ -1322,6 +1521,16 @@
                                                 "type": "string"
                                             },
                                             "description": "An array of dimension names that are allowed for segmenting this metric in the Metrics Explorer"
+                                        },
+                                        "default_segment": {
+                                            "type": "string",
+                                            "description": "A dimension name pre-selected in the Segment by picker when this metric is opened in the Metrics Explorer. Must be one of segment_by (if set) and a segmentable dimension."
+                                        },
+                                        "default_filter": {
+                                            "type": "object",
+                                            "description": "A single filter pre-applied when this metric is opened in the Metrics Explorer, e.g. { status: active } or { status: [active, pending] }. Uses the metric filter syntax; only is / is not operators are supported here.",
+                                            "additionalProperties": true,
+                                            "maxProperties": 1
                                         },
                                         "owner": {
                                             "type": "string",
@@ -1379,6 +1588,10 @@
                             "type": "string",
                             "minLength": 1
                         },
+                        "ai_hint": {
+                            "$ref": "#/$defs/aiHint",
+                            "description": "Hints for AI-powered query generation"
+                        },
                         "sql": {
                             "type": "string",
                             "minLength": 1
@@ -1386,6 +1599,11 @@
                         "convert_timezone": {
                             "type": "boolean",
                             "description": "When false, this dimension is rendered in its raw warehouse value and is not converted to the project timezone for display. Filter SQL still converts. Defaults to true."
+                        },
+                        "timestamp_domain": {
+                            "type": "string",
+                            "enum": ["aware", "naive"],
+                            "description": "Declares whether this timestamp column stores an instant ('aware') or a bare wall clock ('naive'); overrides the warehouse catalog."
                         },
                         "hidden": {
                             "type": "boolean"
@@ -1396,6 +1614,9 @@
                         },
                         "format": {
                             "type": "string"
+                        },
+                        "separator": {
+                            "$ref": "#/$defs/separator"
                         },
                         "time_intervals": {
                             "anyOf": [
@@ -1444,16 +1665,17 @@
                         },
                         "groups": {
                             "type": "array",
-                            "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 3 levels",
+                            "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 5 levels",
                             "items": {
                                 "type": "string",
                                 "minLength": 1
                             },
-                            "maxItems": 3
+                            "maxItems": 5
                         },
                         "compact": {
                             "type": "string",
                             "enum": [
+                                "auto",
                                 "thousands",
                                 "millions",
                                 "billions",
@@ -1584,6 +1806,51 @@
                                     "description": "Whether this dimension can be used for segmenting in the Metrics Explorer. Defaults to true."
                                 }
                             }
+                        },
+                        "filter_autocomplete": {
+                            "type": "object",
+                            "description": "Configure static filter autocomplete suggestions and warehouse fetching for this dimension.",
+                            "properties": {
+                                "values": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "value": {
+                                                "type": "string"
+                                            },
+                                            "label": {
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": ["value"]
+                                    }
+                                },
+                                "fetch_from_warehouse": {
+                                    "type": "boolean",
+                                    "description": "When false, filter autocomplete will not fetch values from the warehouse for this dimension. Defaults to true."
+                                },
+                                "label_dimension": {
+                                    "type": "string",
+                                    "description": "Name of another dimension in the same table whose value is shown as the display label for each warehouse-fetched value."
+                                },
+                                "options_from_dimension": {
+                                    "type": "object",
+                                    "description": "Fetch autocomplete values from a dimension in another model. Cascading filters are not applied.",
+                                    "properties": {
+                                        "model": {
+                                            "type": "string"
+                                        },
+                                        "dimension": {
+                                            "type": "string"
+                                        },
+                                        "label_dimension": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": ["model", "dimension"]
+                                }
+                            }
                         }
                     }
                 },
@@ -1610,6 +1877,10 @@
                                 "description": {
                                     "type": "string",
                                     "minLength": 1
+                                },
+                                "ai_hint": {
+                                    "$ref": "#/$defs/aiHint",
+                                    "description": "Hints for AI-powered query generation"
                                 },
                                 "sql": {
                                     "type": "string",
@@ -1664,6 +1935,11 @@
                                     "type": "boolean",
                                     "description": "When false, this dimension is rendered in its raw warehouse value and is not converted to the project timezone for display. Filter SQL still converts. Defaults to true."
                                 },
+                                "timestamp_domain": {
+                                    "type": "string",
+                                    "enum": ["aware", "naive"],
+                                    "description": "Declares whether this timestamp column stores an instant ('aware') or a bare wall clock ('naive'); overrides the warehouse catalog."
+                                },
                                 "hidden": {
                                     "type": "boolean"
                                 },
@@ -1674,9 +1950,13 @@
                                 "format": {
                                     "type": "string"
                                 },
+                                "separator": {
+                                    "$ref": "#/$defs/separator"
+                                },
                                 "compact": {
                                     "type": "string",
                                     "enum": [
+                                        "auto",
                                         "thousands",
                                         "millions",
                                         "billions",
@@ -1797,6 +2077,51 @@
                                                 "type": "string"
                                             }
                                         ]
+                                    }
+                                },
+                                "filter_autocomplete": {
+                                    "type": "object",
+                                    "description": "Configure static filter autocomplete suggestions and warehouse fetching for this dimension.",
+                                    "properties": {
+                                        "values": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "value": {
+                                                        "type": "string"
+                                                    },
+                                                    "label": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "required": ["value"]
+                                            }
+                                        },
+                                        "fetch_from_warehouse": {
+                                            "type": "boolean",
+                                            "description": "When false, filter autocomplete will not fetch values from the warehouse for this dimension. Defaults to true."
+                                        },
+                                        "label_dimension": {
+                                            "type": "string",
+                                            "description": "Name of another dimension in the same table whose value is shown as the display label for each warehouse-fetched value."
+                                        },
+                                        "options_from_dimension": {
+                                            "type": "object",
+                                            "description": "Fetch autocomplete values from a dimension in another model. Cascading filters are not applied.",
+                                            "properties": {
+                                                "model": {
+                                                    "type": "string"
+                                                },
+                                                "dimension": {
+                                                    "type": "string"
+                                                },
+                                                "label_dimension": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "required": ["model", "dimension"]
+                                        }
                                     }
                                 }
                             }

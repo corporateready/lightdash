@@ -124,7 +124,10 @@ export type QueryDefinition = {
     exploreName: string;
     dimensions: string[];
     metrics: string[];
+    /** Dimension (WHERE) filters added with `.filters()`. */
     filters: InternalFilterDefinition[];
+    /** Metric (HAVING) filters added with `.metricFilters()`. Optional for definitions built by older SDK versions. */
+    metricFilters?: InternalFilterDefinition[];
     sorts: { fieldId: string; descending: boolean }[];
     tableCalculations: TableCalculation[];
     additionalMetrics: AdditionalMetric[];
@@ -157,7 +160,198 @@ export type QueryResult = {
     rows: Row[];
     columns: Column[];
     format: FormatFunction;
+    /** Total rows returned by the source query, across all fetched pages. */
+    totalResults?: number;
+    /** Async query UUID for the source query. Useful for debugging and advanced flows. */
+    queryUuid?: string;
+    /**
+     * Row key for each qualified Lightdash field id (`orders_status` →
+     * `status`). Lets host features that speak field ids find the row.
+     */
+    rowKeys?: Record<string, string>;
+    /**
+     * Fetch raw rows behind an aggregated metric value from this query result.
+     * Available when the transport supports Lightdash underlying-data queries.
+     */
+    getUnderlyingData?: (
+        options: UnderlyingDataOptions,
+    ) => Promise<UnderlyingDataResult>;
+    /**
+     * Schedule a backend CSV/XLSX export for rows behind an aggregated metric
+     * value from this query result.
+     */
+    downloadUnderlyingData?: (
+        options: DownloadUnderlyingDataOptions,
+    ) => Promise<DownloadResultsResult>;
+    /**
+     * Schedule a backend CSV/XLSX export for this query result.
+     * Available when the transport supports Lightdash download jobs.
+     */
+    downloadResults?: (
+        options?: DownloadResultsOptions,
+    ) => Promise<DownloadResultsResult>;
 };
+
+export type DownloadResultsFileType = 'csv' | 'xlsx';
+
+export type DownloadResultsValues = 'formatted' | 'raw';
+
+export type DownloadResultsLimit = 'table' | 'all' | number;
+
+export type DownloadResultsOptions = {
+    /** Export file type. Defaults to CSV. */
+    fileType?: DownloadResultsFileType;
+    /** Formatted display values or raw values. Defaults to formatted. */
+    values?: DownloadResultsValues;
+    /** Current table rows, all results, or a custom row count. Defaults to table. */
+    limit?: DownloadResultsLimit;
+    /** Download filename without extension. */
+    filename?: string;
+    /** Whether to trigger a browser download when the job completes. Defaults to true. */
+    autoDownload?: boolean;
+};
+
+export type DownloadResultsResult = {
+    queryUuid: string;
+    jobId: string;
+    fileUrl: string;
+    fileType: DownloadResultsFileType;
+    truncated: boolean;
+};
+
+export type DownloadUnderlyingDataOptions = Omit<
+    UnderlyingDataOptions,
+    'limit'
+> &
+    DownloadResultsOptions;
+
+export type UnderlyingDataOptions = {
+    /** Row object from this query result. */
+    row: Row;
+    /** Metric from the source query, using the same field name passed to `.metrics()`. */
+    metric: string;
+    /** Maximum raw rows to return. Defaults to the backend's underlying-data limit. */
+    limit?: number | null;
+};
+
+export type UnderlyingDataResult = {
+    rows: Row[];
+    columns: Column[];
+    format: FormatFunction;
+    queryUuid: string;
+};
+
+// --- Viz underlying data ---
+
+/**
+ * Bridge-only virtual route for viz underlying-data click intents. Duplicated
+ * from `@lightdash/common` (`APP_SDK_VIZ_UNDERLYING_DATA_PATH`) — this package
+ * must not depend on common. The path only resolves behind the host's
+ * postMessage bridge, which rewrites it into the real underlying-data request;
+ * on a direct-API transport it fails with a plain HTTP error.
+ */
+export const VIZ_UNDERLYING_DATA_PATH = '/__sdk/viz/underlying-data';
+
+/**
+ * Bridge-only virtual route for opening the host's underlying-data dialog.
+ * Separate from `VIZ_UNDERLYING_DATA_PATH` so deployed bundles can keep using
+ * the legacy fetch/download contract while current bundles delegate the UI to
+ * Lightdash.
+ */
+export const VIZ_UNDERLYING_DATA_OPEN_PATH = '/__sdk/viz/underlying-data/open';
+
+/** Host-owned subtotal execution for reusable chart types. */
+export const VIZ_SUBTOTALS_PATH = '/__sdk/viz/subtotals';
+
+export type VizSubtotalsRequest = {
+    level: number;
+    parentValues: Array<string | number | boolean | null>;
+};
+
+export type VizSubtotalsResult = {
+    rows: Record<string, { value?: { raw?: unknown; formatted?: string } }>[];
+};
+
+/**
+ * Semantic click intent a viz sends to the host: the untransformed source row
+ * (as received from `useVizContext().rows`) and the declared field NAME bound
+ * to the clicked metric slot. The host resolves everything else.
+ */
+export type VizUnderlyingDataIntent = {
+    row: Record<
+        string,
+        { value?: { raw?: unknown; formatted?: string } } | undefined
+    >;
+    metric: string;
+    /** The clicked query field id when `metric` is a multi-field slot. */
+    fieldId?: string;
+    limit?: number | null;
+};
+
+/**
+ * Bridge-only virtual route for viz drill-down click intents. Duplicated from
+ * `@lightdash/common` (`APP_SDK_VIZ_DRILL_DOWN_PATH`) — this package must not
+ * depend on common. The host answers it directly (opens its drill dialog);
+ * nothing is forwarded to the API. On a direct-API transport it fails with a
+ * plain HTTP error.
+ */
+export const VIZ_DRILL_DOWN_PATH = '/__sdk/viz/drill-down';
+
+/**
+ * Drill click intent a viz sends to the host: the untransformed source row
+ * (as received from `useVizContext().rows`) and the declared field NAME bound
+ * to the clicked metric slot. The host resolves everything else and owns all
+ * subsequent UI.
+ */
+export type VizDrillDownIntent = {
+    row: Record<
+        string,
+        { value?: { raw?: unknown; formatted?: string } } | undefined
+    >;
+    metric: string;
+    /** The clicked query field id when `metric` is a multi-field slot. */
+    fieldId?: string;
+};
+
+/**
+ * Bridge-only virtual route for the host-rendered data-point action menu.
+ * Duplicated from `@lightdash/common` (`APP_SDK_VIZ_POINT_MENU_PATH`) — this
+ * package must not depend on common. The host answers it directly (renders
+ * its native context menu over the iframe); nothing is forwarded to the API.
+ */
+export const VIZ_POINT_MENU_PATH = '/__sdk/viz/point-menu';
+
+/**
+ * Data-point menu intent: the untransformed source row and metric slot (as
+ * for drill-down), plus the click position in the iframe's client
+ * coordinates so the host can place the menu.
+ */
+export type VizPointMenuIntent = {
+    row: Record<
+        string,
+        { value?: { raw?: unknown; formatted?: string } } | undefined
+    >;
+    metric: string;
+    /** The clicked query field id when `metric` is a multi-field slot. */
+    fieldId?: string;
+    x: number;
+    y: number;
+};
+
+/** `shown: false` means the host had no applicable action for this point. */
+export type VizPointMenuResult = { shown: boolean };
+
+/**
+ * Host-answered virtual route returning an explore's base table. Duplicated
+ * from `@lightdash/common` (`APP_SDK_EXPLORE_BASE_TABLE_PATH`) — this package
+ * must not depend on common. The bridge and the CLI preview proxy answer it;
+ * the backend has no such route.
+ */
+export const EXPLORE_BASE_TABLE_PATH = '/__sdk/explore-base-table';
+
+export type ExploreBaseTableRequest = { exploreName: string };
+
+export type ExploreBaseTableResult = { baseTable: string | null };
 
 // --- Client config ---
 
@@ -170,6 +364,12 @@ export type LightdashClientConfig = {
     apiKey: string;
     /** Use relative /api paths instead of baseUrl (for dev proxy setups) */
     useProxy?: boolean;
+    /**
+     * The data app this client runs as. Needed by `useAppState` /
+     * `useSharedAppState` outside the Lightdash iframe (local dev); set via
+     * VITE_LIGHTDASH_APP_UUID. Without it, saved state stays in memory.
+     */
+    appUuid?: string;
 };
 
 // --- User ---
@@ -182,9 +382,191 @@ export type LightdashUser = {
     attributes: Record<string, string>;
 };
 
+// --- External API fetch (warehouse-proxied external connections) ---
+
+/**
+ * Result of an external API call proxied through Lightdash.
+ *
+ * Structural copy of `@lightdash/common`'s `ExternalFetchResponse`. The SDK
+ * is published standalone and intentionally has no `@lightdash/common`
+ * dependency, so this shape is duplicated here. Keep the two in sync.
+ */
+export type ExternalFetchResult = {
+    /** HTTP status returned by the upstream external API. */
+    status: number;
+    /** Upstream `Content-Type` (e.g. `application/json`). */
+    contentType: string;
+    /** Safe upstream response headers, with lowercase names. */
+    headers: Record<string, string>;
+    /** Parsed JSON body when JSON, otherwise the raw text. */
+    body: unknown;
+    /** True when Lightdash truncated an oversized response body. */
+    truncated: boolean;
+};
+
+/**
+ * HTTP methods an external connection can be configured to allow. Mirror of
+ * `ExternalConnectionMethod` in `@lightdash/common` — the SDK is published
+ * standalone with no `@lightdash/common` dependency, so keep the two in sync.
+ */
+export type ExternalFetchMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export type ExternalFetchOptions = {
+    /** HTTP method. Defaults to `'GET'`. */
+    method?: ExternalFetchMethod;
+    /** Relative path appended to the connection's configured base URL. */
+    path: string;
+    /** Query-string params, merged into the request URL by the backend. */
+    query?: Record<string, string>;
+    /** JSON request body. Sent for every method except `GET`. */
+    body?: unknown;
+};
+
+// --- App state (durable, Lightdash-hosted) ---
+// Structural copies of `@lightdash/common`'s app state types. The SDK is
+// published standalone with no `@lightdash/common` dependency; keep in sync.
+
+export type AppStateAuthor = { userUuid: string; name: string | null };
+
+export type AppStateUserEntry = { value: unknown; updatedAt: string };
+
+export type AppStateSharedEntry = {
+    value: unknown;
+    version: number;
+    updatedAt: string;
+    updatedBy: AppStateAuthor | null;
+};
+
+export type AppStateHistoryAuthor =
+    | { kind: 'user'; userUuid: string | null; name: string | null }
+    | { kind: 'agent' };
+
+export type AppStateHistoryEntry = {
+    version: number;
+    value: unknown;
+    createdAt: string;
+    author: AppStateHistoryAuthor;
+};
+
+export type AppStateSnapshot = {
+    user: Record<string, AppStateUserEntry>;
+    shared: Record<string, AppStateSharedEntry>;
+};
+
+export type AppStateHistoryOptions = {
+    limit?: number;
+    beforeVersion?: number;
+};
+
+export type AppStateErrorCode =
+    | 'conflict'
+    | 'feature_disabled'
+    | 'forbidden'
+    | 'invalid'
+    | 'unavailable'
+    | 'unknown';
+
+/** Wire shape of a failed app state call, before it becomes an AppStateError. */
+export type AppStateErrorPayload = {
+    code: AppStateErrorCode;
+    message: string;
+    /** On `conflict`: what the shared key holds now (null when deleted). */
+    current?: AppStateSharedEntry | null;
+};
+
+export type AppStateTransport = {
+    getSnapshot: () => Promise<AppStateSnapshot>;
+    setUser: (key: string, value: unknown) => Promise<AppStateUserEntry>;
+    deleteUser: (key: string) => Promise<void>;
+    setShared: (
+        key: string,
+        value: unknown,
+        expectedVersion: number | null,
+    ) => Promise<AppStateSharedEntry>;
+    deleteShared: (key: string) => Promise<void>;
+    getSharedHistory: (
+        key: string,
+        options: AppStateHistoryOptions,
+    ) => Promise<AppStateHistoryEntry[]>;
+};
+
 // --- Transport ---
+
+/** Wire shape of a `useAiPrompt` request, proxied by the host. */
+export type AiPromptRequest = {
+    appUuid: string;
+    prompt: string;
+    sources: { queryUuid: string; label: string | null }[];
+    focus: Record<string, string> | null;
+};
+
+export type AiPromptResult = { text: string };
 
 export type Transport = {
     executeQuery: (query: QueryDefinition) => Promise<QueryResult>;
+    executeSavedChart: (params: {
+        chartUuid: string;
+        label?: string;
+        limit?: number;
+        parameters?: ParametersValuesMap;
+        filters?: InternalFilterDefinition[];
+    }) => Promise<QueryResult>;
     getUser: () => Promise<LightdashUser>;
+    externalFetch: (
+        alias: string,
+        opts: ExternalFetchOptions,
+    ) => Promise<ExternalFetchResult>;
+    /**
+     * Durable app state (`useAppState` / `useSharedAppState`). Absent when
+     * the transport has no app to attribute state to; the hooks then keep
+     * values in memory for the session.
+     */
+    appState?: AppStateTransport;
+    /**
+     * Fetch the raw rows behind a viz data point via the host bridge.
+     * Optional so custom transports predating the capability stay valid —
+     * `useVizContext().underlyingData.enabled` is false when absent.
+     */
+    getVizUnderlyingData?: (
+        intent: VizUnderlyingDataIntent,
+    ) => Promise<UnderlyingDataResult>;
+    /** Schedule a CSV/XLSX export of the rows behind a viz data point. */
+    downloadVizUnderlyingData?: (
+        intent: Omit<VizUnderlyingDataIntent, 'limit'>,
+        options?: DownloadResultsOptions,
+    ) => Promise<DownloadResultsResult>;
+    /**
+     * Fire an underlying-data intent for a viz data point. One-way: the host
+     * opens its standard dialog and the resolved promise is only an ack.
+     */
+    openVizUnderlyingData?: (
+        intent: Omit<VizUnderlyingDataIntent, 'limit'>,
+    ) => Promise<void>;
+    /** Ask the host for the aggregated rows of a hierarchy level. */
+    getVizSubtotals?: (
+        request: VizSubtotalsRequest,
+    ) => Promise<VizSubtotalsResult>;
+    /**
+     * Fire the drill-down intent for a viz data point via the host bridge.
+     * One-way: the host opens its drill dialog; the resolved promise is only
+     * an ack. Optional so custom transports predating the capability stay
+     * valid — `useVizContext().drillDown.enabled` is false when absent.
+     */
+    openVizDrillDown?: (intent: VizDrillDownIntent) => Promise<void>;
+    /**
+     * Fire the data-point menu intent for a viz click via the host bridge.
+     * Bridge-only virtual route: the host renders its native data-point menu
+     * over the iframe and resolves with whether it had an applicable action.
+     * Optional so custom transports predating the capability stay valid —
+     * `useVizContext().pointMenu.enabled` is false when absent.
+     */
+    openVizPointMenu?: (
+        intent: VizPointMenuIntent,
+    ) => Promise<VizPointMenuResult>;
+    /**
+     * Ask the host's AI a question about the viewer's own query results.
+     * Optional so custom transports predating the capability stay valid —
+     * `useAiPrompt().available` is false when absent.
+     */
+    aiPrompt?: (request: AiPromptRequest) => Promise<AiPromptResult>;
 };

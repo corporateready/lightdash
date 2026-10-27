@@ -16,7 +16,7 @@ import {
     Switch,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
 import { useCallback, useMemo } from 'react';
 import { getConditionalRuleLabelFromItem } from '../../../../components/common/Filters/FilterInputs/utils';
@@ -108,10 +108,12 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
             enabled: newEnabledValue,
             allowedFilters: newAllowedFilters,
             hidden: newHiddenValue,
+            canAddFilters: newCanAddFiltersValue,
         }: {
             enabled?: FilterInteractivityValues;
             allowedFilters?: string[];
             hidden?: boolean;
+            canAddFilters?: boolean;
         }) => {
             const enabled = getFilterInteractivityValue(
                 newEnabledValue ?? interactivityOptions.enabled,
@@ -139,12 +141,17 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                 enabled,
                 allowedFilters,
                 hidden: newHiddenValue ?? interactivityOptions.hidden ?? false,
+                canAddFilters:
+                    newCanAddFiltersValue ??
+                    interactivityOptions.canAddFilters ??
+                    false,
             });
         },
         [
             interactivityOptions.enabled,
             interactivityOptions.allowedFilters,
             interactivityOptions.hidden,
+            interactivityOptions.canAddFilters,
             onInteractivityOptionsChange,
         ],
     );
@@ -156,7 +163,6 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                     Users can change:
                 </Text>
                 <SegmentedControl
-                    radius="md"
                     value={interactivityOptions.enabled as string}
                     onChange={(value: string) => {
                         setInteractivityOptions({
@@ -182,7 +188,6 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                                 FilterInteractivityValues.all,
                             ),
                             value: FilterInteractivityValues.all,
-                            disabled: dashboardFilters?.length === 0,
                         },
                     ]}
                     size="xs"
@@ -201,9 +206,6 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                         <Text inherit>Hide filters</Text>
                         <Tooltip
                             label="Hide filters from the embed UI while still applying them. Useful when building custom filter controls with the React SDK."
-                            withArrow
-                            withinPortal
-                            multiline
                             maw="300px"
                             position="right"
                         >
@@ -214,6 +216,32 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                 onChange={(event) => {
                     setInteractivityOptions({
                         hidden: event.currentTarget.checked,
+                    });
+                }}
+            />
+            <Switch
+                size="sm"
+                checked={interactivityOptions.canAddFilters ?? false}
+                disabled={
+                    getFilterInteractivityValue(
+                        interactivityOptions.enabled,
+                    ) === FilterInteractivityValues.none
+                }
+                label={
+                    <Group gap="xs">
+                        <Text inherit>Users can add their own filters</Text>
+                        <Tooltip
+                            label="Filters added by viewers are temporary and only last for the current session. This also requires the dashboard's 'Add filter' button to be visible to viewers."
+                            maw="300px"
+                            position="right"
+                        >
+                            <MantineIcon icon={IconInfoCircle} size="sm" />
+                        </Tooltip>
+                    </Group>
+                }
+                onChange={(event) => {
+                    setInteractivityOptions({
+                        canAddFilters: event.currentTarget.checked,
                     });
                 }}
             />
@@ -252,7 +280,7 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                                                 {filter.disabled ? (
                                                     <Text
                                                         span
-                                                        c="ldGray.6"
+                                                        c="dimmed"
                                                         fz="xs"
                                                     >
                                                         is any value
@@ -269,7 +297,7 @@ const EmbedFiltersInteractivity: React.FC<Props> = ({
                                                             }{' '}
                                                         </Text>
                                                         <Text
-                                                            fw={700}
+                                                            fw={600}
                                                             span
                                                             fz="xs"
                                                         >

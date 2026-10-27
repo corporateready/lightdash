@@ -3,13 +3,22 @@ import {
     DbtError,
     DbtModelNode,
     DbtRpcGetManifestResults,
+    getErrorMessage,
     getLatestSupportedDbtManifestVersion,
     isSupportedDbtAdapterType,
+    MetricFlowAggregation,
     ParseError,
     SupportedDbtAdapter,
+    type DbtSemanticMetric,
+    type DbtSemanticMetricType,
+    type DbtSemanticMetricTypeParams,
+    type DbtSemanticModel,
 } from '@lightdash/common';
 import { gql, GraphQLClient } from 'graphql-request';
+import Logger from '../logging/logger';
+import { type DbtManifestFetchOptions } from '../types';
 import { DbtClient } from '../types';
+import { DEFAULT_DBT_CLOUD_DISCOVERY_ENDPOINT } from '../utils/credentialDestination';
 
 const quoteChars: Record<SupportedDbtAdapter, string> = {
     bigquery: '`',
@@ -61,10 +70,10 @@ type DbtCloudEnvironmentResponse = {
                         packages: string[];
                         dbtVersion: string;
                         group: string;
-                        access: string;
+                        access: string | null;
                         deprecationDate: string;
-                        version: string;
-                        latestVersion: string;
+                        version: string | number | null;
+                        latestVersion: string | number | null;
                         releaseVersion: string;
                         contractEnforced: boolean;
                         patchPath: string;
@@ -83,6 +92,201 @@ type DbtCloudEnvironmentResponse = {
         };
     };
 };
+
+type DbtCloudPageInfo = {
+    startCursor: string;
+    hasNextPage: boolean;
+    endCursor: string;
+};
+
+export type DbtCloudSemanticModelNode = {
+    uniqueId: string;
+    name: string;
+    description: string | null;
+    entities: { name: string; type: string }[];
+    dimensions: { name: string; type: string }[];
+    measures: {
+        name: string;
+        agg: string;
+        expr: string | null;
+        createMetric: boolean | null;
+        description: string | null;
+    }[];
+    parents: { uniqueId: string }[];
+};
+
+export type DbtCloudMetricNode = {
+    uniqueId: string;
+    name: string;
+    description: string | null;
+    label: string | null;
+    type: string | null;
+    typeParams: AnyType;
+    filter: AnyType;
+    meta: AnyType;
+};
+
+type DbtCloudDefinitionResponse = {
+    environment: {
+        definition: {
+            semanticModels: {
+                pageInfo: DbtCloudPageInfo;
+                edges: { node: DbtCloudSemanticModelNode }[];
+            };
+            metrics: {
+                pageInfo: DbtCloudPageInfo;
+                edges: { node: DbtCloudMetricNode }[];
+            };
+        } | null;
+    };
+};
+
+/**
+ * MetricFlow definitions from the Discovery API's definition state. The JSON
+ * scalars (`typeParams`, `filter`, `meta`) mirror the dbt manifest shapes
+ * (`type_params`, `filter`, `config.meta`), so they feed the shared MetricFlow
+ * translator with minimal mapping.
+ */
+const dbtCloudDefinitionQuery = gql`
+    query DefinitionQuery(
+        $environmentId: BigInt!
+        $first: Int!
+        $afterSemanticModels: String
+        $afterMetrics: String
+    ) {
+        environment(id: $environmentId) {
+            definition {
+                semanticModels(first: $first, after: $afterSemanticModels) {
+                    pageInfo {
+                        startCursor
+                        hasNextPage
+                        endCursor
+                    }
+                    edges {
+                        node {
+                            uniqueId
+                            name
+                            description
+                            entities {
+                                name
+                                type
+                            }
+                            dimensions {
+                                name
+                                type
+                            }
+                            measures {
+                                name
+                                agg
+                                expr
+                                createMetric
+                                description
+                            }
+                            parents {
+                                uniqueId
+                            }
+                        }
+                    }
+                }
+                metrics(first: $first, after: $afterMetrics) {
+                    pageInfo {
+                        startCursor
+                        hasNextPage
+                        endCursor
+                    }
+                    edges {
+                        node {
+                            uniqueId
+                            name
+                            description
+                            label
+                            type
+                            typeParams
+                            filter
+                            meta
+                        }
+                    }
+                }
+            }
+        }
+    }
+`;
+
+/**
+ * Map Discovery API semantic model definition nodes to the dbt manifest
+ * `semantic_models` shape consumed by `translateMetricFlowMetrics`.
+ *
+ * Known gaps of the Discovery API vs a local manifest: measure `agg_params`
+ * (percentile values), measure/dimension `config.meta` and dimension `expr`
+ * are not exposed. Percentile metrics are skipped by the translator (missing
+ * percentile value) and dimension filters resolve against the dimension name.
+ */
+export const mapDbtCloudSemanticModels = (
+    nodes: DbtCloudSemanticModelNode[],
+): Record<string, DbtSemanticModel> =>
+    Object.fromEntries(
+        nodes.map((node) => [
+            node.uniqueId,
+            <DbtSemanticModel>{
+                name: node.name,
+                unique_id: node.uniqueId,
+                // The dbt ref string is not exposed by the Discovery API; the
+                // translator resolves the model through `depends_on` instead.
+                model: '',
+                node_relation: null,
+                description: node.description,
+                entities: (node.entities ?? []).map((entity) => ({
+                    name: entity.name,
+                    type: entity.type,
+                    expr: null,
+                })),
+                dimensions: (node.dimensions ?? []).map((dimension) => ({
+                    name: dimension.name,
+                    type: dimension.type,
+                    expr: null,
+                })),
+                measures: (node.measures ?? []).map((measure) => ({
+                    name: measure.name,
+                    agg: measure.agg as MetricFlowAggregation,
+                    expr: measure.expr,
+                    create_metric: measure.createMetric ?? undefined,
+                    description: measure.description,
+                })),
+                depends_on: {
+                    nodes: (node.parents ?? [])
+                        .map((parent) => parent.uniqueId)
+                        .filter((uniqueId) => uniqueId.startsWith('model.')),
+                },
+            },
+        ]),
+    );
+
+/**
+ * Map Discovery API metric definition nodes to the dbt manifest `metrics`
+ * shape. `typeParams` and `filter` are returned by the API in the manifest's
+ * snake_case shapes verbatim; `meta` is the manifest's `config.meta`.
+ */
+export const mapDbtCloudMetrics = (
+    nodes: DbtCloudMetricNode[],
+): Record<string, DbtSemanticMetric> =>
+    Object.fromEntries(
+        nodes.map((node) => [
+            node.uniqueId,
+            <DbtSemanticMetric>{
+                name: node.name,
+                unique_id: node.uniqueId,
+                type: node.type as DbtSemanticMetricType,
+                type_params: node.typeParams as DbtSemanticMetricTypeParams,
+                label: node.label,
+                description: node.description,
+                filter: node.filter ?? null,
+                config:
+                    node.meta && typeof node.meta === 'object'
+                        ? { meta: node.meta }
+                        : null,
+            },
+        ]),
+    );
 
 const dbtCloudEnvironmentQuery = gql`
     query EnvironmentQuery(
@@ -150,8 +354,7 @@ const dbtCloudEnvironmentQuery = gql`
 `;
 
 export class DbtMetadataApiClient implements DbtClient {
-    private readonly domain: string =
-        'https://metadata.cloud.getdbt.com/graphql';
+    private readonly domain: string = DEFAULT_DBT_CLOUD_DISCOVERY_ENDPOINT;
 
     private readonly bearerToken: string;
 
@@ -257,9 +460,93 @@ export class DbtMetadataApiClient implements DbtClient {
         return responseWithNewModels;
     }
 
-    async getDbtManifest() {
+    /**
+     * Fetch MetricFlow semantic model and metric definitions from the
+     * Discovery API definition state. Both connections are paginated
+     * independently until exhausted.
+     */
+    private async getDefinitionPage(
+        afterSemanticModels: string | undefined,
+        afterMetrics: string | undefined,
+    ): Promise<DbtCloudDefinitionResponse> {
+        return this.client.request<DbtCloudDefinitionResponse>(
+            dbtCloudDefinitionQuery,
+            {
+                environmentId: this.environmentId,
+                first: PAGE_SIZE,
+                afterSemanticModels,
+                afterMetrics,
+            },
+        );
+    }
+
+    private async getSemanticLayerDefinitions(): Promise<{
+        semanticModels: DbtCloudSemanticModelNode[];
+        metrics: DbtCloudMetricNode[];
+    }> {
+        const semanticModels: DbtCloudSemanticModelNode[] = [];
+        const metrics: DbtCloudMetricNode[] = [];
+        let afterSemanticModels: string | undefined;
+        let afterMetrics: string | undefined;
+        let hasNextPage = true;
+
+        while (hasNextPage) {
+            // Pages are fetched sequentially on purpose: each request needs
+            // the previous page's end cursors.
+            // eslint-disable-next-line no-await-in-loop
+            const response = await this.getDefinitionPage(
+                afterSemanticModels,
+                afterMetrics,
+            );
+
+            const { definition } = response.environment;
+            if (!definition) {
+                break;
+            }
+
+            semanticModels.push(
+                ...definition.semanticModels.edges.map(({ node }) => node),
+            );
+            metrics.push(...definition.metrics.edges.map(({ node }) => node));
+
+            afterSemanticModels =
+                definition.semanticModels.pageInfo.endCursor ?? undefined;
+            afterMetrics = definition.metrics.pageInfo.endCursor ?? undefined;
+            hasNextPage =
+                definition.semanticModels.pageInfo.hasNextPage ||
+                definition.metrics.pageInfo.hasNextPage;
+        }
+
+        return { semanticModels, metrics };
+    }
+
+    /**
+     * MetricFlow definitions are optional: environments without a semantic
+     * layer (or Discovery API plans without the definition state) must not
+     * break the project compile, so failures degrade to an empty result.
+     */
+    private async getSemanticLayerDefinitionsSafe(): Promise<{
+        semanticModels: DbtCloudSemanticModelNode[];
+        metrics: DbtCloudMetricNode[];
+    }> {
         try {
-            const results = await this.getModels();
+            return await this.getSemanticLayerDefinitions();
+        } catch (e) {
+            Logger.warn(
+                `Failed to fetch MetricFlow definitions from dbt Cloud for environment ${
+                    this.environmentId
+                }, continuing without them: ${getErrorMessage(e)}`,
+            );
+            return { semanticModels: [], metrics: [] };
+        }
+    }
+
+    async getDbtManifest(_options?: DbtManifestFetchOptions) {
+        try {
+            const [results, definitions] = await Promise.all([
+                this.getModels(),
+                this.getSemanticLayerDefinitionsSafe(),
+            ]);
             const { adapterType } = results.environment;
             let fieldQuoteChar = '"';
             if (!adapterType) {
@@ -331,6 +618,9 @@ export class DbtMetadataApiClient implements DbtClient {
                                 schema,
                                 alias,
                                 package_name: node.packageName,
+                                version: node.version ?? null,
+                                latest_version: node.latestVersion ?? null,
+                                access: node.access ?? null,
                                 raw_code: node.rawCode,
                                 compiled_code: node.compiledCode,
                                 relation_name: `${fieldQuoteChar}${database}${fieldQuoteChar}.${fieldQuoteChar}${schema}${fieldQuoteChar}.${fieldQuoteChar}${alias}${fieldQuoteChar}`,
@@ -347,8 +637,11 @@ export class DbtMetadataApiClient implements DbtClient {
                         generated_at: results.environment.applied.lastUpdatedAt,
                         dbt_schema_version: `/${getLatestSupportedDbtManifestVersion()}.json`,
                     },
-                    metrics: {},
+                    metrics: mapDbtCloudMetrics(definitions.metrics),
                     docs: {},
+                    semantic_models: mapDbtCloudSemanticModels(
+                        definitions.semanticModels,
+                    ),
                 },
             };
         } catch (e) {

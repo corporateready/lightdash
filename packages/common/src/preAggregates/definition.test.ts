@@ -10,6 +10,177 @@ describe('parseDbtPreAggregateDef', () => {
         metrics: ['order_count'],
     };
 
+    it('parses canonical materialization sorts in order', () => {
+        expect(
+            parseDbtPreAggregateDef(
+                {
+                    ...basePreAggregate,
+                    sorts: [
+                        {
+                            fieldId: ' orders_order_date_day ',
+                            descending: true,
+                        },
+                        { fieldId: 'orders_status', descending: false },
+                    ],
+                },
+                'orders',
+            ),
+        ).toEqual({
+            ...basePreAggregate,
+            sorts: [
+                {
+                    fieldId: 'orders_order_date_day',
+                    descending: true,
+                },
+                { fieldId: 'orders_status', descending: false },
+            ],
+        });
+    });
+
+    it.each([
+        'analytics.orders_rollup_mv',
+        '"analytics"."orders rollup"',
+        '`project-id.analytics.orders_rollup_mv`',
+    ])('parses and trims external table %s', (table) => {
+        expect(
+            parseDbtPreAggregateDef(
+                { ...basePreAggregate, table: `  ${table}  ` },
+                'orders',
+            ),
+        ).toEqual({
+            ...basePreAggregate,
+            table,
+        });
+    });
+
+    it('omits table when not configured (managed pre-aggregate)', () => {
+        expect(
+            parseDbtPreAggregateDef(basePreAggregate, 'orders'),
+        ).not.toHaveProperty('table');
+    });
+
+    it.each([
+        { name: 'an empty string', table: '' },
+        { name: 'a whitespace-only string', table: '   ' },
+        { name: 'a non-string value', table: 42 },
+        { name: 'a SQL expression', table: '(SELECT * FROM orders)' },
+        { name: 'multiple statements', table: 'orders; DROP TABLE users' },
+        { name: 'a SQL comment', table: 'orders -- injected' },
+    ])('throws when table is $name', ({ table }) => {
+        expect(() =>
+            parseDbtPreAggregateDef({ ...basePreAggregate, table }, 'orders'),
+        ).toThrow(ParseError);
+    });
+
+    it('omits materialization sorts when they are not configured', () => {
+        expect(
+            parseDbtPreAggregateDef(basePreAggregate, 'orders'),
+        ).not.toHaveProperty('sorts');
+    });
+
+    it.each([
+        { name: 'false', sorts: false },
+        { name: 'an empty array', sorts: [] },
+    ])('normalizes $name to disabled materialization sorts', ({ sorts }) => {
+        expect(
+            parseDbtPreAggregateDef(
+                {
+                    ...basePreAggregate,
+                    sorts,
+                },
+                'orders',
+            ),
+        ).toHaveProperty('sorts', []);
+    });
+
+    it.each([
+        {
+            name: 'true',
+            sorts: true,
+            message: 'Expected an array of sort entries, or false / []',
+        },
+        {
+            name: 'null',
+            sorts: null,
+            message: 'Expected an array of sort entries, or false / []',
+        },
+        {
+            name: 'a non-object entry',
+            sorts: [null],
+            message: 'Expected an object',
+        },
+        {
+            name: 'the old field key',
+            sorts: [{ field: 'order_date', descending: true }],
+            message: 'has unsupported "sorts" fields: field',
+        },
+        {
+            name: 'a missing fieldId',
+            sorts: [{ descending: false }],
+            message: '"fieldId" must be a non-empty string',
+        },
+        {
+            name: 'an empty fieldId',
+            sorts: [{ fieldId: '', descending: false }],
+            message: '"fieldId" must be a non-empty string',
+        },
+        {
+            name: 'a missing direction',
+            sorts: [{ fieldId: 'orders_order_date_day' }],
+            message: '"descending" is required',
+        },
+        {
+            name: 'an invalid direction',
+            sorts: [
+                {
+                    fieldId: 'orders_order_date_day',
+                    descending: 'yes',
+                },
+            ],
+            message: '"descending" must be a boolean',
+        },
+        {
+            name: 'a misspelled direction',
+            sorts: [
+                {
+                    fieldId: 'orders_order_date_day',
+                    descending: true,
+                    desceding: false,
+                },
+            ],
+            message: 'has unsupported "sorts" fields: desceding',
+        },
+        {
+            name: 'unsupported null ordering',
+            sorts: [
+                {
+                    fieldId: 'orders_order_date_day',
+                    descending: true,
+                    nulls_first: true,
+                },
+            ],
+            message: 'has unsupported "sorts" fields: nulls_first',
+        },
+        {
+            name: 'a duplicate fieldId',
+            sorts: [
+                { fieldId: 'orders_status', descending: false },
+                { fieldId: ' orders_status ', descending: true },
+            ],
+            message: 'has duplicate "sorts" fieldId "orders_status"',
+        },
+    ])('rejects $name in materialization sorts', ({ sorts, message }) => {
+        expect(() =>
+            parseDbtPreAggregateDef(
+                {
+                    ...basePreAggregate,
+                    sorts,
+                },
+                'orders',
+            ),
+        ).toThrow(message);
+    });
+
     it('parses materialization_role and normalizes scalar attributes to arrays', () => {
         const result = parseDbtPreAggregateDef(
             {
@@ -72,6 +243,63 @@ describe('parseDbtPreAggregateDef', () => {
                 },
             },
         });
+    });
+
+    it('parses refresh.on_change alongside cron', () => {
+        const result = parseDbtPreAggregateDef(
+            {
+                ...basePreAggregate,
+                refresh: { cron: '0 3 * * *', on_change: true },
+            },
+            'orders',
+        );
+        expect(result.refresh).toEqual({ cron: '0 3 * * *', onChange: true });
+    });
+
+    it('parses refresh.on_change without a cron', () => {
+        const result = parseDbtPreAggregateDef(
+            { ...basePreAggregate, refresh: { on_change: true } },
+            'orders',
+        );
+        expect(result.refresh).toEqual({ onChange: true });
+    });
+
+    it('omits refresh when it is an empty object', () => {
+        const result = parseDbtPreAggregateDef(
+            { ...basePreAggregate, refresh: {} },
+            'orders',
+        );
+        expect(result.refresh).toBeUndefined();
+    });
+
+    it('ignores a null or empty refresh.cron', () => {
+        expect(
+            parseDbtPreAggregateDef(
+                {
+                    ...basePreAggregate,
+                    refresh: { cron: null },
+                } as unknown as Parameters<typeof parseDbtPreAggregateDef>[0],
+                'orders',
+            ).refresh,
+        ).toBeUndefined();
+        expect(
+            parseDbtPreAggregateDef(
+                { ...basePreAggregate, refresh: { cron: '' } },
+                'orders',
+            ).refresh,
+        ).toBeUndefined();
+    });
+
+    it('throws when refresh.on_change is not a boolean', () => {
+        expect(() =>
+            parseDbtPreAggregateDef(
+                {
+                    ...basePreAggregate,
+                    refresh: { on_change: 'no' },
+                } as unknown as Parameters<typeof parseDbtPreAggregateDef>[0],
+                'orders',
+            ),
+        ).toThrow('invalid "refresh.on_change"');
     });
 
     it('throws when materialization_role.email is missing', () => {
@@ -179,6 +407,43 @@ describe('parseDbtPreAggregateDef', () => {
                 },
             ],
         });
+    });
+
+    it('parses "to date" pre-aggregate filters into current period bounds', () => {
+        const parsed = parseDbtPreAggregateDef(
+            {
+                name: 'orders_rollup',
+                dimensions: ['status'],
+                metrics: ['order_count'],
+                time_dimension: 'order_date',
+                granularity: 'day',
+                filters: [
+                    { order_date: 'inTheCurrent month to date' },
+                    { status: 'notInTheCurrent year to date excluding today' },
+                ],
+            },
+            'orders',
+        );
+        expect(parsed.filters).toStrictEqual([
+            {
+                id: expect.any(String),
+                target: { fieldRef: 'order_date' },
+                operator: FilterOperator.IN_THE_CURRENT,
+                values: [1],
+                settings: { unitOfTime: UnitOfTime.months, toDate: true },
+            },
+            {
+                id: expect.any(String),
+                target: { fieldRef: 'status' },
+                operator: FilterOperator.NOT_IN_THE_CURRENT,
+                values: [1],
+                settings: {
+                    unitOfTime: UnitOfTime.years,
+                    toDate: true,
+                    excludeToday: true,
+                },
+            },
+        ]);
     });
 
     it('throws when pre-aggregate filters use invalid filter grammar', () => {

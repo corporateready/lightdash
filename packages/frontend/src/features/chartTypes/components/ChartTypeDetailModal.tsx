@@ -1,0 +1,315 @@
+import {
+    getAppDisplayName,
+    isOfficialChartType,
+    type DataAppViz,
+    type RegistryChartTypeListItem,
+} from '@lightdash/common';
+import { Box, Button, Group, SimpleGrid, Stack, Text } from '@mantine/core';
+import { IconFilePencil, IconGitFork, IconTrash } from '@tabler/icons-react';
+import { useEffect, useRef, useState, type FC } from 'react';
+import { Link, useNavigate } from 'react-router';
+import Callout from '../../../components/common/Callout';
+import MantineIcon from '../../../components/common/MantineIcon';
+import MantineModal from '../../../components/common/MantineModal';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
+import { useTimeAgo } from '../../../hooks/useTimeAgo';
+import useTracking from '../../../providers/Tracking/useTracking';
+import { EventName } from '../../../types/Events';
+import { useAppVersionHistory } from '../../apps/hooks/useAppVersionHistory';
+import { useCanCreateDataApp } from '../../apps/hooks/useCanCreateDataApp';
+import { useCanEditDataApp } from '../../apps/hooks/useCanEditDataApp';
+import { useChartStudioAvailable } from '../hooks/useChartStudioAvailable';
+import { chartTypeBuilderPath } from '../utils/chartTypeBuilderPath';
+import { getChartTypeIcon } from '../utils/chartTypeIcons';
+import classes from './ChartTypeDetailModal.module.css';
+import ChartTypeForkModal from './ChartTypeForkModal';
+import ChartTypeReleaseStageBadge from './ChartTypeReleaseStageBadge';
+import ChartTypeSamplePreview from './ChartTypeSamplePreview';
+import ChartTypeUpgradeModal from './ChartTypeUpgradeModal';
+import DataAppVizFieldsList from './DataAppVizFieldsList';
+import OfficialChartTypeBadge from './OfficialChartTypeBadge';
+
+type Props = {
+    opened: boolean;
+    projectUuid: string;
+    dataAppViz: DataAppViz;
+    isActive: boolean;
+    /** This chart type's registry entry, when it is a registry install */
+    registryEntry: RegistryChartTypeListItem | null;
+    onClose: () => void;
+    onPreview: () => void;
+    onDelete: () => void;
+};
+
+const ChartTypeDetailModal: FC<Props> = ({
+    opened,
+    projectUuid,
+    dataAppViz,
+    isActive,
+    registryEntry,
+    onClose,
+    onPreview,
+    onDelete,
+}) => {
+    const navigate = useNavigate();
+    const canEdit = useCanEditDataApp(projectUuid, dataAppViz);
+    const canFork = useCanCreateDataApp(projectUuid);
+    // Forking and editing are authoring: they need Chart Studio, unlike
+    // install/upgrade/uninstall which follow the chart type library.
+    const chartStudioAvailable = useChartStudioAvailable();
+    const isOfficial = isOfficialChartType(dataAppViz);
+    const [isForkOpen, setIsForkOpen] = useState(false);
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
+    const [isUpgradeOpen, setIsUpgradeOpen] = useState(false);
+    const isDetailActive = opened && isActive && !isForkOpen && !isUpgradeOpen;
+    const { track } = useTracking();
+    const registryUpdate =
+        registryEntry?.state === 'update_available' ? registryEntry : null;
+    // The registry's release stage describes its current version only.
+    const installedReleaseStage =
+        isOfficial &&
+        registryEntry &&
+        registryEntry.installedRegistryVersion === registryEntry.version
+            ? registryEntry.releaseStage
+            : null;
+
+    const hasTrackedView = useRef(false);
+    const hasUpdate = registryUpdate !== null;
+    useEffect(() => {
+        if (hasTrackedView.current) return;
+        hasTrackedView.current = true;
+        track({
+            name: EventName.CHART_TYPE_DETAIL_VIEWED,
+            properties: {
+                projectUuid,
+                isOfficial,
+                registrySlug: dataAppViz.registrySlug,
+                hasUpdate,
+            },
+        });
+    }, [projectUuid, isOfficial, dataAppViz.registrySlug, hasUpdate, track]);
+    const { latestReadyVersion, oldest, latest, hasOrigin } =
+        useAppVersionHistory(projectUuid, dataAppViz.dataAppVizUuid);
+
+    // Only attribute once v1 is loaded — the oldest loaded version is not the
+    // origin author while older pages are unfetched.
+    const builtBy =
+        hasOrigin && oldest?.createdByUser
+            ? `${oldest.createdByUser.firstName} ${oldest.createdByUser.lastName}`.trim()
+            : null;
+    const lastUpdatedAgo = useTimeAgo(
+        latest
+            ? (latest.statusUpdatedAt ?? latest.createdAt)
+            : dataAppViz.createdAt,
+    );
+
+    return (
+        <>
+            <MantineModal
+                opened={opened}
+                onClose={onClose}
+                modalRootProps={{
+                    closeOnEscape: isDetailActive,
+                    closeOnClickOutside: isDetailActive,
+                    trapFocus: isDetailActive,
+                }}
+                title={
+                    <Group gap="xs" wrap="nowrap">
+                        <MantineIcon icon={getChartTypeIcon(dataAppViz.icon)} />
+                        <Text fw={700} fz="md" c="ldDark.9">
+                            {getAppDisplayName(
+                                dataAppViz.name,
+                                dataAppViz.dataAppVizUuid,
+                            )}
+                        </Text>
+                        {isOfficial && <OfficialChartTypeBadge />}
+                    </Group>
+                }
+                // The default 80vh cap clips the meta panel.
+                bodyScrollAreaMaxHeight="calc(100vh - 200px)"
+                cancelLabel={false}
+                leftActions={
+                    canEdit && (
+                        // The theme's subtle variant hardcodes gray text; c overrides it.
+                        <Button
+                            variant="subtle"
+                            size="xs"
+                            color="red"
+                            c="red.7"
+                            leftSection={<MantineIcon icon={IconTrash} />}
+                            onClick={onDelete}
+                        >
+                            {isOfficial ? 'Uninstall' : 'Delete'}
+                        </Button>
+                    )
+                }
+                actions={
+                    isOfficial
+                        ? chartStudioAvailable &&
+                          canFork && (
+                              <Button
+                                  variant="default"
+                                  leftSection={
+                                      <MantineIcon icon={IconGitFork} />
+                                  }
+                                  onClick={() => {
+                                      track({
+                                          name: EventName.CHART_TYPE_FORK_MODAL_OPENED,
+                                          properties: {
+                                              projectUuid,
+                                              registrySlug:
+                                                  dataAppViz.registrySlug,
+                                          },
+                                      });
+                                      setIsForkOpen(true);
+                                  }}
+                              >
+                                  Fork to customize
+                              </Button>
+                          )
+                        : chartStudioAvailable &&
+                          canEdit && (
+                              <Button
+                                  component={Link}
+                                  to={chartTypeBuilderPath(
+                                      projectUrlIdentifier,
+                                      dataAppViz.slug,
+                                  )}
+                                  variant="default"
+                                  leftSection={
+                                      <MantineIcon icon={IconFilePencil} />
+                                  }
+                              >
+                                  Edit
+                              </Button>
+                          )
+                }
+                onConfirm={onPreview}
+                confirmLabel="Preview in explorer"
+            >
+                <Stack gap="md">
+                    <Box className={classes.preview}>
+                        <ChartTypeSamplePreview
+                            projectUuid={projectUuid}
+                            dataAppVizUuid={dataAppViz.dataAppVizUuid}
+                            icon={dataAppViz.icon}
+                        />
+                    </Box>
+                    <Text fz="sm" c="ldGray.7" lh={1.55}>
+                        {dataAppViz.description || 'No description'}
+                    </Text>
+                    {registryUpdate && (
+                        <Callout
+                            variant="info"
+                            title={`Update available: v${registryUpdate.version}`}
+                        >
+                            <Stack gap="sm" align="flex-start">
+                                <Text fz="sm">
+                                    {registryUpdate.changelog
+                                        ? `${registryUpdate.changelog} `
+                                        : ''}
+                                    Charts pinned to an earlier version keep
+                                    rendering it until each chart is upgraded;
+                                    charts without a pinned version switch to v
+                                    {registryUpdate.version} right away.
+                                </Text>
+                                {canFork && (
+                                    <Button
+                                        size="xs"
+                                        variant="default"
+                                        onClick={() => setIsUpgradeOpen(true)}
+                                    >
+                                        Upgrade to v{registryUpdate.version}
+                                    </Button>
+                                )}
+                            </Stack>
+                        </Callout>
+                    )}
+                    {dataAppViz.schema !== null && (
+                        <DataAppVizFieldsList
+                            fields={dataAppViz.schema.fields}
+                        />
+                    )}
+                    <SimpleGrid cols={2} className={classes.metaPanel}>
+                        {builtBy !== null && (
+                            <Box>
+                                <Text fz="xs" fw={600} c="dimmed">
+                                    Built by
+                                </Text>
+                                <Text fz="sm" fw={500} c="ldGray.8">
+                                    {builtBy}
+                                </Text>
+                            </Box>
+                        )}
+                        <Box>
+                            <Text fz="xs" fw={600} c="dimmed">
+                                Last updated
+                            </Text>
+                            <Text fz="sm" fw={500} c="ldGray.8">
+                                {lastUpdatedAgo}
+                            </Text>
+                        </Box>
+                        <Box>
+                            <Text fz="xs" fw={600} c="dimmed">
+                                Version
+                            </Text>
+                            <Group gap="xs" wrap="nowrap">
+                                <Text fz="sm" fw={500} c="ldGray.8">
+                                    {/* Officials show the registry semver, matching
+                                        the library; the internal app version only
+                                        describes locally built types. */}
+                                    {isOfficial &&
+                                    registryEntry?.installedRegistryVersion
+                                        ? `v${registryEntry.installedRegistryVersion}`
+                                        : latestReadyVersion !== null
+                                          ? `v${latestReadyVersion}`
+                                          : '—'}
+                                </Text>
+                                {installedReleaseStage && (
+                                    <ChartTypeReleaseStageBadge
+                                        stage={installedReleaseStage}
+                                    />
+                                )}
+                            </Group>
+                        </Box>
+                    </SimpleGrid>
+                    {dataAppViz.schema === null && (
+                        <Text fz="sm" c="dimmed">
+                            No finished version yet. Open the builder to
+                            generate one.
+                        </Text>
+                    )}
+                </Stack>
+            </MantineModal>
+            {isForkOpen && (
+                <ChartTypeForkModal
+                    opened
+                    onClose={() => setIsForkOpen(false)}
+                    projectUuid={projectUuid}
+                    appUuid={dataAppViz.dataAppVizUuid}
+                    defaultName={`${dataAppViz.name} (custom)`}
+                    onForked={(result) =>
+                        void navigate(
+                            chartTypeBuilderPath(
+                                projectUrlIdentifier,
+                                result.slug,
+                            ),
+                        )
+                    }
+                />
+            )}
+            {isUpgradeOpen && registryUpdate && (
+                <ChartTypeUpgradeModal
+                    projectUuid={projectUuid}
+                    dataAppViz={dataAppViz}
+                    registryUpdate={registryUpdate}
+                    onClose={() => setIsUpgradeOpen(false)}
+                />
+            )}
+        </>
+    );
+};
+
+export default ChartTypeDetailModal;

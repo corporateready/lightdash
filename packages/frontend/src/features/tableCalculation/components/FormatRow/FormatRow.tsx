@@ -1,4 +1,6 @@
 import {
+    applyCustomFormat,
+    Compact,
     assertUnreachable,
     CompactConfigMap,
     convertCustomFormatToFormatExpression,
@@ -26,8 +28,7 @@ import {
     TextInput,
     Tooltip,
     type ComboboxItem,
-} from '@mantine-8/core';
-import { NumberInput } from '@mantine/core';
+} from '@mantine/core';
 import { type UseFormReturnType } from '@mantine/form';
 import {
     Icon123,
@@ -42,6 +43,9 @@ import {
 import { useMemo, type FC } from 'react';
 import { type ValueOf } from 'type-fest';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import { NumberInput } from '../../../../components/common/NumberInput';
+import { formatTextInputProps } from '../../../../components/Explorer/FormatForm/formatTextInputProps';
+import { optionalNumber } from '../../../../utils/numberInputUtils';
 import classes from './FormatRow.module.css';
 
 type Props = {
@@ -106,6 +110,7 @@ const separatorOptions: ComboboxItem[] = [
     { value: NumberSeparator.SPACE_PERIOD, label: '100 000.00' },
     { value: NumberSeparator.PERIOD_COMMA, label: '100.000,00' },
     { value: NumberSeparator.NO_SEPARATOR_PERIOD, label: '100000.00' },
+    { value: NumberSeparator.APOSTROPHE_PERIOD, label: "100'000.00" },
 ];
 
 const bytesUnitOptions: { value: 'si' | 'iec'; label: string }[] = [
@@ -210,6 +215,14 @@ const getPreviewValue = (
             return dataType === TableCalculationType.TIMESTAMP
                 ? formatTimestamp(sample)
                 : formatDate(sample);
+        }
+
+        if (
+            format.compact === Compact.AUTO &&
+            (format.type === CustomFormatType.NUMBER ||
+                format.type === CustomFormatType.CURRENCY)
+        ) {
+            return applyCustomFormat(NUMERIC_SAMPLE, format);
         }
 
         const expression = convertCustomFormatToFormatExpression(format);
@@ -433,7 +446,6 @@ export const FormatRow: FC<Props> = ({
                                 <Button
                                     key={p.value}
                                     size="compact-xs"
-                                    radius="md"
                                     variant={isActive ? 'filled' : 'default'}
                                     color={isActive ? 'blue' : undefined}
                                     onClick={() => onPillClick(p.value)}
@@ -460,7 +472,6 @@ export const FormatRow: FC<Props> = ({
                             <NumberInput
                                 className={classes.subFieldInputNarrow}
                                 size="xs"
-                                radius="md"
                                 min={0}
                                 label="Decimals"
                                 placeholder="Auto"
@@ -469,7 +480,7 @@ export const FormatRow: FC<Props> = ({
                                     onChange: (value) =>
                                         setFormatFieldValue(
                                             'round',
-                                            value === '' ? undefined : value,
+                                            optionalNumber(value),
                                         ),
                                 }}
                             />
@@ -495,14 +506,18 @@ export const FormatRow: FC<Props> = ({
                                 size="xs"
                                 label="Prefix"
                                 placeholder="$"
-                                {...formatInputProps('prefix')}
+                                {...formatTextInputProps(
+                                    formatInputProps('prefix'),
+                                )}
                             />
                             <TextInput
                                 className={classes.subFieldTextNarrow}
                                 size="xs"
                                 label="Suffix"
                                 placeholder="km/h"
-                                {...formatInputProps('suffix')}
+                                {...formatTextInputProps(
+                                    formatInputProps('suffix'),
+                                )}
                             />
                             <Select
                                 className={classes.subFieldSeparator}
@@ -528,7 +543,6 @@ export const FormatRow: FC<Props> = ({
                             <NumberInput
                                 className={classes.subFieldInput}
                                 size="xs"
-                                radius="md"
                                 min={0}
                                 label="Decimals"
                                 placeholder="Auto"
@@ -537,7 +551,7 @@ export const FormatRow: FC<Props> = ({
                                     onChange: (value) =>
                                         setFormatFieldValue(
                                             'round',
-                                            value === '' ? undefined : value,
+                                            optionalNumber(value),
                                         ),
                                 }}
                             />
@@ -565,7 +579,6 @@ export const FormatRow: FC<Props> = ({
                         <NumberInput
                             className={classes.subFieldInput}
                             size="xs"
-                            radius="md"
                             min={0}
                             label="Decimals"
                             placeholder="Auto"
@@ -574,7 +587,7 @@ export const FormatRow: FC<Props> = ({
                                 onChange: (value) =>
                                     setFormatFieldValue(
                                         'round',
-                                        value === '' ? undefined : value,
+                                        optionalNumber(value),
                                     ),
                             }}
                         />
@@ -620,7 +633,6 @@ export const FormatRow: FC<Props> = ({
                     {isNumeric && format.type === CustomFormatType.CUSTOM && (
                         <TextInput
                             size="xs"
-                            radius="md"
                             placeholder="e.g. #,##0.00"
                             label={
                                 <Group
@@ -649,7 +661,9 @@ export const FormatRow: FC<Props> = ({
                                 </Group>
                             }
                             classNames={{ label: classes.fullWidthLabel }}
-                            {...formatInputProps('custom')}
+                            {...formatTextInputProps(
+                                formatInputProps('custom'),
+                            )}
                         />
                     )}
 
@@ -693,7 +707,6 @@ const DateFormatBody: FC<{
     return (
         <TextInput
             size="xs"
-            radius="md"
             placeholder="e.g. dd/mm/yyyy or mmmm d, yyyy"
             label={
                 <Group
@@ -726,15 +739,10 @@ const DateFormatBody: FC<{
                 />
             }
             rightSection={
-                <Menu shadow="md" position="bottom-end" width={240}>
+                <Menu position="bottom-end" width={240}>
                     <Menu.Target>
-                        <Tooltip label="Pick a preset" withArrow>
-                            <ActionIcon
-                                variant="subtle"
-                                color="gray"
-                                size="sm"
-                                aria-label="Pick a preset"
-                            >
+                        <Tooltip label="Pick a preset">
+                            <ActionIcon size="sm" aria-label="Pick a preset">
                                 <MantineIcon icon={IconChevronDown} size="sm" />
                             </ActionIcon>
                         </Tooltip>
@@ -760,7 +768,7 @@ const DateFormatBody: FC<{
                     </Menu.Dropdown>
                 </Menu>
             }
-            {...formatInputProps('custom')}
+            {...formatTextInputProps(formatInputProps('custom'))}
         />
     );
 };

@@ -3,6 +3,7 @@ import {
     FilterOperator,
     FilterType,
     getItemId,
+    isBooleanItem,
     isConditionalFormattingWithCompareTarget,
     isConditionalFormattingWithValues,
     isNumericItem,
@@ -10,20 +11,20 @@ import {
     type ConditionalFormattingWithFilterOperator,
     type FilterableItem,
 } from '@lightdash/common';
-import { Accordion } from '@mantine-8/core';
 import {
+    TextInput,
+    Accordion,
     Center,
     Group,
-    SegmentedControl,
-    Select,
     Stack,
     Text,
-    TextInput,
+    SegmentedControl,
+    Select,
     Tooltip,
 } from '@mantine/core';
 import differenceBy from 'lodash/differenceBy';
 import { useCallback, useMemo, type FC } from 'react';
-import { useParams } from 'react-router';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import FieldSelect from '../../common/FieldSelect';
 import FilterInputComponent from '../../common/Filters/FilterInputs';
 import {
@@ -62,7 +63,7 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
     hasRemove,
     disabled,
 }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
 
     const comparisonType = useMemo(() => {
         if (
@@ -88,23 +89,27 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
         }
     }, [fields, rule]);
 
-    // conditional formatting only supports number filters or string filters
-    const filterType: FilterType.NUMBER | FilterType.STRING | undefined =
-        useMemo(() => {
-            let fieldToFilter = field;
+    // conditional formatting only supports number, string or boolean filters
+    const filterType:
+        | FilterType.NUMBER
+        | FilterType.STRING
+        | FilterType.BOOLEAN
+        | undefined = useMemo(() => {
+        let fieldToFilter = field;
 
-            if (
-                isConditionalFormattingWithCompareTarget(rule) &&
-                isConditionalFormattingWithValues(rule) &&
-                compareField
-            ) {
-                fieldToFilter = compareField;
-            }
+        if (
+            isConditionalFormattingWithCompareTarget(rule) &&
+            isConditionalFormattingWithValues(rule) &&
+            compareField
+        ) {
+            fieldToFilter = compareField;
+        }
 
-            if (isNumericItem(fieldToFilter)) return FilterType.NUMBER;
-            if (isStringDimension(fieldToFilter)) return FilterType.STRING;
-            return undefined;
-        }, [field, compareField, rule]);
+        if (isNumericItem(fieldToFilter)) return FilterType.NUMBER;
+        if (isStringDimension(fieldToFilter)) return FilterType.STRING;
+        if (isBooleanItem(fieldToFilter)) return FilterType.BOOLEAN;
+        return undefined;
+    }, [field, compareField, rule]);
 
     const filterOperatorOptions = useMemo(() => {
         if (!filterType) return [];
@@ -131,6 +136,20 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
                 FilterOperator.INCLUDE,
             ]);
         }
+        if (filterType === FilterType.BOOLEAN) {
+            const options = getFilterOperatorOptions(filterType);
+
+            if (isConditionalFormattingWithCompareTarget(rule)) {
+                const ignoredOperators = getFilterOptions([
+                    FilterOperator.NULL,
+                    FilterOperator.NOT_NULL,
+                ]);
+
+                return differenceBy(options, ignoredOperators, 'value');
+            }
+
+            return options;
+        }
         return [];
     }, [filterType, rule]);
 
@@ -151,7 +170,8 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
             ) {
                 return (
                     ((isNumericItem(f) && isNumericItem(field)) ||
-                        (isStringDimension(f) && isStringDimension(field))) &&
+                        (isStringDimension(f) && isStringDimension(field)) ||
+                        (isBooleanItem(f) && isBooleanItem(field))) &&
                     field &&
                     getItemId(f) !== getItemId(field)
                 );
@@ -180,17 +200,23 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
     const handleChangeRule = useCallback(
         (newRule: ConditionalFormattingWithFilterOperator) => {
             if (isConditionalFormattingWithValues(newRule)) {
+                const valuesField = isConditionalFormattingWithCompareTarget(
+                    newRule,
+                )
+                    ? compareField
+                    : field;
+
                 onChangeRule({
                     ...newRule,
                     values: newRule.values.map((v) => {
-                        // FIXME: check if we can fix this problem in number input
-                        if (
-                            isConditionalFormattingWithCompareTarget(newRule)
-                                ? isStringDimension(compareField)
-                                : isStringDimension(field)
-                        ) {
+                        if (isStringDimension(valuesField)) {
                             return String(v);
                         }
+                        // Boolean inputs already emit real booleans; keep them
+                        if (isBooleanItem(valuesField)) {
+                            return v;
+                        }
+                        // FIXME: check if we can fix this problem in number input
                         return Number(v);
                     }),
                 });
@@ -218,23 +244,23 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
             />
 
             <Accordion.Panel>
-                <Stack spacing="xs">
-                    <Group noWrap spacing="xs">
+                <Stack gap="xs">
+                    <Group wrap="nowrap" gap="xs">
                         <Text fw={500} fz="xs" c="dimmed">
                             Compare:
                         </Text>
                         <SegmentedControl
                             size="xs"
                             value={comparisonType}
-                            onChange={onChangeRuleComparisonType}
+                            onChange={(value) =>
+                                onChangeRuleComparisonType(
+                                    value as ConditionalFormattingComparisonType,
+                                )
+                            }
                             data={[
                                 {
                                     label: (
-                                        <Tooltip
-                                            label="Compare selected field to values"
-                                            withinPortal
-                                            variant="xs"
-                                        >
+                                        <Tooltip label="Compare selected field to values">
                                             <Center>Values</Center>
                                         </Tooltip>
                                     ),
@@ -242,11 +268,7 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
                                 },
                                 {
                                     label: (
-                                        <Tooltip
-                                            label="Compare selected field to another field"
-                                            withinPortal
-                                            variant="xs"
-                                        >
+                                        <Tooltip label="Compare selected field to another field">
                                             <Center>Field</Center>
                                         </Tooltip>
                                     ),
@@ -254,11 +276,7 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
                                 },
                                 {
                                     label: (
-                                        <Tooltip
-                                            label="Compare another field to values"
-                                            withinPortal
-                                            variant="xs"
-                                        >
+                                        <Tooltip label="Compare another field to values">
                                             <Center>Field values</Center>
                                         </Tooltip>
                                     ),
@@ -279,8 +297,9 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
                                 placeholder="Compare field"
                             />
                         )}
-                    <Group noWrap spacing="xs">
+                    <Group wrap="nowrap" gap="xs">
                         <Select
+                            allowDeselect={false}
                             value={rule.operator}
                             data={filterOperatorOptions}
                             size="xs"
@@ -293,6 +312,7 @@ const ConditionalFormattingRule: FC<ConditionalFormattingRuleProps> = ({
                         />
 
                         <Select
+                            allowDeselect={false}
                             display={field && filterType ? 'none' : 'block'}
                             placeholder="Value(s)"
                             data={[]}

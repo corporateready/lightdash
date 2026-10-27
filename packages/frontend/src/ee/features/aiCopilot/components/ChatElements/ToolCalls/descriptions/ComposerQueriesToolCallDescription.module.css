@@ -1,0 +1,31 @@
+.pipeline {
+    min-width: 0;
+}
+
+.detail {
+    min-width: 0;
+    flex: 1;
+}
+
+.statusText {
+    flex-shrink: 0;
+    color: var(--mantine-color-ldGray-5);
+}
+
+.statusText[data-status='running'] {
+    color: var(--mantine-color-indigo-6);
+}
+
+.statusText[data-status='awaiting_approval'] {
+    color: var(--mantine-color-orange-7);
+    font-weight: 500;
+}
+
+.statusText[data-status='error'] {
+    color: var(--mantine-color-red-6);
+}
+
+/* Indent to the title: status mark (12) + gap (8) + icon (13) + gap (8). */
+.body {
+    padding: 2px 0 6px 41px;
+}

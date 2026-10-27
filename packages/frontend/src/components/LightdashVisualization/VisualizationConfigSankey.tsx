@@ -1,71 +1,41 @@
-import {
-    ChartType,
-    getDimensionsFromItemsMap,
-    getMetricsFromItemsMap,
-    getTableCalculationsFromItemsMap,
-    isNumericItem,
-    type TableCalculation,
-} from '@lightdash/common';
-import { useEffect, useMemo, type FC } from 'react';
+import { ChartType } from '@lightdash/common';
+import { memo, useMemo, type FC } from 'react';
+import { selectSankeyFieldPools } from '../../features/visualization/store';
 import useSankeyChartConfig from '../../hooks/useSankeyChartConfig';
-import { type VisualizationConfigSankeyProps } from './types';
+import {
+    type VisualizationConfigSankeyProps,
+    type VisualizationConfigSankeyType,
+} from './types';
+import { useEmitChartConfig } from './useEmitChartConfig';
+import { useVisualizationInputSelector } from './useVisualizationContext';
 
 const VisualizationConfigSankey: FC<VisualizationConfigSankeyProps> = ({
-    resultsData,
-    initialChartConfig,
     onChartConfigChange,
-    itemsMap,
-    colorPalette,
     children,
-    tableCalculationsMetadata,
 }) => {
-    const { dimensions, numericFields } = useMemo(() => {
-        const metrics = getMetricsFromItemsMap(itemsMap ?? {}, isNumericItem);
-        const tableCalculations = getTableCalculationsFromItemsMap(itemsMap);
+    const { dimensions, numericFields } = useVisualizationInputSelector(
+        selectSankeyFieldPools,
+    );
+    const sankeyChartConfig = useSankeyChartConfig();
 
-        const numericTableCalculations = Object.keys(tableCalculations).reduce<
-            Record<string, TableCalculation>
-        >((acc, key) => {
-            const tableCalculation = tableCalculations[key];
-            if (isNumericItem(tableCalculation)) {
-                acc[key] = tableCalculation;
-            }
-            return acc;
-        }, {});
-
-        return {
-            dimensions: getDimensionsFromItemsMap(itemsMap ?? {}),
-            numericFields: { ...metrics, ...numericTableCalculations },
-        };
-    }, [itemsMap]);
-
-    const sankeyChartConfig = useSankeyChartConfig(
-        resultsData,
-        initialChartConfig,
-        itemsMap,
-        dimensions,
-        numericFields,
-        colorPalette,
-        tableCalculationsMetadata,
+    useEmitChartConfig(
+        ChartType.SANKEY,
+        sankeyChartConfig.validConfig,
+        onChartConfigChange,
     );
 
-    useEffect(() => {
-        if (!onChartConfigChange || !sankeyChartConfig.validConfig) return;
-
-        onChartConfigChange({
-            type: ChartType.SANKEY,
-            config: sankeyChartConfig.validConfig,
-        });
-    }, [sankeyChartConfig, onChartConfigChange]);
-
-    return children({
-        visualizationConfig: {
+    const visualizationConfig: VisualizationConfigSankeyType = useMemo(
+        () => ({
             chartType: ChartType.SANKEY,
             chartConfig: sankeyChartConfig,
             dimensions,
             numericFields,
-        },
-    });
+        }),
+        [sankeyChartConfig, dimensions, numericFields],
+    );
+
+    return children({ visualizationConfig });
 };
 
-export default VisualizationConfigSankey;
+// Memoised so a resize skips it; an echoed config re-renders it, the memoised aggregate spares consumers
+export default memo(VisualizationConfigSankey);

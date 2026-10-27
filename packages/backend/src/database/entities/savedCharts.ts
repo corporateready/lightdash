@@ -1,3 +1,4 @@
+import { type AgentIdentityClaim } from '@lightdash/common';
 import {
     AnyType,
     BinGroup,
@@ -15,32 +16,44 @@ import {
     MetricType,
     PivotSortAnchor,
     TableCalculationTemplate,
+    TableCalculationTotalMode,
     TableCalculationType,
+    TimezoneSetting,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 
 export const SavedChartsTableName = 'saved_queries';
 export const SavedChartVersionsTableName = 'saved_queries_versions';
 
-type InsertChartInSpace = Pick<
+/** Correlated subquery for one column of a chart's latest version; the id tiebreaker keeps same-timestamp versions deterministic.
+ * Correlates on the literal `saved_queries` table name, so the outer query must have it in scope unaliased. */
+export const latestSavedChartVersionColumnSql = (
+    column: keyof DbSavedChartVersion,
+): string => `(
+    SELECT latest.${column} FROM ${SavedChartVersionsTableName} latest
+    WHERE latest.saved_query_id = ${SavedChartsTableName}.saved_query_id
+    ORDER BY latest.created_at DESC, latest.saved_queries_version_id DESC
+    LIMIT 1
+)`;
+
+type InsertChartBase = Pick<
     DbSavedChart,
     | 'name'
     | 'description'
     | 'last_version_chart_kind'
     | 'last_version_updated_by_user_uuid'
     | 'slug'
-> & {
+> &
+    Pick<DbSavedChart, 'color_palette_uuid'>;
+
+type InsertChartInSpace = InsertChartBase & {
+    project_uuid: string;
     space_id: number;
     dashboard_uuid: null;
 };
 
-type InsertChartInDashboard = Pick<
-    DbSavedChart,
-    | 'name'
-    | 'description'
-    | 'last_version_chart_kind'
-    | 'last_version_updated_by_user_uuid'
-> & {
+type InsertChartInDashboard = InsertChartBase & {
+    project_uuid: string;
     space_id: null;
     dashboard_uuid: string;
 };
@@ -53,6 +66,7 @@ export type SavedChartTable = Knex.CompositeTableType<
     Partial<
         Pick<
             DbSavedChart,
+            | 'project_uuid'
             | 'space_id'
             | 'name'
             | 'description'
@@ -73,6 +87,7 @@ export type SavedChartTable = Knex.CompositeTableType<
 export type DbSavedChart = {
     saved_query_id: number;
     saved_query_uuid: string;
+    project_uuid: string;
     space_id: number | null;
     dashboard_uuid: string | null;
     name: string;
@@ -91,6 +106,7 @@ export type DbSavedChart = {
 };
 
 export type DbSavedChartVersion = {
+    agent_identity: AgentIdentityClaim | null;
     saved_queries_version_id: number;
     saved_queries_version_uuid: string;
     created_at: Date;
@@ -103,9 +119,10 @@ export type DbSavedChartVersion = {
     saved_query_id: number;
     chart_config: ChartConfig['config'] | null;
     pivot_dimensions: string[] | null;
+    pivot_rows: string[] | null;
     parameters: AnyType | null; // JSONB
     updated_by_user_uuid: string | null;
-    timezone: string | null;
+    timezone: TimezoneSetting;
 };
 
 export type SavedChartVersionsTable = Knex.CompositeTableType<
@@ -123,13 +140,14 @@ export type CreateDbSavedChartVersion = Pick<
     | 'dimension_overrides'
     | 'chart_type'
     | 'pivot_dimensions'
+    | 'pivot_rows'
     | 'chart_config'
     | 'parameters'
     | 'updated_by_user_uuid'
     | 'timezone'
->;
+> & { agent_identity: AgentIdentityClaim | null };
 
-type DbSavedChartVersionField = {
+export type DbSavedChartVersionField = {
     saved_queries_version_field_id: number;
     saved_queries_version_id: number;
     name: string;
@@ -148,7 +166,7 @@ export type SavedChartVersionFieldsTable = Knex.CompositeTableType<
     CreateDbSavedChartVersionField
 >;
 
-type DbSavedChartVersionSort = {
+export type DbSavedChartVersionSort = {
     saved_queries_version_sort_id: number;
     saved_queries_version_id: number;
     field_name: string;
@@ -189,6 +207,7 @@ export type DbSavedChartTableCalculation = {
     type?: TableCalculationType;
     template?: TableCalculationTemplate;
     formula?: string;
+    total_mode?: TableCalculationTotalMode;
 };
 
 export type DbSavedChartTableCalculationInsert = Omit<
@@ -250,6 +269,7 @@ export type DbSavedChartAdditionalMetric = {
     saved_queries_version_id: number;
     filters: MetricFilterRule[] | null; // JSONB
     base_dimension_name: string | null;
+    base_metric_name: string | null;
     uuid: string;
     format_options?: CustomFormat | string | null; // JSONB
     // PoP metadata (optional)
@@ -297,6 +317,7 @@ export type DBFilteredAdditionalMetrics = Pick<
             | 'distinct_keys'
             | 'filters'
             | 'base_dimension_name'
+            | 'base_metric_name'
             | 'format_options'
             | 'generation_type'
             | 'base_metric_id'

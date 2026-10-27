@@ -8,14 +8,16 @@ import {
     Stack,
     Text,
     Textarea,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { modals } from '@mantine/modals';
 import { IconIdOff } from '@tabler/icons-react';
 import html2canvas from 'html2canvas-pro';
 import { useCallback, useEffect, useState, type FC } from 'react';
-import { lightdashApi, networkHistory } from '../../api';
+import { networkHistory } from '../../api';
 import MantineIcon from '../../components/common/MantineIcon';
 import useToaster from '../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../LightdashApi/useLightdashApi';
+import classes from './SupportDrawerContent.module.css';
 
 type SupportDrawerContentProps = {
     // Add props here
@@ -60,6 +62,7 @@ let logHistory: AnyType[] = [];
 })();
 
 const SupportDrawerContent: FC<SupportDrawerContentProps> = () => {
+    const lightdashApi = useLightdashApi();
     const [includeImage, setIncludeImage] = useState(true);
     const [moreDetails, setMoreDetails] = useState('');
     const [allowAccess, setAllowAccess] = useState(true);
@@ -105,7 +108,14 @@ const SupportDrawerContent: FC<SupportDrawerContentProps> = () => {
             });
         });
         modals.closeAll();
-    }, [includeImage, screenshot, allowAccess, moreDetails, showToastSuccess]);
+    }, [
+        includeImage,
+        screenshot,
+        allowAccess,
+        moreDetails,
+        showToastSuccess,
+        lightdashApi,
+    ]);
 
     return (
         <Stack gap="xs">
@@ -125,19 +135,19 @@ const SupportDrawerContent: FC<SupportDrawerContentProps> = () => {
                     fit="contain"
                 />
             ) : (
-                <Paper p="lg" withBorder h={200}>
+                <Paper p="lg" h={200}>
                     <Stack h="100%" align="center" justify="center" gap="xs">
                         {screenshotError ? (
                             <>
                                 <MantineIcon icon={IconIdOff} color="ldGray" />
-                                <Text color="dimmed" ta="center">
+                                <Text c="dimmed" ta="center">
                                     Screenshot could not be captured. You can
                                     still submit your report with the details
                                     below
                                 </Text>
                             </>
                         ) : (
-                            <Loader height={200} w="100%" variant="dots" />
+                            <Loader height={200} w="100%" type="dots" />
                         )}
                     </Stack>
                 </Paper>
@@ -157,18 +167,18 @@ const SupportDrawerContent: FC<SupportDrawerContentProps> = () => {
                 onChange={(event) => setAllowAccess(event.target.checked)}
                 mt="xs"
             />
-            <Text size="xs" color="dimmed">
+            <Text size="xs" c="dimmed">
                 By ticking this box, you agree to give Lightdash Support access
                 to your organization for 12 hours to investigate this issue.
             </Text>
 
-            <Text size="xs" color="dimmed">
+            <Text size="xs" c="dimmed">
                 We will also share your Lightdash logs and your recent network
                 requests to help us investigate this issue.
             </Text>
             <Button
                 mt="xs"
-                style={{ alignSelf: 'flex-end' }}
+                className={classes.submitButton}
                 onClick={handleShare}
             >
                 Share

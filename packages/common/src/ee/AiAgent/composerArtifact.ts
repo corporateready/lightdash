@@ -1,0 +1,291 @@
+import { ParameterError } from '../../types/errors';
+import { type DimensionType } from '../../types/field';
+import {
+    isAndFilterGroup,
+    isOrFilterGroup,
+    type FilterGroupItem,
+    type Filters,
+} from '../../types/filter';
+import {
+    getSourceQueryResultReferences,
+    QuerySourceType,
+    type QueryNodeId,
+    type SourceQuery,
+} from '../../types/querySources';
+import { type ResultColumns } from '../../types/results';
+import assertUnreachable from '../../utils/assertUnreachable';
+import { stableJson } from '../../utils/stableJson';
+import { type AllVizChartConfig } from '../../visualizations/types';
+import { type ComposerStoredChartVizConfig } from './schemas/tools/composerChartVizConfigSchema';
+
+/**
+ * A composer artifact version: a declarative pipeline, its terminal node and
+ * the viz config. Holds no results; opening it runs the pipeline.
+ */
+export type AiComposerChartArtifactConfigV1 = {
+    source: 'composer';
+    schemaVersion: 1;
+    /** Self-contained pipeline: every node has a node id and reads only nodes of this pipeline. */
+    queries: SourceQuery[];
+    terminalNodeId: QueryNodeId;
+    vizConfig: AllVizChartConfig | null;
+};
+
+/** v2 draws the terminal node through the runQuery chart builders. */
+export type AiComposerChartArtifactConfigV2 = {
+    source: 'composer';
+    schemaVersion: 2;
+    queries: SourceQuery[];
+    terminalNodeId: QueryNodeId;
+    vizConfig: ComposerStoredChartVizConfig | null;
+};
+
+export type AiComposerChartArtifactConfig =
+    | AiComposerChartArtifactConfigV1
+    | AiComposerChartArtifactConfigV2;
+
+/** Arguments for saving a composer artifact version. */
+export type AiComposerArtifactVersion = {
+    artifactType: 'chart';
+    title: string;
+    description?: string;
+    vizConfig: AiComposerChartArtifactConfig;
+};
+
+export const toComposerArtifactVersion = ({
+    title,
+    description,
+    queries,
+    terminalNodeId,
+    vizConfig,
+}: {
+    title: string;
+    description: string | null;
+    queries: SourceQuery[];
+    terminalNodeId: QueryNodeId;
+    vizConfig: AllVizChartConfig | null;
+}): AiComposerArtifactVersion => ({
+    artifactType: 'chart',
+    title,
+    ...(description ? { description } : {}),
+    vizConfig: {
+        source: 'composer',
+        schemaVersion: 1,
+        queries,
+        terminalNodeId,
+        vizConfig,
+    },
+});
+
+export const toComposerChartArtifactVersion = ({
+    title,
+    description,
+    queries,
+    terminalNodeId,
+    vizConfig,
+}: {
+    title: string;
+    description: string | null;
+    queries: SourceQuery[];
+    terminalNodeId: QueryNodeId;
+    vizConfig: ComposerStoredChartVizConfig;
+}): AiComposerArtifactVersion => ({
+    artifactType: 'chart',
+    title,
+    ...(description ? { description } : {}),
+    vizConfig: {
+        source: 'composer',
+        schemaVersion: 2,
+        queries,
+        terminalNodeId,
+        vizConfig,
+    },
+});
+
+export const isAiComposerChartArtifactConfig = (
+    config: unknown,
+): config is AiComposerChartArtifactConfig =>
+    typeof config === 'object' &&
+    config !== null &&
+    'source' in config &&
+    config.source === 'composer' &&
+    'schemaVersion' in config &&
+    (config.schemaVersion === 1 || config.schemaVersion === 2) &&
+    'queries' in config &&
+    Array.isArray(config.queries) &&
+    'terminalNodeId' in config &&
+    typeof config.terminalNodeId === 'string';
+
+/** Semantic explores a pipeline reads, the access a user needs to see its results. */
+export const getComposerSemanticExploreNames = (
+    queries: SourceQuery[],
+): string[] => [
+    ...new Set(
+        queries.flatMap((node) =>
+            node.sourceType === QuerySourceType.SEMANTIC_LAYER
+                ? [node.exploreName]
+                : [],
+        ),
+    ),
+];
+
+// The full definition, with array references written in map form.
+// Filter group and rule ids are generated per submission, so two identical
+// filters differ only by id; compare them without.
+const filterItemDefinition = (item: FilterGroupItem): unknown => {
+    if (isAndFilterGroup(item)) {
+        return { and: item.and.map(filterItemDefinition) };
+    }
+    if (isOrFilterGroup(item)) {
+        return { or: item.or.map(filterItemDefinition) };
+    }
+    const { id, ...rule } = item;
+    return rule;
+};
+const filtersDefinition = (filters: Filters | undefined) =>
+    filters === undefined
+        ? undefined
+        : {
+              dimensions:
+                  filters.dimensions &&
+                  filterItemDefinition(filters.dimensions),
+              metrics: filters.metrics && filterItemDefinition(filters.metrics),
+              tableCalculations:
+                  filters.tableCalculations &&
+                  filterItemDefinition(filters.tableCalculations),
+          };
+
+const nodeDefinition = (node: SourceQuery): string => {
+    switch (node.sourceType) {
+        case QuerySourceType.DUCKDB:
+        case QuerySourceType.PYTHON:
+            return stableJson({
+                ...node,
+                references: getSourceQueryResultReferences(node),
+            });
+        case QuerySourceType.SEMANTIC_LAYER:
+            return stableJson({
+                ...node,
+                filters: filtersDefinition(node.filters),
+            });
+        case QuerySourceType.SQL:
+        case QuerySourceType.EXTERNAL:
+            return stableJson(node);
+        default:
+            return assertUnreachable(node, 'Unknown composer node');
+    }
+};
+
+export const isSameComposerNodeDefinition = (
+    a: SourceQuery,
+    b: SourceQuery,
+): boolean => nodeDefinition(a) === nodeDefinition(b);
+
+export const getComposerNodeConflictMessage = (
+    existing: ThreadComposerQueryNode,
+): string =>
+    `Node id "${existing.nodeId}" already names a different node in this thread ("${existing.title ?? existing.nodeId}"). To reuse it, read "${existing.nodeId}" without resubmitting it; to define a new node, give it a different node id.`;
+
+const describeNodes = (nodes: ThreadComposerQueryNode[]): string =>
+    nodes.length === 0
+        ? 'No nodes have been defined earlier in this thread.'
+        : `Nodes defined earlier in this thread: ${nodes
+              .map((node) => `${node.nodeId} ("${node.title ?? node.nodeId}")`)
+              .join(', ')}.`;
+
+/** A node of a built pipeline; building guarantees every node a node id. */
+export type ComposerPipelineNode = SourceQuery & { nodeId: QueryNodeId };
+
+/** A node a thread defined through a successful composer query. */
+export type ThreadComposerQueryNode = ComposerPipelineNode;
+
+/** A result column of a node, stored beside its definition by the run that registered it. */
+export type ComposerNodeColumn = {
+    reference: string;
+    type: DimensionType;
+};
+
+export const toComposerNodeColumns = (
+    columns: ResultColumns,
+): ComposerNodeColumn[] =>
+    Object.values(columns).map(({ reference, type }) => ({ reference, type }));
+
+const hasNodeId = (node: SourceQuery): node is ComposerPipelineNode =>
+    !!node.nodeId;
+
+/**
+ * Builds a submission's pipeline: submitted nodes plus every reused thread
+ * node and everything it reads, in dependency order. A node id names one
+ * definition for the whole thread.
+ */
+export const buildComposerArtifactPipeline = ({
+    queries,
+    threadNodes: threadNodeList,
+}: {
+    queries: SourceQuery[];
+    threadNodes: ThreadComposerQueryNode[];
+}): ComposerPipelineNode[] => {
+    const threadNodes = new Map<QueryNodeId, ThreadComposerQueryNode>(
+        threadNodeList.map((node) => [node.nodeId, node]),
+    );
+    const submittedNodes = new Map<QueryNodeId, SourceQuery>(
+        queries.flatMap((node) => (node.nodeId ? [[node.nodeId, node]] : [])),
+    );
+
+    submittedNodes.forEach((node, nodeId) => {
+        const existing = threadNodes.get(nodeId);
+        if (existing && !isSameComposerNodeDefinition(existing, node)) {
+            throw new ParameterError(getComposerNodeConflictMessage(existing));
+        }
+    });
+    queries.forEach((node) =>
+        Object.values(getSourceQueryResultReferences(node)).forEach(
+            (reference) => {
+                if (
+                    !submittedNodes.has(reference) &&
+                    !threadNodes.has(reference)
+                ) {
+                    throw new ParameterError(
+                        `Node "${node.nodeId}" reads "${reference}", which is not a node of this submission or of an earlier call in this thread. ${describeNodes(threadNodeList)}`,
+                    );
+                }
+            },
+        ),
+    );
+
+    const emitted = new Set<QueryNodeId>();
+    const visiting = new Set<QueryNodeId>();
+    const pipeline: ComposerPipelineNode[] = [];
+    const visit = (node: SourceQuery) => {
+        if (!hasNodeId(node)) return;
+        const { nodeId } = node;
+        if (emitted.has(nodeId) || visiting.has(nodeId)) return;
+        visiting.add(nodeId);
+        Object.values(getSourceQueryResultReferences(node)).forEach(
+            (reference) => {
+                const read =
+                    submittedNodes.get(reference) ?? threadNodes.get(reference);
+                if (read) visit(read);
+            },
+        );
+        visiting.delete(nodeId);
+        emitted.add(nodeId);
+        pipeline.push(node);
+    };
+    queries.forEach(visit);
+    return pipeline;
+};
+
+/** A successful `query` call of a turn, presented by its terminal node. */
+export type AiAgentMessageQueryPipeline = {
+    queryUuid: string;
+    title: string;
+    terminalNodeId: QueryNodeId;
+    /** Every node the call ran, reused ones included, in dependency order. */
+    nodes: ComposerPipelineNode[];
+};
+
+export type ApiAiAgentMessageQueryPipelinesResponse = {
+    status: 'ok';
+    results: AiAgentMessageQueryPipeline[];
+};

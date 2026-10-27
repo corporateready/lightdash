@@ -50,7 +50,7 @@ const metricFiltersSchema = z.array(metricFilterRuleSchema).nullable();
 // Aggregation custom metric — defines a NEW metric by applying an aggregation
 // (SUM / AVG / COUNT / …) to a base dimension.
 // --------------------------------------------------------------------------
-const aggregationCustomMetricSchema = z.object({
+export const aggregationCustomMetricSchema = z.object({
     kind: z
         .literal('aggregation')
         .describe(
@@ -74,7 +74,7 @@ const aggregationCustomMetricSchema = z.object({
     baseDimensionName: z
         .string()
         .describe(
-            'Name of the base dimension/column this metric calculates from',
+            'Field ID (e.g. "customers_age") or bare column name (e.g. "age") of the base dimension to aggregate. Must be a dimension that already EXISTS in this explore — confirm it exists with your field discovery tools first. Do NOT guess an id/primary-key column: many explores do not expose "<table>_id" as a queryable dimension.',
         ),
     table: z
         .string()
@@ -96,7 +96,7 @@ const aggregationCustomMetricSchema = z.object({
             `Aggregation type. If the base dimension type is STRING, TIMESTAMP, DATE, BOOLEAN, use COUNT_DISTINCT, COUNT, MIN, MAX. If NUMBER, use MIN, MAX, SUM, PERCENTILE, MEDIAN, AVERAGE, COUNT_DISTINCT, COUNT. If BOOLEAN, use COUNT_DISTINCT, COUNT.`,
         ),
     filters: metricFiltersSchema.describe(
-        'Optional filters for conditional metrics. Each filter needs fieldId (from findFields) and table name.',
+        'Optional filters for conditional metrics. Each filter needs a fieldId discovered via field search and the table name.',
     ),
 });
 
@@ -110,7 +110,7 @@ const popGranularityEnum = z.enum(
     validPeriodOverPeriodGranularities as [TimeFrames, ...TimeFrames[]],
 );
 
-const periodComparisonCustomMetricSchema = z.object({
+export const periodComparisonCustomMetricSchema = z.object({
     kind: z
         .literal('periodComparison')
         .describe(
@@ -129,7 +129,7 @@ const periodComparisonCustomMetricSchema = z.object({
     granularity: popGranularityEnum.describe(
         "Bucket unit for the offset. Must equal the bucket encoded in timeDimensionId's suffix.",
     ),
-    periodOffset: z
+    periodOffset: z.coerce
         .number()
         .int()
         .min(1)
@@ -253,8 +253,8 @@ DO NOT simulate a period comparison by adding a second time-dimension granularit
 
 For aggregation entries:
 1. Add the entry to customMetrics with kind: "aggregation"
-2. Reference it in queryConfig.metrics using the format "table_name" (e.g. "customers_avg_customer_age")
-3. Reference it the same way in sorts, filters, chartConfig.yAxisMetrics
+2. Reference it in queryConfig.metrics by its field id, \`<table>_<name>\` (e.g. "customers_avg_customer_age")
+3. Reference it the same way in sorts, filters, tableCalculations and chartConfig.yAxisMetrics
 
 Example A — "Average customer age sorted descending"
   customMetrics: [{ kind: "aggregation", name: "avg_customer_age", label: "Average Customer Age", description: "...", type: "AVERAGE", baseDimensionName: "age", table: "customers", filters: null }]

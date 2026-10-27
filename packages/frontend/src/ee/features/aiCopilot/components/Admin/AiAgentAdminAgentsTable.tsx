@@ -1,4 +1,4 @@
-import { type AiAgentSummary } from '@lightdash/common';
+import { ProjectType, type AiAgentSummary } from '@lightdash/common';
 import {
     ActionIcon,
     Badge,
@@ -8,10 +8,11 @@ import {
     Group,
     Menu,
     Paper,
+    Switch,
     Text,
     Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconBox,
     IconClock,
@@ -25,35 +26,77 @@ import {
     IconUser,
     IconUsers,
 } from '@tabler/icons-react';
-import { useDeferredValue, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router';
+import {
+    useCallback,
+    useDeferredValue,
+    useEffect,
+    useMemo,
+    useState,
+} from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { LightdashUserAvatar } from '../../../../../components/Avatar';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
+    type ContentTableColumnDef,
 } from '../../../../../components/common/ContentTable';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import {
     useGetSlack,
     useSlackChannels,
 } from '../../../../../hooks/slack/useSlack';
-import { useIsTruncated } from '../../../../../hooks/useIsTruncated';
 import { useProjects } from '../../../../../hooks/useProjects';
+import useSearchParams from '../../../../../hooks/useSearchParams';
 import SlackSvg from '../../../../../svgs/slack.svg?react';
 import { useAiAgentAdminAgents } from '../../hooks/useAiAgentAdmin';
+import { useAgentSettingsLinkState } from '../../utils/agentSettingsNavigation';
 import ProjectsFilter from './ProjectsFilter';
 import { SearchFilter } from './SearchFilter';
 
 const AiAgentAdminAgentsTable = () => {
     const theme = useMantineTheme();
     const navigate = useNavigate();
+    const { pathname, search: locationSearch } = useLocation();
+    const settingsLinkState = useAgentSettingsLinkState();
     const { data: agents, isLoading } = useAiAgentAdminAgents();
     const { data: projects } = useProjects();
+    const projectsParam = useSearchParams<string>('projects');
 
     const [search, setSearch] = useState<string | undefined>(undefined);
     const [selectedProjectUuids, setSelectedProjectUuids] = useState<string[]>(
-        [],
+        () => projectsParam?.split(',').filter(Boolean) ?? [],
+    );
+    const [hidePreviewProjects, setHidePreviewProjects] = useState(true);
+
+    useEffect(() => {
+        setSelectedProjectUuids(
+            projectsParam?.split(',').filter(Boolean) ?? [],
+        );
+    }, [projectsParam]);
+
+    const handleSelectedProjectUuidsChange = useCallback(
+        (projectUuids: string[]) => {
+            setSelectedProjectUuids(projectUuids);
+
+            const searchParams = new URLSearchParams(locationSearch);
+            if (projectUuids.length > 0) {
+                searchParams.set('projects', projectUuids.join(','));
+            } else {
+                searchParams.delete('projects');
+            }
+
+            const nextSearch = searchParams.toString();
+            if (nextSearch !== new URLSearchParams(locationSearch).toString()) {
+                void navigate(
+                    {
+                        pathname,
+                        search: nextSearch,
+                    },
+                    { replace: true },
+                );
+            }
+        },
+        [locationSearch, navigate, pathname],
     );
 
     const {
@@ -101,6 +144,15 @@ const AiAgentAdminAgentsTable = () => {
 
         let filtered = agents;
 
+        // Hide agents that belong to preview projects
+        if (hidePreviewProjects) {
+            filtered = filtered.filter(
+                (agent) =>
+                    projectsMap.get(agent.projectUuid)?.type !==
+                    ProjectType.PREVIEW,
+            );
+        }
+
         // Filter by project
         if (selectedProjectUuids.length > 0) {
             filtered = filtered.filter((agent) =>
@@ -129,18 +181,26 @@ const AiAgentAdminAgentsTable = () => {
         }
 
         return filtered;
-    }, [agents, selectedProjectUuids, deferredSearch, projectsMap]);
+    }, [
+        agents,
+        selectedProjectUuids,
+        deferredSearch,
+        projectsMap,
+        hidePreviewProjects,
+    ]);
 
     const hasActiveFilters =
         (search !== undefined && search !== '') ||
-        selectedProjectUuids.length > 0;
+        selectedProjectUuids.length > 0 ||
+        !hidePreviewProjects;
 
     const handleClearFilters = () => {
         setSearch(undefined);
-        setSelectedProjectUuids([]);
+        handleSelectedProjectUuidsChange([]);
+        setHidePreviewProjects(true);
     };
 
-    const columns: MRT_ColumnDef<AiAgentSummary>[] = useMemo(
+    const columns: ContentTableColumnDef<AiAgentSummary>[] = useMemo(
         () => [
             {
                 accessorKey: 'name',
@@ -149,7 +209,7 @@ const AiAgentAdminAgentsTable = () => {
                 size: 250,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconRobotFace} color="ldGray.6" />
+                        <MantineIcon icon={IconRobotFace} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -163,7 +223,7 @@ const AiAgentAdminAgentsTable = () => {
                                     name={agent.name}
                                     src={agent.imageUrl}
                                 />
-                                <Text fz="sm" fw={600} c="ldGray.9" truncate>
+                                <Text fz="sm" fw={600} truncate>
                                     {agent.name}
                                 </Text>
                             </Group>
@@ -178,14 +238,14 @@ const AiAgentAdminAgentsTable = () => {
                 size: 200,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconBox} color="ldGray.6" />
+                        <MantineIcon icon={IconBox} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
                 Cell: ({ row }) => {
                     const project = projectsMap.get(row.original.projectUuid);
                     return (
-                        <Text c="ldGray.9" fz="sm" fw={400}>
+                        <Text fz="sm" fw={400}>
                             {project?.name ?? 'Unknown Project'}
                         </Text>
                     );
@@ -198,7 +258,7 @@ const AiAgentAdminAgentsTable = () => {
                 size: 150,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconTag} color="ldGray.6" />
+                        <MantineIcon icon={IconTag} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -214,19 +274,12 @@ const AiAgentAdminAgentsTable = () => {
                     return (
                         <Group gap="xs">
                             {agent.tags.slice(0, 3).map((tag) => (
-                                <Badge
-                                    key={tag}
-                                    variant="light"
-                                    color="indigo"
-                                    size="sm"
-                                    radius="sm"
-                                    tt="none"
-                                >
+                                <Badge key={tag} color="indigo" size="sm">
                                     {tag}
                                 </Badge>
                             ))}
                             {agent.tags.length > 3 && (
-                                <Text c="ldGray.6" fz="xs">
+                                <Text c="dimmed" fz="xs">
                                     +{agent.tags.length - 3} more
                                 </Text>
                             )}
@@ -241,14 +294,12 @@ const AiAgentAdminAgentsTable = () => {
                 size: 150,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconPuzzle} color="ldGray.6" />
+                        <MantineIcon icon={IconPuzzle} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
                 Cell: ({ row }) => {
                     const agent = row.original;
-
-                    const isTruncated = useIsTruncated<HTMLDivElement>();
 
                     if (agent.integrations.length === 0) {
                         return (
@@ -272,24 +323,18 @@ const AiAgentAdminAgentsTable = () => {
                                     const isResolved = !!resolvedChannel;
 
                                     return (
-                                        <Box key={idx}>
+                                        <Box key={idx} maw="100%">
                                             <Tooltip
-                                                withinPortal
-                                                variant="xs"
                                                 label={
                                                     isResolved
                                                         ? channelName
                                                         : 'Channel not cached yet. If this is a private channel, add the integration to the channel manually'
                                                 }
-                                                disabled={
-                                                    isResolved &&
-                                                    !isTruncated.isTruncated
-                                                }
-                                                multiline
                                                 maw={300}
                                             >
                                                 <Paper
                                                     w="fit-content"
+                                                    maw="100%"
                                                     style={(t) =>
                                                         isResolved
                                                             ? undefined
@@ -314,9 +359,6 @@ const AiAgentAdminAgentsTable = () => {
                                                             c="ldGray.7"
                                                             fw={500}
                                                             truncate
-                                                            ref={
-                                                                isTruncated.ref
-                                                            }
                                                         >
                                                             {channelName}
                                                         </Text>
@@ -339,7 +381,7 @@ const AiAgentAdminAgentsTable = () => {
                 size: 120,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconUsers} color="ldGray.6" />
+                        <MantineIcon icon={IconUsers} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -370,8 +412,6 @@ const AiAgentAdminAgentsTable = () => {
                                             size={12}
                                         />
                                     }
-                                    radius="sm"
-                                    tt="none"
                                 >
                                     {groupCount}
                                 </Badge>
@@ -387,8 +427,6 @@ const AiAgentAdminAgentsTable = () => {
                                             size={12}
                                         />
                                     }
-                                    radius="sm"
-                                    tt="none"
                                 >
                                     {userCount}
                                 </Badge>
@@ -404,7 +442,7 @@ const AiAgentAdminAgentsTable = () => {
                 size: 150,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconClock} color="ldGray.6" />
+                        <MantineIcon icon={IconClock} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -427,16 +465,12 @@ const AiAgentAdminAgentsTable = () => {
                     const agent = row.original;
 
                     return (
-                        <Menu
-                            position="bottom-end"
-                            withArrow
-                            withinPortal
-                            shadow="md"
-                            width={200}
-                        >
+                        <Menu position="bottom-end" withArrow width={200}>
                             {' '}
                             <Menu.Target>
-                                <ActionIcon variant="subtle" color="gray">
+                                <ActionIcon
+                                    onClick={(event) => event.stopPropagation()}
+                                >
                                     <MantineIcon icon={IconDots} />
                                 </ActionIcon>
                             </Menu.Target>
@@ -445,9 +479,11 @@ const AiAgentAdminAgentsTable = () => {
                                     leftSection={
                                         <MantineIcon icon={IconSettings} />
                                     }
-                                    onClick={() => {
+                                    onClick={(event) => {
+                                        event.stopPropagation();
                                         void navigate(
                                             `/projects/${agent.projectUuid}/ai-agents/${agent.uuid}/edit`,
+                                            { state: settingsLinkState },
                                         );
                                     }}
                                 >
@@ -457,7 +493,8 @@ const AiAgentAdminAgentsTable = () => {
                                     leftSection={
                                         <MantineIcon icon={IconMessageCircle} />
                                     }
-                                    onClick={() => {
+                                    onClick={(event) => {
+                                        event.stopPropagation();
                                         void navigate(
                                             `/projects/${agent.projectUuid}/ai-agents/${agent.uuid}`,
                                         );
@@ -471,45 +508,40 @@ const AiAgentAdminAgentsTable = () => {
                 },
             },
         ],
-        [projectsMap, slackChannels, navigate],
+        [projectsMap, slackChannels, navigate, settingsLinkState],
     );
 
     const table = useContentTable({
         columns,
         data: filteredAgents,
         enableColumnResizing: false,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: true,
         enableTopToolbar: true,
         enableBottomToolbar: false,
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
         mantineTableContainerProps: {
             style: {
                 maxHeight: 'calc(100dvh - 350px)',
             },
         },
+        mantineTableProps: {
+            highlightOnHover: true,
+        },
 
-        mantineTableHeadRowProps: {
-            style: {
-                boxShadow: 'none',
-            },
+        mantineTableBodyRowProps: ({ row, table: mantineTable }) => {
+            if (mantineTable.getState().showSkeletons) {
+                return {};
+            }
+
+            const agent = row.original;
+
+            return {
+                onClick: () => {
+                    void navigate(
+                        `/projects/${agent.projectUuid}/ai-agents/${agent.uuid}`,
+                    );
+                },
+            };
         },
         mantineTableBodyCellProps: {
             h: 72,
@@ -534,30 +566,30 @@ const AiAgentAdminAgentsTable = () => {
                             placeholder="Search agents"
                         />
 
-                        <Divider
-                            orientation="vertical"
-                            w={1}
-                            h={20}
-                            style={{
-                                alignSelf: 'center',
-                            }}
-                        />
+                        <Divider orientation="vertical" w={1} h={20} />
                         <ProjectsFilter
                             selectedProjectUuids={selectedProjectUuids}
-                            setSelectedProjectUuids={setSelectedProjectUuids}
+                            setSelectedProjectUuids={
+                                handleSelectedProjectUuidsChange
+                            }
                             tooltipLabel="Filter agents by project"
+                        />
+
+                        <Divider orientation="vertical" w={1} h={20} />
+                        <Switch
+                            size="xs"
+                            label="Hide preview projects"
+                            checked={hidePreviewProjects}
+                            onChange={(event) =>
+                                setHidePreviewProjects(
+                                    event.currentTarget.checked,
+                                )
+                            }
                         />
 
                         {hasActiveFilters && (
                             <>
-                                <Divider
-                                    orientation="vertical"
-                                    w={1}
-                                    h={20}
-                                    style={{
-                                        alignSelf: 'center',
-                                    }}
-                                />
+                                <Divider orientation="vertical" w={1} h={20} />
                                 <Button
                                     variant="subtle"
                                     size="xs"

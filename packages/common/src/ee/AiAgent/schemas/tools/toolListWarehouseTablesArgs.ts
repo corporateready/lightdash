@@ -1,43 +1,29 @@
 import { z } from 'zod';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
 
-const TOOL_LIST_WAREHOUSE_TABLES_DESCRIPTION = `Tool: list_warehouse_tables
+export const TOOL_LIST_WAREHOUSE_TABLES_DESCRIPTION = `List the physical tables in the connected data warehouse as qualified database.schema.table names. Use it before writing raw SQL to find a raw, staging or seed table that no explore exposes, and its exact schema, so the first query names the table correctly. It reads a cached catalog, so it is fast and needs no approval.
 
-Purpose:
-List physical tables available in the connected data warehouse. Use this BEFORE writing a runSql call when you need to discover the correct schema or table name for a table that isn't already exposed via an explore.
+For explore-backed tables use grepFields; for a raw table's columns use describeWarehouseTable.`;
 
-Returns a list of fully-qualified tables (database, schema, table). Results come from a cached metadata catalog, so this is fast and does NOT require user approval.
-
-When to use:
-- You want to write raw SQL and need the qualified table name (database.schema.table) on the first try.
-- You're looking for a raw / staging / seed table that isn't surfaced by findExplores.
-- You're trying to confirm a schema name before writing SQL.
-
-Do NOT use:
-- For column/field discovery — use findFields on the relevant explore instead.
-- To run ad-hoc queries — use runSql.
-
-Parameters:
-- schema: Optional. Filter results to a specific schema name (e.g. "jaffle", "public", "raw").
-- search: Optional. Case-insensitive substring filter on table name (e.g. "work_order").
-- limit: Optional. Maximum number of tables to return. Defaults to 100.
-`;
-
-export const toolListWarehouseTablesArgsSchema = createToolSchema({
-    description: TOOL_LIST_WAREHOUSE_TABLES_DESCRIPTION,
-})
+export const toolListWarehouseTablesArgsSchema = createToolSchema()
     .extend({
         schema: z
             .string()
             .optional()
-            .describe('Optional schema name to filter results.'),
+            .describe(
+                'Schema to list, e.g. "jaffle", "public" or "raw". Omit to list every schema.',
+            ),
         search: z
             .string()
             .optional()
             .describe(
-                'Optional case-insensitive substring filter on table name.',
+                'Case-insensitive substring of the table name, e.g. "work_order".',
             ),
-        limit: z
+        limit: z.coerce
             .number()
             .int()
             .positive()
@@ -51,4 +37,58 @@ export const toolListWarehouseTablesArgsSchema = createToolSchema({
 
 export type ToolListWarehouseTablesArgs = z.infer<
     typeof toolListWarehouseTablesArgsSchema
+>;
+
+const tableSchema = z.object({
+    database: z.string(),
+    schema: z.string(),
+    table: z.string(),
+    qualifiedName: z
+        .string()
+        .describe('"database.schema.table", ready to use in SQL.'),
+});
+
+export const toolListWarehouseTablesStructuredContentSchema = z.union([
+    z.object({
+        matchCount: z
+            .literal(0)
+            .describe('Number of tables matched; 0 when nothing matched.'),
+        filters: z
+            .object({
+                schema: z.string().nullable(),
+                search: z.string().nullable(),
+            })
+            .describe('Filters applied to the catalog; null when not given.'),
+        tables: z
+            .array(tableSchema)
+            .length(0)
+            .describe(
+                'Matched tables, in the same order as the text; empty when none matched.',
+            ),
+    }),
+    z.object({
+        matchCount: z
+            .number()
+            .int()
+            .positive()
+            .describe('Number of tables matched; 0 when nothing matched.'),
+        tables: z
+            .array(tableSchema)
+            .describe(
+                'Matched tables, in the same order as the text; empty when none matched.',
+            ),
+    }),
+]);
+
+export type ToolListWarehouseTablesStructuredContent = z.infer<
+    typeof toolListWarehouseTablesStructuredContentSchema
+>;
+
+export const toolListWarehouseTablesOutputSchema = structuredToolOutputSchema({
+    metadata: baseOutputMetadataSchema,
+    structuredContent: toolListWarehouseTablesStructuredContentSchema,
+});
+
+export type ToolListWarehouseTablesOutput = z.infer<
+    typeof toolListWarehouseTablesOutputSchema
 >;

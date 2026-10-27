@@ -17,3 +17,46 @@ export const useAiAgentPermission = ({
         }),
     );
 };
+
+export const useCanCreateAiAgentThread = (projectUuid?: string) => {
+    const { user } = useApp();
+    return !!user.data?.ability.can(
+        'create',
+        subject('AiAgentThread', {
+            organizationUuid: user.data?.organizationUuid,
+            projectUuid,
+        }),
+    );
+};
+
+export const useCanManageAiAgentThread = ({
+    projectUuid,
+    threadUserUuid,
+}: {
+    projectUuid?: string;
+    threadUserUuid?: string;
+}) => {
+    const { user } = useApp();
+    return !!user.data?.ability.can(
+        'manage',
+        subject('AiAgentThread', {
+            organizationUuid: user.data?.organizationUuid,
+            projectUuid,
+            userUuid: threadUserUuid,
+        }),
+    );
+};
+
+export const useAiAgentOrgPermission = ({
+    action,
+}: {
+    action: 'manage' | 'view';
+}) => {
+    const { user } = useApp();
+    return user.data?.ability.can(
+        action,
+        subject('OrganizationAiAgent', {
+            organizationUuid: user.data?.organizationUuid,
+        }),
+    );
+};

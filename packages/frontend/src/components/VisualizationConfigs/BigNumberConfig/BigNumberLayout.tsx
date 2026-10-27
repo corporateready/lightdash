@@ -1,5 +1,5 @@
 import { getItemId, type CompactOrAlias } from '@lightdash/common';
-import { ActionIcon, Group, Select, Tooltip } from '@mantine-8/core';
+import { ActionIcon, Group, Select, Tooltip } from '@mantine/core';
 import {
     IconEye,
     IconEyeOff,
@@ -7,38 +7,60 @@ import {
     IconTableOff,
 } from '@tabler/icons-react';
 import { type FC } from 'react';
+import {
+    selectBigNumberDefaultLabel,
+    selectBigNumberEditor,
+    selectBigNumberGranularityFields,
+    selectBigNumberSelectedField,
+    selectBigNumberShowStyle,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
+import { useBigNumberEditorActions } from '../../../hooks/useBigNumberConfig';
 import FieldSelect from '../../common/FieldSelect';
 import MantineIcon from '../../common/MantineIcon';
-import { isBigNumberVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationInputs,
+    useVisualizationInputSelector,
+} from '../../LightdashVisualization/useVisualizationContext';
 import { Config } from '../common/Config';
+import { LabelEditor } from '../common/LabelEditor';
 import { StyleOptions } from './common';
-import { LabelEditor } from './LabelEditor';
 
 export const Layout: FC = () => {
-    const { visualizationConfig, itemsMap } = useVisualizationContext();
-
-    if (!isBigNumberVisualizationConfig(visualizationConfig)) return null;
-
+    const { itemsMap } = useVisualizationInputs();
+    const bigNumberLabel = useVisualizationSelector(
+        (state) => selectBigNumberEditor(state).bigNumberLabel,
+    );
+    const bigNumberStyle = useVisualizationSelector(
+        (state) => selectBigNumberEditor(state).bigNumberStyle,
+    );
+    const showBigNumberLabel = useVisualizationSelector(
+        (state) => selectBigNumberEditor(state).showBigNumberLabel,
+    );
+    const showTableNamesInLabel = useVisualizationSelector(
+        (state) => selectBigNumberEditor(state).showTableNamesInLabel,
+    );
+    const selectedFieldId = useVisualizationInputSelector(
+        selectBigNumberSelectedField,
+    );
+    const defaultLabel = useVisualizationInputSelector(
+        selectBigNumberDefaultLabel,
+    );
+    const showStyle = useVisualizationInputSelector(selectBigNumberShowStyle);
+    const granularityFields = useVisualizationInputSelector(
+        selectBigNumberGranularityFields,
+    );
     const {
-        bigNumberLabel,
-        defaultLabel,
-        setBigNumberLabel,
-        bigNumberStyle,
-        setBigNumberStyle,
-        setBigNumberComparisonStyle,
-        showStyle,
-        selectedField: selectedFieldId,
         setSelectedField,
-        getField,
-        showBigNumberLabel,
-        setShowBigNumberLabel,
-        showTableNamesInLabel,
-        setShowTableNamesInLabel,
-        granularityFields,
-    } = visualizationConfig.chartConfig;
+        setBigNumberLabel,
+        styleChange,
+        toggleShowBigNumberLabel,
+        toggleShowTableNamesInLabel,
+    } = useBigNumberEditorActions();
 
-    const selectedField = getField(selectedFieldId);
+    const selectedField = selectedFieldId
+        ? itemsMap?.[selectedFieldId]
+        : undefined;
 
     return (
         <Config>
@@ -62,15 +84,11 @@ export const Layout: FC = () => {
                         data={StyleOptions}
                         value={bigNumberStyle ?? ''}
                         onChange={(newValue) => {
-                            if (!newValue) {
-                                setBigNumberStyle(undefined);
-                                setBigNumberComparisonStyle(undefined);
-                            } else {
-                                setBigNumberStyle(newValue as CompactOrAlias);
-                                setBigNumberComparisonStyle(
-                                    newValue as CompactOrAlias,
-                                );
-                            }
+                            styleChange(
+                                newValue
+                                    ? (newValue as CompactOrAlias)
+                                    : undefined,
+                            );
                         }}
                     />
                 )}
@@ -89,7 +107,6 @@ export const Layout: FC = () => {
 
                     <Group gap={4} wrap="nowrap" mt={25}>
                         <Tooltip
-                            withinPortal
                             label={
                                 bigNumberLabel
                                     ? 'Clear custom label to toggle table names'
@@ -99,12 +116,9 @@ export const Layout: FC = () => {
                             }
                         >
                             <ActionIcon
-                                variant="subtle"
                                 onClick={() => {
                                     if (!bigNumberLabel) {
-                                        setShowTableNamesInLabel(
-                                            !showTableNamesInLabel,
-                                        );
+                                        toggleShowTableNamesInLabel();
                                     }
                                 }}
                                 disabled={!!bigNumberLabel}
@@ -118,12 +132,7 @@ export const Layout: FC = () => {
                                 />
                             </ActionIcon>
                         </Tooltip>
-                        <ActionIcon
-                            variant="subtle"
-                            onClick={() => {
-                                setShowBigNumberLabel(!showBigNumberLabel);
-                            }}
-                        >
+                        <ActionIcon onClick={toggleShowBigNumberLabel}>
                             <MantineIcon
                                 icon={showBigNumberLabel ? IconEye : IconEyeOff}
                             />

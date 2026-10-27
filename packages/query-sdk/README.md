@@ -92,9 +92,17 @@ lightdash
         { field: 'amount', operator: 'greaterThan', value: 1000 },
         { field: 'order_date', operator: 'inThePast', value: 90, unit: 'days' },
     ])
+    .metricFilters([
+        { field: 'total_revenue', operator: 'greaterThanOrEqual', value: 5000 },
+    ])
     .sorts([{ field: 'total_revenue', direction: 'desc' }])
     .limit(100);
 ```
+
+`.filters()` accepts dimensions and serializes them as WHERE filters.
+`.metricFilters()` accepts metrics and serializes them as HAVING filters. A
+metric can be used only as a filter and does not need to be selected with
+`.metrics()`.
 
 Supported filter operators: `equals`, `notEquals`, `greaterThan`, `lessThan`, `greaterThanOrEqual`, `lessThanOrEqual`, `inThePast`, `notInThePast`, `inTheNext`, `inTheCurrent`, `notInTheCurrent`, `inBetween`, `notInBetween`, `isNull`, `notNull`, `startsWith`, `endsWith`, `include`, `doesNotInclude`.
 
@@ -140,9 +148,128 @@ strings, numbers, or arrays of either. They are sent at the top level of the API
 | Field     | Type            | Description                                                      |
 | --------- | --------------- | ---------------------------------------------------------------- |
 | `data`    | `Row[]`         | Array of flat objects. Numbers are numbers, strings are strings. |
+| `columns` | `Column[]`      | Field metadata for returned rows.                                |
+| `format`  | `(row, fieldName) => string` | Server-formatted value for a field.                  |
+| `totalResults` | `number \| null` | Total rows returned by the loaded source query. |
 | `loading` | `boolean`       | True while the query is running.                                 |
 | `error`   | `Error \| null` | Error if the query failed.                                       |
 | `refetch` | `() => void`    | Re-run the query.                                                |
+| `queryUuid` | `string \| null` | Async query UUID for the loaded source query.                 |
+| `getUnderlyingData` | `({ row, metric, limit? }) => Promise<UnderlyingDataResult>` | Fetch raw rows behind an aggregated metric value. |
+| `downloadUnderlyingData` | `({ row, metric, fileType?, values?, limit?, filename? }) => Promise<DownloadResultsResult>` | Schedule a backend CSV/XLSX export for raw rows behind an aggregated metric value. |
+| `downloadResults` | `({ fileType?, values?, limit?, filename? }) => Promise<DownloadResultsResult>` | Schedule a backend CSV/XLSX export for this query. |
+
+## Underlying data
+
+Use `getUnderlyingData()` to retrieve the raw rows behind a metric value from an
+already-loaded query result:
+
+```tsx
+function RevenueTable() {
+    const { data, getUnderlyingData } = useLightdash(
+        lightdash
+            .model('orders')
+            .dimensions(['customer_segment'])
+            .metrics(['total_revenue']),
+    );
+
+    async function openUnderlying(row) {
+        const result = await getUnderlyingData({
+            row,
+            metric: 'total_revenue',
+            limit: 500,
+        });
+        console.log(result.rows);
+    }
+
+    return data.map((row) => (
+        <button onClick={() => openUnderlying(row)}>
+            View {row.customer_segment}
+        </button>
+    ));
+}
+```
+
+Call it from a user action. Pass the original row from `data` and the same
+metric name used in `.metrics([...])`.
+
+Use `downloadUnderlyingData()` when the user wants to export those underlying
+rows without fetching or serializing them in the iframe:
+
+```tsx
+function RevenueTable() {
+    const { data, downloadUnderlyingData } = useLightdash(
+        lightdash
+            .model('orders')
+            .dimensions(['customer_segment'])
+            .metrics(['total_revenue']),
+    );
+
+    return data.map((row) => (
+        <button
+            onClick={() =>
+                downloadUnderlyingData({
+                    row,
+                    metric: 'total_revenue',
+                    fileType: 'csv',
+                    values: 'formatted',
+                    limit: 'all',
+                    filename: `orders-${row.customer_segment}`,
+                })
+            }
+        >
+            Download rows
+        </button>
+    ));
+}
+```
+
+For underlying-data downloads, `limit: 'table'` uses the backend's default
+underlying-data row limit, `limit: 'all'` asks Lightdash for all matching rows
+within backend export caps, and a number requests that many rows.
+
+## Backend downloads
+
+Use `downloadResults()` to export query results through Lightdash's backend
+CSV/XLSX pipeline:
+
+```tsx
+function ResultsTable() {
+    const { data, columns, format, downloadResults } = useLightdash(
+        lightdash
+            .model('orders')
+            .dimensions(['customer_segment'])
+            .metrics(['total_revenue']),
+    );
+
+    return (
+        <button
+            onClick={() =>
+                downloadResults({
+                    fileType: 'xlsx',
+                    values: 'formatted',
+                    limit: 'table',
+                    filename: 'revenue-by-segment',
+                })
+            }
+        >
+            Download
+        </button>
+    );
+}
+```
+
+Options:
+
+- `fileType`: `'csv'` or `'xlsx'`; defaults to `'csv'`.
+- `values`: `'formatted'` or `'raw'`; defaults to `'formatted'`.
+- `limit`: `'table'`, `'all'`, or a custom positive row count; defaults to `'table'`.
+- `filename`: optional download filename without extension.
+
+`limit: 'table'` reuses the loaded query. `limit: 'all'` and custom limits
+rerun the same metric query with the requested row limit, wait for it to be
+ready, and then schedule the backend export job. The full export is generated
+by Lightdash; rows are not serialized in the app iframe.
 
 ## User context
 
@@ -167,3 +294,62 @@ pnpm -F query-sdk fix-format    # format with oxfmt
 ```
 
 See `example/` for a working F1 dashboard demo.
+
+## SDK feature and fix manifests
+
+The SDK announces the features and fixes built into every app bundle so
+Lightdash can offer a rebuild when a newer SDK adds something applicable. When
+adding a user-facing capability, register a stable kebab-case key in
+`src/features.ts`'s `SDK_FEATURES` and mirror it in
+`packages/common/src/ee/apps/sdkFeatures.ts`; features may include `wiring`
+when app code must opt in.
+
+When fixing SDK behavior that becomes active after a rebuild, add a stable key,
+label, description, and `appliesTo` target to `SDK_FIXES` in both registries.
+Fixes describe the shipped behavior only: never add `wiring`, infer old fixes
+from SDK versions, or backfill historical entries. The host lists missing
+applicable fixes separately from features and rebuilding activates them.
+
+### Gradient chart options
+
+A chart type can declare a chart-wide `gradient` config option. The optional
+`showBounds` declaration defaults to `true`. Set it to `false` for a decorative
+gradient: the editor shows Start/End colors without minimum or maximum controls.
+The runtime value still contains `colors`, `min`, and `max`; the chart can use
+`colors` directly for a fill without calling `createGradientColorScale`.
+Hiding the controls does not change stored bounds or the SDK scale behavior.
+
+```json
+{
+  "type": "gradient",
+  "name": "scale",
+  "label": "Colour scale",
+  "default": {
+    "colors": ["#2166ac", "#f7f7f7", "#b2182b"],
+    "min": "auto",
+    "max": "auto"
+  }
+}
+```
+
+Gradients contain two to five fixed hex colours (3, 6, or 8 digits). Palette swatches are
+saved as colours, so changing the chart palette does not change saved stops.
+Each bound independently accepts `"auto"` or a finite number.
+
+```tsx
+import { createGradientColorScale, getRaw, useVizContext } from '@lightdash/query-sdk';
+
+const context = useVizContext();
+const values = context.rows.map((row) => getRaw(row, context.fieldMapping.value));
+const colorForValue = createGradientColorScale(context.options.scale, values);
+const fill = colorForValue(values[0]) ?? '#888888';
+```
+
+Build the scale once per render. The chart chooses the values used for automatic
+bounds; only finite numbers contribute. Numeric strings are not coerced. Colours
+interpolate between evenly spaced stops in OKLab, matching the map gradient
+preview. Out-of-range numbers clamp to endpoint colours. Equal bounds use the
+middle indexed stop, matching maps. Missing or non-numeric values, malformed
+gradients, reversed bounds, and automatic bounds without finite values return
+`undefined`, letting the chart use its fallback colour. Fixed bounds work without
+supplying values. Per-field gradient integration is not yet available.

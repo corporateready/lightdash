@@ -1,8 +1,8 @@
 # Timezone Questions — Specific Answers
 
-Direct answers to the questions raised in the [timezone review](./timezone-review.md). Each answer is grounded in what the code actually does today, with `file:line` references. Where the answer is "we don't do this," that's stated explicitly.
+Direct answers to the questions raised while reviewing timezone handling against industry practice. Each answer is grounded in what the code actually does today, with `file:line` references. Where the answer is "we don't do this," that's stated explicitly.
 
-Companion to [`timezone-handling.md`](./timezone-handling.md) (what we do) and [`timezone-review.md`](./timezone-review.md) (how it compares to industry).
+Companion to [`timezone-handling.md`](./timezone-handling.md) (what we do).
 
 ---
 
@@ -44,7 +44,7 @@ Companion to [`timezone-handling.md`](./timezone-handling.md) (what we do) and [
 
 The closest workaround is `convert_timezone: false` per-dimension (translator.ts:219), but that's a *display* opt-out, not a wall-clock-tz declaration. The filter SQL still converts as if the value were in `dataTimezone`.
 
-**This is a real gap** — flagged in [`timezone-review.md` section E](./timezone-review.md#e-the-datatimezone-is-an-unvalidated-user-assertion). Per the research synthesis, this is the single highest-leverage feature to differentiate the design.
+**This is a real gap**. This is the single highest-leverage feature to differentiate the design.
 
 ---
 
@@ -90,27 +90,28 @@ So we *carry* the metadata. But we *re-derive* on top of it in five places (the 
 `packages/common/src/utils/resolveQueryTimezone.ts`:
 
 ```
-metricQuery.timezone   (per-chart pin)
-  → user.timezone     (profile preference, if any)
-    → project.queryTimezone
-      → 'UTC'
+sessionTimezone        (embed ?timezone= URL param, embed sessions only)
+  → metricQuery.timezone   (per-chart pin)
+    → user.timezone     (profile preference, if any)
+      → project.queryTimezone
+        → 'UTC'
 ```
 
-This is the same order documented in [`timezone-handling.md:23`](./timezone-handling.md). Anonymous viewers (embeds, JWT, service accounts) skip the user layer (`getAccountUserTimezone(account)` returns null for them).
+This is the same order documented in [`timezone-handling.md:23`](./timezone-handling.md). Anonymous viewers (embeds, JWT, service accounts) skip the user layer (`getAccountUserTimezone(account)` returns null for them); embedded sessions may set the top-priority `sessionTimezone` via the `?timezone=` URL param.
 
 ### Per-content choice between a pinned TZ and a viewer TZ?
 
-**Partially.** The per-chart pin in Explorer (chart-level `metricQuery.timezone`) gives an **author-pinned** mode — once set, every viewer sees that zone. An unpinned chart with `EnableUserTimezones=on` gives a **viewer-TZ** mode — each viewer's profile drives the resolution.
+**Partially.** The per-chart pin in Explorer (chart-level `metricQuery.timezone`) gives an **author-pinned** mode — once set, every viewer sees that zone. A chart pinned to `user_timezone` with `EnableTimezoneSupport=on` gives a **viewer-TZ** mode — each viewer's profile drives the resolution.
 
 **What we don't have**: an *author-saved-at-save-time* default that silently inherits the author's zone. We require the author to explicitly pin if they want viewer-stable behavior. This is more honest, slightly less ergonomic.
 
 ### Is there a user-TZ concept at all? What's the roadmap?
 
-**Yes, today.** `users.timezone` (IANA string) is settable in Profile Settings → Default timezone, gated behind the `EnableUserTimezones` feature flag (`featureFlags.ts:12`). Stored in the database, validated server-side in `UserService.ts`, threaded through every authenticated query.
+**Yes, today.** `users.timezone` (IANA string) is settable in Profile Settings → Default timezone, gated behind the `EnableTimezoneSupport` feature flag. Stored in the database, validated server-side in `UserService.ts`, threaded through every authenticated query.
 
-**Admin opt-in**: yes — `EnableUserTimezones` defaults off and can be toggled per-org via `feature_flag_overrides`.
+**Admin opt-in**: yes — `EnableTimezoneSupport` defaults off and can be toggled per-org via `feature_flag_overrides`.
 
-**Sharp footgun**: turning the flag off does NOT clear stored `users.timezone` values, and `resolveQueryTimezone` honors them regardless of the flag (only the picker UI is gated). Flagged in [`timezone-review.md` Concern 1](./timezone-review.md#concern-1--feature-flag-entanglement-is-wide-and-underspecified). Fix it before any customer hits "I disabled the feature but it still applies."
+**Flag-off behavior**: turning the flag off does NOT clear stored `users.timezone` values, but they are no longer applied — when `EnableTimezoneSupport` is off, the surrounding query pipeline (warehouse session setup, timezone-aware `DATE_TRUNC`, returning `displayTimezone`) is short-circuited, so the resolved zone is not applied to the query. The stored preference is preserved (non-destructive) and re-applies when the flag is turned back on.
 
 ### Scheduled deliveries & embeds — which TZ wins?
 
@@ -118,7 +119,7 @@ This is the same order documented in [`timezone-handling.md:23`](./timezone-hand
 
 1. **`scheduler.timezone`** — when to send. A separate field on the scheduler row (`SchedulerClient.ts:872`). Used purely for cron parsing. Has nothing to do with query semantics.
 2. **Query TZ for the scheduled report** — resolved via the normal chain, but the *user* is the schedule owner (or an impersonated account), so their profile TZ applies.
-3. **Embed TZ** — embed viewers are anonymous; their `getAccountUserTimezone` returns null, so they fall through to the project default. Embed JWTs do not currently surface a user-TZ override.
+3. **Embed TZ** — embed viewers are anonymous; their `getAccountUserTimezone` returns null. An embedded session can carry a per-session query TZ via the `?timezone=<IANA>` embed URL param, threaded in as the top-priority `sessionTimezone` argument (wins over the chart pin); absent that param it falls through to the project default. The signed JWT itself still has no timezone field.
 
 **Why this matters**: an admin in NY sets up a daily 9am Pacific delivery (`scheduler.timezone = America/Los_Angeles`). The report queries fire at 9am PT but compute "last 7 days" in NY because that's the schedule owner's TZ. The recipient in Singapore reads numbers bracketed by NY midnight. This is the kind of cross-tz confusion that warrants explicit documentation. **We don't have a doc for this.**
 
@@ -135,10 +136,10 @@ This is the same order documented in [`timezone-handling.md:23`](./timezone-hand
 **Surface consistency**:
 - **Interactive queries**: Node `moment()` in the resolved query TZ.
 - **Scheduled queries**: same path, but the resolution chain runs with the schedule owner's user.
-- **Embed queries**: same path, but `getAccountUserTimezone` returns null so it falls through to project TZ.
+- **Embed queries**: same path, but `getAccountUserTimezone` returns null, so it falls through to project TZ unless the `?timezone=` embed URL param sets a per-session timezone.
 - **SQL Runner / user-written SQL**: `CURRENT_TIMESTAMP` runs on the warehouse against whatever session TZ we set. **Inconsistent with the rest** — a user who writes `WHERE created_at > NOW()` in SQL Runner does NOT get the same boundary as `IN_THE_CURRENT` in Explore.
 
-The fix is to expose the resolved TZ to user SQL as a template variable. Flagged in [`timezone-review.md` section H](./timezone-review.md#h-no-sql-side-surface-for-the-resolved-tz).
+The fix is to expose the resolved TZ to user SQL as a template variable.
 
 ### "Yesterday" filter on a DATE column — what's the literal?
 
@@ -162,11 +163,12 @@ The DATE-base bypass at `filtersCompiler.ts` is the same logic as the SELECT-sid
 
 | Configuration | Alice's SQL == Bob's SQL? |
 |---|---|
-| `EnableUserTimezones=off`, no chart pin | ✅ Yes — both get project TZ |
-| `EnableUserTimezones=off`, chart pinned to Pacific | ✅ Yes — pin wins |
-| `EnableUserTimezones=on`, no chart pin, neither has profile TZ | ✅ Yes — both fall through to project |
-| `EnableUserTimezones=on`, no chart pin, both have profile TZs | ❌ No — Alice's WHERE uses Tokyo bounds, Bob's uses LA bounds |
-| `EnableUserTimezones=on`, chart pinned to Pacific | ✅ Yes — pin wins over profile |
+| `EnableTimezoneSupport=off`, no chart pin | ✅ Yes — both get project TZ |
+| `EnableTimezoneSupport=off`, chart pinned to `user_timezone` | ✅ Yes — flag off, both fall back to project TZ |
+| `EnableTimezoneSupport=on`, no chart pin | ✅ Yes — both get project TZ |
+| `EnableTimezoneSupport=on`, chart pinned to `user_timezone`, neither has profile TZ | ✅ Yes — both fall through to project |
+| `EnableTimezoneSupport=on`, chart pinned to `user_timezone`, both have profile TZs | ❌ No — Alice's WHERE uses Tokyo bounds, Bob's uses LA bounds |
+| `EnableTimezoneSupport=on`, chart pinned to Pacific | ✅ Yes — pin wins over profile |
 | Dashboard date filter (absolute range) | ✅ Yes — absolute filters are UTC instants regardless of viewer |
 | Dashboard date filter (relative — "last 7 days") | depends on the chart settings as above |
 
@@ -193,7 +195,7 @@ If we used `CURRENT_DATE` on the warehouse instead, the answer would depend on t
 
 ### Plans for a `wall_clock_timezone` annotation?
 
-**Not on the roadmap that I can find.** Worth doing — flagged as a "real gap" in the review (section E). The implementation surface is small: a new column-level meta key like `meta.dimension.wall_clock_timezone: 'America/Los_Angeles'` that overrides `dataTimezone` per-dimension. Wires into `getColumnTimezone(credentials, dimension)` and threads through the existing `sourceTimezone` parameter chain in `timeFrames.ts`. Two engineering days at most.
+**Now tracked for v3 (GLITCH-463), not yet built.** The implementation surface is small: a new column-level meta key like `meta.dimension.wall_clock_timezone: 'America/Los_Angeles'` that overrides `dataTimezone` per-dimension. Wires into `getColumnTimezone(credentials, dimension)` and threads through the existing `sourceTimezone` parameter chain in `timeFrames.ts`. Two engineering days at most.
 
 ---
 
@@ -298,22 +300,51 @@ The companion filter parity is also implemented ([`timezone-handling.md:149`](./
 
 **Two different stories.**
 
-1. **Server-side warehouse SQL**: handled correctly by the warehouse's native DST-aware functions. `CONVERT_TIMEZONE` / `AT TIME ZONE` / `TIMESTAMP_TRUNC(..., 'tz')` all produce real 23- or 25-hour days at DST boundaries. A "spring forward" Sunday in `America/New_York` correctly returns 23 hourly buckets, with the 2am hour missing.
+1. **Server-side warehouse SQL**: spring-forward is handled correctly and uniformly. `CONVERT_TIMEZONE` / `AT TIME ZONE` / `TIMESTAMP_TRUNC(..., 'tz')` all return 23 hourly buckets for a "spring forward" Sunday in `America/New_York`, with the 2am hour missing, on every warehouse. **Fall-back (the 25-hour day) is NOT uniform** across warehouses, see "DST fall-back" below.
 
 2. **Frontend ECharts shift** (`packages/frontend/src/hooks/echarts/timezoneShift.ts`): **broken at DST boundaries.** The shift offset is computed *per row* (`getTimezoneOffsetMs(rawMs, timezone)`) but applied as a constant adjustment when ECharts renders. For an hour-grain chart spanning a DST transition, the bars before and after the transition use different offsets — visually correct in position but the gap between them looks like a 1-hour jump.
 
-The internal doc does not mention DST. Flagged in [`timezone-review.md` section B](./timezone-review.md#b-the-echarts-shifted-column-workaround). Add a unit test that exercises 2024-03-10 (spring forward) and 2024-11-03 (fall back) for `America/New_York` to either prove or fix this.
+The internal doc does not mention DST. The frontend half is now fixed: sub-day and DAY+ grains both shift onto the project wall-clock timeline via the companion column (GLITCH-449 → GLITCH-509), so the two folded hours render correctly and ECharts places native adaptive ticks on real day boundaries. The fall-back bucketing question below is now resolved (merge, GLITCH-509) — see that section.
+
+### DST fall-back — do the two 1 AM hours merge into one bucket or split into two?
+
+> **Resolved — standardized on merge (GLITCH-504 decision + GLITCH-509 fix).** All warehouses now collapse the fold into one `count=2` bucket. The analysis below documents the pre-fix divergence and why merge was chosen; the "verified 2026-06-12" table is the *before* state. BigQuery and ClickHouse were moved off instant-domain truncation to merge like the rest.
+
+At a fall-back the local clock hits 1 AM twice. The two hours are wall-clock-identical but are genuinely distinct instants an hour apart (New York 2024-11-03: `01:00 EDT` = `05:00Z` and `01:00 EST` = `06:00Z`). Whether an HOUR `DATE_TRUNC` produces one bucket or two **used to diverge by warehouse** (now unified on merge):
+
+Verified 2026-06-12 (pre-GLITCH-509) by querying the fold pair at HOUR + count, project TZ `America/New_York` (via `POST /api/v2/projects/{uuid}/query/metric-query`):
+
+| Warehouse | Result | Buckets |
+| --- | --- | --- |
+| BigQuery, ClickHouse | **SPLIT** | two `01:00` rows (`05:00Z` and `06:00Z`), count 1 each |
+| Postgres, Snowflake, Databricks, Trino | **MERGE** | one `01:00` row, count 2 |
+| Redshift, DuckDB, Spark | **MERGE** (by the same route, not re-tested) | one `01:00` row, count 2 |
+
+So a 25-hour fall-back day renders as 25 distinct hourly buckets on BigQuery/ClickHouse but as 24 (with one double-counted hour) on the merge warehouses.
+
+**This is our SQL, not a warehouse property.** It is decided entirely by whether our per-adapter conversion in `dateTruncTimezoneConversions` (`timeFrames.ts:94`) lands the value in the **naive wall-clock domain** or the **instant domain** before `DATE_TRUNC` runs:
+
+- **Merge route**: `toProjectTz` strips the offset first. Postgres `(col)::timestamptz AT TIME ZONE 'tz'` yields a `timestamp WITHOUT time zone`; Snowflake wraps in `TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ...))`. Both 1 AMs become the bare `01:xx:00` and `GROUP BY` collapses them.
+- **Split route**: BigQuery `TIMESTAMP_TRUNC(col, part, 'tz')` and ClickHouse `toTimeZone(...)` truncate in the instant domain, so the two instants stay distinct.
+
+The same warehouse can do either. Postgres merges with our `AT TIME ZONE` route but **splits** with 3-arg `date_trunc(unit, ts, 'tz')` (available since PG12), confirmed locally. So the divergence is an artifact of our conversion map, not intrinsic warehouse behavior on identical SQL.
+
+**Which is "correct"? — decided: merge.** Under Lightdash's wall-clock contract (group by the local wall-clock hour), **merge is the contract-consistent answer**: both folds are "1 AM" locally, so they belong in one bucket. By that reading the merge warehouses honored the contract and BigQuery/ClickHouse leaked instant-domain semantics. The opposite reading (a fall-back day really has 25 hours, so splitting is the truthful representation) is defensible for precise time-series, but Lightdash made the deliberate call to **merge everywhere** (GLITCH-504) and moved BigQuery/ClickHouse onto the naive-domain route (GLITCH-509).
+
+**Fixability is asymmetric, but split is not blocked.** Unifying on **merge** is cheap and convergent: the naive route is always expressible, and only BigQuery/ClickHouse change. Unifying on **split** is costlier, not impossible: BigQuery/ClickHouse are native and Postgres 12+ has the 3-arg `date_trunc`, but Redshift and Spark/Databricks have no native zone-aware truncation (session-zone-naive timestamps), so a portable split needs hand-rolled offset arithmetic (verified working on Databricks). It also rewrites bucketing SQL on 8 adapters plus a display-label disambiguation, versus 2 adapters for merge. Either direction invalidates cache keys and historical results for every hour/day query.
+
+Tracked as `gap-dst-fold-bucketing` in [`timezones-v2-design.md`](./timezones-v2-design.md) — **resolved (merge)**, shipped in GLITCH-509. The merge route was chosen precisely because it is convergent across all 8+ adapters; the costlier split route (blocked on Redshift/Spark native support) was rejected.
 
 ### Half-hour / 45-minute timezones (India, Nepal, Australia)?
 
-**Should work, but untested.** Our code path is dayjs/moment-tz on the Node side and warehouse-native on the SQL side. Both libraries handle half-hour zones natively (`Asia/Kolkata` is +05:30, `Asia/Kathmandu` is +05:45, `Australia/Eucla` is +08:45).
+**Verified working (GLITCH-453).** Our code path is dayjs/moment-tz on the Node side and warehouse-native on the SQL side. Both libraries handle half-hour zones natively (`Asia/Kolkata` is +05:30, `Asia/Kathmandu` is +05:45, `Australia/Eucla` is +08:45).
 
 **Risk surfaces:**
 - The ECharts shift math (`getTimezoneOffsetMs(rawMs, timezone)` → millisecond addition) — should be fine because dayjs returns minute-level offsets in milliseconds. Worth a smoke test.
 - Excel serialization (`toExcelWallClockDate`) — works on the wall-clock components, so half-hour offsets land correctly.
-- Filter literal formatting — `+05:30` suffix is valid in standard SQL TIMESTAMP literals on Postgres, Snowflake, Redshift, Databricks. **BigQuery's bare-literal path (no offset, `timezone-handling.md:208`) drops the offset entirely** — for a project in `Asia/Kolkata` with a BigQuery DATETIME filter, the boundary literal will be the local wall-clock time interpreted as session-TZ, which may or may not be IST depending on warehouse configuration.
+- Filter literal formatting — `+05:30` suffix is valid in standard SQL TIMESTAMP literals on Postgres, Snowflake, Redshift, Databricks. On BigQuery/ClickHouse the literal is bare (no offset, `timezone-handling.md:208`), but `formatTimestampAsUTCNoOffset` has already converted it to the UTC instant, so the offset is baked in, not dropped — the fractional boundary is correct. (The separate DATETIME/NTZ no-session-TZ limitation applies to non-UTC *stored* data, not to filter boundaries.)
 
-**Recommendation**: add `Asia/Kolkata` to whatever timezone test matrix exists, if any.
+**Coverage**: `Asia/Kathmandu` (+05:45) and `Pacific/Marquesas` (-09:30) sub-day buckets are asserted in `packages/api-tests/tests/queryTimezone.test.ts` on both Postgres and BigQuery.
 
 ### Historical TZ changes (Samoa 2011, Russia bunch)?
 
@@ -359,18 +390,31 @@ The only place this could go wrong is if we ever emitted `IS NULL OR (col >= bou
 
 The one gap: the resolved `queryTimezone` value itself isn't shown next to the SQL — you can infer it from the literals, but a "resolved TZ: America/New_York" label above the SQL panel would close the loop.
 
+**The output is raw by design — we don't auto-convert it.** SQL Runner results bypass `formatRows`, so timestamps render as raw UTC ISO 8601 (`2026-01-15T09:30:00.000Z`) regardless of project timezone. This is intentional: custom SQL can return any shape, so Lightdash will *not* apply the project timezone to SQL Runner / SQL-chart output. The supported path for users who want conversion is the `${ldQueryTimezone}` template variable ([GLITCH-462](https://linear.app/lightdash/issue/GLITCH-462), v3) — they write the conversion in their own SQL without hardcoding a zone; [GLITCH-466](https://linear.app/lightdash/issue/GLITCH-466) additionally labels the resolved TZ next to the compiled SQL.
+
+The residual friction: SQL Runner serializes every timestamp via a JS `Date` → ISO 8601 `Z` string, regardless of the value's real zone, so it both ignores the data/session TZ and misrepresents the value. Verified on Postgres with the warehouse session at Pacific/Pago_Pago (UTC−11):
+
+| Expression | SQL Runner shows | Warehouse `::text` / `to_char` |
+| ---------- | ---------------- | ------------------------------ |
+| `'2026-06-09 12:00:00+00'::timestamptz` | `2026-06-09T12:00:00.000Z` | `2026-06-09 01:00:00-11` |
+| `... AT TIME ZONE 'America/New_York'` | `2026-06-09T08:00:00.000Z` | `2026-06-09 08:00:00` |
+
+The first row shows a TZ-aware value collapsed to the UTC instant with the offset dropped; the second shows a naive (converted) wall-clock stamped with a false `Z`. Either way the rendering misrepresents the value, and casting to text is the only faithful workaround.
+
+Verified on Snowflake too: `CONVERT_TIMEZONE('America/New_York', '2026-06-09 12:00:00 +00:00'::timestamp_tz)` returns a `TIMESTAMP_TZ` of `08:00:00 -04:00`, but SQL Runner displays `2026-06-09T12:00:00.000Z` — *identical* to the unconverted value, so the 2-arg conversion looks completely inert; `TO_CHAR(...)` confirms the real `2026-06-09 08:00:00 -04:00`. (Note Snowflake `TIMESTAMP_TZ` keeps the literal's own offset rather than the session zone, so on Snowflake the drop shows up as this converted-looks-inert case rather than as a session-offset divergence.) Making SQL Runner render timestamps faithfully is tracked as [GLITCH-489](https://linear.app/lightdash/issue/GLITCH-489) (v3), separate from GLITCH-462.
+
 ---
 
 ## The meta question
 
 ### What's the declared design intent — "consistent shape" or "viewer-local"?
 
-**Both, depending on configuration.** Off the rack with `EnableUserTimezones=off`:
-- Every viewer of a non-pinned chart sees project-TZ buckets → **consistent chart shape**.
+**Both, depending on configuration.** Off the rack with `EnableTimezoneSupport=off`:
+- Every viewer sees project-TZ buckets → **consistent chart shape**.
 
-With `EnableUserTimezones=on`:
-- Non-pinned charts shift per viewer → **viewer-local boundaries**.
-- Pinned charts override per viewer → **per-content choice**.
+With `EnableTimezoneSupport=on`:
+- Charts pinned to `user_timezone` shift per viewer → **viewer-local boundaries**.
+- Charts pinned to a specific zone override per viewer → **per-content choice**.
 
 So the architectural intent is "support both, default to consistent." **This is not documented anywhere a customer can find.** Customers discover it via:
 - The Profile Settings picker appearing or not appearing (depending on flag).
@@ -385,14 +429,14 @@ So the architectural intent is "support both, default to consistent." **This is 
 
 | Issue | Severity | Effort | Location |
 |---|---|---|---|
-| ECharts DST shift bug | Correctness | 1d test + 2d fix | `packages/frontend/src/hooks/echarts/timezoneShift.ts` |
-| `EnableUserTimezones=off` doesn't gate stored profile TZs | Correctness | 1d | `resolveQueryTimezone.ts` |
-| Scheduled deliveries TZ interaction undocumented | Docs | 0.5d | `timezone-handling.md` |
-| Per-column wall-clock TZ annotation | Feature | 2d | `translator.ts` + `getColumnTimezone` |
-| BigQuery half-hour offset bare-literal hole | Correctness | 1d | `filtersCompiler.ts` |
-| Pre-agg TZ-frozen-after-project-TZ-change behavior | Correctness | 1d test | materialization path |
-| `${ldQueryTimezone}` SQL templating | Feature | 1w | `MetricQueryBuilder.ts` |
-| Customer-facing "how Lightdash handles TZ" doc | Docs | 2d | new file in docs site |
-| Timestamp leak in SQL Runner output | Polish | indef | warehouse `getSqlForTruncatedDate` |
-| Half-hour TZ test coverage | Testing | 0.5d | test matrix |
-| moment-timezone version pinning policy | Hygiene | 0.5d | `package.json` |
+| ~~ECharts DST shift bug~~ ✅ fixed (GLITCH-449 → 509: all grains shift via companion column) | Correctness | 1d test + 2d fix | `packages/frontend/src/hooks/echarts/timezoneShift.ts` |
+| ~~`EnableTimezoneSupport=off` doesn't gate stored profile TZs~~ ✅ fixed | Correctness | 1d | `resolveQueryTimezone.ts` |
+| Scheduled deliveries TZ interaction undocumented (GLITCH-465, v3; now in the published timezone docs: workspace-admin/set-project-timezone and personal-settings/timezone) | Docs | 0.5d | `timezone-handling.md` |
+| Per-column wall-clock TZ annotation (GLITCH-463, v3) | Feature | 2d | `translator.ts` + `getColumnTimezone` |
+| ~~BigQuery half-hour offset bare-literal hole~~ ✅ not a bug (literal is a pre-converted UTC instant) | Correctness | 1d | `filtersCompiler.ts` |
+| Pre-agg TZ-frozen-after-project-TZ-change behavior (**untracked — no ticket**) | Correctness | 1d test | materialization path |
+| `${ldQueryTimezone}` SQL templating (GLITCH-462, v3) | Feature | 1w | `MetricQueryBuilder.ts` |
+| Customer-facing "how Lightdash handles TZ" doc (GLITCH-457, Phase 3; now in the published timezone docs: workspace-admin/set-project-timezone and personal-settings/timezone) | Docs | 2d | new file in docs site |
+| SQL Runner output is raw UTC ISO by design; conversion is user-driven via `${ldQueryTimezone}`. In-SQL `CONVERT_TIMEZONE` only shows once cast to string | Feature | v3 | GLITCH-462 (`${ldQueryTimezone}` var) |
+| ~~Half-hour TZ test coverage~~ ✅ added (Postgres + BigQuery) | Testing | 0.5d | `queryTimezone.test.ts` |
+| moment-timezone version pinning policy (**untracked — no ticket**) | Hygiene | 0.5d | `package.json` |

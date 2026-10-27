@@ -1,0 +1,874 @@
+import { LegacyOpenTelemetry } from '@ai-sdk/otel';
+/**
+ * Tracing runs in one of two exclusive modes, selected by
+ * LIGHTDASH_OTEL_TRACES_ENABLED:
+ *
+ * - OTel mode (Lightdash Cloud, and local dev): spans are created via the OTel
+ *   SDK and exported according to OTEL_TRACES_EXPORTER. Sentry does NOT receive
+ *   or create spans — it is errors-only (see sentry.ts, which strips Sentry's
+ *   span-emitting integrations in this mode).
+ * - Sentry mode (self-hosted): spans are created via Sentry's SDK exactly as
+ *   before OTLP export existed.
+ *
+ * The modes must not run together: the previous dual export created two spans
+ * per traceSpan call and oddly-parented traces.
+ */
+import type {
+    Attributes,
+    AttributeValue,
+    Context,
+    DiagLogger,
+    Link,
+    Span as OtelSpan,
+    SpanKind,
+    Tracer,
+} from '@opentelemetry/api';
+import {
+    context,
+    diag,
+    DiagConsoleLogger,
+    propagation,
+    SpanStatusCode,
+    trace,
+    TraceFlags,
+} from '@opentelemetry/api';
+import {
+    CompositePropagator,
+    diagLogLevelFromString,
+    getNumberFromEnv,
+    getStringFromEnv,
+    getStringListFromEnv,
+    W3CBaggagePropagator,
+    W3CTraceContextPropagator,
+} from '@opentelemetry/core';
+import {
+    ExpressInstrumentation,
+    ExpressLayerType,
+} from '@opentelemetry/instrumentation-express';
+import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
+import { KnexInstrumentation } from '@opentelemetry/instrumentation-knex';
+import {
+    defaultResource,
+    resourceFromAttributes,
+} from '@opentelemetry/resources';
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import {
+    ParentBasedSampler,
+    SamplingDecision,
+    TraceIdRatioBasedSampler,
+    type Sampler,
+    type SamplingResult,
+} from '@opentelemetry/sdk-trace-base';
+import * as Sentry from '@sentry/node';
+import { registerTelemetry } from 'ai';
+import Logger from '../logging/logger';
+import { VERSION } from '../version';
+
+type TraceSpanOptions = Parameters<typeof Sentry.startSpan>[0];
+
+/**
+ * The span handed to traceSpan callbacks. Both the OTel span and the Sentry
+ * span satisfy this surface, so call sites work in either mode.
+ */
+export type TraceSpan = Pick<
+    OtelSpan,
+    'setAttribute' | 'setAttributes' | 'setStatus' | 'end' | 'spanContext'
+>;
+
+export type TraceHeaders = {
+    traceparent?: string;
+    sentryTrace?: string;
+    baggage?: string;
+};
+
+type TracingStrategy = {
+    initialize(): void;
+    shutdown(): Promise<void>;
+    getActiveSpanId(): string | undefined;
+    getActiveTraceId(): string | undefined;
+    getActiveSpanName(): string | undefined;
+    getTraceHeaders(): TraceHeaders;
+    continueTrace<T>(headers: TraceHeaders, callback: () => T): T;
+    startSpan<T>(
+        options: TraceSpanOptions,
+        callback: (span: TraceSpan) => T,
+    ): T;
+};
+
+const serviceVersion = String(VERSION);
+
+// Only a sampled trace is exported, so an unsampled ID would send callers
+// looking for a trace that does not exist in their store.
+const getSampledTraceId = (
+    spanContext: ReturnType<OtelSpan['spanContext']> | undefined,
+): string | undefined =>
+    // eslint-disable-next-line no-bitwise
+    spanContext && (spanContext.traceFlags & TraceFlags.SAMPLED) !== 0
+        ? spanContext.traceId
+        : undefined;
+
+const parseBoolean = (value: string | undefined) => value === 'true';
+
+const SENSITIVE_OTEL_DIAGNOSTIC_VALUE =
+    /\b(authorization|proxy-authorization|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|token|password)["']?\s*[:=]/iu;
+
+const redactOtelDiagnosticString = (value: string): string => {
+    const redactedUrls = value.replace(
+        /https?:\/\/[^\s'"<>]+/giu,
+        (candidate) => {
+            try {
+                const url = new URL(candidate);
+                url.username = '';
+                url.password = '';
+                url.search = '';
+                url.pathname = url.pathname.endsWith('/v1/traces')
+                    ? '/v1/traces'
+                    : '/';
+                return url.toString();
+            } catch {
+                return '[REDACTED_URL]';
+            }
+        },
+    );
+
+    return SENSITIVE_OTEL_DIAGNOSTIC_VALUE.test(redactedUrls)
+        ? '[sensitive diagnostic omitted]'
+        : redactedUrls;
+};
+
+const sanitizeOtelDiagnosticValue = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+        return redactOtelDiagnosticString(value);
+    }
+    if (value instanceof Error) {
+        return `${value.name}: ${redactOtelDiagnosticString(value.message)}`;
+    }
+    if (typeof value === 'object' && value !== null) {
+        return '[diagnostic details omitted]';
+    }
+    return value;
+};
+
+export const sanitizeOtelDiagnosticArguments = (
+    message: unknown,
+    ...args: unknown[]
+): [string, ...unknown[]] => {
+    if (message === 'OTLPExportDelegate' && args[0] === 'items to be sent') {
+        return [message, 'items to be sent (payload omitted)'];
+    }
+
+    return [
+        String(sanitizeOtelDiagnosticValue(message)),
+        ...args.map(sanitizeOtelDiagnosticValue),
+    ];
+};
+
+const createRedactingOtelDiagLogger = (): DiagLogger => {
+    const delegate = new DiagConsoleLogger();
+    const redact =
+        (log: DiagLogger['debug']): DiagLogger['debug'] =>
+        (message, ...args) =>
+            log(...sanitizeOtelDiagnosticArguments(message, ...args));
+
+    return {
+        error: redact(delegate.error),
+        warn: redact(delegate.warn),
+        info: redact(delegate.info),
+        debug: redact(delegate.debug),
+        verbose: redact(delegate.verbose),
+    };
+};
+
+export const installRedactingOtelDiagnostics = (): (() => void) => {
+    const originalOtelLogLevel = process.env.OTEL_LOG_LEVEL;
+    const otelLogLevel = getStringFromEnv('OTEL_LOG_LEVEL');
+    if (!otelLogLevel) return () => undefined;
+
+    diag.setLogger(createRedactingOtelDiagLogger(), {
+        logLevel: diagLogLevelFromString(otelLogLevel),
+        suppressOverrideMessage: true,
+    });
+    delete process.env.OTEL_LOG_LEVEL;
+
+    return () => {
+        process.env.OTEL_LOG_LEVEL = originalOtelLogLevel;
+    };
+};
+
+export const otelTracingEnabled = () =>
+    parseBoolean(process.env.LIGHTDASH_OTEL_TRACES_ENABLED) &&
+    process.env.OTEL_SDK_DISABLED !== 'true';
+
+export const otelDatabaseTracingEnabled = () =>
+    otelTracingEnabled() &&
+    parseBoolean(process.env.LIGHTDASH_OTEL_DB_TRACES_ENABLED);
+
+const DEFAULT_OTEL_DB_TRACES_MAX_QUERY_LENGTH = 1022;
+
+export const getOtelDatabaseTraceMaxQueryLength = () => {
+    const configured = getNumberFromEnv(
+        'LIGHTDASH_OTEL_DB_TRACES_MAX_QUERY_LENGTH',
+    );
+    if (configured === undefined)
+        return DEFAULT_OTEL_DB_TRACES_MAX_QUERY_LENGTH;
+
+    if (!Number.isInteger(configured) || configured < 0) {
+        diag.warn(
+            `LIGHTDASH_OTEL_DB_TRACES_MAX_QUERY_LENGTH must be a non-negative integer; using ${DEFAULT_OTEL_DB_TRACES_MAX_QUERY_LENGTH}`,
+        );
+        return DEFAULT_OTEL_DB_TRACES_MAX_QUERY_LENGTH;
+    }
+
+    return configured;
+};
+
+const SUPPORTED_TRACE_EXPORTERS = new Set(['console', 'otlp', 'zipkin']);
+const SUPPORTED_OTLP_PROTOCOLS = new Set([
+    'grpc',
+    'http/json',
+    'http/protobuf',
+]);
+
+type OtelTraceExportConfig = {
+    exporters: string[];
+    protocol: string | null;
+    warnings: string[];
+};
+
+export const configureOtelTraceExport = (): OtelTraceExportConfig => {
+    let requestedExporters = Array.from(
+        new Set(getStringListFromEnv('OTEL_TRACES_EXPORTER') ?? []),
+    ).filter((exporter) => exporter !== 'null');
+    const warnings: string[] = [];
+
+    if (requestedExporters.includes('none')) {
+        process.env.OTEL_TRACES_EXPORTER = 'none';
+        if (requestedExporters.length > 1) {
+            warnings.push(
+                'OTEL_TRACES_EXPORTER contains "none" with other exporters; only "none" will be used',
+            );
+        }
+        return { exporters: ['none'], protocol: null, warnings };
+    }
+
+    if (requestedExporters.length === 0) {
+        requestedExporters = ['otlp'];
+    }
+
+    const exporters = requestedExporters.filter((exporter) => {
+        if (SUPPORTED_TRACE_EXPORTERS.has(exporter)) return true;
+
+        warnings.push(
+            `Unsupported OTEL_TRACES_EXPORTER value "${exporter}" was ignored; supported values are otlp, console, zipkin, and none`,
+        );
+        return false;
+    });
+
+    if (exporters.length === 0) {
+        warnings.push(
+            'OpenTelemetry could not configure trace export because no supported exporter was selected',
+        );
+    }
+
+    if (!exporters.includes('otlp')) {
+        return { exporters, protocol: null, warnings };
+    }
+
+    const requestedProtocol =
+        getStringFromEnv('OTEL_EXPORTER_OTLP_TRACES_PROTOCOL') ??
+        getStringFromEnv('OTEL_EXPORTER_OTLP_PROTOCOL') ??
+        'http/protobuf';
+    if (SUPPORTED_OTLP_PROTOCOLS.has(requestedProtocol)) {
+        return { exporters, protocol: requestedProtocol, warnings };
+    }
+
+    warnings.push(
+        `Unsupported OTLP traces protocol "${requestedProtocol}"; OpenTelemetry will use "http/protobuf"`,
+    );
+    return { exporters, protocol: 'http/protobuf', warnings };
+};
+
+const getSampleRate = () => {
+    const sampleRate = Number(
+        // SENTRY_TRACES_SAMPLE_RATE is a deprecated fallback kept while deploy
+        // configs migrate; LIGHTDASH_OTEL_TRACES_SAMPLE_RATE is the knob.
+        process.env.LIGHTDASH_OTEL_TRACES_SAMPLE_RATE ??
+            process.env.SENTRY_TRACES_SAMPLE_RATE ??
+            '1',
+    );
+
+    if (Number.isNaN(sampleRate)) return 1;
+    return Math.min(Math.max(sampleRate, 0), 1);
+};
+
+/**
+ * AI/agent entrypoints whose traces are always sampled: when a customer
+ * reports a broken agent run, the trace must exist regardless of the global
+ * sample rate. Cost reporting does not depend on traces (it uses unsampled
+ * ai.usage logs), so this is purely a debugging-quality decision.
+ *
+ * Worker task names mirror SCHEDULER_TASKS / EE_SCHEDULER_TASKS in
+ * packages/common/src/types/schedulerTaskList.ts. String literals are used
+ * (not imports) so this module stays dependency-free and safe to load before
+ * instrumentation patches modules.
+ */
+const AI_WORKER_TASKS = new Set([
+    'slackAiPrompt',
+    'aiAgentEvalResult',
+    'aiAgentReviewClassifier',
+    'aiAgentReviewWriteback',
+    'aiAgentReviewRemediationPreview',
+    'aiAgentReviewRemediationCompile',
+    'aiAgentReviewRemediationRun',
+    'embedArtifactVersion',
+    'generateArtifactQuestion',
+    'appGeneratePipeline',
+    'appBuildFromSource',
+    'managedAgentHeartbeat',
+    'ingestProjectContext',
+]);
+
+// Matched against the raw request path: at head-sampling time the HTTP span
+// has no resolved http.route yet, only http.target/url.path.
+const AI_HTTP_PATHS = [
+    /^\/api\/v1\/projects\/[^/]+\/aiAgents(\/|$)/,
+    /^\/api\/v1\/projects\/[^/]+\/managed-agent(\/|$)/,
+    /^\/api\/v1\/ai\/[^/]+(\/|$)/,
+    /^\/api\/v1\/org\/aiRouter(\/|$)/,
+    /^\/api\/v1\/aiAgents\/documents(\/|$)/,
+    /^\/api\/v1\/ee\/projects\/[^/]+\/(ai-writeback|apps)(\/|$)/,
+    /^\/api\/v1\/ee\/user\/apps(\/|$)/,
+    /^\/api\/v1\/mcp(\/|$)/,
+];
+
+const isAiEntrypoint = (spanName: string, attributes: Attributes): boolean => {
+    if (spanName.startsWith('worker.task.')) {
+        return AI_WORKER_TASKS.has(spanName.slice('worker.task.'.length));
+    }
+
+    const target = attributes['http.target'] ?? attributes['url.path'];
+    if (typeof target === 'string') {
+        const [path] = target.split('?');
+        return AI_HTTP_PATHS.some((pattern) => pattern.test(path));
+    }
+
+    return false;
+};
+
+/**
+ * Head sampler that always samples AI/agent entrypoint roots and delegates
+ * everything else. Child spans (including the AI SDK's ai.* spans) follow the
+ * root decision via ParentBasedSampler, so sampling the root captures the
+ * whole waterfall.
+ */
+export class AlwaysSampleAiRootsSampler implements Sampler {
+    constructor(private readonly delegate: Sampler) {}
+
+    shouldSample(
+        samplingContext: Context,
+        traceId: string,
+        spanName: string,
+        spanKind: SpanKind,
+        attributes: Attributes,
+        links: Link[],
+    ): SamplingResult {
+        if (isAiEntrypoint(spanName, attributes)) {
+            return { decision: SamplingDecision.RECORD_AND_SAMPLED };
+        }
+        return this.delegate.shouldSample(
+            samplingContext,
+            traceId,
+            spanName,
+            spanKind,
+            attributes,
+            links,
+        );
+    }
+
+    toString() {
+        return `AlwaysSampleAiRoots(${this.delegate.toString()})`;
+    }
+}
+
+const createTraceSampler = () => {
+    const ratioSampler = new TraceIdRatioBasedSampler(getSampleRate());
+    const rootSampler =
+        process.env.LIGHTDASH_OTEL_ALWAYS_SAMPLE_AI_TRACES === 'false'
+            ? ratioSampler
+            : new AlwaysSampleAiRootsSampler(ratioSampler);
+    return new ParentBasedSampler({
+        root: rootSampler,
+        // A worker task queued from an unsampled request still gets the
+        // AI-aware decision, so agent worker traces are never lost.
+        remoteParentNotSampled: rootSampler,
+    });
+};
+
+// Convert a sentry-trace header ("<traceId>-<spanId>(-<0|1>)?") to W3C
+// traceparent so payloads queued by an older Sentry-tracing producer still
+// stitch into one trace during a rolling deploy.
+export const sentryTraceToTraceparent = (
+    sentryTrace: string,
+): string | undefined => {
+    const match = sentryTrace.match(
+        /^([0-9a-f]{32})-([0-9a-f]{16})(?:-([01]))?$/,
+    );
+    if (!match) return undefined;
+    return `00-${match[1]}-${match[2]}-${match[3] === '0' ? '00' : '01'}`;
+};
+
+export class LightdashTraceContextPropagator extends W3CTraceContextPropagator {
+    extract(
+        extractionContext: Context,
+        carrier: unknown,
+        getter: Parameters<W3CTraceContextPropagator['extract']>[2],
+    ): Context {
+        const first = (value: string | string[] | undefined) =>
+            Array.isArray(value) ? value[0] : value;
+        const sentryTrace = first(getter.get(carrier, 'sentry-trace'));
+        const traceparent = first(getter.get(carrier, 'traceparent'));
+
+        // Sentry's browser span is exported elsewhere, so it cannot parent OTLP.
+        if (
+            sentryTrace &&
+            traceparent === sentryTraceToTraceparent(sentryTrace)
+        ) {
+            return extractionContext;
+        }
+
+        return super.extract(extractionContext, carrier, getter);
+    }
+}
+
+const toOtelAttributes = (
+    attributes: TraceSpanOptions['attributes'],
+): Attributes => {
+    const entries = Object.entries(attributes ?? {}).filter(
+        (entry): entry is [string, AttributeValue] => {
+            const value = entry[1];
+            return (
+                typeof value === 'string' ||
+                typeof value === 'number' ||
+                typeof value === 'boolean' ||
+                (Array.isArray(value) &&
+                    value.every(
+                        (item) =>
+                            typeof item === 'string' ||
+                            typeof item === 'number' ||
+                            typeof item === 'boolean',
+                    ))
+            );
+        },
+    );
+
+    return Object.fromEntries(entries);
+};
+
+export const recordOtelSpanError = (span: OtelSpan, error: unknown) => {
+    span.recordException(error as Error);
+    span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : String(error),
+    });
+};
+
+class SentryTracingStrategy implements TracingStrategy {
+    private readonly sentry = Sentry;
+
+    initialize() {
+        this.sentry.getClient();
+    }
+
+    shutdown() {
+        this.sentry.getClient();
+        return Promise.resolve();
+    }
+
+    getActiveSpanId(): string | undefined {
+        return this.sentry.getActiveSpan()?.spanContext().spanId;
+    }
+
+    getActiveTraceId(): string | undefined {
+        return getSampledTraceId(this.sentry.getActiveSpan()?.spanContext());
+    }
+
+    getActiveSpanName(): string | undefined {
+        const span = this.sentry.getActiveSpan();
+        return span ? this.sentry.spanToJSON(span).description : undefined;
+    }
+
+    getTraceHeaders(): TraceHeaders {
+        const span = this.sentry.getActiveSpan();
+        if (!span) return {};
+
+        const baggage = this.sentry.spanToBaggageHeader(span);
+        return {
+            sentryTrace: this.sentry.spanToTraceHeader(span),
+            ...(baggage ? { baggage } : {}),
+        };
+    }
+
+    continueTrace<T>(headers: TraceHeaders, callback: () => T): T {
+        const { sentryTrace } = headers;
+        if (!sentryTrace) return callback();
+
+        return this.sentry.continueTrace(
+            { sentryTrace, baggage: headers.baggage },
+            callback,
+        );
+    }
+
+    startSpan<T>(
+        options: TraceSpanOptions,
+        callback: (span: TraceSpan) => T,
+    ): T {
+        return this.sentry.startSpan(options, (span) =>
+            callback(span as unknown as TraceSpan),
+        );
+    }
+}
+
+// Paths whose incoming requests are not traced at all: health checks and
+// high-frequency status polling (mirrors the drop list the Sentry
+// tracesSampler used).
+const isIgnoredIncomingRequest = (
+    url: string,
+    userAgent: string | undefined,
+): boolean => {
+    const [path] = url.split('?');
+    return (
+        path === '/api/v1/health' ||
+        path === '/health' ||
+        path.endsWith('/status') ||
+        path.endsWith('/favicon.ico') ||
+        path.endsWith('/robots.txt') ||
+        path.endsWith('/openai-apps-challenge') ||
+        path.endsWith('livez') ||
+        (userAgent ?? '').includes('GoogleHC')
+    );
+};
+
+/**
+ * instrumentation-knex names a span `${operation} ${db}.${table}`, falling
+ * back to `${db}` alone for schema-builder queries (knex.schema.hasTable),
+ * which carry no `method`. `db` is knex's `connection.database`, and that is
+ * undefined whenever the connection is configured from PG* env vars rather
+ * than PGCONNECTIONURI (docker-compose, Cloud). The OTLP protobuf serializer
+ * (gRPC and http/protobuf) throws on an undefined span name and drops the
+ * whole batch, so give those spans a name before they reach the SDK.
+ */
+class NamedKnexInstrumentation extends KnexInstrumentation {
+    protected get tracer(): Tracer {
+        const tracer = super.tracer;
+        // Prototype-chain wrapper: the SDK's startActiveSpan calls
+        // this.startSpan, so it routes through the override too.
+        const startSpan: Tracer['startSpan'] = (name, ...rest) =>
+            tracer.startSpan(name || 'knex', ...rest);
+        return Object.assign(Object.create(tracer) as Tracer, { startSpan });
+    }
+}
+
+export const createOtelInstrumentations = () => [
+    new HttpInstrumentation({
+        ignoreIncomingRequestHook: (req) =>
+            isIgnoredIncomingRequest(req.url ?? '', req.headers['user-agent']),
+    }),
+    new ExpressInstrumentation({
+        // A span per middleware layer floods traces; the request handler layer
+        // alone still names the HTTP span with the resolved route.
+        ignoreLayersType: [
+            ExpressLayerType.MIDDLEWARE,
+            ExpressLayerType.ROUTER,
+        ],
+    }),
+    ...(otelDatabaseTracingEnabled()
+        ? [
+              new NamedKnexInstrumentation({
+                  requireParentSpan: true,
+                  maxQueryLength: getOtelDatabaseTraceMaxQueryLength(),
+              }),
+          ]
+        : []),
+];
+
+class OtelTracingStrategy implements TracingStrategy {
+    private readonly isEnabled = otelTracingEnabled;
+
+    private sdk: NodeSDK | undefined;
+
+    private tracer = trace.getTracer('lightdash-backend', serviceVersion);
+
+    initialize() {
+        if (!this.isEnabled() || this.sdk) return;
+
+        const exportConfig = configureOtelTraceExport();
+        exportConfig.warnings.forEach((warning) => Logger.warn(warning));
+
+        const restoreOtelLogLevel = installRedactingOtelDiagnostics();
+
+        // Leaving spanProcessors unset delegates exporter and protocol
+        // selection to the Node SDK's standard OTEL_* environment handling.
+        try {
+            this.sdk = new NodeSDK({
+                // Sentry's context manager (an AsyncLocalStorage manager that also
+                // forks Sentry scopes per context) is required for per-request
+                // error isolation — Sentry still captures errors in OTel mode.
+                contextManager: new Sentry.SentryContextManager(),
+                resource: defaultResource().merge(
+                    resourceFromAttributes({
+                        'service.name':
+                            process.env.OTEL_SERVICE_NAME || 'lightdash',
+                        'service.version': serviceVersion,
+                    }),
+                ),
+                sampler: createTraceSampler(),
+                metricReaders: [],
+                textMapPropagator: new CompositePropagator({
+                    propagators: [
+                        new LightdashTraceContextPropagator(),
+                        new W3CBaggagePropagator(),
+                    ],
+                }),
+                instrumentations: createOtelInstrumentations(),
+            });
+        } finally {
+            restoreOtelLogLevel();
+        }
+        this.sdk.start();
+        this.tracer = trace.getTracer('lightdash-backend', serviceVersion);
+
+        const exporters = exportConfig.exporters.join(', ') || 'none';
+        const protocol = exportConfig.protocol
+            ? `; OTLP protocol: ${exportConfig.protocol}`
+            : '';
+        const aiSampling =
+            process.env.LIGHTDASH_OTEL_ALWAYS_SAMPLE_AI_TRACES === 'false'
+                ? ''
+                : '; AI/agent roots are always sampled';
+        const databaseTracing = otelDatabaseTracingEnabled()
+            ? '; database traces enabled'
+            : '';
+        Logger.info(
+            `OpenTelemetry tracing configured; trace exporters: ${exporters}${protocol}; Lightdash sampling ratio: ${getSampleRate()}${aiSampling}${databaseTracing}; OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG are overridden by Lightdash; exporter connectivity has not been validated. Set OTEL_LOG_LEVEL=DEBUG for OpenTelemetry SDK/exporter diagnostics`,
+        );
+    }
+
+    async shutdown() {
+        await this.sdk?.shutdown();
+    }
+
+    getActiveSpanId(): string | undefined {
+        return this.isEnabled()
+            ? trace.getActiveSpan()?.spanContext().spanId
+            : undefined;
+    }
+
+    getActiveTraceId(): string | undefined {
+        return this.isEnabled()
+            ? getSampledTraceId(trace.getActiveSpan()?.spanContext())
+            : undefined;
+    }
+
+    getActiveSpanName(): string | undefined {
+        if (!this.isEnabled()) return undefined;
+
+        const span = trace.getActiveSpan() as
+            | (OtelSpan & { name?: unknown })
+            | undefined;
+        return typeof span?.name === 'string' ? span.name : undefined;
+    }
+
+    getTraceHeaders(): TraceHeaders {
+        if (!this.isEnabled()) return {};
+
+        const carrier: Record<string, string> = {};
+        propagation.inject(context.active(), carrier);
+
+        return {
+            ...(carrier.traceparent
+                ? { traceparent: carrier.traceparent }
+                : {}),
+            ...(carrier.baggage ? { baggage: carrier.baggage } : {}),
+        };
+    }
+
+    continueTrace<T>(headers: TraceHeaders, callback: () => T): T {
+        const traceparent =
+            headers.traceparent ??
+            (headers.sentryTrace
+                ? sentryTraceToTraceparent(headers.sentryTrace)
+                : undefined);
+
+        if (!this.isEnabled() || !traceparent) return callback();
+
+        const carrier: Record<string, string> = {
+            traceparent,
+            ...(headers.baggage ? { baggage: headers.baggage } : {}),
+        };
+
+        return context.with(
+            propagation.extract(context.active(), carrier),
+            callback,
+        );
+    }
+
+    startSpan<T>(
+        options: TraceSpanOptions,
+        callback: (span: TraceSpan) => T,
+    ): T {
+        if (!this.isEnabled()) {
+            // Non-recording span from the un-started tracer keeps the
+            // callback contract without emitting anything.
+            return callback(this.tracer.startSpan(options.name));
+        }
+
+        const span = this.tracer.startSpan(
+            options.name,
+            {
+                attributes: {
+                    ...toOtelAttributes(options.attributes),
+                    ...(options.op ? { 'sentry.op': options.op } : {}),
+                },
+            },
+            context.active(),
+        );
+
+        const finishWithError = (error: unknown): never => {
+            recordOtelSpanError(span, error);
+            span.end();
+            throw error;
+        };
+
+        return context.with(trace.setSpan(context.active(), span), () => {
+            try {
+                const result = callback(span);
+                const maybePromise = result as unknown as Promise<unknown>;
+                if (result && typeof maybePromise.then === 'function') {
+                    return maybePromise.then(
+                        (value) => {
+                            span.end();
+                            return value;
+                        },
+                        (error) => finishWithError(error),
+                    ) as T;
+                }
+
+                span.end();
+                return result;
+            } catch (error) {
+                return finishWithError(error);
+            }
+        });
+    }
+}
+
+class TracingService {
+    constructor(
+        private readonly sentry: SentryTracingStrategy,
+        private readonly otel: OtelTracingStrategy,
+    ) {}
+
+    private telemetryRegistered = false;
+
+    // Exclusive: OTel mode owns spans + propagation entirely, otherwise
+    // Sentry does. Running both duplicated every span.
+    private get strategy(): TracingStrategy {
+        return otelTracingEnabled() ? this.otel : this.sentry;
+    }
+
+    initialize() {
+        this.sentry.initialize();
+        this.otel.initialize();
+        // AI SDK 7 only emits spans through a registered integration. Legacy
+        // integration on purpose: it keeps the v6 `ai.*` span names, so
+        // dashboards and alerts keyed on those keep working. Moving to the
+        // GenAI semantic conventions (`invoke_agent`, `gen_ai.*`) is a
+        // deliberate, separately reviewable change.
+        //
+        // Span names carry over; attribution keys do not. v7 dropped
+        // `telemetry.metadata`, so those dimensions now land under
+        // `ai.settings.context.*` rather than `ai.telemetry.metadata.*`.
+        //
+        // The tracer is read from the @opentelemetry/api singleton in the
+        // constructor, so this must run after the providers are initialised.
+        //
+        // registerTelemetry appends to a global list and never de-duplicates,
+        // so a second call emits every AI span twice. initialize() runs more
+        // than once per process: the bootstrap import and App's module body
+        // both call it, as does SchedulerApp when it shares the process.
+        if (this.telemetryRegistered) return;
+        this.telemetryRegistered = true;
+        registerTelemetry(new LegacyOpenTelemetry());
+    }
+
+    async shutdown() {
+        await this.otel.shutdown();
+        await this.sentry.shutdown();
+    }
+
+    getActiveSpanId(): string | undefined {
+        return this.strategy.getActiveSpanId();
+    }
+
+    getActiveTraceId(): string | undefined {
+        return this.strategy.getActiveTraceId();
+    }
+
+    getActiveSpanName(): string | undefined {
+        return this.strategy.getActiveSpanName();
+    }
+
+    getTraceHeaders(): TraceHeaders {
+        return this.strategy.getTraceHeaders();
+    }
+
+    continueTrace<T>(headers: TraceHeaders, callback: () => T): T {
+        return this.strategy.continueTrace(headers, callback);
+    }
+
+    startSpan<T>(
+        options: TraceSpanOptions,
+        callback: (span: TraceSpan) => T,
+    ): T {
+        return this.strategy.startSpan(options, callback);
+    }
+
+    runWithOtelSpanContext<T>(
+        options: TraceSpanOptions,
+        callback: (span: TraceSpan) => T,
+    ): T {
+        return this.otel.startSpan(options, callback);
+    }
+}
+
+const tracingService = new TracingService(
+    new SentryTracingStrategy(),
+    new OtelTracingStrategy(),
+);
+
+export const initOtelTracing = () => tracingService.initialize();
+
+export const shutdownOtelTracing = async () => tracingService.shutdown();
+
+export const getActiveSpanId = () => tracingService.getActiveSpanId();
+
+export const getActiveTraceId = () => tracingService.getActiveTraceId();
+
+export const getActiveSpanName = () => tracingService.getActiveSpanName();
+
+export const getTraceHeaders = () => tracingService.getTraceHeaders();
+
+export const continueTrace = <T>(headers: TraceHeaders, callback: () => T): T =>
+    tracingService.continueTrace(headers, callback);
+
+export const traceSpan = <T>(
+    options: TraceSpanOptions,
+    callback: (span: TraceSpan) => T,
+): T => tracingService.startSpan(options, callback);
+
+export const getOtelTraceHeaders = getTraceHeaders;
+
+export const runWithOtelSpanContext = <T>(
+    options: TraceSpanOptions,
+    callback: (span: TraceSpan) => T,
+): T => tracingService.runWithOtelSpanContext(options, callback);

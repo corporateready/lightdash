@@ -1,4 +1,4 @@
-import { Alert, type AlertProps, type MantineColor } from '@mantine-8/core';
+import { Alert, type AlertProps, type MantineColor } from '@mantine/core';
 import {
     IconAlertCircle,
     IconAlertTriangle,
@@ -8,7 +8,7 @@ import {
 import { type FC, type ReactNode } from 'react';
 import MantineIcon from './MantineIcon';
 
-type CalloutVariant = 'danger' | 'warning' | 'info' | 'success';
+type CalloutVariant = 'danger' | 'warning' | 'info' | 'success' | 'neutral';
 
 const CALLOUT_CONFIG: Record<
     CalloutVariant,
@@ -22,7 +22,7 @@ const CALLOUT_CONFIG: Record<
         icon: IconAlertCircle,
     },
     warning: {
-        color: 'yellow',
+        color: 'orange',
         icon: IconAlertTriangle,
     },
     info: {
@@ -32,6 +32,10 @@ const CALLOUT_CONFIG: Record<
     success: {
         color: 'green',
         icon: IconCheck,
+    },
+    neutral: {
+        color: 'gray',
+        icon: IconInfoCircle,
     },
 };
 
@@ -68,13 +72,11 @@ const Callout: FC<CalloutProps> = ({
 }) => {
     const config = CALLOUT_CONFIG[variant];
     const IconComponent = config.icon;
-    const resolvedIcon = icon ?? <MantineIcon icon={IconComponent} size="lg" />;
+    const resolvedIcon = icon ?? <MantineIcon icon={IconComponent} />;
 
     return (
         <Alert
             color={config.color}
-            variant="light"
-            radius="md"
             icon={!hideIcon && resolvedIcon}
             title={title}
             {...alertProps}

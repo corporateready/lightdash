@@ -1,5 +1,20 @@
 volumes:
     node_modules:
+    # When DB_SNAPSHOT_NAME is set (see okteto.preview.yaml), Okteto's webhook
+    # diverts this volume to a copy-on-write clone of a pre-seeded snapshot
+    # instead of a blank disk. Empty values deploy a normal blank volume.
+    # csi-okteto is required: the default storage class can't restore snapshots.
+    db-data:
+        driver_opts:
+            class: csi-okteto
+            size: 2Gi
+        labels:
+            dev.okteto.com/from-snapshot-name: ${DB_SNAPSHOT_NAME:-}
+            dev.okteto.com/from-snapshot-namespace: ${DB_SNAPSHOT_NAMESPACE:-}
+
+secrets:
+    TURBO_TOKEN:
+        environment: TURBO_TOKEN
 
 # Okteto specific
 endpoints:
@@ -15,6 +30,8 @@ services:
             - POSTGRES_PASSWORD=${PGPASSWORD}
         ports:
             - '5432'
+        volumes:
+            - db-data:/var/lib/postgresql
 
     headless-browser:
         build:
@@ -23,14 +40,35 @@ services:
         ports:
             - '3000'
 
+    # Snowflake agent OAuth and SDK sidecar for the API test loop.
+    snowflake-ai-stub:
+        build:
+            target: pr-runner
+            context: ..
+            dockerfile: dockerfile-prs
+            args:
+                - TURBO_TEAM=$TURBO_TEAM
+            secrets:
+                - TURBO_TOKEN
+        working_dir: /usr/app
+        entrypoint: ['dumb-init', '--']
+        command: ['node', 'packages/api-tests/stub/snowflake-ai-stub.mjs']
+        ports:
+            - '3900'
+
     lightdash-preview:
         build:
             target: pr-runner
             context: ..
             dockerfile: dockerfile-prs
+            args:
+                - TURBO_TEAM=$TURBO_TEAM
+            secrets:
+                - TURBO_TOKEN
         depends_on:
             - db-preview
             - headless-browser
+            - snowflake-ai-stub
         healthcheck:
             interval: 10s
             timeout: 5s
@@ -45,6 +83,7 @@ services:
             IS_PULL_REQUEST: true
             LIGHTDASH_MODE: pr
             DBT_DEMO_DIR: /usr/app
+            LIGHTDASH_SEED_DBT_VERSION: v1.12
             INTERNAL_LIGHTDASH_HOST: http://lightdash-preview:8080
 
             # This must be set in the GitHub Actions workflow
@@ -72,20 +111,33 @@ services:
             S3_REGION: ${S3_REGION}
             S3_BUCKET: ${S3_BUCKET}
             MCP_ENABLED: true
+            SNOWFLAKE_AI_TEST_ACCOUNT_URL_ORIGIN: http://snowflake-ai-stub:3900
             CUSTOM_ROLES_ENABLED: true
-            LIGHTDASH_ENABLE_TIMEZONE_SUPPORT: true
+
+            # Enterprise Postgres wire protocol server for the semantic layer.
+            # Setting the port starts the listener and lights up the "Semantic
+            # layer" project settings page so the UI can be tested. NOTE: the
+            # port is intentionally NOT published on the service (see `ports`
+            # below) — Okteto's HTTP ingress can't route raw Postgres TCP, and
+            # publishing a second port makes Okteto generate per-port endpoints
+            # that break the default preview endpoint the e2e suite relies on.
+            # The listener still binds inside the container, which is all the
+            # UI needs to render.
+            PGWIRE_PORT: 5433
+            # Preview has no TLS certs; plaintext is fine inside the compose
+            # network. Production requires PGWIRE_SSL_CERT_PATH/KEY_PATH.
+            PGWIRE_SSL_MODE: disabled
+
+            # Most feature flags are enabled automatically in LIGHTDASH_MODE=pr,
+            # and admins can toggle them at runtime via /api/v2/feature-flag.
+            # See docs/preview-feature-flags.md. The legacy per-flag env vars
+            # below are still needed because they also set config fields (e.g.
+            # the health endpoint), not just the feature flag.
 
             # Force-enable embedding flag in preview envs so e2e tests work.
             # Picked up via LEGACY_ENABLE_ENV_VARS in parseConfig.ts → unified
             # enabledFeatureFlags allowlist (step 1a).
             EMBEDDING_ENABLED: true
-
-            # Force-enable the SQL-pivot path in preview envs. Cloud helm sets
-            # this true; preview deploys via docker-compose and otherwise
-            # falls back to PostHog targeting, which doesn't reach the
-            # ephemeral test org — pivotTables.cy.ts then times out waiting
-            # for `pivotConfiguration` in the metric-query POST.
-            USE_SQL_PIVOT_RESULTS: true
 
             PERSISTENT_DOWNLOAD_URLS_ENABLED: true
 
@@ -98,11 +150,27 @@ services:
             LIGHTDASH_LOG_LEVEL: debug
             LIGHTDASH_LOG_FORMAT: json
 
+            # AI agents ("Ask AI"). The ai-copilot flag is intentionally not
+            # in the preview force-enabled flag set (see
+            # docs/preview-feature-flags.md): it follows instance config so a
+            # preview never advertises an unconfigured copilot. Enablement is
+            # therefore driven from the okteto admin UI: set
+            # AI_COPILOT_ENABLED=true together with a provider key (and
+            # AI_DEFAULT_PROVIDER when that key is not OpenAI's). With the
+            # variables unset these resolve to empty strings and the copilot
+            # stays off, so previews fail safe.
+            AI_COPILOT_ENABLED: ${AI_COPILOT_ENABLED}
+            AI_DEFAULT_PROVIDER: ${AI_DEFAULT_PROVIDER}
+            ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+            GEMINI_API_KEY: ${GEMINI_API_KEY}
+            OPENAI_API_KEY: ${OPENAI_API_KEY}
+
             # These were set in the render UI but are secret
             # these are set in the okteto admin UI - DO NOT SET THESE LOCALLY WHEN DEPLOYING or they will override the values in the okteto admin UI
             RUDDERSTACK_WRITE_KEY: ${RUDDERSTACK_WRITE_KEY}
             RUDDERSTACK_DATA_PLANE_URL: ${RUDDERSTACK_DATA_PLANE_URL}
             LIGHTDASH_LICENSE_KEY: ${LIGHTDASH_LICENSE_KEY}
+            LIGHTDASH_LICENSE_CERTIFICATE: ${LIGHTDASH_LICENSE_CERTIFICATE}
             GITHUB_APP_ID: ${GITHUB_APP_ID}
             GITHUB_APP_NAME: ${GITHUB_APP_NAME}
             GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
@@ -114,6 +182,7 @@ services:
             EMAIL_SMTP_USER: ${EMAIL_SMTP_SENDER_USER}
             DBT_CLOUD_ENVIRONMENT_ID: ${DBT_CLOUD_ENVIRONMENT_ID}
             DBT_CLOUD_BEARER_TOKEN: ${DBT_CLOUD_BEARER_TOKEN}
+            BRANDFETCH_API_KEY: ${BRANDFETCH_API_KEY}
         ports:
             - '8080:8080'
         command: ['pnpm', 'start']

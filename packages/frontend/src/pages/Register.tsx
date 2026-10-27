@@ -1,42 +1,106 @@
 import {
+    FeatureFlags,
     OpenIdIdentityIssuerType,
     type ApiError,
+    type CreateEmailOnlyUserArgs,
     type CreateUserArgs,
+    type HealthState,
     type LightdashUser,
 } from '@lightdash/common';
-import {
-    Anchor,
-    Box,
-    Card,
-    Divider,
-    Stack,
-    Text,
-    Title,
-} from '@mantine-8/core';
+import { Anchor, Divider, Stack, Text } from '@mantine/core';
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, type FC } from 'react';
-import { useLocation } from 'react-router';
-import { lightdashApi } from '../api';
-import Page from '../components/common/Page/Page';
+import { Navigate, useLocation } from 'react-router';
+import { type LightdashApi } from '../api';
+import AuthLayout from '../components/common/AuthLayout';
+import { useAuthLayoutVariant } from '../components/common/AuthLayout/useAuthLayoutVariant';
 import { ThirdPartySignInButton } from '../components/common/ThirdPartySignInButton';
-import LightdashLogo from '../components/LightdashLogo/LightdashLogo';
 import PageSpinner from '../components/PageSpinner';
+import CreateEmailOnlyUserForm from '../components/RegisterForms/CreateEmailOnlyUserForm';
 import CreateUserForm from '../components/RegisterForms/CreateUserForm';
 import useToaster from '../hooks/toaster/useToaster';
+import { useEmailStatus } from '../hooks/useEmailVerification';
 import { useFlashMessages } from '../hooks/useFlashMessages';
+import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 import useApp from '../providers/App/useApp';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import useTracking from '../providers/Tracking/useTracking';
+import { EventName } from '../types/Events';
+import { sanitizeRedirectUrl } from '../utils/redirectUrl';
 
-const registerQuery = async (data: CreateUserArgs) =>
+const registerQuery = async (
+    lightdashApi: LightdashApi,
+    data: CreateUserArgs | CreateEmailOnlyUserArgs,
+) =>
     lightdashApi<LightdashUser>({
         url: `/user`,
         method: 'POST',
         body: JSON.stringify(data),
+        sensitive: true,
     });
 
+const isAnySsoEnabled = (auth: HealthState['auth'] | undefined) =>
+    !!auth &&
+    (auth.google.enabled ||
+        auth.okta.enabled ||
+        auth.oneLogin.enabled ||
+        auth.azuread.enabled ||
+        auth.oidc.enabled);
+
+const RegisterTermsFooter: FC<{ isNewLayout: boolean }> = ({ isNewLayout }) =>
+    isNewLayout ? (
+        <Text c="dimmed" ta="center" fz="xs">
+            By continuing, you agree to our{' '}
+            <Anchor
+                href="https://www.lightdash.com/terms-of-service"
+                target="_blank"
+                inherit
+            >
+                Terms of Service
+            </Anchor>{' '}
+            and{' '}
+            <Anchor
+                href="https://www.lightdash.com/privacy-policy"
+                target="_blank"
+                inherit
+            >
+                Privacy Policy
+            </Anchor>
+            .
+        </Text>
+    ) : (
+        <Text c="dimmed" ta="center" fz="sm" fw={500}>
+            By creating an account, you agree to
+            <br />
+            our{' '}
+            <Anchor
+                href="https://www.lightdash.com/privacy-policy"
+                target="_blank"
+                fz="sm"
+                fw={500}
+            >
+                Privacy Policy
+            </Anchor>{' '}
+            and our{' '}
+            <Anchor
+                href="https://www.lightdash.com/terms-of-service"
+                target="_blank"
+                fz="sm"
+                fw={500}
+            >
+                Terms of Service.
+            </Anchor>
+        </Text>
+    );
+
 const Register: FC = () => {
+    const lightdashApi = useLightdashApi();
     const location = useLocation();
     const { health } = useApp();
+    const emailStatus = useEmailStatus(
+        !!health.data?.isAuthenticated && !!health.data?.hasEmailClient,
+    );
+    const { isNewLayout } = useAuthLayoutVariant();
     const { showToastError, showToastApiError } = useToaster();
     const flashMessages = useFlashMessages();
 
@@ -50,68 +114,112 @@ const Register: FC = () => {
     }, [flashMessages.data, showToastError]);
     const allowPasswordAuthentication =
         !health.data?.auth.disablePasswordAuthentication;
-    const { identify } = useTracking();
-    const redirectUrl = location.state?.from
-        ? `${location.state.from.pathname}${location.state.from.search}`
-        : '/';
+    const emailOnlySignupFlag = useServerFeatureFlag(
+        FeatureFlags.NewOnboarding,
+        { retry: 3 },
+    );
+    const { identify, track } = useTracking();
+    const redirectUrl = sanitizeRedirectUrl(
+        location.state?.from
+            ? `${location.state.from.pathname}${location.state.from.search}`
+            : undefined,
+    );
     const { isLoading, mutate, isSuccess } = useMutation<
         LightdashUser,
         ApiError,
-        CreateUserArgs
-    >(registerQuery, {
-        mutationKey: ['login'],
-        onSuccess: (data) => {
-            identify({ id: data.userUuid });
-            window.location.href = redirectUrl;
+        CreateUserArgs | CreateEmailOnlyUserArgs
+    >(
+        (data: CreateUserArgs | CreateEmailOnlyUserArgs) =>
+            registerQuery(lightdashApi, data),
+        {
+            mutationKey: ['login'],
+            onSuccess: (data) => {
+                identify({ id: data.userUuid });
+                window.location.href = redirectUrl;
+            },
+            onError: ({ error }) => {
+                showToastApiError({
+                    title: `Failed to create user`,
+                    apiError: error,
+                });
+            },
         },
-        onError: ({ error }) => {
-            showToastApiError({
-                title: `Failed to create user`,
-                apiError: error,
-            });
-        },
-    });
+    );
 
-    if (health.isInitialLoading) {
+    if (
+        health.isInitialLoading ||
+        emailOnlySignupFlag.isInitialLoading ||
+        emailStatus.isInitialLoading
+    ) {
         return <PageSpinner />;
     }
 
-    const ssoAvailable =
-        health.data?.auth.google.enabled ||
-        health.data?.auth.okta.enabled ||
-        health.data?.auth.oneLogin.enabled ||
-        health.data?.auth.azuread.enabled ||
-        health.data?.auth.oidc.enabled;
-    const ssoLogins = ssoAvailable && (
+    if (
+        health.data?.isAuthenticated &&
+        health.data.hasEmailClient &&
+        emailStatus.data &&
+        !emailStatus.data.isVerified
+    ) {
+        return <Navigate to="/verify-email" replace />;
+    }
+
+    const isEmailOnlySignup =
+        (emailOnlySignupFlag.data?.enabled ?? false) &&
+        !!health.data?.hasEmailClient;
+
+    const ssoLogins = isAnySsoEnabled(health.data?.auth) && (
         <Stack>
             {Object.values(OpenIdIdentityIssuerType).map((providerName) => (
                 <ThirdPartySignInButton
                     key={providerName}
                     providerName={providerName}
-                    intent="signup"
+                    intent={isNewLayout ? 'continue' : 'signup'}
                     redirect={redirectUrl}
                 />
             ))}
         </Stack>
     );
-    const passwordLogin = allowPasswordAuthentication && (
-        <CreateUserForm
-            isLoading={isLoading || isSuccess}
-            onSubmit={(data: CreateUserArgs) => {
-                mutate(data);
-            }}
-        />
-    );
+    const passwordLogin =
+        allowPasswordAuthentication &&
+        (isEmailOnlySignup ? (
+            <CreateEmailOnlyUserForm
+                isLoading={isLoading || isSuccess}
+                onSubmit={(data: CreateEmailOnlyUserArgs) => {
+                    track({
+                        name: EventName.SIGNUP_FORM_SUBMITTED,
+                        properties: {
+                            variant: 'email_only',
+                            onboardingFlow: 'new',
+                        },
+                    });
+                    mutate(data);
+                }}
+            />
+        ) : (
+            <CreateUserForm
+                isLoading={isLoading || isSuccess}
+                onSubmit={(data: CreateUserArgs) => {
+                    track({
+                        name: EventName.SIGNUP_FORM_SUBMITTED,
+                        properties: {
+                            variant: 'password',
+                            onboardingFlow: 'legacy',
+                        },
+                    });
+                    mutate(data);
+                }}
+            />
+        ));
     const logins = (
         <>
             {ssoLogins}
             {ssoLogins && passwordLogin && (
                 <Divider
-                    my="md"
+                    my={isNewLayout ? undefined : 'md'}
                     labelPosition="center"
                     label={
-                        <Text color="ldGray.5" size="sm" fw={500}>
-                            OR
+                        <Text c="ldGray.5" size="sm" fw={500}>
+                            {isNewLayout ? 'or' : 'OR'}
                         </Text>
                     }
                 />
@@ -120,41 +228,16 @@ const Register: FC = () => {
         </>
     );
     return (
-        <Page title="Register" withCenteredContent withNavbar={false}>
-            <Stack w={400} mt="4xl">
-                <Box mx="auto" my="lg">
-                    <LightdashLogo />
-                </Box>
-                <Card p="xl" radius="xs" withBorder shadow="xs">
-                    <Title order={3} ta="center" mb="md">
-                        Sign up
-                    </Title>
-                    {logins}
-                </Card>
-                <Text c="ldGray.6" ta="center" fz="sm" fw={500}>
-                    By creating an account, you agree to
-                    <br />
-                    our{' '}
-                    <Anchor
-                        href="https://www.lightdash.com/privacy-policy"
-                        target="_blank"
-                        fz="sm"
-                        fw={500}
-                    >
-                        Privacy Policy
-                    </Anchor>{' '}
-                    and our{' '}
-                    <Anchor
-                        href="https://www.lightdash.com/terms-of-service"
-                        target="_blank"
-                        fz="sm"
-                        fw={500}
-                    >
-                        Terms of Service.
-                    </Anchor>
-                </Text>
-            </Stack>
-        </Page>
+        <AuthLayout
+            pageTitle="Register"
+            title="Create an account"
+            subtitle="Start building analytics in minutes."
+            legacyTitle="Sign up"
+            withCustomerLogos
+            footer={<RegisterTermsFooter isNewLayout={isNewLayout} />}
+        >
+            {logins}
+        </AuthLayout>
     );
 };
 

@@ -1,0 +1,735 @@
+import {
+    upgradeSavedMergeQuery,
+    ChartType,
+    DashboardTileTypes,
+    DimensionType,
+    FieldType,
+    FilterOperator,
+    MERGE_TABLE_NAME,
+    MergeJoinType,
+    MetricType,
+    QueryHistoryStatus,
+    SupportedDbtAdapter,
+    WarehouseTypes,
+    type ApiExploreResults,
+    type CompiledDimension,
+    type CompiledMetric,
+    type DashboardChartTile as DashboardChartTileType,
+    type DashboardFilterRule,
+    type ItemsMap,
+    type MetricQuery,
+    type SavedChart,
+} from '@lightdash/common';
+import {
+    act,
+    cleanup,
+    fireEvent,
+    screen,
+    waitFor,
+} from '@testing-library/react';
+import { type ComponentProps } from 'react';
+import { MemoryRouter, Route, Routes } from 'react-router';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type DashboardChartReadyQuery } from '../../hooks/dashboard/useDashboardChartReadyQuery';
+import ChartColorMappingContextProvider from '../../hooks/useChartColorConfig/ChartColorMappingContextProvider';
+import { type InfiniteQueryResults } from '../../hooks/useQueryResults';
+import { toDashboardParameters } from '../../providers/Dashboard/dashboardParametersUrl';
+import { createDashboardTestStore } from '../../testing/dashboardStore';
+import { DashboardStoreTestProvider } from '../../testing/DashboardStoreTestProvider';
+import { mockedLightdashApi } from '../../testing/mockedLightdashApi';
+import { renderWithProviders } from '../../testing/testUtils';
+import { GenericDashboardChartTile } from './DashboardChartTile';
+
+mockedLightdashApi.mockImplementation(() => new Promise(() => {}));
+
+const exportMocks = vi.hoisted(() => ({
+    parameters: {} as Record<string, string | string[]>,
+    appliedParameters: {} as Record<string, string | string[]>,
+}));
+const gsheetMocks = vi.hoisted(() => ({ uploadGsheet: vi.fn() }));
+vi.mock('../../hooks/gdrive/useGdrive', async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    uploadGsheet: gsheetMocks.uploadGsheet,
+}));
+vi.mock('../../features/export', async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    ExportToGoogleSheet: ({
+        getGsheetLink,
+    }: {
+        getGsheetLink: () => Promise<unknown>;
+    }) => (
+        <button type="button" onClick={() => void getGsheetLink()}>
+            Export Google Sheets
+        </button>
+    ),
+}));
+vi.mock('../../providers/Ability/useAbilityContext', () => ({
+    useAbilityContext: () => ({ can: () => true }),
+}));
+
+// The tile is rendered with its data already resolved; nothing may reach the network.
+vi.mock('../../api');
+vi.mock('@shopify/react-web-worker', () => ({
+    createWorkerFactory: () => () => ({}),
+    useWorker: () => ({}),
+}));
+vi.mock('../../hooks/useServerOrClientFeatureFlag', async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    useServerFeatureFlag: () => ({ data: undefined }),
+}));
+vi.mock('../../hooks/usePreAggregateRefresh', () => ({
+    useRefreshPreAggregateByDefinitionName: () => ({
+        mutate: () => {},
+        isLoading: false,
+    }),
+}));
+vi.mock('../../hooks/useProjectRoute', async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    useOptionalProjectRoute: () => null,
+    useProjectUrlIdentifier: () => 'project-uuid',
+}));
+vi.mock('../../providers/Dashboard/useDashboardContext', () => ({
+    default: vi.fn((selector: (value: Record<string, unknown>) => unknown) =>
+        selector({
+            dashboard: { uuid: 'dashboard-uuid', slug: 'dashboard' },
+            projectUuid: 'project-uuid',
+            hasTileComments: () => false,
+            dashboardCommentsCheck: undefined,
+            dashboardTiles: [],
+            dashboardTabs: [],
+            dashboardCustomMetrics: [],
+            tilesWithDateZoomApplied: new Set<string>(),
+            dateZoomGranularity: undefined,
+            dateZoomConfig: undefined,
+            addDimensionDashboardFilter: () => {},
+            setDashboardTiles: () => {},
+            setTileChartSorts: () => {},
+            haveTilesChanged: false,
+        }),
+    ),
+}));
+vi.mock('../../providers/Dashboard/useDashboardTileStatusContext', () => ({
+    default: vi.fn((selector: (value: Record<string, unknown>) => unknown) =>
+        selector({
+            markTileScreenshotErrored: () => {},
+            markTileScreenshotReady: () => {},
+            markEmbedTileComplete: () => {},
+            markTileLoaded: () => {},
+            addResultsCacheTime: () => {},
+            addAvailableCustomGranularities: () => {},
+            updateSqlChartTilesMetadata: () => {},
+            preAggregateStatuses: {},
+            invalidateCache: false,
+            isAutoRefresh: false,
+            refreshCounter: 0,
+        }),
+    ),
+}));
+
+const compiled = { compiledSql: '', tablesReferences: [] };
+
+const compiledDimension = (
+    table: string,
+    name: string,
+    label: string,
+    type: DimensionType,
+): CompiledDimension => ({
+    fieldType: FieldType.DIMENSION,
+    type,
+    name,
+    label,
+    table,
+    tableLabel: table,
+    sql: '',
+    hidden: false,
+    ...compiled,
+});
+
+const compiledMetric = (
+    table: string,
+    name: string,
+    label: string,
+): CompiledMetric => ({
+    fieldType: FieldType.METRIC,
+    type: MetricType.SUM,
+    name,
+    label,
+    table,
+    tableLabel: table,
+    sql: '',
+    hidden: false,
+    ...compiled,
+});
+
+const ordersExplore: ApiExploreResults = {
+    warehouseConnectionUuid: null,
+    warehouseConnection: {
+        warehouseConnectionUuid: null,
+        warehouseType: WarehouseTypes.POSTGRES,
+        startOfWeek: null,
+    },
+    name: 'orders',
+    label: 'Orders',
+    tags: [],
+    baseTable: 'orders',
+    joinedTables: [],
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    tables: {
+        orders: {
+            name: 'orders',
+            label: 'Orders',
+            database: 'db',
+            schema: 'public',
+            sqlTable: 'orders',
+            lineageGraph: {},
+            dimensions: {
+                order_date_month: compiledDimension(
+                    'orders',
+                    'order_date_month',
+                    'Order date month',
+                    DimensionType.DATE,
+                ),
+                status: compiledDimension(
+                    'orders',
+                    'status',
+                    'Status',
+                    DimensionType.STRING,
+                ),
+            },
+            metrics: {
+                total_order_amount: compiledMetric(
+                    'orders',
+                    'total_order_amount',
+                    'Total order amount',
+                ),
+            },
+        },
+    },
+};
+
+const JOIN_KEY = 'merge_order_date_month';
+const SOURCE_A_METRIC = 'a_orders_total_order_amount';
+const SOURCE_B_METRIC = 'b_payments_unique_payment_count';
+
+const mergedFields: ItemsMap = {
+    [JOIN_KEY]: compiledDimension(
+        MERGE_TABLE_NAME,
+        'order_date_month',
+        'Order date month',
+        DimensionType.DATE,
+    ),
+    [SOURCE_A_METRIC]: compiledMetric(
+        'a',
+        'orders_total_order_amount',
+        'Total order amount',
+    ),
+    [SOURCE_B_METRIC]: compiledMetric(
+        'b',
+        'payments_unique_payment_count',
+        'Unique payment count',
+    ),
+};
+
+const mergedMetricQuery: MetricQuery = {
+    exploreName: MERGE_TABLE_NAME,
+    dimensions: [JOIN_KEY],
+    metrics: [SOURCE_A_METRIC, SOURCE_B_METRIC],
+    filters: {},
+    sorts: [],
+    limit: 500,
+    tableCalculations: [],
+};
+
+const primaryMetricQuery: MetricQuery = {
+    exploreName: 'orders',
+    dimensions: ['orders_order_date_month'],
+    metrics: ['orders_total_order_amount'],
+    filters: {},
+    sorts: [],
+    limit: 500,
+    tableCalculations: [],
+};
+
+const statusFilter = (tableName: string): DashboardFilterRule => ({
+    id: 'status-filter',
+    label: 'Status',
+    target: { fieldId: `${tableName}_status`, tableName },
+    operator: FilterOperator.EQUALS,
+    values: ['completed'],
+});
+
+const chart: SavedChart = {
+    uuid: 'chart-uuid',
+    projectUuid: 'project-uuid',
+    organizationUuid: 'org-uuid',
+    name: 'Orders and payments by month',
+    tableName: 'orders',
+    metricQuery: primaryMetricQuery,
+    merge: upgradeSavedMergeQuery(
+        {
+            primarySourceId: 'a',
+            sources: [
+                { id: 'a', kind: 'chart' },
+                {
+                    id: 'b',
+                    kind: 'query',
+                    metricQuery: {
+                        exploreName: 'payments',
+                        dimensions: ['payments_payment_date_month'],
+                        metrics: ['payments_unique_payment_count'],
+                        filters: {},
+                        sorts: [],
+                        limit: 500,
+                        tableCalculations: [],
+                    },
+                },
+            ],
+            joinKey: [
+                {
+                    name: 'order_date_month',
+                    fieldIdBySourceId: {
+                        a: 'orders_order_date_month',
+                        b: 'payments_payment_date_month',
+                    },
+                },
+            ],
+            joinType: MergeJoinType.FULL,
+            tableCalculations: [],
+        },
+        primaryMetricQuery,
+    ),
+    chartConfig: { type: ChartType.TABLE, config: undefined },
+    // Saved before the merge: still names the primary source's own field ids.
+    tableConfig: {
+        columnOrder: ['orders_order_date_month', 'orders_total_order_amount'],
+    },
+    updatedAt: new Date('2026-01-01'),
+    spaceUuid: 'space-uuid',
+    spaceName: 'Space',
+    pinnedListUuid: null,
+    pinnedListOrder: null,
+    dashboardUuid: null,
+    dashboardName: null,
+    colorPalette: [],
+    colorPaletteUuid: null,
+    resolvedColorPalette: {
+        source: { type: 'default' },
+        paletteUuid: null,
+        paletteName: null,
+        colors: [],
+        darkColors: null,
+    },
+    inheritsFromOrgOrProject: true,
+    access: [],
+    slug: 'orders-and-payments-by-month',
+    verification: null,
+};
+
+const tile: DashboardChartTileType = {
+    uuid: 'tile-uuid',
+    type: DashboardTileTypes.SAVED_CHART,
+    x: 0,
+    y: 0,
+    h: 4,
+    w: 6,
+    tabUuid: undefined,
+    properties: { savedChartUuid: chart.uuid, title: chart.name },
+};
+
+const dashboardChartReadyQuery: DashboardChartReadyQuery = {
+    chart,
+    explore: ordersExplore,
+    dateZoom: undefined,
+    executeQueryResponse: {
+        queryUuid: 'query-uuid',
+        cacheMetadata: { cacheHit: false },
+        parameterReferences: [],
+        usedParametersValues: {},
+        resolvedTimezone: 'UTC',
+        metricQuery: mergedMetricQuery,
+        fields: mergedFields,
+        appliedDashboardFilters: {
+            dimensions: [statusFilter('orders'), statusFilter('payments')],
+            metrics: [],
+            tableCalculations: [],
+        },
+        appliedDashboardFiltersBySourceId: {
+            a: {
+                dimensions: [statusFilter('orders')],
+                metrics: [],
+                tableCalculations: [],
+            },
+            b: {
+                dimensions: [statusFilter('payments')],
+                metrics: [],
+                tableCalculations: [],
+            },
+        },
+        dateZoomApplied: false,
+    },
+};
+
+const resultsData: InfiniteQueryResults = {
+    queryUuid: 'query-uuid',
+    queryStatus: QueryHistoryStatus.READY,
+    rows: [
+        {
+            [JOIN_KEY]: { value: { raw: '2026-01-01', formatted: '2026-01' } },
+            [SOURCE_A_METRIC]: { value: { raw: 100, formatted: '100' } },
+            [SOURCE_B_METRIC]: { value: { raw: 3, formatted: '3' } },
+        },
+    ],
+    totalResults: 1,
+    isInitialLoading: false,
+    isFetchingFirstPage: false,
+    isFetchingRows: false,
+    isFetchingAllPages: false,
+    fetchMoreRows: () => {},
+    refetchRows: async () => {},
+    setFetchAll: () => {},
+    fetchAll: false,
+    hasFetchedAllRows: true,
+    totalClientFetchTimeMs: undefined,
+    error: null,
+};
+
+const renderTile = (
+    readyQuery = dashboardChartReadyQuery,
+    tileProps: Partial<ComponentProps<typeof GenericDashboardChartTile>> = {},
+) =>
+    renderWithProviders(
+        <DashboardStoreTestProvider
+            // Applied values are the saved values under the current ones
+            store={createDashboardTestStore({
+                parameterValues: exportMocks.parameters,
+                savedParameters: toDashboardParameters(
+                    exportMocks.appliedParameters,
+                ),
+            })}
+        >
+            <MemoryRouter
+                initialEntries={[
+                    '/projects/project-uuid/dashboards/dashboard-uuid/view',
+                ]}
+            >
+                <Routes>
+                    <Route
+                        path="/projects/:projectUuid/dashboards/:dashboardUuid/view"
+                        element={
+                            <ChartColorMappingContextProvider>
+                                <GenericDashboardChartTile
+                                    tile={tile}
+                                    isEditMode={false}
+                                    isLoading={false}
+                                    error={null}
+                                    dashboardChartReadyQuery={readyQuery}
+                                    resultsData={resultsData}
+                                    onDelete={() => {}}
+                                    onEdit={() => {}}
+                                    {...tileProps}
+                                />
+                            </ChartColorMappingContextProvider>
+                        }
+                    />
+                </Routes>
+            </MemoryRouter>
+        </DashboardStoreTestProvider>,
+        { user: { abilityRules: [{ action: 'manage', subject: 'all' }] } },
+    );
+
+describe('DashboardChartTile with a merged chart', () => {
+    afterEach(() => {
+        cleanup();
+    });
+
+    it('renders the merged result columns under a dashboard filter', async () => {
+        const { container, unmount } = renderTile();
+
+        await waitFor(() => {
+            expect(
+                container.querySelectorAll('thead th').length,
+            ).toBeGreaterThan(0);
+        });
+        // The row-number column comes first; the rest must be the merged result.
+        const headers = Array.from(container.querySelectorAll('thead th'))
+            .slice(1)
+            .map((th) => th.textContent?.trim());
+        expect(headers).toEqual([
+            expect.stringContaining('Order date month'),
+            expect.stringContaining('Total order amount'),
+            expect.stringContaining('Unique payment count'),
+        ]);
+
+        // Unmount here and drain queued query notifications while the window
+        // still exists, so none fire after the environment is torn down.
+        unmount();
+        await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    });
+});
+
+describe('DashboardChartTile custom image export', () => {
+    beforeEach(() => {
+        exportMocks.parameters = {};
+        exportMocks.appliedParameters = {};
+    });
+
+    const customChartQuery = (
+        overrides: Partial<SavedChart> = {},
+    ): DashboardChartReadyQuery => ({
+        ...dashboardChartReadyQuery,
+        chart: {
+            ...chart,
+            merge: undefined,
+            chartConfig: {
+                type: ChartType.DATA_APP_VIZ,
+                config: { dataAppVizUuid: 'app-uuid', fieldMapping: {} },
+            },
+            parameters: { region: ['EU'] },
+            ...overrides,
+        },
+        executeQueryResponse: {
+            ...dashboardChartReadyQuery.executeQueryResponse,
+            usedParametersValues: { region: ['EU'] },
+            parameterReferences: ['region'],
+            appliedDashboardFilters: {
+                dimensions: [],
+                metrics: [],
+                tableCalculations: [],
+            },
+        },
+    });
+
+    it.each<Record<string, string | string[]>>([
+        {},
+        { region: ['EU'] },
+        { unusedParameter: 'ignored' },
+    ])(
+        'offers export when dashboard parameters preserve the saved chart: %j',
+        async (parameters) => {
+            exportMocks.parameters = parameters;
+            exportMocks.appliedParameters = parameters;
+            renderTile(customChartQuery());
+            fireEvent.click(await screen.findByTestId('tile-icon-more'));
+            expect(
+                await screen.findByRole('menuitem', { name: 'Export image' }),
+            ).toBeInTheDocument();
+        },
+    );
+
+    it('does not export saved data when a dashboard parameter changes the chart', async () => {
+        exportMocks.parameters = { region: ['US'] };
+        exportMocks.appliedParameters = { region: ['US'] };
+        renderTile(customChartQuery());
+        fireEvent.click(await screen.findByTestId('tile-icon-more'));
+        await screen.findByRole('menu');
+        expect(
+            screen.queryByRole('menuitem', { name: 'Export image' }),
+        ).toBeNull();
+    });
+
+    it('does not export a chart without saved values when an applied dashboard value remains after clearing', async () => {
+        exportMocks.appliedParameters = { region: ['EU'] };
+        renderTile(customChartQuery({ parameters: {} }));
+        fireEvent.click(await screen.findByTestId('tile-icon-more'));
+        await screen.findByRole('menu');
+        expect(
+            screen.queryByRole('menuitem', { name: 'Export image' }),
+        ).toBeNull();
+    });
+
+    it('does not export the published chart while displaying an unpublished draft', async () => {
+        renderTile(customChartQuery({ hasUnpublishedChanges: true }));
+        fireEvent.click(await screen.findByTestId('tile-icon-more'));
+        await screen.findByRole('menu');
+        expect(
+            screen.queryByRole('menuitem', { name: 'Export image' }),
+        ).toBeNull();
+    });
+});
+
+describe('DashboardChartTile embedded "Explore from here"', () => {
+    afterEach(() => {
+        cleanup();
+    });
+
+    const filteredMetricQuery: MetricQuery = {
+        ...primaryMetricQuery,
+        filters: {
+            dimensions: {
+                id: 'group',
+                and: [
+                    {
+                        id: statusFilter('orders').id,
+                        target: { fieldId: 'orders_status' },
+                        operator: FilterOperator.EQUALS,
+                        values: ['completed'],
+                    },
+                ],
+            },
+        },
+    };
+
+    const plainChartQuery: DashboardChartReadyQuery = {
+        ...dashboardChartReadyQuery,
+        chart: { ...chart, merge: undefined },
+        executeQueryResponse: {
+            ...dashboardChartReadyQuery.executeQueryResponse,
+            // The server merges the applied dashboard filters into the
+            // metric query it executed for the tile.
+            metricQuery: filteredMetricQuery,
+            appliedDashboardFilters: {
+                dimensions: [statusFilter('orders')],
+                metrics: [],
+                tableCalculations: [],
+            },
+            appliedDashboardFiltersBySourceId: undefined,
+        },
+    };
+
+    const exploreFromMinimalTile = async (
+        readyQuery: DashboardChartReadyQuery,
+    ) => {
+        const onExplore = vi.fn();
+        renderTile(readyQuery, { minimal: true, onExplore });
+        fireEvent.click(
+            await screen.findByRole('button', { name: 'Tile actions' }),
+        );
+        fireEvent.click(
+            await screen.findByRole('menuitem', { name: 'Explore from here' }),
+        );
+        expect(onExplore).toHaveBeenCalledTimes(1);
+        return onExplore.mock.calls[0][0].chart as SavedChart;
+    };
+
+    it('opens the Explore with the dashboard filters the tile ran with', async () => {
+        const explored = await exploreFromMinimalTile(plainChartQuery);
+
+        expect(explored.uuid).toBe(chart.uuid);
+        expect(explored.metricQuery).toEqual(filteredMetricQuery);
+    });
+
+    it('opens a merged chart from its own primary query', async () => {
+        const explored = await exploreFromMinimalTile(dashboardChartReadyQuery);
+
+        expect(explored).toBe(chart);
+    });
+
+    it('opens the Explore with the parameter values the tile ran with', async () => {
+        const explored = await exploreFromMinimalTile({
+            ...plainChartQuery,
+            chart: { ...plainChartQuery.chart, parameters: { region: 'EU' } },
+            executeQueryResponse: {
+                ...plainChartQuery.executeQueryResponse,
+                usedParametersValues: { region: 'UK' },
+                parameterReferences: ['region'],
+            },
+        });
+
+        expect(explored.parameters).toEqual({ region: 'UK' });
+    });
+});
+
+describe('DashboardChartTile Google Sheets export', () => {
+    beforeEach(() => {
+        exportMocks.parameters = {};
+        gsheetMocks.uploadGsheet.mockReset();
+    });
+    afterEach(() => {
+        cleanup();
+    });
+
+    it('exports with the parameter values the tile ran with', async () => {
+        renderTile({
+            ...dashboardChartReadyQuery,
+            chart: { ...chart, merge: undefined, parameters: { region: 'EU' } },
+            executeQueryResponse: {
+                ...dashboardChartReadyQuery.executeQueryResponse,
+                metricQuery: primaryMetricQuery,
+                usedParametersValues: { region: 'EU' },
+                parameterReferences: ['region'],
+                appliedDashboardFiltersBySourceId: undefined,
+            },
+        });
+        fireEvent.click(await screen.findByTestId('tile-icon-more'));
+        fireEvent.click(
+            await screen.findByRole('button', { name: 'Export Google Sheets' }),
+        );
+
+        await waitFor(() => {
+            expect(gsheetMocks.uploadGsheet).toHaveBeenCalledTimes(1);
+        });
+        expect(gsheetMocks.uploadGsheet.mock.calls[0][1].parameters).toEqual({
+            region: 'EU',
+        });
+    });
+});
+
+describe('DashboardChartTile parameters popover', () => {
+    beforeEach(() => {
+        exportMocks.parameters = {};
+        exportMocks.appliedParameters = {};
+    });
+    afterEach(() => {
+        cleanup();
+    });
+
+    it('says where each parameter value came from', async () => {
+        exportMocks.parameters = { status: 'Shipped' };
+        exportMocks.appliedParameters = { status: 'Shipped' };
+        renderTile({
+            ...dashboardChartReadyQuery,
+            chart: {
+                ...chart,
+                merge: undefined,
+                parameters: { region: 'EU', status: 'Cancelled' },
+            },
+            executeQueryResponse: {
+                ...dashboardChartReadyQuery.executeQueryResponse,
+                metricQuery: primaryMetricQuery,
+                usedParametersValues: {
+                    region: 'EU',
+                    status: 'Shipped',
+                    currency: 'USD',
+                },
+                parameterReferences: ['region', 'status', 'currency'],
+                appliedDashboardFiltersBySourceId: undefined,
+            },
+        });
+        fireEvent.click(await screen.findByLabelText('Chart parameters'));
+
+        expect(
+            (await screen.findByText('(from chart)')).parentElement,
+        ).toHaveTextContent('region: EU (from chart)');
+        expect(
+            screen.getByText('(from dashboard)').parentElement,
+        ).toHaveTextContent('status: Shipped (from dashboard)');
+        expect(screen.getByText('(default)').parentElement).toHaveTextContent(
+            'currency: USD (default)',
+        );
+    });
+
+    it('labels a saved dashboard value the tile still runs with after clearing', async () => {
+        exportMocks.parameters = {};
+        exportMocks.appliedParameters = { status: 'Shipped' };
+        renderTile({
+            ...dashboardChartReadyQuery,
+            chart: {
+                ...chart,
+                merge: undefined,
+                parameters: { status: 'Cancelled' },
+            },
+            executeQueryResponse: {
+                ...dashboardChartReadyQuery.executeQueryResponse,
+                metricQuery: primaryMetricQuery,
+                usedParametersValues: { status: 'Shipped' },
+                parameterReferences: ['status'],
+                appliedDashboardFiltersBySourceId: undefined,
+            },
+        });
+        fireEvent.click(await screen.findByLabelText('Chart parameters'));
+
+        expect(
+            (await screen.findByText('(from dashboard)')).parentElement,
+        ).toHaveTextContent('status: Shipped (from dashboard)');
+    });
+});

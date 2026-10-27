@@ -1,9 +1,9 @@
 import {
+    calculateComparisonValue,
     applyCustomFormat,
     ComparisonFormatTypes,
     CustomFormatType,
     formatItemValue,
-    friendlyName,
     getDefaultMetricTreeNodeDateRange,
     getRollingPeriodDates,
     MetricTotalComparisonType,
@@ -19,12 +19,11 @@ import {
     Text,
     Title,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconHierarchy3, IconInfoCircle } from '@tabler/icons-react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import React, { useCallback, useMemo, type FC } from 'react';
 import MantineIcon from '../../../../../../components/common/MantineIcon';
-import { calculateComparisonValue } from '../../../../../../hooks/useBigNumberConfig';
 import { useAppSelector } from '../../../../../sqlRunner/store/hooks';
 import { useRunMetricTotal } from '../../../../hooks/useRunMetricExplorerQuery';
 import { MetricDetailPopover } from '../../../MetricDetailPopover';
@@ -69,11 +68,9 @@ const ChangeIndicator: FC<{
         <Tooltip
             position="bottom"
             label={getComparisonLabel(timeFrame, rollingDays)}
-            withinPortal
         >
             <Badge
-                fz={13}
-                fw={500}
+                fz="sm"
                 size="lg"
                 radius="md"
                 py="two"
@@ -104,7 +101,7 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
     isConnectable,
     selected,
 }) => {
-    const title = useMemo(() => friendlyName(data.label), [data.label]);
+    const title = data.label;
 
     const projectUuid = useAppSelector(
         (state) => state.metricsCatalog.projectUuid,
@@ -209,8 +206,7 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
     return (
         <Paper
             p="md"
-            fz={14}
-            withBorder
+            fz="sm"
             style={(theme) => ({
                 borderColor: selected
                     ? theme.colors.blue[5]
@@ -227,7 +223,7 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
             />
             <Stack key={data.label} gap="xs">
                 <Group justify="space-between">
-                    <Title fz={14} fw={500} c="ldGray.7">
+                    <Title fz="sm" fw={500} c="ldGray.7">
                         {title}
                     </Title>
                     <Group gap="xs" wrap="nowrap">
@@ -235,19 +231,19 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
                             <Tooltip
                                 label="Add drivers from YAML"
                                 openDelay={300}
-                                withinPortal
                             >
                                 <ActionIcon
                                     size="xs"
-                                    variant="subtle"
-                                    color="gray"
                                     onClick={handleAddDrivers}
                                     aria-label="Add YAML drivers to canvas"
+                                    data-tour-anchor="tree-add-drivers"
+                                    data-tour-hint="Add drivers from YAML"
+                                    data-tour-docs="explore/metrics-catalog/drivers.mdx#how-drivers-appear-on-the-canvas:p2:1"
                                 >
                                     <MantineIcon
                                         icon={IconHierarchy3}
                                         size={12}
-                                        color="ldGray.6"
+                                        color="dimmed"
                                     />
                                 </ActionIcon>
                             </Tooltip>
@@ -257,7 +253,9 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
                                 projectUuid={projectUuid}
                                 tableName={data.tableName}
                                 metricName={data.metricName}
+                                metricLabel={data.label}
                                 compiledQueryConfig={compiledQueryConfig}
+                                showExploreButton
                             >
                                 <MantineIcon
                                     icon={IconInfoCircle}

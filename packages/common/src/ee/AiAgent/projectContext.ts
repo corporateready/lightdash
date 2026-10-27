@@ -1,0 +1,422 @@
+import betterAjvErrors from '@sidvind/better-ajv-errors';
+import Ajv from 'ajv';
+import AjvErrors from 'ajv-errors';
+import * as yaml from 'js-yaml';
+import { isMap, isSeq, parseDocument } from 'yaml';
+import { z } from 'zod';
+import lightdashProjectContextSchema from '../../schemas/json/lightdash-project-context-2.0.json';
+import { ParseError } from '../../types/errors';
+import assertUnreachable from '../../utils/assertUnreachable';
+
+// Two kinds, by retrieval intent: `definition` is term-triggered (acronyms,
+// vocabulary, "X means Y"); `context` is the object-scoped catch-all
+// (routing/join rules, guidance, durable facts). Splitting out more kinds later
+// is additive.
+export const projectContextEntryKinds = ['definition', 'context'] as const;
+
+// Top-level file version. The file is `{ version, entries }`; bumping this is
+// the escape hatch for a future hard schema break, without per-entry churn.
+export const PROJECT_CONTEXT_FILE_VERSION = 2;
+
+export type AiProjectContextTypedObjectRef =
+    | { type: 'explore'; name: string }
+    | { type: 'field'; explore: string; fieldId: string };
+
+export type AiProjectContextObjectRef = string | AiProjectContextTypedObjectRef;
+
+// z.union, not z.discriminatedUnion: zod renders a discriminated union as
+// JSON Schema `oneOf`, which OpenAI's strict structured outputs reject
+// ("'oneOf' is not permitted"). Both branches are strict with distinct `type`
+// literals, so z.union parses exactly the same inputs and renders `anyOf`.
+export const aiProjectContextTypedObjectRefSchema: z.ZodType<AiProjectContextTypedObjectRef> =
+    z.union([
+        z
+            .object({
+                type: z.literal('explore'),
+                name: z.string().min(1),
+            })
+            .strict(),
+        z
+            .object({
+                type: z.literal('field'),
+                explore: z.string().min(1),
+                fieldId: z.string().min(1),
+            })
+            .strict(),
+    ]);
+
+export const aiProjectContextObjectRefSchema: z.ZodType<AiProjectContextObjectRef> =
+    z.union([z.string().min(1), aiProjectContextTypedObjectRefSchema]);
+
+/** Identity of an object reference, for set membership and de-duplication. */
+export const getAiProjectContextObjectKey = (
+    object: AiProjectContextTypedObjectRef,
+): string => {
+    switch (object.type) {
+        case 'explore':
+            return `explore:${object.name}`;
+        case 'field':
+            return `field:${object.explore}:${object.fieldId}`;
+        default:
+            return assertUnreachable(
+                object,
+                'Unknown AI project context object ref type',
+            );
+    }
+};
+
+const typedProjectContextObjectRefsSchema = z.array(
+    aiProjectContextTypedObjectRefSchema,
+);
+
+const sanitizeLegacyProjectContextEntry = (entry: unknown): unknown => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        return entry;
+    }
+
+    const sanitized = { ...entry } as Record<string, unknown>;
+    if (
+        !typedProjectContextObjectRefsSchema.safeParse(sanitized.objects)
+            .success
+    ) {
+        sanitized.objects = [];
+    }
+    return sanitized;
+};
+
+const normalizeLegacyProjectContext = (loaded: unknown): unknown => {
+    if (Array.isArray(loaded)) {
+        return loaded.map(sanitizeLegacyProjectContextEntry);
+    }
+    if (typeof loaded !== 'object' || loaded === null) {
+        return loaded;
+    }
+
+    const document = loaded as Record<string, unknown>;
+    if (document.version !== 1 && document.version !== '1') {
+        return loaded;
+    }
+
+    return {
+        ...document,
+        version: PROJECT_CONTEXT_FILE_VERSION,
+        entries: Array.isArray(document.entries)
+            ? document.entries.map(sanitizeLegacyProjectContextEntry)
+            : document.entries,
+    };
+};
+
+export const serializeAiProjectContextObjectRef = (
+    ref: AiProjectContextObjectRef,
+): string => {
+    if (typeof ref === 'string') {
+        return ref;
+    }
+
+    switch (ref.type) {
+        case 'explore':
+            return ref.name;
+        case 'field':
+            return `${ref.explore}\n${ref.fieldId}`;
+        default:
+            return assertUnreachable(
+                ref,
+                'Unknown AI project context object ref type',
+            );
+    }
+};
+
+export const formatAiProjectContextObjectRef = (
+    ref: AiProjectContextObjectRef,
+): string => {
+    if (typeof ref === 'string') {
+        return ref;
+    }
+
+    switch (ref.type) {
+        case 'explore':
+            return `explore "${ref.name}"`;
+        case 'field':
+            return `field "${ref.fieldId}" in explore "${ref.explore}"`;
+        default:
+            return assertUnreachable(
+                ref,
+                'Unknown AI project context object ref type',
+            );
+    }
+};
+
+// Canonical, post-ingest entry: `id` is always present (derived if the file
+// omitted it). This is what selection, the cache, and the API speak.
+export const projectContextEntrySchema = z.object({
+    id: z.string().min(1),
+    kind: z.enum(projectContextEntryKinds),
+    content: z.string().min(1),
+    terms: z.array(z.string()).default([]),
+    objects: z.array(aiProjectContextObjectRefSchema).default([]),
+});
+
+export type ProjectContextEntry = z.infer<typeof projectContextEntrySchema>;
+
+// File-input shape, deliberately lax for human authors: `id` is optional
+// (derived at ingest) and unknown keys are preserved so a field a newer
+// Lightdash adds round-trips instead of being silently dropped. The legacy
+// `global` key is stripped explicitly during load.
+type ProjectContextFileEntry = Omit<
+    ProjectContextEntry,
+    'id' | 'terms' | 'objects'
+> & {
+    id?: string;
+    terms?: string[];
+    objects?: AiProjectContextObjectRef[];
+    [key: string]: unknown;
+};
+
+// Judge-emitted write-path entry (op + nullable id, no global). Mirrors
+// aiAgentJudgeProjectContextEntrySchema; redeclared here to keep this module
+// free of the review-classifier types.
+export type ProjectContextWritebackEntry = {
+    op: 'create' | 'update';
+    id: string | null;
+    kind: ProjectContextEntry['kind'];
+    content: string;
+    terms: string[];
+    objects: AiProjectContextTypedObjectRef[];
+};
+
+const slugifyId = (value: string): string =>
+    value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+/**
+ * Apply a judge-emitted entry to the current file entries, by id. A create with
+ * no id derives a stable id from the first term/content (suffixed on collision);
+ * an explicit id that already exists updates in place (dedup backstop).
+ */
+export const mergeProjectContextEntry = (
+    existing: ProjectContextEntry[],
+    judgeEntry: ProjectContextWritebackEntry,
+): {
+    entries: ProjectContextEntry[];
+    entryId: string;
+    op: 'create' | 'update';
+} => {
+    const ids = new Set(existing.map((e) => e.id));
+    if (judgeEntry.op === 'update' && !judgeEntry.id) {
+        throw new Error('Project context update requires an entry id');
+    }
+
+    let entryId: string;
+    if (judgeEntry.id) {
+        entryId = judgeEntry.id;
+    } else {
+        const base =
+            slugifyId(judgeEntry.terms[0] ?? judgeEntry.content) ||
+            judgeEntry.kind;
+        entryId = base;
+        let suffix = 1;
+        while (ids.has(entryId)) {
+            entryId = `${base}-${suffix}`;
+            suffix += 1;
+        }
+    }
+
+    const index = existing.findIndex((e) => e.id === entryId);
+    const op: 'create' | 'update' = index >= 0 ? 'update' : 'create';
+    const merged: ProjectContextEntry = {
+        id: entryId,
+        kind: judgeEntry.kind,
+        content: judgeEntry.content,
+        terms: judgeEntry.terms,
+        objects: judgeEntry.objects,
+    };
+
+    const entries =
+        index >= 0
+            ? existing.map((e, i) => (i === index ? merged : e))
+            : [...existing, merged];
+
+    return { entries, entryId, op };
+};
+
+// Prepended when the file is first generated so the artifact a reviewer is asked
+// to merge explains itself. Survives later edits because the writeback path
+// preserves leading comments.
+export const PROJECT_CONTEXT_FILE_HEADER = [
+    '# What your AI agents read before they answer.',
+    '# Add things here to teach them your terms and how your data fits together.',
+    '# Merge a change to this file and your future answers get better.',
+    '# Managed from the Reviews tab under Ask AI.',
+].join('\n');
+
+export const serializeProjectContextFile = (
+    entries: ProjectContextEntry[],
+): string => {
+    if (entries.length === 0) {
+        return '';
+    }
+    const body = yaml.dump(
+        { version: PROJECT_CONTEXT_FILE_VERSION, entries },
+        { lineWidth: -1 },
+    );
+    return `${PROJECT_CONTEXT_FILE_HEADER}\n${body}`;
+};
+
+// Derive a stable id from the first term (or content) when the author omitted
+// one, suffixing on collision so ids stay unique within the file.
+const deriveEntryId = (
+    entry: { id?: string; terms: string[]; content: string },
+    used: Set<string>,
+): string => {
+    const base = entry.id ?? slugifyId(entry.terms[0] ?? entry.content);
+    const fallback = base === '' ? 'entry' : base;
+    let id = fallback;
+    let suffix = 1;
+    while (used.has(id)) {
+        id = `${fallback}-${suffix}`;
+        suffix += 1;
+    }
+    return id;
+};
+
+/**
+ * Load project_context YAML contents. Accepts the canonical `{ version, entries }`
+ * shape and a legacy bare-array file. Invalid files throw with schema-backed
+ * errors, and `id` is derived when absent.
+ */
+export const loadProjectContextFile = (
+    yamlContents: string,
+): ProjectContextEntry[] => {
+    if (yamlContents.trim() === '') {
+        return [];
+    }
+
+    let loaded: unknown;
+    try {
+        loaded = yaml.load(yamlContents);
+    } catch (e) {
+        throw new ParseError(
+            `Invalid lightdash.project_context.yml: ${
+                e instanceof Error ? e.message : 'failed to parse YAML'
+            }`,
+        );
+    }
+
+    const normalized = normalizeLegacyProjectContext(loaded);
+    const ajv = new Ajv({
+        coerceTypes: true,
+        allErrors: true,
+        allowUnionTypes: true,
+    });
+    AjvErrors(ajv);
+    const validate = ajv.compile(lightdashProjectContextSchema);
+
+    if (!validate(normalized)) {
+        const errors = betterAjvErrors(
+            lightdashProjectContextSchema,
+            loaded,
+            validate.errors || [],
+            { indent: 2 },
+        );
+        throw new ParseError(
+            `Invalid lightdash.project_context.yml with errors:\n${errors}`,
+        );
+    }
+
+    const rawEntries = (
+        Array.isArray(normalized)
+            ? normalized
+            : (normalized as { entries: unknown[] }).entries
+    ) as ProjectContextFileEntry[];
+    const entries: ProjectContextEntry[] = [];
+    const usedIds = new Set<string>();
+    for (const item of rawEntries) {
+        const entry = { ...item };
+        const explicitId = entry.id;
+        const terms = entry.terms ?? [];
+        const objects = entry.objects ?? [];
+        delete entry.id;
+        delete entry.global;
+
+        const id = deriveEntryId(
+            { id: explicitId, terms, content: entry.content },
+            usedIds,
+        );
+        usedIds.add(id);
+        entries.push({ ...entry, id, terms, objects });
+    }
+    return entries;
+};
+
+/**
+ * Apply a judge-emitted entry and return the new file contents, the entry id,
+ * and whether it created or updated. For a canonical `{ version, entries }`
+ * file this edits the parsed YAML document in place — appending the new entry
+ * (or replacing the one matching `id`) — so the resulting diff is just the
+ * touched entry, with comments, quoting and key order in the rest of the file
+ * preserved. Empty or legacy (bare-array) files fall back to a fresh canonical
+ * serialization.
+ */
+export const applyProjectContextWriteback = (
+    existingContent: string,
+    judgeEntry: ProjectContextWritebackEntry,
+): {
+    content: string;
+    entryId: string;
+    op: 'create' | 'update';
+    // True when a non-empty legacy (v1 / bare-array) file was rewritten as
+    // canonical v2, so callers can surface the migration to the user.
+    upgradesFileToV2: boolean;
+} => {
+    const { entries, entryId, op } = mergeProjectContextEntry(
+        loadProjectContextFile(existingContent),
+        judgeEntry,
+    );
+
+    if (existingContent.trim() !== '') {
+        const doc = parseDocument(existingContent);
+        const entriesNode = doc.get('entries');
+        if (
+            doc.errors.length === 0 &&
+            isSeq(entriesNode) &&
+            doc.get('version') === PROJECT_CONTEXT_FILE_VERSION
+        ) {
+            const node = doc.createNode({
+                id: entryId,
+                kind: judgeEntry.kind,
+                content: judgeEntry.content,
+                terms: judgeEntry.terms,
+                objects: judgeEntry.objects,
+            });
+            const index = entriesNode.items.findIndex(
+                (item) => isMap(item) && item.get('id') === entryId,
+            );
+            if (index >= 0) {
+                entriesNode.set(index, node);
+            } else {
+                entriesNode.add(node);
+            }
+            // flowCollectionPadding:false keeps `[a, b]` from being re-emitted
+            // as `[ a, b ]`, so untouched flow lines stay byte-identical and the
+            // diff is just the changed entry.
+            return {
+                content: doc.toString({
+                    lineWidth: 0,
+                    flowCollectionPadding: false,
+                }),
+                entryId,
+                op,
+                upgradesFileToV2: false,
+            };
+        }
+    }
+
+    return {
+        content: serializeProjectContextFile(entries),
+        entryId,
+        op,
+        upgradesFileToV2: existingContent.trim() !== '',
+    };
+};

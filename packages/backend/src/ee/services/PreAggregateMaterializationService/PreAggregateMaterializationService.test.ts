@@ -1,11 +1,13 @@
 import {
     Account,
+    ForbiddenError,
     QueryExecutionContext,
     QueryHistoryStatus,
 } from '@lightdash/common';
 import { analyticsMock } from '../../../analytics/LightdashAnalytics.mock';
 import type { S3ResultsFileStorageClient } from '../../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient';
 import { lightdashConfigMock } from '../../../config/lightdashConfig.mock';
+import type { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import type { QueryHistoryModel } from '../../../models/QueryHistoryModel/QueryHistoryModel';
 import type { AsyncQueryService } from '../../../services/AsyncQueryService/AsyncQueryService';
 import type { PreAggregateModel } from '../../models/PreAggregateModel';
@@ -18,32 +20,39 @@ describe('PreAggregateMaterializationService', () => {
             dimensions: ['order_date'],
             metrics: ['order_count'],
         },
+        definitionFingerprint: 'fingerprint-1',
     };
 
     const preAggregateModel = {
-        getPreAggregateDefinitionByUuid: jest.fn(),
-        insertInProgress: jest.fn(),
-        attachQueryUuid: jest.fn(),
-        markFailed: jest.fn(),
-        promoteToActive: jest.fn(),
-        getActiveMaterialization: jest.fn(),
+        getPreAggregateDefinitionByUuid: vi.fn(),
+        insertInProgress: vi.fn(),
+        attachQueryUuid: vi.fn(),
+        markFailed: vi.fn(),
+        promoteToActive: vi.fn(),
+        getActiveMaterialization: vi.fn(),
+    };
+
+    const projectModel = {
+        getSummary: vi.fn(),
     };
 
     const queryHistoryModel = {
-        pollForQueryCompletion: jest.fn(),
+        pollForQueryCompletion: vi.fn(),
     };
 
     const asyncQueryService = {
-        executeAsyncMetricQuery: jest.fn(),
+        executeAsyncMetricQuery: vi.fn(),
     };
 
     const preAggregateResultsStorageClient = {
-        getFileSize: jest.fn(),
+        getFileSize: vi.fn(),
+        uploadResults: vi.fn().mockResolvedValue(undefined),
     };
 
     const service = new PreAggregateMaterializationService({
         lightdashConfig: lightdashConfigMock,
         preAggregateModel: preAggregateModel as unknown as PreAggregateModel,
+        projectModel: projectModel as unknown as ProjectModel,
         queryHistoryModel: queryHistoryModel as unknown as QueryHistoryModel,
         asyncQueryService: asyncQueryService as unknown as AsyncQueryService,
         analytics: analyticsMock,
@@ -52,11 +61,40 @@ describe('PreAggregateMaterializationService', () => {
     });
 
     beforeEach(() => {
-        jest.clearAllMocks();
-        jest.spyOn(analyticsMock, 'trackAccount').mockImplementation();
+        vi.clearAllMocks();
+        vi.spyOn(analyticsMock, 'trackAccount').mockImplementation(
+            () => undefined,
+        );
         preAggregateModel.insertInProgress.mockResolvedValue({
             materializationUuid: 'mat-1',
         });
+    });
+
+    test('refuses expired authority after loading the definition and before creating a materialization', async () => {
+        preAggregateModel.getPreAggregateDefinitionByUuid.mockResolvedValue({
+            ...baseStoredPreAggregateDefinition,
+            preAggregateDefinitionUuid: 'def-1',
+        });
+        const beforeEffect = vi
+            .fn()
+            .mockRejectedValue(new ForbiddenError('expired'));
+        await expect(
+            service.materializePreAggregate({
+                account: {} as Account,
+                projectUuid: 'project-1',
+                preAggregateDefinitionUuid: 'def-1',
+                trigger: 'compile',
+                beforeEffect,
+            }),
+        ).rejects.toThrow('expired');
+        expect(preAggregateModel.insertInProgress).not.toHaveBeenCalled();
+        expect(
+            asyncQueryService.executeAsyncMetricQuery,
+        ).not.toHaveBeenCalled();
+        expect(
+            preAggregateResultsStorageClient.uploadResults,
+        ).not.toHaveBeenCalled();
+        expect(preAggregateModel.promoteToActive).not.toHaveBeenCalled();
     });
 
     test('marks run as failed when definition has no materialization query', async () => {
@@ -82,6 +120,7 @@ describe('PreAggregateMaterializationService', () => {
             projectUuid: 'project-1',
             preAggregateDefinitionUuid: 'def-1',
             trigger: 'manual',
+            definitionFingerprint: 'fingerprint-1',
         });
         expect(preAggregateModel.markFailed).toHaveBeenCalledWith({
             materializationUuid: 'mat-1',
@@ -92,88 +131,180 @@ describe('PreAggregateMaterializationService', () => {
         ).not.toHaveBeenCalled();
     });
 
-    test('runs query and promotes active materialization for valid definition', async () => {
-        const queryUpdatedAt = new Date('2024-02-01T10:00:00.000Z');
-        preAggregateModel.getPreAggregateDefinitionByUuid.mockResolvedValue({
-            ...baseStoredPreAggregateDefinition,
-            preAggregateDefinitionUuid: 'def-1',
-            materializationMetricQuery: {
-                metricQuery: {
-                    exploreName: 'orders',
-                    dimensions: [],
-                    metrics: [],
-                    filters: {},
-                    sorts: [],
-                    limit: 100,
-                    tableCalculations: [],
+    test.each([false, true])(
+        'valid materialization checks connection authority before promotion: revoked=%s',
+        async (revoked) => {
+            const queryUpdatedAt = new Date('2024-02-01T10:00:00.000Z');
+            preAggregateModel.getPreAggregateDefinitionByUuid.mockResolvedValue(
+                {
+                    preAggregateDefinition: {
+                        ...baseStoredPreAggregateDefinition.preAggregateDefinition,
+                        sorts: [
+                            { fieldId: 'orders_status', descending: false },
+                        ],
+                    },
+                    preAggregateDefinitionUuid: 'def-1',
+                    materializationMetricQuery: {
+                        metricQuery: {
+                            exploreName: 'orders',
+                            dimensions: ['orders_status'],
+                            metrics: [],
+                            filters: {},
+                            sorts: [
+                                { fieldId: 'orders_status', descending: false },
+                            ],
+                            limit: 100,
+                            tableCalculations: [],
+                        },
+                        metricComponents: {},
+                        timeDimensionFieldId: null,
+                        resolvedMaxRows: null,
+                    },
+                    materializationQueryError: null,
                 },
-                metricComponents: {},
-                timeDimensionFieldId: null,
-                resolvedMaxRows: null,
-            },
-            materializationQueryError: null,
-        });
-        asyncQueryService.executeAsyncMetricQuery.mockResolvedValue({
-            queryUuid: 'query-1',
-        });
-        queryHistoryModel.pollForQueryCompletion.mockResolvedValue({
-            status: QueryHistoryStatus.READY,
-            resultsFileName: 'query-1-results',
-            resultsUpdatedAt: queryUpdatedAt,
-            totalRowCount: 123,
-            columns: null,
-        });
-        preAggregateResultsStorageClient.getFileSize.mockResolvedValue(456789);
-        preAggregateModel.promoteToActive.mockResolvedValue({
-            status: 'active',
-        });
+            );
+            asyncQueryService.executeAsyncMetricQuery.mockResolvedValue({
+                queryUuid: 'query-1',
+            });
+            queryHistoryModel.pollForQueryCompletion.mockResolvedValue({
+                status: QueryHistoryStatus.READY,
+                resultsFileName: 'query-1-results',
+                resultsUpdatedAt: queryUpdatedAt,
+                requestParameters: {
+                    resultProducer: {
+                        version: 1,
+                        authMethod: 'session',
+                        warehouseConnectionUuid: 'built-connection',
+                        credentialOwner: {
+                            kind: 'shared_connection',
+                            identityFingerprint: 'built-owner',
+                        },
+                        agentIdentity: null,
+                    },
+                },
+                totalRowCount: 123,
+                columns: null,
+            });
+            preAggregateResultsStorageClient.getFileSize.mockResolvedValue(
+                456789,
+            );
+            preAggregateModel.promoteToActive.mockResolvedValue({
+                status: 'active',
+            });
 
-        const result = await service.materializePreAggregate({
-            account: {} as Account,
-            projectUuid: 'project-1',
-            preAggregateDefinitionUuid: 'def-1',
-            trigger: 'manual',
-        });
-
-        expect(result).toEqual({
-            materializationUuid: 'mat-1',
-            status: 'active',
-            queryUuid: 'query-1',
-        });
-        expect(asyncQueryService.executeAsyncMetricQuery).toHaveBeenCalledWith(
-            expect.objectContaining({
+            const beforeEffect = vi.fn().mockResolvedValue(undefined);
+            if (revoked)
+                preAggregateResultsStorageClient.getFileSize.mockImplementationOnce(
+                    async () => {
+                        beforeEffect.mockRejectedValue(
+                            new ForbiddenError('revoked before publication'),
+                        );
+                        return 456789;
+                    },
+                );
+            const resultPromise = service.materializePreAggregate({
+                account: {} as Account,
                 projectUuid: 'project-1',
-                context: QueryExecutionContext.PRE_AGGREGATE_MATERIALIZATION,
-                metricQuery: {
-                    exploreName: 'orders',
-                    dimensions: [],
-                    metrics: [],
-                    filters: {},
-                    sorts: [],
-                    limit: 100,
-                    tableCalculations: [],
-                },
-                invalidateCache: true,
-            }),
-        );
-        expect(
-            asyncQueryService.executeAsyncMetricQuery.mock.calls[0][0],
-        ).not.toHaveProperty('materializationRole');
-        expect(preAggregateModel.promoteToActive).toHaveBeenCalledWith({
-            materializationUuid: 'mat-1',
-            queryUuid: 'query-1',
-            materializationUri: 's3://mock_preagg_bucket/query-1-results.jsonl',
-            materializedAt: queryUpdatedAt,
-            rowCount: 123,
-            columns: null,
-            totalBytes: 456789,
-        });
-    });
+                preAggregateDefinitionUuid: 'def-1',
+                trigger: 'manual',
+                beforeEffect,
+            });
+            if (revoked) {
+                await expect(resultPromise).rejects.toThrow(
+                    'revoked before publication',
+                );
+                expect(
+                    preAggregateResultsStorageClient.uploadResults,
+                ).not.toHaveBeenCalled();
+                expect(
+                    preAggregateModel.promoteToActive,
+                ).not.toHaveBeenCalled();
+                return;
+            }
+            const result = await resultPromise;
+            expect(beforeEffect).toHaveBeenCalledTimes(5);
 
-    test('sorts by dimensions with time dimension first and descending', async () => {
+            expect(result).toEqual({
+                materializationUuid: 'mat-1',
+                status: 'active',
+                queryUuid: 'query-1',
+            });
+            expect(
+                asyncQueryService.executeAsyncMetricQuery,
+            ).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    projectUuid: 'project-1',
+                    context:
+                        QueryExecutionContext.PRE_AGGREGATE_MATERIALIZATION,
+                    metricQuery: {
+                        exploreName: 'orders',
+                        dimensions: ['orders_status'],
+                        metrics: [],
+                        filters: {},
+                        sorts: [
+                            { fieldId: 'orders_status', descending: false },
+                        ],
+                        limit: 100,
+                        tableCalculations: [],
+                    },
+                    invalidateCache: true,
+                }),
+            );
+            expect(
+                asyncQueryService.executeAsyncMetricQuery.mock.calls[0][0],
+            ).not.toHaveProperty('materializationRole');
+            expect(
+                preAggregateResultsStorageClient.uploadResults,
+            ).toHaveBeenCalledWith(
+                'query-1-results.producer',
+                JSON.stringify({
+                    version: 1,
+                    authMethod: 'session',
+                    projectUuid: 'project-1',
+                    queryUuid: 'query-1',
+                    warehouseConnectionUuid: 'built-connection',
+                    identityFingerprint: 'built-owner',
+                }),
+                undefined,
+            );
+            expect(
+                preAggregateResultsStorageClient.uploadResults,
+            ).toHaveBeenCalledBefore(preAggregateModel.promoteToActive);
+            expect(preAggregateModel.promoteToActive).toHaveBeenCalledWith({
+                materializationUuid: 'mat-1',
+                queryUuid: 'query-1',
+                materializationUri:
+                    's3://mock_preagg_bucket/query-1-results.jsonl',
+                materializedAt: queryUpdatedAt,
+                rowCount: 123,
+                columns: null,
+                totalBytes: 456789,
+            });
+        },
+    );
+
+    test.each([
+        {
+            name: 'applies automatic sorts to stored definitions without sort config',
+            preAggregateDefinition:
+                baseStoredPreAggregateDefinition.preAggregateDefinition,
+            expectedSorts: [
+                { fieldId: 'orders_order_date_day', descending: true },
+                { fieldId: 'orders_status', descending: false },
+            ],
+        },
+        {
+            name: 'preserves explicitly disabled materialization sorting',
+            preAggregateDefinition: {
+                ...baseStoredPreAggregateDefinition.preAggregateDefinition,
+                sorts: [],
+            },
+            expectedSorts: [],
+        },
+    ])('$name', async ({ preAggregateDefinition, expectedSorts }) => {
         const queryUpdatedAt = new Date('2024-02-01T10:00:00.000Z');
         preAggregateModel.getPreAggregateDefinitionByUuid.mockResolvedValue({
-            ...baseStoredPreAggregateDefinition,
+            preAggregateDefinition,
             preAggregateDefinitionUuid: 'def-1',
             materializationMetricQuery: {
                 metricQuery: {
@@ -216,10 +347,7 @@ describe('PreAggregateMaterializationService', () => {
         expect(asyncQueryService.executeAsyncMetricQuery).toHaveBeenCalledWith(
             expect.objectContaining({
                 metricQuery: expect.objectContaining({
-                    sorts: [
-                        { fieldId: 'orders_order_date_day', descending: true },
-                        { fieldId: 'orders_status', descending: false },
-                    ],
+                    sorts: expectedSorts,
                 }),
             }),
         );
@@ -313,6 +441,18 @@ describe('PreAggregateMaterializationService', () => {
             status: QueryHistoryStatus.READY,
             resultsFileName: 'query-1-results',
             resultsUpdatedAt: queryUpdatedAt,
+            requestParameters: {
+                resultProducer: {
+                    version: 1,
+                    authMethod: 'session',
+                    warehouseConnectionUuid: 'built-connection',
+                    credentialOwner: {
+                        kind: 'shared_connection',
+                        identityFingerprint: 'built-owner',
+                    },
+                    agentIdentity: null,
+                },
+            },
             totalRowCount: 123,
             columns: null,
         });

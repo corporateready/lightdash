@@ -5,20 +5,26 @@ import {
     Group,
     Modal,
     Paper,
-    ScrollArea,
     Stack,
     Text,
+    useMatches,
     type FlexProps,
     type ModalBodyProps,
     type ModalContentProps,
     type ModalHeaderProps,
     type ModalRootProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconTrash, type Icon as IconType } from '@tabler/icons-react';
-import React, { useCallback, useEffect } from 'react';
+import {
+    IconAlertCircle,
+    IconTrash,
+    type Icon as IconType,
+} from '@tabler/icons-react';
+import clsx from 'clsx';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import MantineIcon from '../MantineIcon';
 import classes from './MantineModal.module.css';
+import { MantineModalContext } from './useMantineModalClose';
 
 /**
  * Modal variants for common action patterns.
@@ -26,6 +32,15 @@ import classes from './MantineModal.module.css';
  * - `delete`: Destructive action modal with red styling and trash icon
  */
 export type MantineModalVariant = 'default' | 'delete';
+
+/**
+ * Semantic role of the modal, driving both its ARIA role and dismissal behavior.
+ * - `dialog`: standard modal, dismissible by clicking outside / pressing Escape
+ * - `alertdialog`: interrupts and requires an explicit decision; not dismissible
+ *   by click-outside or Escape, guarding against accidental dismissal. Use for
+ *   destructive confirmations and other choices that must be answered.
+ */
+export type MantineModalRole = 'dialog' | 'alertdialog';
 
 const VARIANT_CONFIG: Record<
     MantineModalVariant,
@@ -69,6 +84,17 @@ export type MantineModalProps = {
      */
     variant?: MantineModalVariant;
     /**
+     * Semantic role of the modal.
+     * - `alertdialog`: sets `role="alertdialog"` and disables click-outside /
+     *   Escape dismissal so a confirmation can't be lost by a stray click.
+     *   Override the dismissal defaults per-case via `modalRootProps`.
+     * Defaults to `alertdialog` for `variant="delete"` (destructive actions
+     * shouldn't be dismissed by accident), otherwise `dialog`. Set explicitly
+     * to opt a delete modal back into `dialog`, or to mark a non-delete modal
+     * (e.g. a revoke/regenerate confirmation) as an alert.
+     */
+    role?: MantineModalRole;
+    /**
      * The type of resource being acted upon (e.g., "chart", "dashboard", "space").
      * Used with `variant="delete"` to auto-generate description.
      */
@@ -79,6 +105,12 @@ export type MantineModalProps = {
      * "Are you sure you want to delete the {resourceType} "{resourceLabel}"?"
      */
     resourceLabel?: string;
+    /**
+     * Secondary line rendered under the title, in the header.
+     * Use for context about the modal itself; `description` instead puts copy
+     * in the body, where it reads as content.
+     */
+    subtitle?: React.ReactNode;
     icon?: IconType;
     /**
      * Modal size. Accepts Mantine's built-in sizes ('xs', 'sm', 'md', 'lg', 'xl') or a custom number/string.
@@ -144,6 +176,12 @@ export type MantineModalProps = {
      */
     headerActions?: React.ReactNode;
     /**
+     * Custom footer content, rendered full-width in place of the default
+     * cancel/confirm button bar. `onConfirm`, `actions`, `leftActions` and
+     * `cancelLabel` are ignored when set.
+     */
+    footer?: React.ReactNode;
+    /**
      * Label for the cancel button. Set to `false` to hide the cancel button.
      * @default "Cancel"
      */
@@ -179,11 +217,69 @@ export type MantineModalProps = {
     bodyScrollAreaMaxHeight?: string;
 };
 
+const DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"]';
+// Escape key events a modal has already acted on in this dispatch: a
+// confirmation opened by that close would otherwise catch the same key press
+const handledEscapeEvents = new WeakSet<KeyboardEvent>();
+
+/**
+ * Closes on Escape only while the dialog inside `ref` is the topmost open
+ * dialog, so nested dialogs (Mantine's or ours) do not close their host too.
+ */
+const useTopmostDialogEscape = (
+    ref: React.RefObject<HTMLDivElement | null>,
+    enabled: boolean,
+    onEscape: () => void,
+) => {
+    useEffect(() => {
+        if (!enabled) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (
+                event.key !== 'Escape' ||
+                event.isComposing ||
+                event.defaultPrevented
+            )
+                return;
+            if (handledEscapeEvents.has(event)) return;
+            const target = event.target as HTMLElement | null;
+            if (
+                target?.getAttribute?.('data-mantine-stop-propagation') ===
+                'true'
+            )
+                return;
+            // Mantine hands the ref to the wrapper around the dialog element
+            const ownDialog = ref.current?.matches(DIALOG_SELECTOR)
+                ? ref.current
+                : ref.current?.querySelector(DIALOG_SELECTOR);
+            if (!ownDialog) return;
+            // The focus trap keeps focus inside the topmost dialog
+            const active = document.activeElement;
+            if (
+                active &&
+                active !== document.body &&
+                !ownDialog.contains(active)
+            ) {
+                return;
+            }
+            const dialogs = document.querySelectorAll(DIALOG_SELECTOR);
+            if (dialogs[dialogs.length - 1] !== ownDialog) return;
+            handledEscapeEvents.add(event);
+            onEscape();
+        };
+        // Run after the focused control, so an open child overlay can consume
+        // Escape before its host modal considers the same key press.
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [ref, enabled, onEscape]);
+};
+
 const MantineModal: React.FC<MantineModalProps> = ({
     opened,
     onClose,
     title,
+    subtitle,
     variant = 'default',
+    role = variant === 'delete' ? 'alertdialog' : 'dialog',
     resourceType,
     resourceLabel,
     icon,
@@ -199,16 +295,22 @@ const MantineModal: React.FC<MantineModalProps> = ({
     actions,
     leftActions,
     headerActions,
+    footer,
     cancelLabel = 'Cancel',
     cancelDisabled = false,
     onCancel,
     confirmBeforeClose = false,
     modalRootProps,
+    modalContentProps,
     modalHeaderProps,
     modalBodyProps,
     modalActionsProps,
     bodyScrollAreaMaxHeight = 'calc(80vh - 140px)',
 }) => {
+    const compact = useMatches(
+        { base: true, sm: false },
+        { getInitialValueInEffect: false },
+    );
     const [
         isConfirmCloseOpen,
         { open: openConfirmClose, close: closeConfirmClose },
@@ -228,7 +330,33 @@ const MantineModal: React.FC<MantineModalProps> = ({
         }
     }, [confirmBeforeClose, onClose, openConfirmClose]);
 
+    // Descendants (header actions, footers, a breadcrumb in the title) close
+    // the modal through the same path as its own close button.
+    const closeContext = useMemo(
+        () => ({ requestClose: handleClose }),
+        [handleClose],
+    );
+
     const config = VARIANT_CONFIG[variant];
+
+    const isAlertDialog = role === 'alertdialog';
+    const mobileFullScreen = compact && !isAlertDialog;
+
+    // Mantine gives every open modal its own window Escape listener, so a
+    // nested dialog (ours or a plain Mantine one) would close this modal too.
+    // Escape acts here only while this content is the topmost open dialog.
+    // Hosts keep the per-case override (`modalRootProps.closeOnEscape`);
+    // Mantine's own listener stays off, since it cannot tell layers apart.
+    const { closeOnEscape = !isAlertDialog, ...rootProps } =
+        modalRootProps ?? {};
+    const contentRef = useRef<HTMLDivElement>(null);
+    useTopmostDialogEscape(contentRef, opened && closeOnEscape, handleClose);
+    const confirmContentRef = useRef<HTMLDivElement>(null);
+    useTopmostDialogEscape(
+        confirmContentRef,
+        isConfirmCloseOpen,
+        closeConfirmClose,
+    );
 
     const effectiveIcon = icon ?? config.icon;
 
@@ -240,99 +368,133 @@ const MantineModal: React.FC<MantineModalProps> = ({
 
     const confirmButtonColor = config.color;
 
-    const renderBody = () => {
-        if (fullScreen) {
-            // Fullscreen mode: no ScrollArea, body fills available space
-            return (
-                <Modal.Body p={0} className={classes.fullScreenBody}>
-                    <Box
-                        px={modalBodyProps?.px ?? 'xl'}
-                        py={modalBodyProps?.py ?? 'md'}
-                        h="100%"
-                    >
-                        {effectiveDescription && (
-                            <Text fz="sm">{effectiveDescription}</Text>
-                        )}
-                        {children}
-                    </Box>
-                </Modal.Body>
-            );
-        }
-
-        // Standard mode: ScrollArea with max height
-        return (
-            <Modal.Body p={0} className={classes.body}>
-                <ScrollArea.Autosize mah={bodyScrollAreaMaxHeight}>
-                    <Stack
-                        gap="md"
-                        px={modalBodyProps?.px ?? 'xl'}
-                        py={modalBodyProps?.py ?? 'md'}
-                        {...(modalBodyProps?.bg
-                            ? { bg: modalBodyProps.bg }
-                            : {})}
-                        mah={modalBodyProps?.mah}
-                        mih={modalBodyProps?.mih}
-                    >
-                        {effectiveDescription && (
-                            <Text fz="sm">{effectiveDescription}</Text>
-                        )}
-                        {children}
-                    </Stack>
-                </ScrollArea.Autosize>
-            </Modal.Body>
-        );
-    };
-
     return (
-        <>
+        <MantineModalContext.Provider value={closeContext}>
             <Modal.Root
                 opened={opened}
                 onClose={handleClose}
                 size={fullScreen ? 'auto' : size}
                 centered
-                {...modalRootProps}
+                closeOnClickOutside={isAlertDialog ? false : undefined}
+                {...rootProps}
+                closeOnEscape={false}
+                fullScreen={mobileFullScreen || rootProps.fullScreen}
+                yOffset={
+                    mobileFullScreen
+                        ? 0
+                        : (rootProps.yOffset ?? (fullScreen ? 24 : undefined))
+                }
+                xOffset={
+                    mobileFullScreen
+                        ? 0
+                        : (rootProps.xOffset ?? (fullScreen ? 24 : undefined))
+                }
             >
                 <Modal.Overlay />
                 <Modal.Content
-                    className={
-                        fullScreen ? classes.fullScreenContent : undefined
-                    }
+                    {...modalContentProps}
+                    ref={contentRef}
+                    // A form inside the modal must not submit a form around it
+                    onSubmit={(event) => event.stopPropagation()}
+                    role={isAlertDialog ? 'alertdialog' : undefined}
+                    className={clsx(
+                        !fullScreen && !mobileFullScreen && classes.content,
+                        modalContentProps?.className,
+                        mobileFullScreen
+                            ? classes.mobileContent
+                            : fullScreen && classes.fullScreenContent,
+                    )}
                 >
                     <Modal.Header
                         className={classes.header}
-                        px="xl"
+                        px={{ base: 'md', sm: 'xl' }}
                         py="md"
                         {...modalHeaderProps}
                     >
                         <Group
+                            className={classes.titleGroup}
                             gap="sm"
                             flex={1}
+                            // Shrinkable, so long titles truncate instead of
+                            // pushing past the close button
+                            miw={0}
                             wrap="nowrap"
-                            align="flex-start"
+                            align={subtitle ? 'center' : 'flex-start'}
                         >
                             {effectiveIcon ? (
-                                <Paper p="6px" withBorder radius="md">
+                                <Paper p="6px" radius="md">
                                     <MantineIcon
                                         icon={effectiveIcon}
                                         size="md"
                                     />
                                 </Paper>
                             ) : null}
-                            <Text c="ldDark.9" fw={700} fz="md" lh="28px">
-                                {title}
-                            </Text>
+                            <Stack gap={2} miw={0}>
+                                <Modal.Title
+                                    c="ldDark.9"
+                                    fw={600}
+                                    fz="md"
+                                    lh="28px"
+                                >
+                                    {title}
+                                </Modal.Title>
+                                {subtitle ? (
+                                    <Text c="dimmed" fz="sm" lh="20px">
+                                        {subtitle}
+                                    </Text>
+                                ) : null}
+                            </Stack>
                         </Group>
                         {headerActions ? (
-                            <Group gap="sm" mr="md">
+                            <Group
+                                className={classes.headerActions}
+                                gap="sm"
+                                mr={{ base: 0, sm: 'md' }}
+                            >
                                 {headerActions}
                             </Group>
                         ) : null}
-                        {withCloseButton && <Modal.CloseButton />}
+                        {withCloseButton && (
+                            <Modal.CloseButton
+                                className={classes.closeButton}
+                                aria-label="Close"
+                                // Anchor for scope walkthroughs (data-tour-via)
+                                data-tour-anchor="modal-close"
+                                data-tour-hint="Close the dialog"
+                            />
+                        )}
                     </Modal.Header>
 
-                    {renderBody()}
+                    <Modal.Body
+                        p={0}
+                        className={classes.body}
+                        mah={
+                            fullScreen || mobileFullScreen
+                                ? undefined
+                                : bodyScrollAreaMaxHeight
+                        }
+                    >
+                        <Stack
+                            gap="md"
+                            h={fullScreen ? '100%' : undefined}
+                            px={modalBodyProps?.px ?? { base: 'md', sm: 'xl' }}
+                            py={modalBodyProps?.py ?? 'md'}
+                            bg={modalBodyProps?.bg}
+                            mah={modalBodyProps?.mah}
+                            mih={modalBodyProps?.mih}
+                        >
+                            {effectiveDescription && (
+                                <Text fz="sm">{effectiveDescription}</Text>
+                            )}
+                            {children}
+                        </Stack>
+                    </Modal.Body>
 
-                    {(onConfirm || actions || leftActions) && !fullScreen ? (
+                    {footer && !fullScreen ? (
+                        <Box className={classes.actions} px="xl" py="md">
+                            {footer}
+                        </Box>
+                    ) : (onConfirm || actions || leftActions) && !fullScreen ? (
                         <Flex
                             className={classes.actions}
                             px="xl"
@@ -359,6 +521,9 @@ const MantineModal: React.FC<MantineModalProps> = ({
                                         onClick={onConfirm}
                                         disabled={confirmDisabled}
                                         loading={confirmLoading}
+                                        // Anchor for scope walkthroughs
+                                        data-tour-anchor="modal-confirm"
+                                        data-tour-hint="Confirm the change"
                                     >
                                         {effectiveConfirmLabel}
                                     </Button>
@@ -372,21 +537,35 @@ const MantineModal: React.FC<MantineModalProps> = ({
             {confirmBeforeClose && (
                 <Modal.Root
                     opened={isConfirmCloseOpen}
+                    closeOnEscape={false}
                     onClose={closeConfirmClose}
                     size="sm"
                     centered
                 >
                     <Modal.Overlay />
-                    <Modal.Content>
+                    <Modal.Content role="alertdialog" ref={confirmContentRef}>
                         <Modal.Header
                             className={classes.header}
                             px="xl"
                             py="md"
                         >
-                            <Text c="ldDark.9" fw={700} fz="md" lh="28px">
-                                Unsaved changes
-                            </Text>
-                            <Modal.CloseButton />
+                            <Group gap="sm" flex={1} miw={0} wrap="nowrap">
+                                <Paper p="6px" radius="md">
+                                    <MantineIcon
+                                        icon={IconAlertCircle}
+                                        size="md"
+                                    />
+                                </Paper>
+                                <Modal.Title
+                                    c="ldDark.9"
+                                    fw={600}
+                                    fz="md"
+                                    lh="28px"
+                                >
+                                    Unsaved changes
+                                </Modal.Title>
+                            </Group>
+                            <Modal.CloseButton aria-label="Close" />
                         </Modal.Header>
                         <Modal.Body p={0}>
                             <Stack gap="md" px="xl" py="md">
@@ -411,6 +590,7 @@ const MantineModal: React.FC<MantineModalProps> = ({
                                     Keep editing
                                 </Button>
                                 <Button
+                                    color="red"
                                     onClick={() => {
                                         closeConfirmClose();
                                         onClose();
@@ -423,7 +603,7 @@ const MantineModal: React.FC<MantineModalProps> = ({
                     </Modal.Content>
                 </Modal.Root>
             )}
-        </>
+        </MantineModalContext.Provider>
     );
 };
 

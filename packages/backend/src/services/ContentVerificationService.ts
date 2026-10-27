@@ -4,15 +4,15 @@ import {
     type SessionUser,
     type VerifiedContentListItem,
 } from '@lightdash/common';
-import { CaslAuditWrapper } from '../logging/caslAuditWrapper';
-import { logAuditEvent } from '../logging/winston';
 import { ContentVerificationModel } from '../models/ContentVerificationModel';
 import { ProjectModel } from '../models/ProjectModel/ProjectModel';
 import { BaseService } from './BaseService';
+import { SpacePermissionService } from './SpaceService/SpacePermissionService';
 
 type ContentVerificationServiceArguments = {
     contentVerificationModel: ContentVerificationModel;
     projectModel: ProjectModel;
+    spacePermissionService: SpacePermissionService;
 };
 
 export class ContentVerificationService extends BaseService {
@@ -20,13 +20,17 @@ export class ContentVerificationService extends BaseService {
 
     private readonly projectModel: ProjectModel;
 
+    private readonly spacePermissionService: SpacePermissionService;
+
     constructor({
         contentVerificationModel,
         projectModel,
+        spacePermissionService,
     }: ContentVerificationServiceArguments) {
         super({ serviceName: 'ContentVerificationService' });
         this.contentVerificationModel = contentVerificationModel;
         this.projectModel = projectModel;
+        this.spacePermissionService = spacePermissionService;
     }
 
     async listVerifiedContent(
@@ -35,13 +39,11 @@ export class ContentVerificationService extends BaseService {
     ): Promise<VerifiedContentListItem[]> {
         const project = await this.projectModel.getSummary(projectUuid);
 
-        const auditedAbility = new CaslAuditWrapper(user.ability, user, {
-            auditLogger: logAuditEvent,
-        });
+        const auditedAbility = this.createAuditedAbility(user);
 
         if (
             auditedAbility.cannot(
-                'manage',
+                'view',
                 subject('ContentVerification', {
                     organizationUuid: project.organizationUuid,
                     projectUuid,
@@ -54,6 +56,17 @@ export class ContentVerificationService extends BaseService {
             );
         }
 
-        return this.contentVerificationModel.getAllForProject(projectUuid);
+        const items =
+            await this.contentVerificationModel.getAllForProject(projectUuid);
+
+        const accessibleSpaceUuids = new Set(
+            await this.spacePermissionService.getAccessibleSpaceUuids(
+                'view',
+                user,
+                [...new Set(items.map((item) => item.spaceUuid))],
+            ),
+        );
+
+        return items.filter((item) => accessibleSpaceUuids.has(item.spaceUuid));
     }
 }

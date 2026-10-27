@@ -1,8 +1,12 @@
-import { NotFoundError } from '@lightdash/common';
+import {
+    NotFoundError,
+    type PersistentDownloadFileAccessMode,
+    type PersistentDownloadFileStorage,
+} from '@lightdash/common';
 import { Knex } from 'knex';
 import {
-    DbPersistentDownloadFile,
     PersistentDownloadFileTableName,
+    type DbPersistentDownloadFile,
 } from '../database/entities/persistentDownloadFile';
 
 type PersistentDownloadFileModelArguments = {
@@ -23,6 +27,8 @@ export class PersistentDownloadFileModel {
         organizationUuid: string;
         projectUuid: string | null;
         createdByUserUuid: string | null;
+        accessMode: PersistentDownloadFileAccessMode;
+        storage: PersistentDownloadFileStorage;
         expiresAt: Date;
     }): Promise<void> {
         await this.database(PersistentDownloadFileTableName).insert({
@@ -32,6 +38,8 @@ export class PersistentDownloadFileModel {
             organization_uuid: data.organizationUuid,
             project_uuid: data.projectUuid,
             created_by_user_uuid: data.createdByUserUuid,
+            access_mode: data.accessMode,
+            storage: data.storage,
             expires_at: data.expiresAt,
         });
     }
@@ -47,5 +55,11 @@ export class PersistentDownloadFileModel {
         }
 
         return row;
+    }
+
+    async delete(nanoid: string): Promise<void> {
+        await this.database(PersistentDownloadFileTableName)
+            .where('nanoid', nanoid)
+            .delete();
     }
 }

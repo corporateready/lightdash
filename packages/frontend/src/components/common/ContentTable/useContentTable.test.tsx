@@ -2,6 +2,7 @@ import { renderHook } from '@testing-library/react';
 import { describe, expect, test } from 'vitest';
 import { type ContentTableColumnDef } from './types';
 import { useContentTable } from './useContentTable';
+import { getColumnHeaderLabel } from './utils';
 
 type Row = { name: string; createdAt: string };
 
@@ -51,5 +52,72 @@ describe('useContentTable', () => {
         const sortedRows = result.current.getSortedRowModel().rows;
 
         expect(sortedRows.map((r) => r.original.name)).toEqual(['a', 'b']);
+    });
+
+    test('leaves columnDef.footer undefined when the column defines no Footer', () => {
+        const columns: ContentTableColumnDef<Row>[] = [
+            { accessorKey: 'name', header: 'Name' },
+        ];
+
+        const { result } = renderHook(() =>
+            useContentTable<Row>({ columns, data }),
+        );
+
+        const [column] = result.current.getAllLeafColumns();
+
+        expect(column.columnDef.footer).toBeUndefined();
+    });
+
+    test('sets columnDef.footer when the column defines a Footer', () => {
+        const columns: ContentTableColumnDef<Row>[] = [
+            { accessorKey: 'name', header: 'Name', Footer: () => 'Total' },
+        ];
+
+        const { result } = renderHook(() =>
+            useContentTable<Row>({ columns, data }),
+        );
+
+        const [column] = result.current.getAllLeafColumns();
+
+        expect(column.columnDef.footer).toBeDefined();
+    });
+
+    describe('getColumnHeaderLabel', () => {
+        test('returns the original string header even though the runtime header is a render callback', () => {
+            const columns: ContentTableColumnDef<Row>[] = [
+                {
+                    accessorKey: 'name',
+                    header: 'Metric',
+                    Header: ({ column }) => column.columnDef.header,
+                },
+            ];
+
+            const { result } = renderHook(() =>
+                useContentTable<Row>({ columns, data }),
+            );
+
+            const [column] = result.current.getAllLeafColumns();
+
+            expect(typeof column.columnDef.header).toBe('function');
+            expect(getColumnHeaderLabel(column)).toBe('Metric');
+        });
+
+        test('falls back to the column id when the original header is not a string', () => {
+            const columns: ContentTableColumnDef<Row>[] = [
+                {
+                    accessorKey: 'name',
+                    id: 'name',
+                    header: () => 'rendered',
+                },
+            ];
+
+            const { result } = renderHook(() =>
+                useContentTable<Row>({ columns, data }),
+            );
+
+            const [column] = result.current.getAllLeafColumns();
+
+            expect(getColumnHeaderLabel(column)).toBe('name');
+        });
     });
 });

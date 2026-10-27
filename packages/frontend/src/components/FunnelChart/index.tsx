@@ -1,4 +1,4 @@
-import { Box } from '@mantine-8/core';
+import { Box } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconFilterOff } from '@tabler/icons-react';
 import { type ECElementEvent } from 'echarts';
@@ -16,11 +16,15 @@ import useEchartsFunnelConfig, {
     type FunnelSeriesDataPoint,
 } from '../../hooks/echarts/useEchartsFunnelConfig';
 import { useLegendDoubleClickSelection } from '../../hooks/echarts/useLegendDoubleClickSelection';
+import { useLegendScrollPosition } from '../../hooks/echarts/useLegendScrollPosition';
 import { useContextMenuPermissions } from '../../hooks/useContextMenuPermissions';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
 import EChartsReact from '../EChartsReactWrapper';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationInputs,
+    useVisualizationServices,
+} from '../LightdashVisualization/useVisualizationContext';
 import FunnelChartContextMenu, {
     type FunnelChartContextMenuProps,
 } from './FunnelChartContextMenu';
@@ -41,14 +45,20 @@ type FunnelChartProps = Omit<EChartsReactProps, 'option'> & {
     className?: string;
     onScreenshotReady?: () => void;
     onScreenshotError?: () => void;
+    enableContextMenu?: boolean;
 };
 
 const EchartOptions: Opts = { renderer: 'svg' };
 
 const FunnelChart: FC<FunnelChartProps> = memo(
-    ({ onScreenshotReady, onScreenshotError, ...props }) => {
-        const { chartRef, isLoading, resultsData, minimal } =
-            useVisualizationContext();
+    ({
+        onScreenshotReady,
+        onScreenshotError,
+        enableContextMenu = true,
+        ...props
+    }) => {
+        const { chartRef } = useVisualizationServices();
+        const { isLoading, resultsData, minimal } = useVisualizationInputs();
         const { selectedLegends, onLegendChange } =
             useLegendDoubleClickSelection();
 
@@ -56,6 +66,8 @@ const FunnelChart: FC<FunnelChartProps> = memo(
             selectedLegends,
             props.isInDashboard,
         );
+        const { optionWithScrollPosition, onLegendScroll } =
+            useLegendScrollPosition(chartRef, funnelChartOptions);
         const { shouldShowMenu, canViewUnderlyingData } =
             useContextMenuPermissions({
                 minimal,
@@ -95,7 +107,7 @@ const FunnelChart: FC<FunnelChartProps> = memo(
                 chartRef.current?.getEchartsInstance().resize();
             window.addEventListener('resize', listener);
             return () => window.removeEventListener('resize', listener);
-        });
+        }, [chartRef]);
 
         const handleOpenContextMenu = useCallback(
             (e: ECElementEvent) => {
@@ -124,11 +136,21 @@ const FunnelChart: FC<FunnelChartProps> = memo(
 
         const onEvents = useMemo(
             () => ({
-                click: handleOpenContextMenu,
-                oncontextmenu: handleOpenContextMenu,
+                ...(enableContextMenu
+                    ? {
+                          click: handleOpenContextMenu,
+                          oncontextmenu: handleOpenContextMenu,
+                      }
+                    : {}),
                 legendselectchanged: onLegendChange,
+                legendscroll: onLegendScroll,
             }),
-            [handleOpenContextMenu, onLegendChange],
+            [
+                enableContextMenu,
+                handleOpenContextMenu,
+                onLegendChange,
+                onLegendScroll,
+            ],
         );
 
         if (isLoading) return <LoadingChart />;
@@ -153,13 +175,13 @@ const FunnelChart: FC<FunnelChartProps> = memo(
                               }
                     }
                     opts={EchartOptions}
-                    option={funnelChartOptions}
+                    option={optionWithScrollPosition ?? funnelChartOptions}
                     notMerge
                     {...props}
                     onEvents={onEvents}
                 />
 
-                {shouldShowMenu && (
+                {enableContextMenu && shouldShowMenu && (
                     <FunnelChartContextMenu
                         value={menuProps?.value}
                         menuPosition={menuProps?.position}

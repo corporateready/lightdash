@@ -2,51 +2,81 @@ import { NotificationResourceType } from '@lightdash/common';
 import {
     ActionIcon,
     Box,
+    Button,
+    CloseButton,
+    Collapse,
     Divider,
+    Group,
     Indicator,
+    Menu,
     Popover,
     Stack,
     Text,
+    Tooltip,
     type PopoverProps,
-} from '@mantine-8/core';
-import { useScrollIntoView } from '@mantine/hooks';
-import { IconMessage } from '@tabler/icons-react';
+} from '@mantine/core';
+import { useDisclosure, useScrollIntoView } from '@mantine/hooks';
+import {
+    IconChevronDown,
+    IconChevronUp,
+    IconMessage,
+} from '@tabler/icons-react';
 import { useCallback, useMemo, useRef, useState, type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
 import useApp from '../../../providers/App/useApp';
 import useDashboardContext from '../../../providers/Dashboard/useDashboardContext';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
 import { useGetNotifications } from '../../notifications';
 import { useUpdateNotification } from '../../notifications/hooks/useNotifications';
-import { useCreateComment } from '../hooks/useComments';
+import { useCreateComment, useGetResolvedComments } from '../hooks/useComments';
 import { useScrollToDashboardCommentViaSearchParam } from '../hooks/useScrollToDashboardCommentViaSearchParam';
 import { CommentForm } from './CommentForm';
 import { DashboardCommentAndReplies } from './DashboardCommentAndReplies';
 
 type Props = {
     dashboardTileUuid: string;
+    targetVariant?: 'actionIcon' | 'menuItem';
 };
 
 const COMMENTS_LIST_MAX_HEIGHT = 500;
 
 export const DashboardTileComments: FC<
     Props & Pick<PopoverProps, 'opened' | 'onClose' | 'onOpen'>
-> = ({ dashboardTileUuid, opened, onClose, onOpen }) => {
+> = ({
+    dashboardTileUuid,
+    opened,
+    onClose,
+    onOpen,
+    targetVariant = 'actionIcon',
+}) => {
+    const getUiString = useUiStrings();
     const { user } = useApp();
     const { track } = useTracking();
 
     const [openedComments, setOpenedComments] = useState(opened);
+    const [showResolved, { toggle: toggleShowResolved }] = useDisclosure(false);
 
     const projectUuid = useDashboardContext((c) => c.projectUuid);
     const dashboardUuid = useDashboardContext((c) => c.dashboard?.uuid);
     const canCreateDashboardComments = useDashboardContext(
         (c) => c.dashboardCommentsCheck?.canCreateDashboardComments,
     );
+    const canViewDashboardComments = useDashboardContext(
+        (c) => c.dashboardCommentsCheck?.canViewDashboardComments,
+    );
     const dashboard = useDashboardContext((c) => c.dashboard);
     const comments = useDashboardContext(
         (c) => c.dashboardComments && c.dashboardComments[dashboardTileUuid],
     );
+
+    const { data: resolvedCommentsByTile } = useGetResolvedComments(
+        dashboardUuid ?? '',
+        projectUuid,
+        !!openedComments && !!canViewDashboardComments && !!dashboardUuid,
+    );
+    const resolvedComments = resolvedCommentsByTile?.[dashboardTileUuid] ?? [];
 
     const targetRefComments = useRef<HTMLDivElement>(null);
 
@@ -120,6 +150,16 @@ export const DashboardTileComments: FC<
         return 'gray';
     }, [unreadNotificationsForTile]);
 
+    const handleTargetClick = useCallback(() => {
+        if (openedComments) {
+            onClose?.();
+        } else {
+            onOpen?.();
+        }
+
+        setOpenedComments((prev) => !prev);
+    }, [onClose, onOpen, openedComments]);
+
     const handleOnOpen = useCallback(() => {
         track({
             name: EventName.COMMENTS_CLICKED,
@@ -157,8 +197,12 @@ export const DashboardTileComments: FC<
     return (
         <Popover
             withArrow
-            withinPortal
-            shadow="md"
+            preventPositionChangeWhenVisible={false}
+            floatingStrategy="fixed"
+            middlewares={{
+                flip: true,
+                shift: { crossAxis: true, padding: 12, limiter: undefined },
+            }}
             position="bottom-end"
             offset={4}
             arrowOffset={10}
@@ -170,9 +214,53 @@ export const DashboardTileComments: FC<
             closeOnClickOutside
             onChange={setOpenedComments}
         >
-            <Popover.Dropdown p={0} w={400} maw={400}>
+            <Popover.Dropdown
+                p={0}
+                w="min(400px, calc(100vw - 24px))"
+                mah="calc(100dvh - 24px)"
+                style={{ overflowY: 'auto' }}
+                // Walkthrough result marker for create:DashboardComments:
+                // the thread, with the learner's own comment in it.
+                data-tour-scope="create:DashboardComments"
+                data-tour-step="1"
+                data-tour-route="/projects/:projectUuid/dashboards/:dashboardUuid/view"
+                data-tour-label="A comment lives on the tile it is about"
+                data-tour-docs="explore/dashboards/interact.mdx#comment-on-a-tile:1"
+                data-tour-return="none"
+                // The closing step describes what the learner sees next (the
+                // icon with its count), not mentions: the suggested comment
+                // cannot mention anyone, since who exists differs per org.
+                data-tour-resultdocs="explore/dashboards/interact.mdx#comment-on-a-tile:2"
+            >
+                <Group
+                    justify="space-between"
+                    px="sm"
+                    wrap="nowrap"
+                    pos="sticky"
+                    top={0}
+                    bg="background"
+                    style={{ zIndex: 1 }}
+                >
+                    <Text fw={600} size="sm">
+                        {getUiString('comments.title')}
+                    </Text>
+                    <CloseButton
+                        aria-label={getUiString('comments.close')}
+                        mod="touch-dismiss"
+                        onClick={() => setOpenedComments(false)}
+                    />
+                </Group>
                 <Stack
                     id="comments-stack"
+                    // Walkthrough result marker for view:DashboardComments:
+                    // the tile's thread, opened from its speech bubble.
+                    data-tour-scope="view:DashboardComments"
+                    data-tour-step="1"
+                    data-tour-route="/projects/:projectUuid/dashboards/:dashboardUuid/view"
+                    data-tour-label="Every tile carries its own comment thread"
+                    data-tour-docs="explore/dashboards/interact.mdx#comment-on-a-tile:1"
+                    data-tour-return="none"
+                    data-tour-resultdocs="explore/dashboards/interact.mdx#comment-on-a-tile:li1"
                     ref={scrollableRef}
                     p="sm"
                     gap="xs"
@@ -194,11 +282,66 @@ export const DashboardTileComments: FC<
                             }
                         />
                     ))}
-                    {!canCreateDashboardComments && !hasComments && (
-                        <Text fz="xs">No comments yet</Text>
+                    {!hasComments && (
+                        <Text fz="xs" c="dimmed">
+                            No open comments
+                        </Text>
+                    )}
+
+                    {resolvedComments.length > 0 && (
+                        <Box>
+                            {hasComments && <Divider mx="-sm" mb="xs" />}
+                            <Button
+                                size="compact-xs"
+                                variant="subtle"
+                                color="gray"
+                                fz="xs"
+                                onClick={toggleShowResolved}
+                                // Walkthrough result marker for
+                                // manage:DashboardComments: where a
+                                // resolved thread went.
+                                data-tour-scope="manage:DashboardComments"
+                                data-tour-step="1"
+                                data-tour-route="/projects/:projectUuid/dashboards/:dashboardUuid/view"
+                                data-tour-label="A resolved thread folds away"
+                                data-tour-docs="explore/dashboards/interact.mdx#comment-on-a-tile:1"
+                                data-tour-return="none"
+                                data-tour-resultdocs="explore/dashboards/interact.mdx#comment-on-a-tile:li3:2"
+                                rightSection={
+                                    <MantineIcon
+                                        icon={
+                                            showResolved
+                                                ? IconChevronUp
+                                                : IconChevronDown
+                                        }
+                                    />
+                                }
+                            >
+                                {showResolved ? 'Hide' : 'Show'} resolved (
+                                {resolvedComments.length})
+                            </Button>
+                            <Collapse expanded={showResolved}>
+                                <Stack gap="xs" mt="xs">
+                                    {resolvedComments.map((resolvedComment) => (
+                                        <DashboardCommentAndReplies
+                                            key={resolvedComment.commentId}
+                                            comment={resolvedComment}
+                                            projectUuid={projectUuid}
+                                            dashboardUuid={dashboardUuid}
+                                            dashboardTileUuid={
+                                                dashboardTileUuid
+                                            }
+                                            targetRef={null}
+                                            isResolved
+                                        />
+                                    ))}
+                                </Stack>
+                            </Collapse>
+                        </Box>
                     )}
                 </Stack>
-                {hasComments && <Divider />}
+
+                {(hasComments || resolvedComments.length > 0) && <Divider />}
                 <Box p="sm" pt="xs">
                     {canCreateDashboardComments && (
                         <CommentForm
@@ -213,36 +356,62 @@ export const DashboardTileComments: FC<
             </Popover.Dropdown>
 
             <Popover.Target ref={targetRefComments}>
-                <Indicator
-                    label={comments && comments.length}
-                    size={12}
-                    disabled={!showIndicator}
-                    offset={4}
-                    color={indicatorColor}
-                    styles={{
-                        indicator: {
-                            fontSize: 11,
-                            padding: 0,
-                        },
-                    }}
-                >
-                    <ActionIcon
-                        size="sm"
-                        variant="light"
-                        color="gray"
-                        onClick={() => {
-                            if (openedComments) {
-                                onClose?.();
-                            } else {
-                                onOpen?.();
-                            }
-
-                            setOpenedComments((prev) => !prev);
+                {targetVariant === 'menuItem' ? (
+                    <Menu.Item
+                        closeMenuOnClick={false}
+                        leftSection={<MantineIcon icon={IconMessage} />}
+                        rightSection={showIndicator ? comments.length : null}
+                        onClick={handleTargetClick}
+                    >
+                        {getUiString('comments.title')}
+                    </Menu.Item>
+                ) : (
+                    <Indicator
+                        inline
+                        label={comments && comments.length}
+                        size={12}
+                        disabled={!showIndicator}
+                        offset={3}
+                        color={indicatorColor}
+                        styles={{
+                            indicator: {
+                                fontSize: 10,
+                                padding: 0,
+                            },
                         }}
                     >
-                        <MantineIcon icon={IconMessage} />
-                    </ActionIcon>
-                </Indicator>
+                        <Tooltip
+                            label={getUiString('comments.title')}
+                            position="top"
+                            disabled={openedComments}
+                        >
+                            <ActionIcon
+                                aria-label={getUiString('comments.title')}
+                                display="block"
+                                size="sm"
+                                onClick={handleTargetClick}
+                                // Walkthrough anchor (data-tour-via) for the
+                                // commenting walkthroughs, and the action of
+                                // view:DashboardComments.
+                                data-tour-anchor="tile-comments"
+                                data-tour-hint="Open the tile's comments"
+                                // Walkthrough action for view:DashboardComments.
+                                // Tiles with comments keep this visible, so the
+                                // first one on the page is a commented tile.
+                                data-tour-scope="view:DashboardComments"
+                                data-tour-step="2"
+                                data-tour-route="/projects/:projectUuid/dashboards/:dashboardUuid/view"
+                                data-tour-label="Open the tile's comments"
+                                data-tour-title="Read the conversation on a dashboard"
+                                data-tour-interactive="true"
+                                data-tour-via='[data-tour-nav="browse"] >> [data-tour-nav="all-dashboards"] >> [data-tour-anchor="dashboard-row"][data-tour-value="Jaffle Shop overview"]'
+                                data-tour-docs="explore/dashboards/interact.mdx#comment-on-a-tile:2"
+                            >
+                                <MantineIcon icon={IconMessage} />
+                            </ActionIcon>
+                        </Tooltip>
+                    </Indicator>
+                )}
             </Popover.Target>
         </Popover>
     );

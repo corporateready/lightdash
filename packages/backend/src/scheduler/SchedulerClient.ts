@@ -1,7 +1,8 @@
 import {
     AnyType,
+    BackfillDefaultUserSpacesPayload,
     CompileProjectPayload,
-    CreateSchedulerAndTargets,
+    CopyPreviewContentPayload,
     CreateSchedulerTarget,
     EmailBatchNotificationPayload,
     EmailNotificationPayload,
@@ -11,6 +12,7 @@ import {
     GoogleChatNotificationPayload,
     GsheetsNotificationPayload,
     hasSchedulerUuid,
+    isAppCreateScheduler,
     isCreateScheduler,
     isCreateSchedulerGoogleChatTarget,
     isCreateSchedulerMsTeamsTarget,
@@ -39,6 +41,7 @@ import {
     SchedulerMsTeamsTarget,
     SchedulerSlackTarget,
     SchedulerTaskName,
+    SendNowScheduler,
     SlackBatchNotificationPayload,
     SlackNotificationPayload,
     SqlRunnerPayload,
@@ -46,8 +49,10 @@ import {
     SyncSlackChannelsPayload,
     TaskPayloadMap,
     TraceTaskBase,
+    UploadGsheetFromRowsPayload,
     UploadMetricGsheetPayload,
     ValidateProjectPayload,
+    type AgentWorkMarker,
     type DownloadAsyncQueryResultsPayload,
     type PreAggregateSchedulerDetails,
     type SchedulerCreateProjectWithCompilePayload,
@@ -63,6 +68,17 @@ import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
 import { LightdashConfig } from '../config/parseConfig';
 import Logger from '../logging/logger';
 import { SchedulerModel } from '../models/SchedulerModel';
+import {
+    learnSandboxQueueName,
+    resolveSandboxRuntime,
+} from '../services/LearnSandboxService/runtime';
+import { continueTrace, getTraceHeaders, traceSpan } from '../tracing/tracing';
+import { normalizeAgentConnectionTaskPayload } from '../utils/agentConnectionExecution';
+
+export interface SchedulerAiSummaryDelivery {
+    agentWork: AgentWorkMarker;
+    aiSummaryOriginalMessage: string | null;
+}
 
 type SchedulerClientArguments = {
     lightdashConfig: LightdashConfig;
@@ -71,6 +87,12 @@ type SchedulerClientArguments = {
 };
 
 const SCHEDULED_JOB_MAX_ATTEMPTS = 1;
+
+// Name of the per-org graphile named queue that serializes an organization's
+// recurring scheduled deliveries. One queue per org → at most one delivery
+// render runs at a time for that org, so it can't starve the worker pool.
+export const getOrgDeliveryQueueName = (organizationUuid: string): string =>
+    `delivery:${organizationUuid}`;
 
 type SchedulablePreAggregate = Omit<
     PreAggregateSchedulerDetails,
@@ -143,21 +165,30 @@ export class SchedulerClient {
         payload: TaskPayloadMap[T],
         funct: () => Promise<void>,
     ) {
-        const { traceHeader, baggageHeader, sentryMessageId } =
-            payload as unknown as QueueTraceProperties;
+        const {
+            traceHeader,
+            baggageHeader,
+            otelTraceparent,
+            otelBaggage,
+            sentryMessageId,
+        } = payload as unknown as QueueTraceProperties;
 
         const latency = Date.now() - runAt.getTime();
         return new Promise<void>((resolve, reject) => {
-            Sentry.continueTrace(
-                { sentryTrace: traceHeader, baggage: baggageHeader },
-                async () => {
-                    await Sentry.startSpan(
+            continueTrace(
+                {
+                    sentryTrace: traceHeader,
+                    traceparent: otelTraceparent,
+                    baggage: otelBaggage ?? baggageHeader,
+                },
+                async () =>
+                    traceSpan(
                         {
                             name: 'queue_consumer_transaction',
                             op: task,
                         },
                         async (parent) => {
-                            await Sentry.startSpan(
+                            await traceSpan(
                                 {
                                     name: 'queue_consumer',
                                     op: 'queue.process',
@@ -174,13 +205,15 @@ export class SchedulerClient {
                                         'messaging.message.job.id': `${jobId}`,
                                     },
                                 },
-                                async (span) => {
+                                async () => {
                                     const OK = 1;
                                     const ERROR = 2;
                                     try {
                                         await funct();
 
-                                        parent.setStatus({ code: OK });
+                                        parent.setStatus({
+                                            code: OK,
+                                        });
 
                                         resolve();
                                     } catch (e) {
@@ -194,8 +227,7 @@ export class SchedulerClient {
                                 },
                             );
                         },
-                    );
-                },
+                    ),
             ).catch((e) => {
                 reject(e);
             });
@@ -210,9 +242,11 @@ export class SchedulerClient {
         priority: JobPriority,
         maxAttempts: number = SCHEDULED_JOB_MAX_ATTEMPTS,
         explicitJobKey?: string,
+        queueName?: string,
     ) {
+        const normalizedPayload = normalizeAgentConnectionTaskPayload(payload);
         const messageId = nanoid();
-        const jobId = await Sentry.startSpan(
+        const jobId = await traceSpan(
             {
                 name: 'queue_producer',
                 op: 'queue.publish',
@@ -220,18 +254,19 @@ export class SchedulerClient {
                     'messaging.message.id': messageId,
                     'messaging.destination.name': identifier,
                     'messaging.message.body.size': Buffer.byteLength(
-                        JSON.stringify(payload),
+                        JSON.stringify(normalizedPayload),
                     ),
                 },
             },
             async (span) => {
-                const traceHeader = Sentry.spanToTraceHeader(span);
-                const baggageHeader = Sentry.spanToBaggageHeader(span);
+                const traceHeaders = getTraceHeaders();
                 const payloadWithSentryHeaders: TaskPayloadMap[T] &
                     QueueTraceProperties = {
-                    ...payload,
-                    traceHeader,
-                    baggageHeader,
+                    ...normalizedPayload,
+                    traceHeader: traceHeaders.sentryTrace,
+                    baggageHeader: traceHeaders.baggage,
+                    otelTraceparent: traceHeaders.traceparent,
+                    otelBaggage: traceHeaders.baggage,
                     sentryMessageId: messageId,
                 };
 
@@ -245,7 +280,8 @@ export class SchedulerClient {
                     (schedulerUuid
                         ? (() => {
                               // Hash the payload (excluding Sentry tracing headers) to create a stable key
-                              const payloadForHash = JSON.stringify(payload);
+                              const payloadForHash =
+                                  JSON.stringify(normalizedPayload);
                               const payloadHash = createHash('sha256')
                                   .update(payloadForHash)
                                   .digest('hex'); // Use full hash to prevent any collision risk
@@ -263,6 +299,9 @@ export class SchedulerClient {
                         // JobKeyMode is by default (replace) which means that if the job already exists it will be replaced if having the same key, which is what we want here - https://worker.graphile.org/docs/job-key
                         // Having this we can remove the duplicate jobs deletion logic
                         ...(jobKey && { jobKey }),
+                        // Named queue makes jobs run serially per queue (graphile-worker).
+                        // Used to cap concurrent deliveries per org.
+                        ...(queueName && { queueName }),
                     },
                 );
 
@@ -414,6 +453,7 @@ export class SchedulerClient {
         date: Date,
         scheduler: ScheduledDeliveryPayload,
         schedulerUuid: string | undefined, // This detects if a scheduled delivery is to be sent "now"
+        queueName?: string, // When set, jobs run serially in this named queue (per-org delivery cap)
     ) {
         const graphileClient = await this.graphileUtils;
 
@@ -427,14 +467,22 @@ export class SchedulerClient {
             ? {
                   schedulerUuid,
                   ...traceProperties,
+                  ...('executionUserUuid' in scheduler &&
+                      scheduler.executionUserUuid && {
+                          executionUserUuid: scheduler.executionUserUuid,
+                      }),
               }
             : scheduler;
 
+        // Dashboard images and every app delivery (including csv/xlsx, which
+        // capture their queries from a headless render) are retried once more:
+        // the headless browser fails transiently.
         let maxAttempts = SCHEDULED_JOB_MAX_ATTEMPTS;
         if (
             isCreateScheduler(scheduler) &&
-            scheduler.format === SchedulerFormat.IMAGE &&
-            !!scheduler.dashboardUuid
+            ((scheduler.format === SchedulerFormat.IMAGE &&
+                !!scheduler.dashboardUuid) ||
+                isAppCreateScheduler(scheduler))
         ) {
             maxAttempts = SCHEDULED_JOB_MAX_ATTEMPTS + 1;
         }
@@ -446,6 +494,8 @@ export class SchedulerClient {
             date,
             JobPriority.LOW,
             maxAttempts,
+            undefined,
+            queueName,
         );
         await this.schedulerModel.logSchedulerJob({
             task: SCHEDULER_TASKS.HANDLE_SCHEDULED_DELIVERY,
@@ -521,7 +571,7 @@ export class SchedulerClient {
     private async addNotificationJob(
         date: Date,
         jobGroup: string,
-        scheduler: SchedulerAndTargets | CreateSchedulerAndTargets,
+        scheduler: SchedulerAndTargets | SendNowScheduler,
         target: CreateSchedulerTarget | undefined,
         targetUuid: string | undefined,
         page: NotificationPayloadBase['page'] | undefined,
@@ -874,6 +924,10 @@ export class SchedulerClient {
             startingDateTime,
         );
 
+        const queueName = this.lightdashConfig.allowMultiOrgs
+            ? getOrgDeliveryQueueName(traceProperties.organizationUuid)
+            : undefined;
+
         try {
             const promises = dates.map((date: Date) =>
                 this.addScheduledDeliveryJob(
@@ -883,6 +937,7 @@ export class SchedulerClient {
                         ...traceProperties,
                     },
                     scheduler.schedulerUuid,
+                    queueName,
                 ),
             );
 
@@ -929,7 +984,7 @@ export class SchedulerClient {
 
     async generateJobsForSchedulerTargets(
         scheduledTime: Date,
-        scheduler: SchedulerAndTargets | CreateSchedulerAndTargets,
+        scheduler: SchedulerAndTargets | SendNowScheduler,
         page: NotificationPayloadBase['page'] | undefined,
         parentJobId: string,
         traceProperties: TraceTaskBase,
@@ -939,6 +994,7 @@ export class SchedulerClient {
             msteams?: NotificationPayloadBase['page'];
             googlechat?: NotificationPayloadBase['page'];
         },
+        aiSummary?: SchedulerAiSummaryDelivery,
     ) {
         const schedulerUuid = getSchedulerUuid(scheduler);
 
@@ -961,6 +1017,10 @@ export class SchedulerClient {
                 return [{ ...job, target: undefined }];
             }
 
+            const notificationTraceProperties = aiSummary
+                ? { ...traceProperties, ...aiSummary }
+                : traceProperties;
+
             // For saved schedulers, use batch jobs (one job per delivery type)
             // For "Send Now" (unsaved schedulers), fall back to individual jobs
             if (hasSchedulerUuid(scheduler)) {
@@ -969,7 +1029,7 @@ export class SchedulerClient {
                     scheduler,
                     page,
                     parentJobId,
-                    traceProperties,
+                    notificationTraceProperties,
                     perChannelPages,
                 );
             }
@@ -997,7 +1057,7 @@ export class SchedulerClient {
                     target,
                     getSchedulerTargetUuid(target),
                     targetPage,
-                    traceProperties,
+                    notificationTraceProperties,
                 );
                 return { ...result, type };
             });
@@ -1139,7 +1199,8 @@ export class SchedulerClient {
             payload,
             now,
             JobPriority.HIGH,
-            3,
+            // Single attempt: a retry would re-run the slow warehouse query.
+            1,
         );
 
         await this.schedulerModel.logSchedulerJob({
@@ -1153,6 +1214,35 @@ export class SchedulerClient {
                 exploreId: payload.exploreId,
                 metricQuery: payload.metricQuery,
                 organizationUuid: payload.organizationUuid,
+            },
+        });
+
+        return { jobId };
+    }
+
+    async uploadGsheetFromRowsJob(payload: UploadGsheetFromRowsPayload) {
+        const graphileClient = await this.graphileUtils;
+        const now = new Date();
+        const jobId = await SchedulerClient.addJob(
+            graphileClient,
+            SCHEDULER_TASKS.UPLOAD_GSHEET_FROM_QUERY,
+            payload,
+            now,
+            JobPriority.HIGH,
+            3,
+        );
+
+        await this.schedulerModel.logSchedulerJob({
+            task: SCHEDULER_TASKS.UPLOAD_GSHEET_FROM_QUERY,
+            jobId,
+            scheduledTime: now,
+            status: SchedulerJobStatus.SCHEDULED,
+            details: {
+                createdByUserUuid: payload.userUuid,
+                projectUuid: payload.projectUuid,
+                organizationUuid: payload.organizationUuid,
+                title: payload.title,
+                rowCount: payload.rows.length,
             },
         });
 
@@ -1238,6 +1328,18 @@ export class SchedulerClient {
         return jobId;
     }
 
+    async copyPreviewContent(payload: CopyPreviewContentPayload) {
+        const graphileClient = await this.graphileUtils;
+        return SchedulerClient.addJob(
+            graphileClient,
+            SCHEDULER_TASKS.COPY_PREVIEW_CONTENT,
+            payload,
+            new Date(),
+            JobPriority.HIGH,
+            1, // Content duplication is not safe to retry.
+        );
+    }
+
     async compileProject(payload: CompileProjectPayload) {
         const graphileClient = await this.graphileUtils;
         const now = new Date();
@@ -1262,10 +1364,52 @@ export class SchedulerClient {
                 requestMethod: payload.requestMethod,
                 isPreview: payload.isPreview,
                 jobUuid: payload.jobUuid,
+                compilationSource: payload.compilationSource,
             },
         });
 
         return { jobId };
+    }
+
+    async learnSandboxCommand(payload: {
+        commandUuid: string;
+        projectUuid: string;
+        organizationUuid: string;
+        userUuid: string;
+    }): Promise<string> {
+        const graphileClient = await this.graphileUtils;
+        const now = new Date();
+        // One queue per bucket: graphile runs a queue's jobs serially, so this
+        // caps concurrent dbt processes on the worker and serialises a project.
+        const queueName = learnSandboxQueueName(
+            payload.projectUuid,
+            resolveSandboxRuntime().maxConcurrentCommands,
+        );
+        const id = await SchedulerClient.addJob(
+            graphileClient,
+            SCHEDULER_TASKS.LEARN_SANDBOX_COMMAND,
+            payload,
+            now,
+            JobPriority.HIGH,
+            1,
+            undefined,
+            queueName,
+        );
+
+        await this.schedulerModel.logSchedulerJob({
+            task: SCHEDULER_TASKS.LEARN_SANDBOX_COMMAND,
+            jobId: id,
+            scheduledTime: now,
+            status: SchedulerJobStatus.SCHEDULED,
+            details: {
+                projectUuid: payload.projectUuid,
+                organizationUuid: payload.organizationUuid,
+                createdByUserUuid: payload.userUuid,
+                commandUuid: payload.commandUuid,
+            },
+        });
+
+        return id;
     }
 
     async materializePreAggregate(
@@ -1337,6 +1481,22 @@ export class SchedulerClient {
         return { jobId };
     }
 
+    async hasCreateProjectWithCompileJob(jobUuid: string): Promise<boolean> {
+        const graphileClient = await this.graphileUtils;
+        const result = await graphileClient.withPgClient((pgClient) =>
+            pgClient.query<{ exists: boolean }>(
+                `SELECT EXISTS (
+                    SELECT 1
+                    FROM graphile_worker.jobs
+                    WHERE task_identifier = $1
+                      AND payload->>'jobUuid' = $2
+                ) AS exists`,
+                [SCHEDULER_TASKS.CREATE_PROJECT_WITH_COMPILE, jobUuid],
+            ),
+        );
+        return result.rows[0]?.exists ?? false;
+    }
+
     async testAndCompileProject(payload: CompileProjectPayload) {
         const graphileClient = await this.graphileUtils;
         const now = new Date();
@@ -1400,6 +1560,34 @@ export class SchedulerClient {
         return { jobId };
     }
 
+    async backfillDefaultUserSpaces(payload: BackfillDefaultUserSpacesPayload) {
+        const graphileClient = await this.graphileUtils;
+        const now = new Date();
+        const jobId = await SchedulerClient.addJob(
+            graphileClient,
+            SCHEDULER_TASKS.BACKFILL_DEFAULT_USER_SPACES,
+            payload,
+            now,
+            JobPriority.LOW,
+            1,
+        );
+
+        await this.schedulerModel.logSchedulerJob({
+            task: SCHEDULER_TASKS.BACKFILL_DEFAULT_USER_SPACES,
+            jobId,
+            scheduledTime: now,
+            status: SchedulerJobStatus.SCHEDULED,
+            details: {
+                userUuid: payload.userUuid,
+                organizationUuid: payload.organizationUuid,
+                projectUuid: payload.projectUuid,
+                createdByUserUuid: payload.userUuid,
+            },
+        });
+
+        return { jobId };
+    }
+
     async replaceCustomFields(payload: ReplaceCustomFieldsPayload) {
         const graphileClient = await this.graphileUtils;
         const now = new Date();
@@ -1438,6 +1626,9 @@ export class SchedulerClient {
             payload,
             now,
             JobPriority.MEDIUM,
+            undefined,
+            undefined,
+            `index-catalog-${payload.projectUuid}`,
         );
         await this.schedulerModel.logSchedulerJob({
             task: SCHEDULER_TASKS.INDEX_CATALOG,
@@ -1580,6 +1771,63 @@ export class SchedulerClient {
         return jobId;
     }
 
+    async scheduleInitialUsageProcessing(
+        payload: TraceTaskBase,
+    ): Promise<void> {
+        const graphileClient = await this.graphileUtils;
+        await graphileClient.addJob(
+            SCHEDULER_TASKS.COMPACT_USAGE_EVENTS,
+            payload,
+            {
+                queueName: 'usage-events-compaction',
+                jobKey: `initial-usage-processing:${payload.organizationUuid}`,
+                jobKeyMode: 'unsafe_dedupe',
+                maxAttempts: 1,
+                priority: JobPriority.LOW,
+            },
+        );
+    }
+
+    async getUsageHistoryBackfillJob(
+        organizationUuid: string,
+    ): Promise<{ running: boolean; failed: boolean }> {
+        const graphileClient = await this.graphileUtils;
+        const result = await graphileClient.withPgClient((pgClient) =>
+            pgClient.query(
+                'SELECT locked_at, attempts, max_attempts, last_error FROM graphile_worker.jobs WHERE key = $1',
+                [`usage-query-history:${organizationUuid}`],
+            ),
+        );
+        const job = result.rows[0];
+        return {
+            running:
+                !!job &&
+                (job.locked_at !== null || job.attempts < job.max_attempts),
+            failed: !!job?.last_error,
+        };
+    }
+
+    async scheduleUsageHistoryBackfill(payload: TraceTaskBase): Promise<void> {
+        if (
+            (await this.getUsageHistoryBackfillJob(payload.organizationUuid))
+                .running
+        )
+            return;
+        const graphileClient = await this.graphileUtils;
+        // Serialize backfills on one low-priority worker without locking nightly compaction.
+        await graphileClient.addJob(
+            SCHEDULER_TASKS.BACKFILL_USAGE_QUERY_HISTORY,
+            payload,
+            {
+                queueName: 'usage-history-backfill',
+                jobKey: `usage-query-history:${payload.organizationUuid}`,
+                jobKeyMode: 'replace',
+                maxAttempts: 1,
+                priority: JobPriority.LOW,
+            },
+        );
+    }
+
     // --- Managed Agent Heartbeat ---
 
     async scheduleManagedAgentHeartbeat(
@@ -1610,6 +1858,22 @@ export class SchedulerClient {
 
         Logger.info(
             `Scheduled managed agent heartbeat for ${projectUuid} at ${nextRun.toISOString()}`,
+        );
+    }
+
+    // EE-only handler: re-ingests lightdash.project_context.yml after a compile.
+    // No-op in OSS (see SchedulerWorker), so it's safe to enqueue unconditionally.
+    async ingestProjectContext(payload: TraceTaskBase): Promise<void> {
+        const graphileClient = await this.graphileUtils;
+        await graphileClient.addJob(
+            SCHEDULER_TASKS.INGEST_PROJECT_CONTEXT,
+            payload,
+            {
+                runAt: new Date(),
+                maxAttempts: 1,
+                priority: JobPriority.LOW,
+                jobKey: `ingest-project-context:${payload.projectUuid}`,
+            },
         );
     }
 

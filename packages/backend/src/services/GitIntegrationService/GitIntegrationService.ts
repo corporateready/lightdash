@@ -2,54 +2,85 @@
 import { subject } from '@casl/ability';
 import {
     AdditionalMetric,
+    AlreadyExistsError,
+    ApiCustomDimensionWriteBackPreview,
     ApiGithubDbtWritePreview,
     CustomDimension,
+    CustomDimensionWriteback,
+    CustomMetricWriteback,
     DbtGithubProjectConfig,
     DbtGitlabProjectConfig,
     DbtProjectType,
     DbtSchemaEditor,
     DbtVersionOptionLatest,
+    Explore,
     ForbiddenError,
     friendlyName,
+    getCustomDimensionWriteBackError,
     getErrorMessage,
     getLatestSupportDbtVersion,
     GitBranch,
     GitFileOrDirectory,
     GitIntegrationConfiguration,
+    isCustomBinDimension,
+    isExploreError,
     isUserWithOrg,
+    LightdashModelEditor,
+    NotFoundError,
     ParameterError,
     ParseError,
+    Project,
     ProjectType,
     PullRequestCreated,
+    PullRequestProvider,
+    PullRequestSource,
     QueryExecutionContext,
+    RegisteredAccount,
+    resolveCustomDimensionWritebackColumn,
+    resolveCustomMetricWritebackColumn,
     SavedChart,
     SessionUser,
     snakeCaseName,
     SupportedDbtVersions,
     UnexpectedServerError,
+    UUID,
     VizColumn,
+    WarehouseSqlBuilder,
+    Writeback,
+    WritebackColumn,
 } from '@lightdash/common';
+import { warehouseSqlBuilderFromType } from '@lightdash/warehouses';
+import * as yaml from 'js-yaml';
 import { nanoid } from 'nanoid';
+import { z } from 'zod';
 import {
     LightdashAnalytics,
     WriteBackEvent,
 } from '../../analytics/LightdashAnalytics';
+import { toSessionUser } from '../../auth/account';
+import * as BitbucketClient from '../../clients/bitbucket/Bitbucket';
 import * as GithubClient from '../../clients/github/Github';
 import * as GitlabClient from '../../clients/gitlab/Gitlab';
 import { LightdashConfig } from '../../config/parseConfig';
 import Logger from '../../logging/logger';
 import { GithubAppInstallationsModel } from '../../models/GithubAppInstallations/GithubAppInstallationsModel';
+import { ProjectDbtSourcesModel } from '../../models/ProjectDbtSourcesModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import { PullRequestsModel } from '../../models/PullRequestsModel';
 import { SavedChartModel } from '../../models/SavedChartModel';
 import { SpaceModel } from '../../models/SpaceModel';
 import { BaseService } from '../BaseService';
+import type { GithubAppService } from '../GithubAppService/GithubAppService';
 
 type GitIntegrationServiceArguments = {
     lightdashConfig: LightdashConfig;
     savedChartModel: SavedChartModel;
     projectModel: ProjectModel;
+    projectDbtSourcesModel: ProjectDbtSourcesModel;
     spaceModel: SpaceModel;
     githubAppInstallationsModel: GithubAppInstallationsModel;
+    githubAppService: GithubAppService;
+    pullRequestsModel: PullRequestsModel;
     analytics: LightdashAnalytics;
 };
 
@@ -65,10 +96,49 @@ type GitProps = {
     hostDomain?: string; // For GitLab or GitHub Enterprise
     type: DbtProjectType.GITHUB | DbtProjectType.GITLAB;
     dbtVersion?: SupportedDbtVersions;
+    semanticLayer?: 'dbt' | 'lightdash';
 };
+
+type DbtWritebackGitProps =
+    | GitProps
+    | (Omit<GitProps, 'type'> & { type: DbtProjectType.BITBUCKET });
+
+type WritebackFields =
+    | {
+          fieldType: 'customDimensions';
+          fields: CustomDimension[];
+      }
+    | {
+          fieldType: 'customMetrics';
+          fields: AdditionalMetric[];
+      };
+
+type ResolvedWritebacks =
+    | {
+          fieldType: 'customDimensions';
+          items: CustomDimensionWriteback[];
+      }
+    | {
+          fieldType: 'customMetrics';
+          items: CustomMetricWriteback[];
+      };
+
+type WriteBackGitArgs = DbtWritebackGitProps & { projectUuid: UUID };
+
+type WriteBackFileArgs = WriteBackGitArgs & WritebackFields;
+
+type CreatePullRequestArgs =
+    | { type: 'customDimensions'; fields: CustomDimension[] }
+    | { type: 'customMetrics'; fields: AdditionalMetric[] };
+
+type YamlEditor = DbtSchemaEditor | LightdashModelEditor;
+
+type OpenYamlFile = { fileName: string; sha: string; editor: YamlEditor };
 
 // Keep backward compatibility
 type GithubProps = GitProps;
+
+const yamlQuoteCharSchema = z.enum(['"', "'"]);
 
 export class GitIntegrationService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
@@ -77,9 +147,15 @@ export class GitIntegrationService extends BaseService {
 
     private readonly projectModel: ProjectModel;
 
+    private readonly projectDbtSourcesModel: ProjectDbtSourcesModel;
+
     private readonly spaceModel: SpaceModel;
 
     private readonly githubAppInstallationsModel: GithubAppInstallationsModel;
+
+    private readonly githubAppService: GithubAppService;
+
+    private readonly pullRequestsModel: PullRequestsModel;
 
     private readonly analytics: LightdashAnalytics;
 
@@ -88,9 +164,65 @@ export class GitIntegrationService extends BaseService {
         this.lightdashConfig = args.lightdashConfig;
         this.savedChartModel = args.savedChartModel;
         this.projectModel = args.projectModel;
+        this.projectDbtSourcesModel = args.projectDbtSourcesModel;
         this.spaceModel = args.spaceModel;
         this.githubAppInstallationsModel = args.githubAppInstallationsModel;
+        this.githubAppService = args.githubAppService;
+        this.pullRequestsModel = args.pullRequestsModel;
         this.analytics = args.analytics;
+    }
+
+    /**
+     * Record a write-back pull request in the `pull_requests` table so it shows
+     * up in project settings. Best-effort: the PR already exists on the
+     * provider, so a failure to persist the record must never surface to the
+     * caller or undo the write-back.
+     */
+    async recordPullRequest({
+        user,
+        projectUuid,
+        type,
+        owner,
+        repo,
+        prNumber,
+        prUrl,
+        source,
+    }: {
+        user: SessionUser;
+        projectUuid: string;
+        type: DbtProjectType;
+        owner: string;
+        repo: string;
+        prNumber: number;
+        prUrl: string;
+        source: PullRequestSource;
+    }): Promise<void> {
+        const legacyProvider =
+            type === DbtProjectType.GITHUB
+                ? PullRequestProvider.GITHUB
+                : PullRequestProvider.GITLAB;
+        try {
+            await this.pullRequestsModel.create({
+                organizationUuid: user.organizationUuid!,
+                projectUuid,
+                createdByUserUuid: user.userUuid,
+                provider:
+                    type === DbtProjectType.BITBUCKET
+                        ? PullRequestProvider.BITBUCKET
+                        : legacyProvider,
+                source,
+                owner,
+                repo,
+                prNumber,
+                prUrl,
+            });
+        } catch (error) {
+            this.logger.warn('Failed to record pull request', {
+                projectUuid,
+                prUrl,
+                error: getErrorMessage(error),
+            });
+        }
     }
 
     async getInstallationId(user: SessionUser) {
@@ -122,8 +254,61 @@ export class GitIntegrationService extends BaseService {
         };
     }
 
-    static async createBranch(gitProps: GitProps) {
-        const {
+    static async createBranch(gitProps: DbtWritebackGitProps) {
+        await GitIntegrationService.createBranchFrom(
+            gitProps,
+            await GitIntegrationService.getBaseCommitSha(gitProps),
+        );
+    }
+
+    private static async getBaseCommitSha({
+        owner,
+        repo,
+        mainBranch,
+        token,
+        type,
+        hostDomain,
+        installationId,
+    }: DbtWritebackGitProps): Promise<string> {
+        try {
+            if (type === DbtProjectType.BITBUCKET) {
+                const baseBranch = await BitbucketClient.getBranch({
+                    owner,
+                    repo,
+                    token,
+                    branch: mainBranch,
+                });
+                return baseBranch.target.hash;
+            }
+            const getLastCommit =
+                type === DbtProjectType.GITHUB
+                    ? GithubClient.getLastCommit
+                    : GitlabClient.getLastCommit;
+            const { sha } = await getLastCommit({
+                owner,
+                repo,
+                branch: mainBranch,
+                installationId,
+                token,
+                hostDomain,
+            });
+            return sha;
+        } catch (error) {
+            // `mainBranch` is the branch from the project's dbt connection
+            // settings. Both Git clients report a missing (or invisible)
+            // branch as NotFoundError; say where it comes from so the user can
+            // fix it instead of seeing a generic server error.
+            if (error instanceof NotFoundError) {
+                throw new NotFoundError(
+                    `Branch "${mainBranch}" not found in ${owner}/${repo}. It may have been deleted or renamed, or the Git integration may not have access to this repository. Check the branch configured in the project's dbt connection settings.`,
+                );
+            }
+            throw error;
+        }
+    }
+
+    private static async createBranchFrom(
+        {
             owner,
             repo,
             mainBranch,
@@ -132,39 +317,36 @@ export class GitIntegrationService extends BaseService {
             type,
             hostDomain,
             installationId,
-        } = gitProps;
-
-        const getLastCommit =
-            type === DbtProjectType.GITHUB
-                ? GithubClient.getLastCommit
-                : GitlabClient.getLastCommit;
-        const { sha: commitSha } = await getLastCommit({
-            owner,
-            repo,
-            branch: mainBranch,
-            installationId,
-            token,
-            hostDomain,
-        });
-
+        }: DbtWritebackGitProps,
+        commitSha: string,
+    ) {
         Logger.debug(
             `Creating branch ${branch} from ${mainBranch} (commit: ${commitSha}) in ${owner}/${repo}`,
         );
 
-        const createBranch =
-            type === DbtProjectType.GITHUB
-                ? GithubClient.createBranch
-                : GitlabClient.createBranch;
-
-        await createBranch({
-            branch,
-            owner,
-            repo,
-            sha: commitSha,
-            installationId,
-            token,
-            hostDomain,
-        });
+        if (type === DbtProjectType.BITBUCKET) {
+            await BitbucketClient.createBranch({
+                owner,
+                repo,
+                token,
+                branch,
+                sha: commitSha,
+            });
+        } else {
+            const createBranch =
+                type === DbtProjectType.GITHUB
+                    ? GithubClient.createBranch
+                    : GitlabClient.createBranch;
+            await createBranch({
+                branch,
+                owner,
+                repo,
+                sha: commitSha,
+                installationId,
+                token,
+                hostDomain,
+            });
+        }
 
         Logger.debug(
             `Successfully created branch ${branch} in ${owner}/${repo}`,
@@ -221,48 +403,52 @@ Affected charts:
         };
     }
 
-    private async getYamlForTable({
-        owner,
-        repo,
-        path,
-        projectUuid,
-        table,
-        installationId,
-        token,
-        branch,
-        type,
-        hostDomain,
-    }: {
-        owner: string;
-        repo: string;
-        path: string;
-        projectUuid: string;
-        table: string;
-        installationId?: string;
-        token: string;
-        branch: string;
-        type: DbtProjectType.GITHUB | DbtProjectType.GITLAB;
-        hostDomain?: string;
-    }) {
-        const explore = await this.projectModel.getExploreFromCache(
-            projectUuid,
-            table,
+    private static isNativeProject(project: Project): boolean {
+        return (
+            project.dbtConnection.type === DbtProjectType.GITHUB &&
+            project.dbtConnection.semanticLayer === 'lightdash'
         );
+    }
 
-        if (!explore.ymlPath)
+    private async getModelFileName(
+        project: Project,
+        model: string,
+        path: string,
+    ): Promise<string> {
+        const ymlPath = GitIntegrationService.isNativeProject(project)
+            ? await this.getNativeModelPath(project.projectUuid, model)
+            : (
+                  await this.projectModel.getExploreFromCache(
+                      project.projectUuid,
+                      model,
+                  )
+              ).ymlPath;
+        if (!ymlPath) {
             throw new ParameterError(
                 'Your project needs to be compiled before writing back custom fields. Please refresh your project to fix this issue.',
             );
+        }
+        return GitIntegrationService.removeExtraSlashes(`${path}/${ymlPath}`);
+    }
 
-        const fileName = GitIntegrationService.removeExtraSlashes(
-            `${path}/${explore.ymlPath}`,
-        );
-
-        const getFileContent =
-            type === DbtProjectType.GITHUB
-                ? GithubClient.getFileContent
-                : GitlabClient.getFileContent;
-        const { content: fileContent, sha: fileSha } = await getFileContent({
+    private static readGitFile(
+        {
+            owner,
+            repo,
+            branch,
+            installationId,
+            token,
+            hostDomain,
+            type,
+        }: WriteBackGitArgs,
+        fileName: string,
+    ) {
+        const getFileContent = {
+            [DbtProjectType.GITHUB]: GithubClient.getFileContent,
+            [DbtProjectType.GITLAB]: GitlabClient.getFileContent,
+            [DbtProjectType.BITBUCKET]: BitbucketClient.getFileContent,
+        }[type];
+        return getFileContent({
             fileName,
             owner,
             repo,
@@ -271,137 +457,307 @@ Affected charts:
             token,
             hostDomain,
         });
+    }
 
-        // Get the dbt version from the project
-        const project = await this.projectModel.get(projectUuid);
+    private static createEditor(
+        project: Project,
+        content: string,
+        fileName: string,
+    ): YamlEditor {
+        if (GitIntegrationService.isNativeProject(project)) {
+            return new LightdashModelEditor(content, fileName);
+        }
         const dbtVersion =
             project.dbtVersion === DbtVersionOptionLatest.LATEST
                 ? getLatestSupportDbtVersion()
                 : project.dbtVersion;
-
-        const yamlSchema = new DbtSchemaEditor(
-            fileContent,
-            fileName,
-            dbtVersion,
-        );
-
-        if (!yamlSchema.hasModels()) {
+        const editor = new DbtSchemaEditor(content, fileName, dbtVersion);
+        if (!editor.hasModels()) {
             throw new ParseError(`No models found in ${fileName}`);
         }
-
-        return { yamlSchema, fileName, fileContent, fileSha };
+        return editor;
     }
 
-    async updateFile(
-        args: GitProps &
-            (
-                | {
-                      fieldType: 'customDimensions';
-                      fields: CustomDimension[];
-                  }
-                | {
-                      fieldType: 'customMetrics';
-                      fields: AdditionalMetric[];
-                  }
-            ) & {
-                projectUuid: string;
-            },
-    ): Promise<void> {
-        const {
-            owner,
-            repo,
-            path,
+    // Models sharing a YAML file get the same editor, so the file is read and
+    // written once.
+    private async openYamlFiles(
+        args: WriteBackGitArgs,
+        models: string[],
+    ): Promise<Map<string, OpenYamlFile>> {
+        const project = await this.projectModel.get(args.projectUuid);
+        const byFileName = new Map<string, OpenYamlFile>();
+        const byModel = new Map<string, OpenYamlFile>();
+        for (const model of models) {
+            const fileName = await this.getModelFileName(
+                project,
+                model,
+                args.path,
+            );
+            const open = byFileName.get(fileName);
+            if (open) {
+                byModel.set(model, open);
+            } else {
+                const { content, sha } =
+                    await GitIntegrationService.readGitFile(args, fileName);
+                const file = {
+                    fileName,
+                    sha,
+                    editor: GitIntegrationService.createEditor(
+                        project,
+                        content,
+                        fileName,
+                    ),
+                };
+                byFileName.set(fileName, file);
+                byModel.set(model, file);
+            }
+        }
+        return byModel;
+    }
+
+    private async getWarehouseSqlBuilder(
+        projectUuid: UUID,
+        tableName: string,
+    ): Promise<WarehouseSqlBuilder> {
+        const explore = await this.getExploreContainingTable(
             projectUuid,
-            installationId,
-            token,
-            branch,
-            quoteChar,
-            fields,
-            fieldType,
-            type: gitType,
-            hostDomain,
-        } = args;
+            tableName,
+        );
+        const credentials =
+            await this.projectModel.getWarehouseConnectionForBinding(
+                projectUuid,
+                { kind: 'explore', exploreName: explore.name },
+            );
+        return warehouseSqlBuilderFromType(
+            credentials.type,
+            credentials.startOfWeek,
+        );
+    }
+
+    private async createWritebackApplier(
+        projectUuid: UUID,
+        writebacks: ResolvedWritebacks,
+    ): Promise<(editor: YamlEditor, model: string) => YamlEditor> {
+        const ofModel =
+            (model: string) =>
+            ({ column }: Writeback<unknown>) =>
+                column.model === model;
+        if (writebacks.fieldType === 'customMetrics') {
+            return (editor, model) =>
+                editor.addCustomMetrics(
+                    writebacks.items.filter(ofModel(model)),
+                );
+        }
+        const builders = new Map(
+            await Promise.all(
+                [
+                    ...new Set(
+                        writebacks.items.map((item) => item.column.model),
+                    ),
+                ].map(
+                    async (model) =>
+                        [
+                            model,
+                            await this.getWarehouseSqlBuilder(
+                                projectUuid,
+                                model,
+                            ),
+                        ] as const,
+                ),
+            ),
+        );
+        return (editor, model) => {
+            const builder = builders.get(model);
+            if (!builder)
+                throw new ParameterError(
+                    `No warehouse connection found for model "${model}".`,
+                );
+            return editor.addCustomDimensions(
+                writebacks.items.filter(ofModel(model)),
+                builder,
+            );
+        };
+    }
+
+    private async prepareFileUpdates(
+        args: WriteBackGitArgs,
+        writebacks: ResolvedWritebacks,
+    ) {
+        const models = [
+            ...new Set(writebacks.items.map((item) => item.column.model)),
+        ];
+        const files = await this.openYamlFiles(args, models);
+        const apply = await this.createWritebackApplier(
+            args.projectUuid,
+            writebacks,
+        );
+        files.forEach((file, model) => apply(file.editor, model));
         const fieldsType =
-            fieldType === 'customDimensions'
+            writebacks.fieldType === 'customDimensions'
                 ? 'custom dimension'
                 : 'custom metric';
-
-        if (fields === undefined || fields?.length === 0)
-            throw new ParameterError(`No custom ${fieldsType}s found`);
-        const tables = [...new Set(fields.map((item) => item.table))];
-
-        for (const table of tables) {
-            const fieldsForTable = fields.filter(
-                (item) => item.table === table,
+        return [...new Set(files.values())].map((file) => {
+            const fileModels = models.filter(
+                (model) => files.get(model) === file,
             );
-            const { yamlSchema, fileName, fileSha } =
-                await this.getYamlForTable({
-                    table,
-                    path,
-                    owner,
-                    repo,
-                    branch,
-                    installationId,
-                    token,
-                    projectUuid,
-                    type: gitType,
-                    hostDomain,
-                });
+            const fieldCount = writebacks.items.filter((item) =>
+                fileModels.includes(item.column.model),
+            ).length;
+            return {
+                type: args.type,
+                owner: args.owner,
+                repo: args.repo,
+                fileName: file.fileName,
+                content: file.editor.toString({ quoteChar: args.quoteChar }),
+                fileSha: file.sha,
+                branch: args.branch,
+                installationId: args.installationId,
+                token: args.token,
+                hostDomain: args.hostDomain,
+                message: `Updated file ${file.fileName} with ${fieldCount} custom ${fieldsType}s from ${fileModels.join(', ')}`,
+            };
+        });
+    }
 
-            if (!yamlSchema.hasModels()) {
-                throw new ParseError(`No models found in ${fileName}`);
-            }
-
-            let updatedYml: string;
-            if (fieldType === 'customDimensions') {
-                const warehouseCredentials =
-                    await this.projectModel.getWarehouseCredentialsForProject(
-                        projectUuid,
-                    );
-                const warehouseClient =
-                    this.projectModel.getWarehouseClientFromCredentials(
-                        warehouseCredentials,
-                    );
-                updatedYml = yamlSchema
-                    .addCustomDimensions(
-                        fieldsForTable as CustomDimension[],
-                        warehouseClient,
-                    )
-                    .toString({
-                        quoteChar,
-                    });
-            } else if (fieldType === 'customMetrics') {
-                updatedYml = yamlSchema
-                    .addCustomMetrics(fieldsForTable as AdditionalMetric[])
-                    .toString({
-                        quoteChar,
-                    });
-            } else {
-                throw new ParameterError(`Unknown type: ${fieldType}`);
-            }
-
-            const message = `Updated file ${fileName} with ${fieldsForTable?.length} custom ${fieldsType} from table ${table}`;
-
-            const updateFile =
-                gitType === DbtProjectType.GITHUB
-                    ? GithubClient.updateFile
-                    : GitlabClient.updateFile;
-            await updateFile({
-                owner,
-                repo,
-                fileName,
-                content: updatedYml,
-                fileSha,
-                branch,
-                installationId,
-                token,
-                hostDomain,
-                message,
-            });
-            Logger.debug(
-                `Successfully updated file ${fileName} in ${owner}/${repo} (branch: ${branch})`,
+    private async getExploreContainingTable(
+        projectUuid: UUID,
+        table: string,
+    ): Promise<Explore> {
+        const explore = await this.projectModel.findExploreContainingTable(
+            projectUuid,
+            table,
+        );
+        if (explore === undefined || isExploreError(explore)) {
+            throw new ParameterError(
+                'Your project needs to be compiled before writing back custom fields. Please refresh your project to fix this issue.',
             );
         }
+        return explore;
+    }
+
+    private createColumnResolver(projectUuid: UUID) {
+        const explores = new Map<string, Promise<Explore>>();
+        const getExplore = (table: string) => {
+            const cached = explores.get(table);
+            if (cached) return cached;
+            const explore = this.getExploreContainingTable(projectUuid, table);
+            explores.set(table, explore);
+            return explore;
+        };
+        return <T extends { table: string }>(
+            fields: T[],
+            resolveColumn: (explore: Explore, field: T) => WritebackColumn,
+        ): Promise<Writeback<T>[]> =>
+            Promise.all(
+                fields.map(async (field) => ({
+                    field,
+                    column: resolveColumn(await getExplore(field.table), field),
+                })),
+            );
+    }
+
+    private async resolveWritebacks(
+        projectUuid: UUID,
+        fields: WritebackFields,
+    ): Promise<ResolvedWritebacks> {
+        if (fields.fields.length === 0) {
+            throw new ParameterError(
+                `No custom ${fields.fieldType === 'customDimensions' ? 'dimension' : 'metric'}s found`,
+            );
+        }
+        const resolve = this.createColumnResolver(projectUuid);
+        return fields.fieldType === 'customDimensions'
+            ? {
+                  fieldType: 'customDimensions',
+                  items: await resolve(
+                      fields.fields,
+                      resolveCustomDimensionWritebackColumn,
+                  ),
+              }
+            : {
+                  fieldType: 'customMetrics',
+                  items: await resolve(
+                      fields.fields,
+                      resolveCustomMetricWritebackColumn,
+                  ),
+              };
+    }
+
+    private static toWritebackFields(
+        args: CreatePullRequestArgs,
+    ): WritebackFields {
+        return args.type === 'customDimensions'
+            ? { fieldType: 'customDimensions', fields: args.fields }
+            : { fieldType: 'customMetrics', fields: args.fields };
+    }
+
+    private static async updatePreparedFiles(
+        updates: Awaited<
+            ReturnType<GitIntegrationService['prepareFileUpdates']>
+        >,
+        branch: string,
+    ): Promise<void> {
+        for (const { type, ...update } of updates) {
+            if (type === DbtProjectType.BITBUCKET) {
+                await BitbucketClient.commitFiles({
+                    owner: update.owner,
+                    repo: update.repo,
+                    token: update.token,
+                    branch,
+                    expectedParent: update.fileSha,
+                    message: update.message,
+                    changes: [
+                        {
+                            path: update.fileName,
+                            content: update.content,
+                            action: 'upsert',
+                        },
+                    ],
+                });
+            } else {
+                const updateFile =
+                    type === DbtProjectType.GITHUB
+                        ? GithubClient.updateFile
+                        : GitlabClient.updateFile;
+                await updateFile({ ...update, branch });
+            }
+            Logger.debug('Successfully updated file', {
+                type,
+                owner: update.owner,
+                repo: update.repo,
+                fileName: update.fileName,
+                branch,
+            });
+        }
+    }
+
+    async updateFile(args: WriteBackFileArgs): Promise<void> {
+        const writebacks = await this.resolveWritebacks(args.projectUuid, args);
+        await GitIntegrationService.updatePreparedFiles(
+            await this.prepareFileUpdates(args, writebacks),
+            args.branch,
+        );
+    }
+
+    private async getNativeModelPath(
+        projectUuid: string,
+        table: string,
+    ): Promise<string> {
+        const explores =
+            await this.projectModel.getAllExploresFromCache(projectUuid);
+        const paths = new Set(
+            Object.values(explores).flatMap((explore) => {
+                if (isExploreError(explore)) return [];
+                const sourcePath = explore.tables[table]?.ymlPath;
+                return sourcePath ? [sourcePath] : [];
+            }),
+        );
+        if (paths.size !== 1) {
+            throw new ParameterError(
+                `Cannot determine the native source file for ${table}. Refresh the project before writing back.`,
+            );
+        }
+        return [...paths][0];
     }
 
     async getProjectRepo(projectUuid: string) {
@@ -428,10 +784,42 @@ Affected charts:
             branch,
             path,
             hostDomain,
+            semanticLayer:
+                connection.type === DbtProjectType.GITHUB
+                    ? connection.semanticLayer
+                    : undefined,
             type: project.dbtConnection.type as
                 | DbtProjectType.GITHUB
                 | DbtProjectType.GITLAB,
         };
+    }
+
+    private async assertExploreWritebackSourceIsUnambiguous(
+        projectUuid: string,
+    ): Promise<void> {
+        const additionalGitBackedSources = (
+            await this.projectDbtSourcesModel.getSources(projectUuid)
+        ).filter(
+            (source) =>
+                source.dbtConnection?.type === DbtProjectType.GITHUB ||
+                source.dbtConnection?.type === DbtProjectType.GITLAB ||
+                source.dbtConnection?.type === DbtProjectType.BITBUCKET,
+        );
+
+        if (additionalGitBackedSources.length === 0) {
+            return;
+        }
+
+        const sourceNames = [
+            'Project dbt connection',
+            ...additionalGitBackedSources.map((source) => source.name),
+        ]
+            .map((name) => `"${name}"`)
+            .join(', ');
+
+        throw new ParameterError(
+            `Explore write-back cannot determine which dbt source owns this model on a project with multiple git-backed dbt sources: ${sourceNames}`,
+        );
     }
 
     /**
@@ -492,42 +880,12 @@ Affected charts:
         projectUuid: string,
         quoteChar: `"` | `'`,
     ) {
-        const { owner, repo, branch, path, hostDomain, type } =
+        const { branch, path, semanticLayer } =
             await this.getProjectRepo(projectUuid);
-        let token: string = '';
-        let installationId: string | undefined;
-
-        if (type === DbtProjectType.GITHUB) {
-            // GitHub logic - try app installation first, fallback to PAT
-            try {
-                installationId = await this.getInstallationId(user);
-                token = await this.getOrUpdateToken(user.organizationUuid!);
-            } catch {
-                const project =
-                    await this.projectModel.getWithSensitiveFields(projectUuid);
-                const connection =
-                    project.dbtConnection as DbtGithubProjectConfig;
-                token = connection.personal_access_token || '';
-                if (!token) {
-                    throw new ParameterError(
-                        'Invalid personal access token for GitHub project',
-                    );
-                }
-            }
-        } else if (type === DbtProjectType.GITLAB) {
-            // GitLab logic - only personal access tokens supported
-            const project =
-                await this.projectModel.getWithSensitiveFields(projectUuid);
-            const connection = project.dbtConnection as DbtGitlabProjectConfig;
-            token = connection.personal_access_token || '';
-            if (!token) {
-                throw new ParameterError(
-                    'Invalid personal access token for GitLab project',
-                );
-            }
-        } else {
-            throw new ParameterError(`Unsupported project type: ${type}`);
-        }
+        const { owner, repo, hostDomain, type, token, installationId } =
+            await this.getGitCredentials(user, projectUuid, {
+                preferUserToken: true,
+            });
 
         const userName = `${snakeCaseName(
             user.firstName[0] || '',
@@ -553,8 +911,179 @@ Affected charts:
             installationId,
             quoteChar,
             dbtVersion,
+            semanticLayer,
         };
         return gitProps;
+    }
+
+    private async getDbtWritebackGitProps(
+        user: SessionUser,
+        projectUuid: string,
+        quoteChar: `"` | `'`,
+    ): Promise<DbtWritebackGitProps> {
+        const project = await this.projectModel.get(projectUuid);
+        const connection = project.dbtConnection;
+        if (
+            connection.type === DbtProjectType.GITHUB ||
+            connection.type === DbtProjectType.GITLAB
+        ) {
+            return this.getGitProps(user, projectUuid, quoteChar);
+        }
+        if (connection.type !== DbtProjectType.BITBUCKET) {
+            throw new ParameterError(
+                `invalid dbt connection type ${connection.type} for project ${project.name}`,
+            );
+        }
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        if (
+            user.organizationUuid !== organizationUuid ||
+            this.createAuditedAbility(user).cannot(
+                'manage',
+                subject('SourceCode', {
+                    organizationUuid,
+                    projectUuid,
+                    isProtectedBranch: false,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'You need permission to manage source code to write back to Bitbucket',
+            );
+        }
+        const repository =
+            BitbucketClient.resolveBitbucketRepository(connection);
+        const credentials = await this.getBitbucketCredentials(
+            user,
+            projectUuid,
+        );
+        if (
+            repository.owner !== credentials.owner ||
+            repository.repo !== credentials.repo
+        ) {
+            throw new ParameterError(
+                'The Bitbucket repository changed. Reload the project before writing back.',
+            );
+        }
+        const relativePath = connection.project_sub_path
+            .trim()
+            .replace(/^\/+|\/+$/g, '');
+        const path = relativePath
+            .split('/')
+            .filter((segment) => segment !== '.')
+            .join('/');
+        const userName = `${snakeCaseName(user.firstName[0] || '')}${snakeCaseName(user.lastName)}`;
+        return {
+            ...credentials,
+            branch: `lightdash-${userName}-${nanoid(4)}`,
+            mainBranch: connection.branch,
+            path,
+            quoteChar,
+            dbtVersion:
+                project.dbtVersion === DbtVersionOptionLatest.LATEST
+                    ? getLatestSupportDbtVersion()
+                    : project.dbtVersion,
+        };
+    }
+
+    private static assertCustomDimensionsSupported(
+        customDimensions: CustomDimension[],
+    ): void {
+        const error = customDimensions
+            .map(getCustomDimensionWriteBackError)
+            .find((message): message is string => message !== null);
+        if (error) {
+            throw new ParameterError(error);
+        }
+    }
+
+    async previewCustomDimensions(
+        account: RegisteredAccount,
+        projectUuid: UUID,
+        customDimensions: CustomDimension[],
+        quoteChar: string,
+    ): Promise<ApiCustomDimensionWriteBackPreview['results']> {
+        if (customDimensions.length === 0) {
+            throw new ParameterError('No custom dimensions found');
+        }
+        const parsedQuoteChar = yamlQuoteCharSchema.safeParse(quoteChar);
+        if (!parsedQuoteChar.success) {
+            throw new ParameterError(
+                'YAML quote character must be either a single or double quote',
+            );
+        }
+        const yamlQuoteChar = parsedQuoteChar.data;
+
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('CustomFields', {
+                    organizationUuid: account.organization.organizationUuid!,
+                    projectUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        GitIntegrationService.assertCustomDimensionsSupported(customDimensions);
+        await this.assertExploreWritebackSourceIsUnambiguous(projectUuid);
+
+        const user = toSessionUser(account);
+        const gitProps = await this.getDbtWritebackGitProps(
+            user,
+            projectUuid,
+            yamlQuoteChar,
+        );
+        const writebacks = await this.createColumnResolver(projectUuid)(
+            customDimensions,
+            resolveCustomDimensionWritebackColumn,
+        );
+        const files = await this.openYamlFiles(
+            { ...gitProps, projectUuid, branch: gitProps.mainBranch },
+            [...new Set(writebacks.map((item) => item.column.model))],
+        );
+        const definitions: Record<string, unknown> = {};
+        const builders = new Map(
+            await Promise.all(
+                [...files.keys()].map(
+                    async (model) =>
+                        [
+                            model,
+                            await this.getWarehouseSqlBuilder(
+                                projectUuid,
+                                model,
+                            ),
+                        ] as const,
+                ),
+            ),
+        );
+        files.forEach((file, model) => {
+            const warehouseSqlBuilder = builders.get(model);
+            if (!warehouseSqlBuilder)
+                throw new ParameterError(
+                    `No warehouse connection found for model "${model}".`,
+                );
+            writebacks
+                .filter((item) => item.column.model === model)
+                .forEach((item) => {
+                    definitions[item.field.id] =
+                        file.editor.getCustomDimensionDefinition(
+                            item,
+                            warehouseSqlBuilder,
+                        );
+                });
+        });
+
+        return {
+            yaml: yaml.dump(
+                gitProps.semanticLayer === 'lightdash'
+                    ? { dimensions: Object.values(definitions) }
+                    : definitions,
+                { quotingType: yamlQuoteChar },
+            ),
+        };
     }
 
     // Keep backward compatibility
@@ -570,15 +1099,7 @@ Affected charts:
         user: SessionUser,
         projectUuid: string,
         quoteChar: `"` | `'`,
-        args:
-            | {
-                  type: 'customDimensions';
-                  fields: CustomDimension[];
-              }
-            | {
-                  type: 'customMetrics';
-                  fields: AdditionalMetric[];
-              },
+        args: CreatePullRequestArgs,
     ): Promise<PullRequestCreated> {
         const { type, fields } = args;
         const typeName =
@@ -599,29 +1120,44 @@ Affected charts:
             throw new ForbiddenError();
         }
 
-        const gitProps = await this.getGitProps(user, projectUuid, quoteChar);
-
-        await GitIntegrationService.createBranch(gitProps);
-        if (args.type === 'customMetrics') {
-            await this.updateFile({
-                ...gitProps,
-                fieldType: 'customMetrics',
-                fields: args.fields,
-                projectUuid,
-            });
-        } else {
-            await this.updateFile({
-                ...gitProps,
-                fieldType: 'customDimensions',
-                fields: args.fields,
-                projectUuid,
-            });
+        if (args.type === 'customDimensions') {
+            GitIntegrationService.assertCustomDimensionsSupported(args.fields);
         }
+        await this.assertExploreWritebackSourceIsUnambiguous(projectUuid);
+        const gitProps = await this.getDbtWritebackGitProps(
+            user,
+            projectUuid,
+            quoteChar,
+        );
+
+        // Every file is rendered against the base branch before a branch
+        // exists, so a refused field leaves nothing behind on Git.
+        const writebacks = await this.resolveWritebacks(
+            projectUuid,
+            GitIntegrationService.toWritebackFields(args),
+        );
+        const baseCommitSha =
+            await GitIntegrationService.getBaseCommitSha(gitProps);
+        const updates = await this.prepareFileUpdates(
+            { ...gitProps, projectUuid, branch: gitProps.mainBranch },
+            writebacks,
+        );
+        await GitIntegrationService.createBranchFrom(gitProps, baseCommitSha);
+        await GitIntegrationService.updatePreparedFiles(
+            updates,
+            gitProps.branch,
+        );
 
         const fieldsInfo =
             fields.length === 1
                 ? `\`${fields[0].name}\` ${typeName}`
                 : `${fields.length} ${typeName}s`;
+        const containsCustomBins =
+            args.type === 'customDimensions' &&
+            args.fields.some(isCustomBinDimension);
+        const replacementGuidance = containsCustomBins
+            ? '> ℹ️ **Existing saved charts keep their custom bin dimensions.** Lightdash does not automatically replace them with these YAML dimensions, so their current bin ordering remains unchanged. Use the new dimensions after refreshing the project, and define a separate numeric ordering dimension in your model when bin order matters.'
+            : `> ⚠️ **Note: Do not change the \`label\` or \`id\` of your ${typeName}s in this pull request.** Your ${typeName}s _will not be replaced_ with YAML ${typeName}s if you change the \`label\` or \`id\` of the ${typeName}s in this pull request. Lightdash requires the IDs and labels to match 1:1 in order to replace custom ${typeName}s with YAML ${typeName}s.`;
         const eventProperties: WriteBackEvent['properties'] = {
             name: fieldsInfo,
             projectId: projectUuid,
@@ -629,10 +1165,11 @@ Affected charts:
             context: QueryExecutionContext.EXPLORE,
         };
         try {
-            const createPullRequest =
-                gitProps.type === DbtProjectType.GITHUB
-                    ? GithubClient.createPullRequest
-                    : GitlabClient.createPullRequest;
+            const createPullRequest = {
+                [DbtProjectType.GITHUB]: GithubClient.createPullRequest,
+                [DbtProjectType.GITLAB]: GitlabClient.createPullRequest,
+                [DbtProjectType.BITBUCKET]: BitbucketClient.createPullRequest,
+            }[gitProps.type];
             const pullRequest: {
                 html_url: string;
                 title: string;
@@ -640,19 +1177,19 @@ Affected charts:
             } = await createPullRequest({
                 ...gitProps,
                 title: `Adds ${fieldsInfo}`,
-                body: `Created by Lightdash, this pull request adds ${fieldsInfo} to the dbt model.
+                body: `Created by Lightdash, this pull request adds ${fieldsInfo} to the ${gitProps.semanticLayer === 'lightdash' ? 'native Lightdash' : 'dbt'} model.
 Triggered by user ${user.firstName} ${user.lastName} (${user.email})
 
-> ⚠️ **Note: Do not change the \`label\` or \`id\` of your ${typeName}s in this pull request.** Your ${typeName}s _will not be replaced_ with YAML ${typeName}s if you change the \`label\` or \`id\` of the ${typeName}s in this pull request. Lightdash requires the IDs and labels to match 1:1 in order to replace custom ${typeName}s with YAML ${typeName}s.`,
+${replacementGuidance}`,
                 head: gitProps.branch,
                 base: gitProps.mainBranch,
             });
 
             Logger.debug(
                 `Successfully created ${
-                    gitProps.type === DbtProjectType.GITHUB
-                        ? 'pull request'
-                        : 'merge request'
+                    gitProps.type === DbtProjectType.GITLAB
+                        ? 'merge request'
+                        : 'pull request'
                 } #${pullRequest.number} in ${gitProps.owner}/${gitProps.repo}`,
             );
 
@@ -663,6 +1200,19 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                     ...eventProperties,
                     [`${type}Count`]: fields.length,
                 },
+            });
+            await this.recordPullRequest({
+                user,
+                projectUuid,
+                type: gitProps.type,
+                owner: gitProps.owner,
+                repo: gitProps.repo,
+                prNumber: pullRequest.number,
+                prUrl: pullRequest.html_url,
+                source:
+                    type === 'customMetrics'
+                        ? PullRequestSource.CUSTOM_METRIC
+                        : PullRequestSource.CUSTOM_DIMENSION,
             });
             return {
                 prTitle: pullRequest.title,
@@ -698,6 +1248,48 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
         return GitIntegrationService.removeExtraSlashes(filePath);
     }
 
+    private static buildSqlModelContent(sql: string): string {
+        return `
+{{
+  config(
+    tags=['created-by-lightdash']
+  )
+}}
+
+${sql}
+`;
+    }
+
+    private static buildYamlModelContent({
+        name,
+        columns,
+        quoteChar,
+    }: {
+        name: string;
+        columns: VizColumn[];
+        quoteChar: GitProps['quoteChar'];
+    }): string {
+        return new DbtSchemaEditor(`version: 2`)
+            .addModel({
+                name: snakeCaseName(name),
+                description: `SQL model for ${friendlyName(name)}`,
+                meta: {
+                    label: friendlyName(name),
+                },
+                columns: columns.map((c) => ({
+                    name: c.reference,
+                    meta: {
+                        dimension: {
+                            type: c.type,
+                        },
+                    },
+                })),
+            })
+            .toString({
+                quoteChar,
+            });
+    }
+
     private static async createSqlFile({
         gitProps,
         name,
@@ -723,15 +1315,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
             path: fileName,
         });
 
-        const content = `
-{{
-  config(
-    tags=['created-by-lightdash']
-  )
-}}
-  
-${sql}
-`;
+        const content = GitIntegrationService.buildSqlModelContent(sql);
 
         const message = `Created file ${fileName} `;
 
@@ -772,25 +1356,11 @@ ${sql}
             path: fileName,
         });
 
-        const content = new DbtSchemaEditor(`version: 2`)
-            .addModel({
-                name: snakeCaseName(name),
-                description: `SQL model for ${friendlyName(name)}`,
-                meta: {
-                    label: friendlyName(name),
-                },
-                columns: columns.map((c) => ({
-                    name: c.reference,
-                    meta: {
-                        dimension: {
-                            type: c.type,
-                        },
-                    },
-                })),
-            })
-            .toString({
-                quoteChar: gitProps.quoteChar,
-            });
+        const content = GitIntegrationService.buildYamlModelContent({
+            name,
+            columns,
+            quoteChar: gitProps.quoteChar,
+        });
 
         const message = `Created file ${fileName} `;
 
@@ -806,6 +1376,85 @@ ${sql}
         });
     }
 
+    private async assertSqlModelWritebackSupported(
+        projectUuid: string,
+    ): Promise<void> {
+        const { dbtConnection } = await this.projectModel.get(projectUuid);
+        if (
+            dbtConnection.type === DbtProjectType.GITHUB &&
+            dbtConnection.semanticLayer === 'lightdash'
+        ) {
+            throw new ParameterError(
+                'SQL Runner model creation is only supported for dbt projects.',
+            );
+        }
+    }
+
+    private static async createBitbucketSqlModel({
+        gitProps,
+        name,
+        sql,
+        columns,
+    }: {
+        gitProps: Extract<
+            DbtWritebackGitProps,
+            { type: DbtProjectType.BITBUCKET }
+        >;
+        name: string;
+        sql: string;
+        columns: VizColumn[];
+    }): Promise<void> {
+        const changes: BitbucketClient.BitbucketFileChange[] = [
+            {
+                action: 'upsert',
+                path: GitIntegrationService.getFilePath(
+                    gitProps.path,
+                    name,
+                    'sql',
+                ),
+                content: GitIntegrationService.buildSqlModelContent(sql),
+            },
+            {
+                action: 'upsert',
+                path: GitIntegrationService.getFilePath(
+                    gitProps.path,
+                    name,
+                    'yml',
+                ),
+                content: GitIntegrationService.buildYamlModelContent({
+                    name,
+                    columns,
+                    quoteChar: gitProps.quoteChar,
+                }),
+            },
+        ];
+        const parent = await BitbucketClient.getBranch(gitProps);
+        await Promise.all(
+            changes.map(async (change) => {
+                try {
+                    await BitbucketClient.getFileContent({
+                        ...gitProps,
+                        fileName: change.path,
+                    });
+                } catch (error) {
+                    if (error instanceof NotFoundError) {
+                        return;
+                    }
+                    throw error;
+                }
+                throw new AlreadyExistsError(
+                    `File ${change.path} already exists`,
+                );
+            }),
+        );
+        await BitbucketClient.commitFiles({
+            ...gitProps,
+            expectedParent: parent.target.hash,
+            message: `Created SQL and YML model for ${name}`,
+            changes,
+        });
+    }
+
     async createPullRequestFromSql(
         user: SessionUser,
         projectUuid: string,
@@ -814,24 +1463,38 @@ ${sql}
         columns: VizColumn[],
         quoteChar: `"` | `'` = '"',
     ): Promise<PullRequestCreated> {
-        const gitProps = await this.getGitProps(user, projectUuid, quoteChar);
+        const gitProps = await this.getDbtWritebackGitProps(
+            user,
+            projectUuid,
+            quoteChar,
+        );
+        await this.assertSqlModelWritebackSupported(projectUuid);
         await GitIntegrationService.createBranch(gitProps);
 
-        await GitIntegrationService.createSqlFile({
-            gitProps,
-            name,
-            sql,
-        });
-        await GitIntegrationService.createYmlFile({
-            gitProps,
-            name,
-            columns,
-        });
+        if (gitProps.type === DbtProjectType.BITBUCKET) {
+            await GitIntegrationService.createBitbucketSqlModel({
+                gitProps,
+                name,
+                sql,
+                columns,
+            });
+        } else {
+            await GitIntegrationService.createSqlFile({
+                gitProps,
+                name,
+                sql,
+            });
+            await GitIntegrationService.createYmlFile({
+                gitProps,
+                name,
+                columns,
+            });
+        }
         Logger.debug(
             `Creating ${
-                gitProps.type === DbtProjectType.GITHUB
-                    ? 'pull request'
-                    : 'merge request'
+                gitProps.type === DbtProjectType.GITLAB
+                    ? 'merge request'
+                    : 'pull request'
             } from branch ${gitProps.branch} to ${gitProps.mainBranch} in ${
                 gitProps.owner
             }/${gitProps.repo}`,
@@ -843,10 +1506,11 @@ ${sql}
             context: QueryExecutionContext.SQL_RUNNER,
         };
         try {
-            const createPullRequest =
-                gitProps.type === DbtProjectType.GITHUB
-                    ? GithubClient.createPullRequest
-                    : GitlabClient.createPullRequest;
+            const createPullRequest = {
+                [DbtProjectType.GITHUB]: GithubClient.createPullRequest,
+                [DbtProjectType.GITLAB]: GitlabClient.createPullRequest,
+                [DbtProjectType.BITBUCKET]: BitbucketClient.createPullRequest,
+            }[gitProps.type];
 
             const pullRequest: {
                 html_url: string;
@@ -865,9 +1529,9 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
 
             Logger.debug(
                 `Successfully created ${
-                    gitProps.type === DbtProjectType.GITHUB
-                        ? 'pull request'
-                        : 'merge request'
+                    gitProps.type === DbtProjectType.GITLAB
+                        ? 'merge request'
+                        : 'pull request'
                 } #${pullRequest.number} in ${gitProps.owner}/${gitProps.repo}`,
             );
 
@@ -875,6 +1539,16 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                 event: 'write_back.created',
                 userId: user.userUuid,
                 properties: eventProperties,
+            });
+            await this.recordPullRequest({
+                user,
+                projectUuid,
+                type: gitProps.type,
+                owner: gitProps.owner,
+                repo: gitProps.repo,
+                prNumber: pullRequest.number,
+                prUrl: pullRequest.html_url,
+                source: PullRequestSource.SQL_RUNNER,
             });
             return {
                 prTitle: pullRequest.title,
@@ -898,6 +1572,27 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
         projectUuid: string,
         name: string,
     ): Promise<ApiGithubDbtWritePreview['results']> {
+        await this.assertSqlModelWritebackSupported(projectUuid);
+        const project = await this.projectModel.get(projectUuid);
+        if (project.dbtConnection.type === DbtProjectType.BITBUCKET) {
+            const { owner, repo, path } = await this.getDbtWritebackGitProps(
+                user,
+                projectUuid,
+                '"',
+            );
+            return {
+                url: `https://bitbucket.org/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+                owner,
+                repo,
+                path: GitIntegrationService.removeExtraSlashes(
+                    `${path}/models/lightdash`,
+                ),
+                files: [
+                    GitIntegrationService.getFilePath(path, name, 'sql'),
+                    GitIntegrationService.getFilePath(path, name, 'yml'),
+                ],
+            };
+        }
         const { owner, repo, path, type, hostDomain } =
             await this.getProjectRepo(projectUuid);
 
@@ -931,231 +1626,34 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
         return branches.map((branch) => branch.name);
     }
 
-    /**
-     * Get the YAML file for an explore's base table
-     */
-    async getFileForExplore(
+    async getBitbucketCredentials(
         user: SessionUser,
         projectUuid: string,
-        exploreName: string,
-    ): Promise<{ content: string; sha: string; filePath: string }> {
-        const auditedAbility = this.createAuditedAbility(user);
+    ): Promise<
+        BitbucketClient.BitbucketCredentials & {
+            type: DbtProjectType.BITBUCKET;
+        }
+    > {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
         if (
-            auditedAbility.cannot(
+            this.createAuditedAbility(user).cannot(
                 'view',
                 subject('SourceCode', {
-                    organizationUuid: user.organizationUuid!,
+                    organizationUuid,
                     projectUuid,
                 }),
             )
         ) {
             throw new ForbiddenError();
         }
-
-        const explore = await this.projectModel.getExploreFromCache(
-            projectUuid,
-            exploreName,
-        );
-
-        if (!explore.ymlPath) {
-            throw new ParameterError(
-                'Your project needs to be compiled before accessing model files. Please refresh your project to fix this issue.',
-            );
-        }
-
-        const { owner, repo, branch, path, type, hostDomain } =
-            await this.getProjectRepo(projectUuid);
-
-        const gitProps = await this.getGitProps(user, projectUuid, '"');
-
-        const fullPath = GitIntegrationService.removeExtraSlashes(
-            `${path}/${explore.ymlPath}`,
-        );
-
-        const getFileContent =
-            type === DbtProjectType.GITHUB
-                ? GithubClient.getFileContent
-                : GitlabClient.getFileContent;
-
-        const { content, sha } = await getFileContent({
-            fileName: fullPath,
-            owner,
-            repo,
-            branch,
-            installationId: gitProps.installationId,
-            token: gitProps.token,
-            hostDomain,
-        });
-
-        this.analytics.track({
-            event: 'source_code.viewed',
-            userId: user.userUuid,
-            properties: {
-                organizationId: user.organizationUuid!,
-                projectId: projectUuid,
-                exploreName,
-                filePath: fullPath,
-                fileSize: content.length,
-                gitProvider: type,
-            },
-        });
-
-        return { content, sha, filePath: fullPath };
-    }
-
-    /**
-     * Get the file path for an explore's YAML file (without fetching content)
-     * Used for deep-linking to the source code editor
-     */
-    async getFilePathForExplore(
-        user: SessionUser,
-        projectUuid: string,
-        exploreName: string,
-    ): Promise<{ filePath: string }> {
-        const auditedAbility = this.createAuditedAbility(user);
-        if (
-            auditedAbility.cannot(
-                'view',
-                subject('SourceCode', {
-                    organizationUuid: user.organizationUuid!,
-                    projectUuid,
-                }),
-            )
-        ) {
-            throw new ForbiddenError();
-        }
-
-        const explore = await this.projectModel.getExploreFromCache(
-            projectUuid,
-            exploreName,
-        );
-
-        if (!explore.ymlPath) {
-            throw new ParameterError(
-                'Your project needs to be compiled before accessing model files. Please refresh your project to fix this issue.',
-            );
-        }
-
-        const { path } = await this.getProjectRepo(projectUuid);
-
-        const fullPath = GitIntegrationService.removeExtraSlashes(
-            `${path}/${explore.ymlPath}`,
-        );
-
-        return { filePath: fullPath };
-    }
-
-    /**
-     * Create a pull request with arbitrary file changes
-     */
-    async createPullRequestWithFileChange(
-        user: SessionUser,
-        projectUuid: string,
-        filePath: string,
-        newContent: string,
-        originalSha: string,
-        prTitle: string,
-        prDescription: string,
-    ): Promise<PullRequestCreated> {
-        const auditedAbility = this.createAuditedAbility(user);
-        // PR creates its own feature branch, so always allow (isProtectedBranch: false)
-        if (
-            auditedAbility.cannot(
-                'manage',
-                subject('SourceCode', {
-                    organizationUuid: user.organizationUuid!,
-                    projectUuid,
-                    isProtectedBranch: false,
-                }),
-            )
-        ) {
-            throw new ForbiddenError();
-        }
-
-        const gitProps = await this.getGitProps(user, projectUuid, '"');
-
-        // 1. Create branch
-        await GitIntegrationService.createBranch(gitProps);
-
-        Logger.debug(
-            `Updating file ${filePath} on branch ${gitProps.branch} in ${gitProps.owner}/${gitProps.repo}`,
-        );
-
-        // 2. Update file on new branch
-        const updateFile =
-            gitProps.type === DbtProjectType.GITHUB
-                ? GithubClient.updateFile
-                : GitlabClient.updateFile;
-
-        await updateFile({
-            owner: gitProps.owner,
-            repo: gitProps.repo,
-            fileName: filePath,
-            content: newContent,
-            fileSha: originalSha,
-            branch: gitProps.branch,
-            installationId: gitProps.installationId,
-            token: gitProps.token,
-            hostDomain: gitProps.hostDomain,
-            message: `Update ${filePath}`,
-        });
-
-        Logger.debug(
-            `Creating pull request from branch ${gitProps.branch} to ${gitProps.mainBranch}`,
-        );
-
-        // 3. Create PR
-        const createPullRequest =
-            gitProps.type === DbtProjectType.GITHUB
-                ? GithubClient.createPullRequest
-                : GitlabClient.createPullRequest;
-
-        const fullDescription = `${prDescription}
-
-Triggered by user ${user.firstName} ${user.lastName} (${user.email})
-
-🤖 Created with Lightdash`;
-
-        const pullRequest = await createPullRequest({
-            ...gitProps,
-            title: prTitle,
-            body: fullDescription,
-            head: gitProps.branch,
-            base: gitProps.mainBranch,
-        });
-
-        Logger.debug(
-            `Successfully created pull request #${pullRequest.number} in ${gitProps.owner}/${gitProps.repo}`,
-        );
-
-        // Keep backwards compatible event for existing analytics
-        this.analytics.track({
-            event: 'write_back.created',
-            userId: user.userUuid,
-            properties: {
-                name: filePath,
-                projectId: projectUuid,
-                organizationId: user.organizationUuid!,
-                context: QueryExecutionContext.EXPLORE,
-            },
-        });
-
-        // New event with additional details
-        this.analytics.track({
-            event: 'source_code.pull_request_created',
-            userId: user.userUuid,
-            properties: {
-                organizationId: user.organizationUuid!,
-                projectId: projectUuid,
-                filePath,
-                fileSize: newContent.length,
-                gitProvider: gitProps.type,
-            },
-        });
-
+        const project =
+            await this.projectModel.getWithSensitiveFields(projectUuid);
         return {
-            prTitle: pullRequest.title,
-            prUrl: pullRequest.html_url,
+            ...BitbucketClient.resolveBitbucketCredentials(
+                project.dbtConnection,
+            ),
+            type: DbtProjectType.BITBUCKET,
         };
     }
 
@@ -1163,9 +1661,10 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
      * Get git credentials for a project (without generating a new branch name)
      * This is used for read/write operations on existing branches
      */
-    private async getGitCredentials(
+    async getGitCredentials(
         user: SessionUser,
         projectUuid: string,
+        options?: { preferUserToken?: boolean },
     ): Promise<{
         owner: string;
         repo: string;
@@ -1180,6 +1679,34 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
         let installationId: string | undefined;
 
         if (type === DbtProjectType.GITHUB) {
+            if (options?.preferUserToken && user.organizationUuid) {
+                // When the user has linked their personal GitHub account, act
+                // as them so commits and PRs are attributed to the real
+                // author. A user-to-server token only reaches repos the user
+                // can access AND the app is installed on, so verify repo
+                // access first and fall back to the app bot when it's missing.
+                const userToken = await this.githubAppService.getValidUserToken(
+                    user.userUuid,
+                    user.organizationUuid,
+                );
+                if (
+                    userToken &&
+                    (await GithubClient.userTokenHasRepoAccess(
+                        userToken,
+                        owner,
+                        repo,
+                    ))
+                ) {
+                    return {
+                        owner,
+                        repo,
+                        token: userToken,
+                        installationId: undefined,
+                        hostDomain,
+                        type,
+                    };
+                }
+            }
             try {
                 installationId = await this.getInstallationId(user);
                 token = await this.getOrUpdateToken(user.organizationUuid!);
@@ -1282,6 +1809,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                 subject('SourceCode', {
                     organizationUuid: user.organizationUuid!,
                     projectUuid,
+                    metadata: { branch, path },
                 }),
             )
         ) {
@@ -1361,6 +1889,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
         content: string,
         sha?: string,
         message?: string,
+        encoding?: 'base64',
     ): Promise<{ sha: string; path: string }> {
         const auditedAbility = this.createAuditedAbility(user);
         const protectedBranch = await this.getProtectedBranch(projectUuid);
@@ -1373,6 +1902,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                     organizationUuid: user.organizationUuid!,
                     projectUuid,
                     isProtectedBranch,
+                    metadata: { branch, path, sha },
                 }),
             )
         ) {
@@ -1382,7 +1912,9 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
             );
         }
 
-        const creds = await this.getGitCredentials(user, projectUuid);
+        const creds = await this.getGitCredentials(user, projectUuid, {
+            preferUserToken: true,
+        });
         const commitMessage =
             message || (sha ? `Update ${path}` : `Create ${path}`);
 
@@ -1398,6 +1930,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                 repo: creds.repo,
                 fileName: path,
                 content,
+                encoding,
                 fileSha: sha,
                 branch,
                 message: commitMessage,
@@ -1430,6 +1963,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
             repo: creds.repo,
             fileName: path,
             content,
+            encoding,
             branch,
             message: commitMessage,
             installationId: creds.installationId,
@@ -1472,6 +2006,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                     organizationUuid: user.organizationUuid!,
                     projectUuid,
                     isProtectedBranch,
+                    metadata: { branch, path, sha },
                 }),
             )
         ) {
@@ -1481,7 +2016,9 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
             );
         }
 
-        const creds = await this.getGitCredentials(user, projectUuid);
+        const creds = await this.getGitCredentials(user, projectUuid, {
+            preferUserToken: true,
+        });
         const commitMessage = message || `Delete ${path}`;
 
         const deleteFile =
@@ -1523,13 +2060,16 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                     organizationUuid: user.organizationUuid!,
                     projectUuid,
                     isProtectedBranch: false,
+                    metadata: { branchName, sourceBranch },
                 }),
             )
         ) {
             throw new ForbiddenError();
         }
 
-        const creds = await this.getGitCredentials(user, projectUuid);
+        const creds = await this.getGitCredentials(user, projectUuid, {
+            preferUserToken: true,
+        });
 
         // Get the latest commit from the source branch
         const getLastCommit =
@@ -1585,6 +2125,7 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
         branch: string,
         title: string,
         description: string,
+        source: PullRequestSource = PullRequestSource.SOURCE_EDITOR,
     ): Promise<PullRequestCreated> {
         const auditedAbility = this.createAuditedAbility(user);
         if (
@@ -1594,13 +2135,16 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
                     organizationUuid: user.organizationUuid!,
                     projectUuid,
                     isProtectedBranch: false,
+                    metadata: { branch },
                 }),
             )
         ) {
             throw new ForbiddenError();
         }
 
-        const creds = await this.getGitCredentials(user, projectUuid);
+        const creds = await this.getGitCredentials(user, projectUuid, {
+            preferUserToken: true,
+        });
         const protectedBranch = await this.getProtectedBranch(projectUuid);
 
         Logger.debug(
@@ -1645,9 +2189,43 @@ Triggered by user ${user.firstName} ${user.lastName} (${user.email})
             },
         });
 
+        await this.recordPullRequest({
+            user,
+            projectUuid,
+            type: creds.type,
+            owner: creds.owner,
+            repo: creds.repo,
+            prNumber: pullRequest.number,
+            prUrl: pullRequest.html_url,
+            source,
+        });
+
         return {
             prTitle: pullRequest.title,
             prUrl: pullRequest.html_url,
         };
+    }
+
+    // Provider-side lookup so a branch whose PR was opened by another
+    // instance (or before a database reset) can be adopted. GitHub only.
+    async findOpenPullRequestForBranch(
+        user: SessionUser,
+        projectUuid: string,
+        branch: string,
+    ): Promise<{ prNumber: number; prUrl: string } | null> {
+        const creds = await this.getGitCredentials(user, projectUuid, {
+            preferUserToken: true,
+        });
+        if (creds.type !== DbtProjectType.GITHUB) return null;
+        const pullRequest = await GithubClient.findOpenPullRequestByHead({
+            owner: creds.owner,
+            repo: creds.repo,
+            head: branch,
+            installationId: creds.installationId,
+            token: creds.token,
+        });
+        return pullRequest
+            ? { prNumber: pullRequest.number, prUrl: pullRequest.url }
+            : null;
     }
 }

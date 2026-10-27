@@ -1,13 +1,15 @@
 import {
     FeatureFlags,
+    getResourceViewItemName,
     isResourceViewDataAppItem,
+    isResourceViewDocumentItem,
     isResourceViewItemChart,
     isResourceViewItemDashboard,
     isResourceViewSpaceItem,
     type ContentVerificationInfo,
     type ResourceViewItem,
 } from '@lightdash/common';
-import { Anchor, Box, Group, Stack, Text, Tooltip } from '@mantine-8/core';
+import { Anchor, Box, Group, Stack, Text, Tooltip } from '@mantine/core';
 import {
     IconAlertTriangle,
     IconAppWindow,
@@ -17,15 +19,22 @@ import {
     IconLayoutDashboard,
 } from '@tabler/icons-react';
 import { Link } from 'react-router';
+import AppThumbnailHoverCard from '../../../features/apps/components/AppThumbnailHoverCard';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import MantineIcon from '../MantineIcon';
 import { ResourceIcon, ResourceIndicator } from '../ResourceIcon';
-import { ResourceInfoPopup } from '../ResourceInfoPopup/ResourceInfoPopup';
+import {
+    ResourceInfoPopup,
+    ResourceInfoPopupContent,
+} from '../ResourceInfoPopup/ResourceInfoPopup';
+import ViewsCountPopover from '../ViewsCountPopover';
+import DataAppBuildStatus from './DataAppBuildStatus';
 import AttributeCount from './ResourceAttributeCount';
 import {
     getResourceTypeName,
     getResourceUrl,
     getResourceViewsSinceWhenDescription,
+    getViewStatsResourceType,
 } from './resourceUtils';
 
 type ResourceValidationErrorIndicatorProps = {
@@ -103,7 +112,7 @@ type ResourceVerifiedInlineBadgeProps = {
  * Inline verified badge rendered next to the resource title (Instagram-style).
  * Renders nothing when the resource is not verified.
  */
-const ResourceVerifiedInlineBadge = ({
+export const ResourceVerifiedInlineBadge = ({
     verification,
 }: ResourceVerifiedInlineBadgeProps) => {
     if (!verification) {
@@ -114,8 +123,6 @@ const ResourceVerifiedInlineBadge = ({
 
     return (
         <Tooltip
-            withinPortal
-            multiline
             maw={300}
             position="bottom"
             label={
@@ -135,13 +142,17 @@ const ResourceVerifiedInlineBadge = ({
 type InfiniteResourceTableColumnNameProps = {
     item: ResourceViewItem;
     projectUuid: string;
+    projectUrlIdentifier: string;
     canUserManageValidation: boolean;
+    showDataAppVersionStatus: boolean;
 };
 
 const InfiniteResourceTableColumnName = ({
     item,
     projectUuid,
+    projectUrlIdentifier,
     canUserManageValidation,
+    showDataAppVersionStatus,
 }: InfiniteResourceTableColumnNameProps) => {
     const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
     const dataAppsEnabled = dataAppsFlag.data?.enabled ?? false;
@@ -161,20 +172,31 @@ const InfiniteResourceTableColumnName = ({
         : undefined;
 
     const verification =
-        isChartOrDashboard && !hasValidationErrors
+        (isChartOrDashboard && !hasValidationErrors) ||
+        isResourceViewDataAppItem(item) ||
+        isResourceViewDocumentItem(item)
             ? item.data.verification
             : null;
+    const latestVersion =
+        isResourceViewDataAppItem(item) &&
+        item.data.latestVersionNumber !== null &&
+        item.data.latestVersionStatus !== null
+            ? {
+                  number: item.data.latestVersionNumber,
+                  status: item.data.latestVersionStatus,
+              }
+            : null;
+    const showResourceInfo =
+        !isSpace &&
+        // If there is no description, don't show the info icon on dashboards or data apps.
+        // For charts we still show it for the dashboard list
+        (item.data.description || isResourceViewItemChart(item)) &&
+        (isChartOrDashboard ||
+            isResourceViewDataAppItem(item) ||
+            isResourceViewDocumentItem(item));
 
-    return (
-        <Anchor
-            component={Link}
-            c="unset"
-            underline="never"
-            to={getResourceUrl(projectUuid, item)}
-            onClick={(e: React.MouseEvent<HTMLAnchorElement>) =>
-                e.stopPropagation()
-            }
-        >
+    const renderContent = (hideInlineInfo = false) => (
+        <Box miw={0}>
             <Group wrap="nowrap">
                 <ResourceValidationErrorIndicator
                     item={item}
@@ -185,67 +207,80 @@ const InfiniteResourceTableColumnName = ({
                     <ResourceIcon item={item} />
                 </ResourceValidationErrorIndicator>
 
-                <Stack gap={2}>
+                <Stack gap={2} miw={0}>
                     <Group gap="xs" wrap="nowrap">
                         <Text
+                            component={Link}
+                            to={getResourceUrl(
+                                projectUuid,
+                                item,
+                                projectUrlIdentifier,
+                            )}
+                            onClick={(event) => event.stopPropagation()}
+                            c="inherit"
+                            td="none"
                             fz="sm"
                             fw={600}
                             lineClamp={1}
                             style={{ overflowWrap: 'anywhere' }}
                         >
-                            {item.data.name}
+                            {getResourceViewItemName(item)}
                         </Text>
                         <ResourceVerifiedInlineBadge
                             verification={verification}
                         />
-                        {!isSpace &&
-                            // If there is no description, don't show the info icon on dashboards or data apps.
-                            // For charts we still show it for the dashboard list
-                            (item.data.description ||
-                                isResourceViewItemChart(item)) &&
-                            (isChartOrDashboard ||
-                                isResourceViewDataAppItem(item)) && (
-                                <Box>
-                                    <ResourceInfoPopup
-                                        resourceUuid={item.data.uuid}
-                                        projectUuid={projectUuid}
-                                        description={item.data.description}
-                                        withChartData={isResourceViewItemChart(
-                                            item,
-                                        )}
-                                        latestVersion={
-                                            isResourceViewDataAppItem(item) &&
-                                            item.data.latestVersionNumber !==
-                                                null &&
-                                            item.data.latestVersionStatus !==
-                                                null
-                                                ? {
-                                                      number: item.data
-                                                          .latestVersionNumber,
-                                                      status: item.data
-                                                          .latestVersionStatus,
-                                                  }
-                                                : null
+                        {showResourceInfo && !hideInlineInfo && (
+                            <Box>
+                                <ResourceInfoPopup
+                                    resourceUuid={item.data.uuid}
+                                    projectUuid={projectUuid}
+                                    description={item.data.description}
+                                    withChartData={isResourceViewItemChart(
+                                        item,
+                                    )}
+                                    latestVersion={latestVersion}
+                                />
+                            </Box>
+                        )}
+                    </Group>
+                    {isResourceViewDocumentItem(item) && (
+                        <Text fz="xs" c="dimmed">
+                            Document
+                        </Text>
+                    )}
+                    {showTypeAndViews && (
+                        <Group gap="xs" wrap="nowrap">
+                            <Text fz="xs" c="dimmed">
+                                {getResourceTypeName(item)} •{' '}
+                                <ViewsCountPopover
+                                    resourceType={getViewStatsResourceType(
+                                        item,
+                                    )}
+                                    resourceUuid={item.data.uuid}
+                                    projectUuid={projectUuid}
+                                    views={item.data.views}
+                                    fallbackTooltip={getResourceViewsSinceWhenDescription(
+                                        item,
+                                    )}
+                                >
+                                    {item.data.views || '0'} views
+                                </ViewsCountPopover>
+                            </Text>
+                            {showDataAppVersionStatus &&
+                                isResourceViewDataAppItem(item) && (
+                                    <DataAppBuildStatus
+                                        latestVersionNumber={
+                                            item.data.latestVersionNumber
+                                        }
+                                        latestVersionStatus={
+                                            item.data.latestVersionStatus
+                                        }
+                                        latestReadyVersionNumber={
+                                            item.data.latestReadyVersionNumber
                                         }
                                     />
-                                </Box>
-                            )}
-                    </Group>
-                    {showTypeAndViews && (
-                        <Text fz={12} c="ldGray.6">
-                            {getResourceTypeName(item)} •{' '}
-                            <Tooltip
-                                position="top-start"
-                                disabled={
-                                    !item.data.views || !item.data.firstViewedAt
-                                }
-                                label={getResourceViewsSinceWhenDescription(
-                                    item,
                                 )}
-                            >
-                                <span>{item.data.views || '0'} views</span>
-                            </Tooltip>
-                        </Text>
+                        </Group>
                     )}
                     {isSpace && item.data.parentSpaceUuid && (
                         <Group gap="xs" wrap="nowrap">
@@ -277,8 +312,38 @@ const InfiniteResourceTableColumnName = ({
                     )}
                 </Stack>
             </Group>
-        </Anchor>
+        </Box>
     );
+
+    if (isResourceViewDataAppItem(item)) {
+        const appName = getResourceViewItemName(item);
+
+        return (
+            <AppThumbnailHoverCard
+                projectUuid={projectUuid}
+                appUuid={item.data.uuid}
+                appName={appName}
+                hasReadyVersion={item.data.latestReadyVersionNumber !== null}
+                activateOnClosestRow
+                infoContent={
+                    showResourceInfo ? (
+                        <ResourceInfoPopupContent
+                            resourceUuid={item.data.uuid}
+                            projectUuid={projectUuid}
+                            description={item.data.description}
+                            latestVersion={latestVersion}
+                        />
+                    ) : undefined
+                }
+            >
+                {({ hasThumbnailPreview }) =>
+                    renderContent(hasThumbnailPreview)
+                }
+            </AppThumbnailHoverCard>
+        );
+    }
+
+    return renderContent();
 };
 
 export default InfiniteResourceTableColumnName;

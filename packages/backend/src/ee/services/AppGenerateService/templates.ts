@@ -20,13 +20,32 @@ Build a slideshow-style data app:
 const PDF_REPORT_INSTRUCTIONS = `[Starter template: PDF Report]
 Build a print-optimized report:
 - Layout for A4/Letter portrait pages with comfortable internal padding.
+- The report must offer a visible Download PDF button — the app is incomplete without it, on this build and after any later edit. It uses the pre-installed \`html-to-image\` and \`jspdf\` packages to save the rendered report directly from the browser. Track an exporting state, disable the button while data or PDF generation is loading, and show a spinner or "Exporting..." label.
 - Set \`@page { margin: 0; size: A4 }\` so the design fills the sheet edge-to-edge — apply your own padding inside each page (e.g. \`p-12\`) instead of relying on the browser's default page margin (which is ugly and shrinks the canvas).
 - Use a clean, document-style typography hierarchy (title, section headings, body).
 - Render charts at fixed widths so they reflow across pages cleanly.
+- The app itself stays fully interactive (hover tooltips, the "Filter by <value>" action menu, etc.) — keep all of it. But the *exported* PDF is static: readers of the printed page can't hover, so any value only available via tooltip is lost. So **in addition to** the normal interactivity, draw the numbers on the chart: \`<LabelList>\` on bars, and labeled or end-of-line point labels on lines. Keep them legible — compact-format the numbers (e.g. \`1.2K\`, \`$1.3M\`) and avoid overlap on dense series.
 - Include a title page header (title, subtitle, generated-on date) and section dividers.
 - Apply CSS \`@media print\` rules and \`page-break-inside: avoid\` on cards and figures.
 - Note: browsers may inject their own header/footer on printed pages (URL, page number, date), controlled by the user's print dialog — not removable via CSS. Keep critical content away from the very top and bottom edges so it doesn't sit underneath.
+- \`window.print()\` can be a secondary Print action, but do not rely on it for the Download PDF button.
 - Prefer narrative copy with charts as supporting evidence, not a dense dashboard grid.`;
+
+// The viz build contract (the hook, the declaration, the option vocabulary, the
+// final pass) lives in the sandbox's `reusable-visualization` skill, so it sits alongside
+// the app-focused sandbox skill it overrides instead of competing with it from
+// the user prompt. This prompt only orients the request and names that skill —
+// naming it is enough for the agent to load it through the skill mechanism.
+const DATA_APP_VIZ_INSTRUCTIONS = `[Data app viz]
+You are building ONE reusable chart component. You do NOT fetch data or run queries: Lightdash runs the query, then gives you the result rows plus a mapping from your field names to the columns in those rows. The same component is reused across many different queries, so never hardcode column names — just render whatever data you are handed.
+
+Before you write any code, use the \`reusable-visualization\` skill. It is the contract for this build: the \`useVizContext()\` hook you take your data and settings from, the fields and config options you declare as structured output, the exact option vocabulary, the palette rule, and the final pass you run before you finish. Where it and the sandbox skill disagree, it wins. Follow it as written.
+
+Build the chart type the user asked for; only if they did not name one, pick what best fits the fields (bars to compare categories, a line for a trend over time).
+
+Wire the standard data-point action: when \`useVizContext().pointMenu?.enabled\` is true, a mark click calls \`pointMenu.open({ x: event.clientX, y: event.clientY, row: datum.sourceRow, metric: '<field name>' })\` and the viz renders NO menu of its own — Lightdash renders its native context menu (copy value, view underlying data, drill, dashboard cross-filtering) over the viz and owns all subsequent UI. Only when \`pointMenu?.enabled\` is not true (older hosts, or an SDK that predates \`pointMenu\` — always use the optional chain so this degrades instead of crashing), fall back to a minimal in-viz action menu offering "View underlying data" via \`underlyingData.open({ row, metric })\` when \`underlyingData.enabled\`, and a drill action via \`drillDown.open({ row, metric })\` when \`drillDown.enabled\`. Keep the untransformed source row on every interactive datum; skip the action on marks that aggregate multiple rows. The \`reusable-visualization\` skill has the full contract.
+
+You are done when the chart renders for real and the declaration you emit is the one that skill describes: every field and every config option the component reads, and nothing a viewer would plausibly want different left hardcoded.`;
 
 export const getTemplateInstructions = (
     template: DataAppTemplate,
@@ -40,6 +59,8 @@ export const getTemplateInstructions = (
             return PDF_REPORT_INSTRUCTIONS;
         case 'custom':
             return null;
+        case 'data_app_viz':
+            return DATA_APP_VIZ_INSTRUCTIONS;
         default:
             return assertUnreachable(
                 template,

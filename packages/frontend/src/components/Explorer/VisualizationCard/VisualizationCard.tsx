@@ -1,71 +1,88 @@
-import { subject } from '@casl/ability';
 import {
-    derivePivotConfigurationFromChart,
-    ECHARTS_DEFAULT_COLORS,
-    getFieldsFromMetricQuery,
     getHiddenTableFields,
     getPivotConfig,
     NotFoundError,
-    FeatureFlags,
     type ApiErrorDetail,
     type ChartConfig,
     type ChartType,
     type EChartsSeries,
     type FieldId,
 } from '@lightdash/common';
-import { Button, useMantineColorScheme } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { useElementSize } from '@mantine/hooks';
 import {
     IconLayoutSidebarLeftCollapse,
     IconLayoutSidebarLeftExpand,
 } from '@tabler/icons-react';
 import {
+    lazy,
     memo,
+    Suspense,
     useCallback,
+    useEffect,
     useLayoutEffect,
     useMemo,
     useState,
+    type ComponentProps,
     type FC,
+    type PropsWithChildren,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { useSearchParams } from 'react-router';
 import ErrorBoundary from '../../../features/errorBoundary/ErrorBoundary';
 import {
     explorerActions,
+    selectChartConfig,
+    selectChartType,
+    selectChartTypeAuthoring,
+    selectColumnOrder,
     selectIsEditMode,
     selectIsVisualizationConfigOpen,
     selectIsVisualizationExpanded,
+    selectMetricQuery,
+    selectParameters,
+    selectPivotConfig,
     selectSavedChart,
     selectSorts,
     selectTableCalculationsMetadata,
+    selectTableName,
     selectUnsavedChartVersion,
-    selectUnsavedColorPaletteUuid,
     useExplorerDispatch,
     useExplorerSelector,
+    useExplorerStore,
 } from '../../../features/explorer/store';
-import { useColorPalettes } from '../../../hooks/appearance/useOrganizationAppearance';
-import { useProjectColorPalette } from '../../../hooks/appearance/useProjectColorPalette';
+import { resolveMergeColumnOrder } from '../../../features/mergeQuery/utils/resolveMergeColumnOrder';
 import { uploadGsheet } from '../../../hooks/gdrive/useGdrive';
-import { useOrganization } from '../../../hooks/organization/useOrganization';
 import { useExplore } from '../../../hooks/useExplore';
-import { useExplorerQuery } from '../../../hooks/useExplorerQuery';
-import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
-import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
 import { ExplorerSection } from '../../../providers/Explorer/types';
+import useFullscreen from '../../../providers/Fullscreen/useFullscreen';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 import ChartDownloadMenu from '../../common/ChartDownload/ChartDownloadMenu';
 import CollapsableCard from '../../common/CollapsableCard/CollapsableCard';
 import { COLLAPSABLE_CARD_BUTTON_PROPS } from '../../common/CollapsableCard/constants';
 import MantineIcon from '../../common/MantineIcon';
 import LightdashVisualization from '../../LightdashVisualization';
-import VisualizationProvider from '../../LightdashVisualization/VisualizationProvider';
+import { useEditedChartConfig } from '../../LightdashVisualization/useVisualizationContext';
+import VisualizationProvider, {
+    type VisualizationProviderProps,
+} from '../../LightdashVisualization/VisualizationProvider';
 import { type EchartsSeriesClickEvent } from '../../SimpleChart';
 import SortButton from '../../SortButton';
-import { VisualizationConfigPortalId } from '../ExplorePanel/constants';
+import ExplorerChartSidebar from '../ChartGallery/ExplorerChartSidebar';
 import { DevCopyChartDebugData } from '../ExplorerHeader/DevCopyChartDebugData';
-import VisualizationConfig from '../VisualizationCard/VisualizationConfig';
 import { SeriesContextMenu } from './SeriesContextMenu';
+import { useDirtyPivotConfiguration } from './useDirtyPivotConfiguration';
+import { useExplorerChartColorPalette } from './useExplorerChartColorPalette';
+import { useExplorerResultsData } from './useExplorerResultsData';
+import useVisualizationConfigPortalTarget from './useVisualizationConfigPortalTarget';
 import VisualizationTimezone from './VisualizationTimezone';
 import VisualizationWarning from './VisualizationWarning';
+
+// Lazy-load so the Explorer bundle stays small when nothing is authored.
+const ExplorerChartTypeAuthoring = lazy(
+    () => import('../ChartTypeAuthoring/ExplorerChartTypeAuthoring'),
+);
 
 export type EchartsClickEvent = {
     event: EchartsSeriesClickEvent;
@@ -73,96 +90,101 @@ export type EchartsClickEvent = {
     series: EChartsSeries[];
 };
 
+// Only this wrapper follows the explorer's chart config, so an edit echoed
+// back by the explorer re-renders the provider but not the card around it.
+const ConnectedVisualizationProvider: FC<
+    PropsWithChildren<Omit<VisualizationProviderProps, 'chartConfig'>>
+> = ({ children, ...props }) => {
+    const chartConfig = useExplorerSelector(selectChartConfig);
+    return (
+        <VisualizationProvider chartConfig={chartConfig} {...props}>
+            {children}
+        </VisualizationProvider>
+    );
+};
+
+const ConnectedVisualizationWarning: FC<
+    Omit<ComponentProps<typeof VisualizationWarning>, 'chartConfig'>
+> = (props) => {
+    const chartConfig = useEditedChartConfig();
+    return <VisualizationWarning chartConfig={chartConfig} {...props} />;
+};
+
 type Props = {
     projectUuid?: string;
+    /** False keeps the card, its provider and the config sidebar alive
+     *  without drawing the chart, so nothing renders twice while a chart
+     *  type is authored in its place. */
+    renderVisualization: boolean;
     onScreenshotReady?: () => void;
     onScreenshotError?: () => void;
+    minimal?: boolean;
 };
 
 const VisualizationCard: FC<Props> = memo((props) => {
+    const lightdashApi = useLightdashApi();
     const {
         projectUuid: fallBackUUid,
+        renderVisualization,
         onScreenshotReady,
         onScreenshotError,
+        minimal = false,
     } = props;
     const { health } = useApp();
-    const { data: org } = useOrganization();
-    const { colorScheme } = useMantineColorScheme();
     const dispatch = useExplorerDispatch();
+    // In fullscreen the chart card header is hidden so the chart owns the viewport
+    const { isFullscreen } = useFullscreen();
 
     // Get savedChart from Redux
     const savedChart = useExplorerSelector(selectSavedChart);
 
+    // Authoring opens the builder modal from inside this card's provider
+    // tree, so the modal's config column shares the chart's viz context.
+    const chartTypeAuthoring = useExplorerSelector(selectChartTypeAuthoring);
+
     const sorts = useExplorerSelector(selectSorts);
 
-    const { data: pivotColumnSortFlag } = useServerFeatureFlag(
-        FeatureFlags.PivotColumnSort,
-    );
-    const isPivotColumnSortEnabled = pivotColumnSortFlag?.enabled ?? false;
-
     const projectUuid = savedChart?.projectUuid || fallBackUUid;
-    const stagedColorPaletteUuid = useExplorerSelector(
-        selectUnsavedColorPaletteUuid,
-    );
-    const isPaletteStagedDirty =
-        savedChart !== undefined &&
-        stagedColorPaletteUuid !== savedChart.colorPaletteUuid;
-    const resolverChartUuid =
-        isPaletteStagedDirty && stagedColorPaletteUuid === null
-            ? undefined
-            : savedChart?.uuid;
-    const { data: resolvedPalette } = useProjectColorPalette(projectUuid, {
-        chartUuid: resolverChartUuid,
-        dashboardUuid: savedChart?.dashboardUuid ?? undefined,
-    });
-
-    const { data: palettes } = useColorPalettes({
-        enabled: isPaletteStagedDirty && stagedColorPaletteUuid !== null,
-    });
-    const stagedPalette = useMemo(() => {
-        if (!isPaletteStagedDirty || stagedColorPaletteUuid === null) {
-            return undefined;
-        }
-        return palettes?.find(
-            (p) => p.colorPaletteUuid === stagedColorPaletteUuid,
-        );
-    }, [isPaletteStagedDirty, stagedColorPaletteUuid, palettes]);
-
-    const colorPalette = useMemo(() => {
-        if (stagedPalette) {
-            if (colorScheme === 'dark' && stagedPalette.darkColors) {
-                return stagedPalette.darkColors;
-            }
-            return stagedPalette.colors;
-        }
-        if (colorScheme === 'dark' && resolvedPalette?.darkColors) {
-            return resolvedPalette.darkColors;
-        }
-        return resolvedPalette?.colors ?? ECHARTS_DEFAULT_COLORS;
-    }, [colorScheme, resolvedPalette, stagedPalette]);
-
+    const colorPalette = useExplorerChartColorPalette(projectUuid);
     const {
         query,
         queryResults,
-        isLoading,
         getDownloadQueryUuid,
         validQueryArgs,
-    } = useExplorerQuery();
-    const isLoadingQueryResults = isLoading || queryResults.isFetchingRows;
+        missingRequiredParameters,
+        merge,
+        mergeResults,
+        suppressPrimaryResults,
+        isLoadingQueryResults,
+        resultsData,
+    } = useExplorerResultsData();
 
-    const resultsData = useMemo(
-        () => ({
-            ...queryResults,
-            metricQuery: query.data?.metricQuery,
-            fields: query.data?.fields,
-            resolvedTimezone: query.data?.resolvedTimezone ?? undefined,
-        }),
-        [query.data, queryResults],
-    );
+    // Narrow reads: the chart config is followed by the connected provider
+    // below, so edits do not re-render the card
+    const explorerStore = useExplorerStore();
+    const metricQuery = useExplorerSelector(selectMetricQuery);
+    const tableName = useExplorerSelector(selectTableName);
+    const columnOrder = useExplorerSelector(selectColumnOrder);
+    const pivotConfig = useExplorerSelector(selectPivotConfig);
+    const chartType = useExplorerSelector(selectChartType);
+    const parameters = useExplorerSelector(selectParameters);
+    const visualizationMetricQuery = suppressPrimaryResults
+        ? undefined
+        : (mergeResults?.metricQuery ?? metricQuery);
+    const visualizationColumnOrder = mergeResults
+        ? resolveMergeColumnOrder(mergeResults.columnOrder, columnOrder)
+        : columnOrder;
 
     const handleSetPivotFields = useCallback(
         (fields: FieldId[] = []) => {
-            dispatch(explorerActions.setPivotConfig({ columns: fields }));
+            dispatch(explorerActions.setPivotColumns(fields));
+        },
+        [dispatch],
+    );
+
+    const handleSetPivotRows = useCallback(
+        (rows: FieldId[] = []) => {
+            dispatch(explorerActions.setPivotRows(rows));
         },
         [dispatch],
     );
@@ -185,7 +207,11 @@ const VisualizationCard: FC<Props> = memo((props) => {
         [dispatch],
     );
 
-    const isOpen = useExplorerSelector(selectIsVisualizationExpanded);
+    const isVisualizationExpanded = useExplorerSelector(
+        selectIsVisualizationExpanded,
+    );
+    // Without the heading there is no way to expand the card, so force it open
+    const isOpen = minimal || isVisualizationExpanded || isFullscreen;
     const isEditMode = useExplorerSelector(selectIsEditMode);
     const isVisualizationConfigOpen = useExplorerSelector(
         selectIsVisualizationConfigOpen,
@@ -197,8 +223,6 @@ const VisualizationCard: FC<Props> = memo((props) => {
         [dispatch],
     );
 
-    const unsavedChartVersion = useExplorerSelector(selectUnsavedChartVersion);
-
     const tableCalculationsMetadata = useExplorerSelector(
         selectTableCalculationsMetadata,
     );
@@ -208,7 +232,7 @@ const VisualizationCard: FC<Props> = memo((props) => {
         [toggleExpandedSection],
     );
 
-    const { data: explore } = useExplore(unsavedChartVersion.tableName);
+    const { data: explore } = useExplore(tableName);
 
     const [echartsClickEvent, setEchartsClickEvent] =
         useState<EchartsClickEvent>();
@@ -222,22 +246,25 @@ const VisualizationCard: FC<Props> = memo((props) => {
         [dispatch],
     );
 
-    const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
+    // Deep link (e.g. the removed-chart-type recovery hint): arrive in edit
+    // mode with the config sidebar already open, then drop the param.
+    const [searchParams, setSearchParams] = useSearchParams();
+    useEffect(() => {
+        if (!isEditMode || searchParams.get('openVizConfig') !== 'true') return;
+        openVisualizationConfig();
+        const next = new URLSearchParams(searchParams);
+        next.delete('openVizConfig');
+        setSearchParams(next, { replace: true });
+    }, [isEditMode, searchParams, setSearchParams, openVisualizationConfig]);
+
+    const { target: portalTarget, ref: visualizationConfigButtonRef } =
+        useVisualizationConfigPortalTarget(isVisualizationConfigOpen);
 
     const {
         ref: measureRef,
         width: containerWidth,
         height: containerHeight,
     } = useElementSize();
-
-    useLayoutEffect(() => {
-        if (isVisualizationConfigOpen) {
-            const target = document.getElementById(VisualizationConfigPortalId);
-            setPortalTarget(target);
-        } else {
-            setPortalTarget(null);
-        }
-    }, [isVisualizationConfigOpen]);
 
     useLayoutEffect(() => {
         if (!isEditMode) {
@@ -255,17 +282,31 @@ const VisualizationCard: FC<Props> = memo((props) => {
         (e: EchartsSeriesClickEvent, series: EChartsSeries[]) => {
             setEchartsClickEvent({
                 event: e,
-                dimensions: unsavedChartVersion.metricQuery.dimensions,
+                dimensions: visualizationMetricQuery?.dimensions ?? [],
                 series,
             });
         },
-        [unsavedChartVersion],
+        [visualizationMetricQuery],
     );
 
-    const { missingRequiredParameters } = useExplorerQuery();
-
     const apiErrorDetail = useMemo(() => {
-        const queryError = query.error?.error ?? queryResults.error?.error;
+        // Once a merge owns the screen, the Explorer's own query is idle and
+        // any error it still holds is stale.
+        const queryError = merge?.replacesQuery
+            ? undefined
+            : (query.error?.error ?? queryResults.error?.error);
+
+        if (merge?.runError) return merge.runError.error;
+        if (merge?.runErrors.length) {
+            return {
+                message: merge.runErrors
+                    .map((error) => error.message)
+                    .join(' '),
+                name: 'Error',
+                statusCode: 400,
+                data: {},
+            } satisfies ApiErrorDetail;
+        }
 
         return !missingRequiredParameters?.length
             ? queryError
@@ -280,22 +321,22 @@ const VisualizationCard: FC<Props> = memo((props) => {
         query.error?.error,
         queryResults.error?.error,
         missingRequiredParameters,
+        merge?.runError,
+        merge?.runErrors,
+        merge?.replacesQuery,
     ]);
 
-    const dirtyPivotConfiguration = useMemo(() => {
-        return explore
-            ? derivePivotConfigurationFromChart(
-                  unsavedChartVersion,
-                  unsavedChartVersion.metricQuery,
-                  getFieldsFromMetricQuery(
-                      unsavedChartVersion.metricQuery,
-                      explore,
-                  ),
-              )
-            : undefined;
-    }, [unsavedChartVersion, explore]);
+    const savedChartReference = useMemo(
+        () =>
+            savedChart
+                ? { uuid: savedChart.uuid, chartConfig: savedChart.chartConfig }
+                : undefined,
+        [savedChart],
+    );
 
-    if (!unsavedChartVersion.tableName) {
+    const dirtyPivotConfiguration = useDirtyPivotConfiguration();
+
+    if (!tableName) {
         return <CollapsableCard title="Charts" disabled />;
     }
 
@@ -304,13 +345,18 @@ const VisualizationCard: FC<Props> = memo((props) => {
         showTableNames: boolean,
         customLabels?: Record<string, string>,
     ) => {
+        // Read at call time; the card does not subscribe to the chart config
+        const unsavedChartVersion = selectUnsavedChartVersion(
+            explorerStore.getState(),
+        );
         if (explore?.name && unsavedChartVersion?.metricQuery && projectUuid) {
-            const gsheetResponse = await uploadGsheet({
+            const gsheetResponse = await uploadGsheet(lightdashApi, {
                 projectUuid,
                 exploreId: explore?.name,
                 metricQuery: unsavedChartVersion?.metricQuery,
                 columnOrder: exportColumnOrder,
                 showTableNames,
+                parameters,
                 customLabels,
                 hiddenFields: getHiddenTableFields(
                     unsavedChartVersion.chartConfig,
@@ -328,26 +374,29 @@ const VisualizationCard: FC<Props> = memo((props) => {
 
     return (
         <ErrorBoundary>
-            <VisualizationProvider
+            <ConnectedVisualizationProvider
                 key={savedChart?.uuid}
-                chartConfig={unsavedChartVersion.chartConfig}
-                initialPivotDimensions={
-                    unsavedChartVersion.pivotConfig?.columns
-                }
-                unsavedMetricQuery={unsavedChartVersion.metricQuery}
+                minimal={minimal}
+                initialPivotDimensions={pivotConfig?.columns}
+                initialPivotRows={pivotConfig?.rows}
+                unsavedMetricQuery={visualizationMetricQuery}
                 resultsData={resultsData}
                 apiErrorDetail={apiErrorDetail}
                 isLoading={isLoadingQueryResults}
-                columnOrder={unsavedChartVersion.tableConfig.columnOrder}
+                columnOrder={visualizationColumnOrder}
                 onSeriesContextMenu={onSeriesContextMenu}
-                pivotTableMaxColumnLimit={health.data.pivotTable.maxColumnLimit}
                 savedChartUuid={isEditMode ? undefined : savedChart?.uuid}
+                savedChartReference={savedChartReference}
                 onChartConfigChange={handleSetChartConfig}
                 onChartTypeChange={handleSetChartType}
                 onPivotDimensionsChange={handleSetPivotFields}
+                onPivotRowsChange={handleSetPivotRows}
                 colorPalette={colorPalette}
                 tableCalculationsMetadata={tableCalculationsMetadata}
-                parameters={query.data?.usedParametersValues}
+                parameters={
+                    mergeResults?.usedParametersValues ??
+                    query.data?.usedParametersValues
+                }
                 containerWidth={containerWidth}
                 containerHeight={containerHeight}
                 isDashboard={false}
@@ -358,23 +407,33 @@ const VisualizationCard: FC<Props> = memo((props) => {
                     title="Chart"
                     isOpen={isOpen}
                     isVisualizationCard
+                    // Walkthrough look for view:SavedChart: the chart is
+                    // the first thing to read on a saved chart. See
+                    // scripts/scope-tours.
+                    tourProps={{
+                        'data-tour-scope': 'view:SavedChart',
+                        'data-tour-look': '1',
+                        'data-tour-after':
+                            '[data-tour-anchor="chart-row"][data-tour-value="Orders over time"]',
+                        'data-tour-label': 'The chart shows the answer',
+                        'data-tour-docs':
+                            'explore/explore-view.mdx#the-explore-page:li3',
+                    }}
+                    hideHeading={isFullscreen || minimal}
+                    minimal={minimal}
                     onToggle={toggleSection}
                     headerElement={
                         isOpen && (
                             <>
-                                {isPivotColumnSortEnabled &&
-                                    sorts.length > 0 && (
-                                        <SortButton
-                                            sorts={sorts}
-                                            isEditMode={isEditMode}
-                                        />
-                                    )}
-                                <VisualizationWarning
+                                {sorts.length > 0 && (
+                                    <SortButton
+                                        sorts={sorts}
+                                        isEditMode={isEditMode}
+                                    />
+                                )}
+                                <ConnectedVisualizationWarning
                                     dirtyPivotConfiguration={
                                         dirtyPivotConfiguration
-                                    }
-                                    chartConfig={
-                                        unsavedChartVersion.chartConfig
                                     }
                                     resultsData={resultsData}
                                     isLoading={isLoadingQueryResults}
@@ -392,19 +451,20 @@ const VisualizationCard: FC<Props> = memo((props) => {
                                     resolvedTimezone={
                                         query.data?.resolvedTimezone
                                     }
-                                    metricQueryTimezone={
+                                    timezoneSetting={
                                         query.data?.metricQuery?.timezone
                                     }
                                 />
                                 {isEditMode ? (
                                     <Button
+                                        ref={visualizationConfigButtonRef}
                                         {...COLLAPSABLE_CARD_BUTTON_PROPS}
                                         onClick={
                                             isVisualizationConfigOpen
                                                 ? closeVisualizationConfig
                                                 : openVisualizationConfig
                                         }
-                                        rightIcon={
+                                        rightSection={
                                             <MantineIcon
                                                 icon={
                                                     isVisualizationConfigOpen
@@ -421,39 +481,38 @@ const VisualizationCard: FC<Props> = memo((props) => {
                                 ) : null}
 
                                 {/*
-                                 * NOTE: not using Portal from mantine-8 because this page lacks MantineProvider from Mantine 8
-                                 * TODO: use mantine-8 portal with reuseTargetNode flag to avoid rendering additional divs
+                                 * NOTE: not using Mantine Portal because this page lacks a MantineProvider
+                                 * TODO: use Mantine Portal with reuseTargetNode flag to avoid rendering additional divs
                                  */}
                                 {portalTarget &&
+                                    // The modal owns the config while a type
+                                    // is authored; a second mount in the
+                                    // sidebar would echo its state.
+                                    !chartTypeAuthoring &&
                                     createPortal(
-                                        <VisualizationConfig
-                                            chartType={
-                                                unsavedChartVersion.chartConfig
-                                                    .type
-                                            }
+                                        <ExplorerChartSidebar
+                                            chartType={chartType}
                                             onClose={closeVisualizationConfig}
                                         />,
                                         portalTarget,
                                     )}
 
-                                <Can
-                                    I="manage"
-                                    this={subject('Explore', {
-                                        organizationUuid: org?.organizationUuid,
-                                        projectUuid,
-                                    })}
-                                >
-                                    {!!projectUuid && (
-                                        <ChartDownloadMenu
-                                            getDownloadQueryUuid={
-                                                getDownloadQueryUuid
-                                            }
-                                            projectUuid={projectUuid}
-                                            chartName={savedChart?.name}
-                                            getGsheetLink={getGsheetLink}
-                                        />
-                                    )}
-                                </Can>
+                                {!!projectUuid && (
+                                    <ChartDownloadMenu
+                                        getDownloadQueryUuid={
+                                            mergeResults && merge
+                                                ? merge.getDownloadQueryUuid
+                                                : getDownloadQueryUuid
+                                        }
+                                        projectUuid={projectUuid}
+                                        chartName={savedChart?.name}
+                                        getGsheetLink={
+                                            mergeResults
+                                                ? undefined
+                                                : getGsheetLink
+                                        }
+                                    />
+                                )}
 
                                 {import.meta.env.DEV && (
                                     <DevCopyChartDebugData />
@@ -462,21 +521,34 @@ const VisualizationCard: FC<Props> = memo((props) => {
                         )
                     }
                 >
-                    <LightdashVisualization
-                        ref={measureRef}
-                        className="sentry-block ph-no-capture"
-                        data-testid="visualization"
-                        onScreenshotReady={onScreenshotReady}
-                        onScreenshotError={onScreenshotError}
-                    />
-                    <SeriesContextMenu
-                        echartsSeriesClickEvent={echartsClickEvent?.event}
-                        dimensions={echartsClickEvent?.dimensions}
-                        series={echartsClickEvent?.series}
-                        explore={explore}
-                    />
+                    {renderVisualization && (
+                        <>
+                            <LightdashVisualization
+                                ref={measureRef}
+                                className="sentry-block ph-no-capture"
+                                data-testid="visualization"
+                                onScreenshotReady={onScreenshotReady}
+                                onScreenshotError={onScreenshotError}
+                            />
+                            <SeriesContextMenu
+                                echartsSeriesClickEvent={
+                                    echartsClickEvent?.event
+                                }
+                                dimensions={echartsClickEvent?.dimensions}
+                                series={echartsClickEvent?.series}
+                                explore={explore}
+                            />
+                        </>
+                    )}
                 </CollapsableCard>
-            </VisualizationProvider>
+                {chartTypeAuthoring && (
+                    <Suspense fallback={null}>
+                        <ExplorerChartTypeAuthoring
+                            authoring={chartTypeAuthoring}
+                        />
+                    </Suspense>
+                )}
+            </ConnectedVisualizationProvider>
         </ErrorBoundary>
     );
 });

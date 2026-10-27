@@ -6,27 +6,43 @@ import {
     ExploreError,
     friendlyName,
     getErrorMessage,
-    isExploreError,
+    getWarehouseLocation,
     LightdashError,
     ParseError,
     Project,
     ProjectType,
+    WarehouseTypes,
+    type ConnectionRoute,
+    type DeployTarget,
     type LightdashProjectConfig,
     type Tag,
 } from '@lightdash/common';
 import inquirer from 'inquirer';
 import path from 'path';
 import { URL } from 'url';
-import { v4 as uuidv4 } from 'uuid';
+import { validate as isUuid, v4 as uuidv4 } from 'uuid';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
+import {
+    assertConnectionResponse,
+    isResponseCount,
+} from '../agentConnections/responseValidation';
 import { LightdashAnalytics } from '../analytics/analytics';
 import { getConfig, setProject } from '../config';
+import { getAgentConnectionSelection } from '../credentials';
 import { getDbtContext } from '../dbt/context';
-import { loadDbtTarget } from '../dbt/profile';
+import {
+    loadDbtTarget,
+    warehouseCredentialsFromDbtTarget,
+} from '../dbt/profile';
 import GlobalState from '../globalState';
 import { readAndLoadLightdashProjectConfig } from '../lightdash-config';
 import { CliProjectType, detectProjectType } from '../lightdash/projectType';
 import * as styles from '../styles';
-import { compile } from './compile';
+import {
+    compileProject,
+    hasBlockingCompileError,
+    stripWarehouseColumnErrors,
+} from './compile';
 import {
     createProject,
     resolveOrganizationCredentialsName,
@@ -38,7 +54,13 @@ import {
 } from './dbt/apiClient';
 import { DbtCompileOptions } from './dbt/compile';
 import { tryGetDbtVersion } from './dbt/getDbtVersion';
-import { logSelectedProject, selectProject } from './selectProject';
+import {
+    logSelectedProject,
+    selectProject,
+    type ProjectSelection,
+} from './selectProject';
+import { resolveProjectSourceUuid } from './sourceSelection';
+import { getProjectDeploySettings } from './timestampConversion';
 
 type DeployHandlerOptions = DbtCompileOptions & {
     projectDir: string;
@@ -53,17 +75,81 @@ type DeployHandlerOptions = DbtCompileOptions & {
     warehouseCredentials?: boolean;
     organizationCredentials?: string;
     assumeYes?: boolean;
-    useBatchedDeploy?: boolean;
+    batchedDeploy?: boolean;
     batchSize?: string;
     parallelBatches?: string;
     gzip?: boolean;
+    disableTimestampConversion?: boolean;
+    validateWarehouseColumns: boolean;
+    partialCompilation?: boolean;
+    source?: string;
 };
 
 type DeployArgs = DeployHandlerOptions & {
     projectUuid: string;
+    complete?: boolean;
+    dbtModelNames?: string[];
+    sourceUuid?: string;
+    deployTarget?: DeployTarget;
 };
 
-export const logDeployWarnings = (
+const deployDestinationQuery = (options: DeployArgs): string =>
+    [
+        options.sourceUuid === undefined
+            ? undefined
+            : `sourceUuid=${encodeURIComponent(options.sourceUuid)}`,
+        options.deployTarget === undefined
+            ? undefined
+            : `targetDatabase=${encodeURIComponent(options.deployTarget.database)}`,
+        options.deployTarget?.region === undefined
+            ? undefined
+            : `targetRegion=${encodeURIComponent(options.deployTarget.region)}`,
+    ]
+        .filter((parameter) => parameter !== undefined)
+        .map((parameter) => `&${parameter}`)
+        .join('');
+
+export const getDeployTarget = async (
+    options: Pick<
+        DeployHandlerOptions,
+        'projectDir' | 'targetPath' | 'profilesDir' | 'profile' | 'target'
+    >,
+    projectType: CliProjectType,
+    connectionRoute: ConnectionRoute | undefined,
+): Promise<DeployTarget | undefined> => {
+    if (projectType !== CliProjectType.Dbt || connectionRoute !== 'multi') {
+        return undefined;
+    }
+    try {
+        const context = await getDbtContext({
+            projectDir: path.resolve(options.projectDir),
+            targetPath: options.targetPath,
+        });
+        const { target } = await loadDbtTarget({
+            profilesDir: path.resolve(options.profilesDir),
+            profileName: options.profile || context.profileName,
+            targetName: options.target,
+        });
+        if (target.type === 'spark') return undefined;
+        const credentials = await warehouseCredentialsFromDbtTarget(target);
+        const location = getWarehouseLocation(credentials);
+        const database = location.database ?? location.schema;
+        if (!database) return undefined;
+        return {
+            database,
+            ...(credentials.type === WarehouseTypes.ATHENA
+                ? { region: credentials.region }
+                : {}),
+        };
+    } catch (e) {
+        GlobalState.debug(
+            `> Could not read the dbt target database: ${getErrorMessage(e)}`,
+        );
+        return undefined;
+    }
+};
+
+const logDeployWarnings = (
     warningResults: ApiDeployExploresResults['warnings'] | undefined,
 ) => {
     if (
@@ -71,6 +157,13 @@ export const logDeployWarnings = (
         warningResults.warningCount === 0 ||
         !warningResults.exploresWithWarnings?.length
     ) {
+        return;
+    }
+
+    if (getAgentConnectionSelection() !== null) {
+        console.error(
+            'The server reported compilation warnings. Review the project in the app.',
+        );
         return;
     }
 
@@ -117,10 +210,16 @@ const replaceProjectParameters = async (
     projectUuid: string,
     lightdashProjectConfig: LightdashProjectConfig,
 ) => {
+    if (lightdashProjectConfig.parameters === undefined) {
+        GlobalState.log(
+            'No parameters section in lightdash.config.yml; project parameters left unchanged (use `parameters: {}` to clear)',
+        );
+        return;
+    }
     await lightdashApi<null>({
         method: 'PUT',
         url: `/api/v2/projects/${projectUuid}/parameters`,
-        body: JSON.stringify(lightdashProjectConfig.parameters ?? {}),
+        body: JSON.stringify(lightdashProjectConfig.parameters),
     });
 };
 
@@ -173,6 +272,7 @@ const retryBatchUpload = async <T>(
     task: () => Promise<T>,
     batchNumber: number,
 ): Promise<T> => {
+    if (getAgentConnectionSelection() !== null) return task();
     let backoffMs = BATCH_UPLOAD_INITIAL_BACKOFF_MS;
     for (let attempt = 1; attempt <= BATCH_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
         try {
@@ -201,7 +301,7 @@ const retryBatchUpload = async <T>(
 const deployBatched = async (
     explores: (Explore | ExploreError)[],
     options: DeployArgs,
-): Promise<void> => {
+): Promise<boolean> => {
     const batchSize = parseInt(options.batchSize || '50', 10);
     if (Number.isNaN(batchSize) || batchSize < 1 || batchSize > 1000) {
         throw new Error(
@@ -229,14 +329,32 @@ const deployBatched = async (
 
     // Start deploy session
     GlobalState.log(`Starting deploy session...`);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const startSessionResponse = (await lightdashApi<any>({
-        method: 'POST',
-        url: `/api/v2/projects/${options.projectUuid}/deploy`,
-        body: JSON.stringify({}),
-    })) as { deploySessionUuid: string };
+    let sessionUuid: string;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const startSessionResponse = (await lightdashApi<any>({
+            method: 'POST',
+            url: `/api/v2/projects/${options.projectUuid}/deploy`,
+            body: JSON.stringify({}),
+        })) as { deploySessionUuid: string };
+        assertConnectionResponse(
+            typeof startSessionResponse?.deploySessionUuid === 'string' &&
+                isUuid(startSessionResponse.deploySessionUuid),
+        );
+        sessionUuid = startSessionResponse.deploySessionUuid;
+    } catch (error) {
+        if (getAgentConnectionSelection() !== null) throw error;
+        if (error instanceof LightdashError && error.statusCode === 404) {
+            GlobalState.log(
+                styles.info(
+                    'Batched deploy is not supported by this server; falling back to legacy deploy',
+                ),
+            );
+            return false;
+        }
+        throw error;
+    }
 
-    const sessionUuid = startSessionResponse.deploySessionUuid;
     GlobalState.log(styles.success(`Deploy session created: ${sessionUuid}`));
 
     // Split explores into batches
@@ -265,11 +383,16 @@ const deployBatched = async (
                     body: JSON.stringify({
                         explores: batch,
                         batchNumber: batchIndex,
+                        complete: options.complete === true,
                     }),
                 }) as Promise<{ batchNumber: number; exploreCount: number }>,
             batchIndex + 1,
         );
 
+        assertConnectionResponse(
+            isResponseCount(response?.exploreCount) &&
+                isResponseCount(response?.batchNumber),
+        );
         GlobalState.log(
             styles.success(
                 `  ✓ Batch ${batchIndex + 1} uploaded (${response.exploreCount} explores)`,
@@ -312,9 +435,14 @@ const deployBatched = async (
     >({
         method: 'POST',
         url: `/api/v2/projects/${options.projectUuid}/deploy/${sessionUuid}/finalize`,
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+            dbtModelNames: options.dbtModelNames,
+            sourceUuid: options.sourceUuid,
+            target: options.deployTarget,
+        }),
     });
 
+    assertConnectionResponse(isResponseCount(finalizeResponse?.exploreCount));
     GlobalState.log(
         styles.success(
             `Deploy completed! ${finalizeResponse.exploreCount} explores deployed.`,
@@ -329,18 +457,24 @@ const deployBatched = async (
             durationMs: Date.now() - deployStartTime,
         },
     });
+    return true;
 };
 
 export const deploy = async (
     explores: (Explore | ExploreError)[],
     options: DeployArgs,
 ): Promise<void> => {
+    if (getAgentConnectionSelection() !== null)
+        assertAgentCommandAllowed('deploy', {
+            source: options.sourceUuid,
+            target: options.deployTarget,
+        });
     if (explores.length === 0) {
         GlobalState.log(styles.warning('No explores found'));
         process.exit(1);
     }
 
-    const errors = explores.filter((e) => isExploreError(e)).length;
+    const errors = explores.filter(hasBlockingCompileError).length;
     if (errors > 0) {
         if (options.ignoreErrors) {
             console.error(
@@ -358,12 +492,101 @@ export const deploy = async (
         }
     }
 
+    const deployableExplores = explores.map(stripWarehouseColumnErrors);
+
     const lightdashProjectConfig = await readAndLoadLightdashProjectConfig(
         path.resolve(options.projectDir),
         options.projectUuid,
     );
 
-    // These two methods are not critical to the deployment process, so we can ignore errors and show warnings instead
+    const shouldUseLegacyDeploy =
+        options.batchedDeploy === false ||
+        !(await deployBatched(deployableExplores, options));
+    if (shouldUseLegacyDeploy) {
+        const deployStartTime = Date.now();
+        const deployPayload = JSON.stringify(
+            options.dbtModelNames === undefined
+                ? deployableExplores
+                : {
+                      explores: deployableExplores,
+                      dbtModelNames: options.dbtModelNames,
+                      complete: options.complete === true,
+                      sourceUuid: options.sourceUuid,
+                      target: options.deployTarget,
+                  },
+        );
+        try {
+            const deployResponse = await lightdashApi<ApiDeployExploresResults>(
+                {
+                    method: 'PUT',
+                    url:
+                        options.dbtModelNames === undefined
+                            ? `/api/v1/projects/${options.projectUuid}/explores?complete=${options.complete === true}${deployDestinationQuery(options)}`
+                            : `/api/v2/projects/${options.projectUuid}/deploy`,
+                    body: deployPayload,
+                },
+            ).catch(async (error: unknown) => {
+                if (getAgentConnectionSelection() !== null) throw error;
+                if (
+                    options.dbtModelNames === undefined ||
+                    !(error instanceof LightdashError) ||
+                    error.statusCode !== 404
+                ) {
+                    throw error;
+                }
+                GlobalState.log(
+                    styles.warning(
+                        'This server does not support deleted dbt model cleanup; deploying without cleanup. Upgrade the server to enable it.',
+                    ),
+                );
+                return lightdashApi<ApiDeployExploresResults>({
+                    method: 'PUT',
+                    url: `/api/v1/projects/${options.projectUuid}/explores?complete=${options.complete === true}${deployDestinationQuery(options)}`,
+                    body: JSON.stringify(deployableExplores),
+                });
+            });
+            if (deployResponse) {
+                logDeployWarnings(deployResponse.warnings);
+            }
+            await LightdashAnalytics.track({
+                event: 'deploy.triggered',
+                properties: {
+                    projectId: options.projectUuid,
+                    durationMs: Date.now() - deployStartTime,
+                    payloadSizeBytes: Buffer.byteLength(deployPayload),
+                },
+            });
+        } catch (error: unknown) {
+            // Check if it's a payload too large error (413) or similar size-related errors
+            const errorStatus = (error as { status?: number }).status;
+            const errorMessage = (error as { message?: string }).message;
+            if (
+                errorStatus === 413 ||
+                errorMessage?.includes('too large') ||
+                errorMessage?.includes('payload') ||
+                errorMessage?.includes('Request Entity Too Large') ||
+                errorMessage?.includes('413')
+            ) {
+                console.error(
+                    styles.error('\n❌ Deploy failed: Payload too large\n'),
+                );
+                console.error(
+                    styles.warning(
+                        'Your project is too large to deploy in a single request.\n' +
+                            'Please use the batched deploy feature:\n\n' +
+                            `  ${styles.bold('lightdash deploy --use-batched-deploy')}\n\n` +
+                            'You can also customize batch size and parallelism:\n' +
+                            `  ${styles.bold('--batch-size <number>')}      Number of explores per batch (default: 50)\n` +
+                            `  ${styles.bold('--parallel-batches <number>')} Number of parallel batches (default: 1)\n`,
+                    ),
+                );
+                process.exit(1);
+            }
+            // Re-throw other errors to be handled by the caller
+            throw error;
+        }
+    }
+
     try {
         await replaceProjectYamlTags(
             options.projectUuid,
@@ -416,62 +639,6 @@ export const deploy = async (
                 )}\n`,
             ),
         );
-    }
-
-    // Use batched deploy if enabled
-    if (options.useBatchedDeploy) {
-        await deployBatched(explores, options);
-    } else {
-        const deployStartTime = Date.now();
-        const deployPayload = JSON.stringify(explores);
-        try {
-            const deployResponse = await lightdashApi<ApiDeployExploresResults>(
-                {
-                    method: 'PUT',
-                    url: `/api/v1/projects/${options.projectUuid}/explores`,
-                    body: deployPayload,
-                },
-            );
-            if (deployResponse) {
-                logDeployWarnings(deployResponse.warnings);
-            }
-            await LightdashAnalytics.track({
-                event: 'deploy.triggered',
-                properties: {
-                    projectId: options.projectUuid,
-                    durationMs: Date.now() - deployStartTime,
-                    payloadSizeBytes: Buffer.byteLength(deployPayload),
-                },
-            });
-        } catch (error: unknown) {
-            // Check if it's a payload too large error (413) or similar size-related errors
-            const errorStatus = (error as { status?: number }).status;
-            const errorMessage = (error as { message?: string }).message;
-            if (
-                errorStatus === 413 ||
-                errorMessage?.includes('too large') ||
-                errorMessage?.includes('payload') ||
-                errorMessage?.includes('Request Entity Too Large') ||
-                errorMessage?.includes('413')
-            ) {
-                console.error(
-                    styles.error('\n❌ Deploy failed: Payload too large\n'),
-                );
-                console.error(
-                    styles.warning(
-                        'Your project is too large to deploy in a single request.\n' +
-                            'Please use the batched deploy feature:\n\n' +
-                            `  ${styles.bold('lightdash deploy --use-batched-deploy')}\n\n` +
-                            'You can also customize batch size and parallelism:\n' +
-                            `  ${styles.bold('--batch-size <number>')}      Number of explores per batch (default: 50)\n` +
-                            `  ${styles.bold('--parallel-batches <number>')} Number of parallel batches (default: 1)\n`,
-                    ),
-                );
-                process.exit(1);
-            }
-            // Re-throw other errors to be handled by the caller
-            throw error;
-        }
     }
 };
 
@@ -571,6 +738,7 @@ const createNewProject = async (
 };
 
 export const deployHandler = async (originalOptions: DeployHandlerOptions) => {
+    assertAgentCommandAllowed('deploy', originalOptions);
     const options = {
         ...originalOptions,
     };
@@ -657,9 +825,47 @@ export const deployHandler = async (originalOptions: DeployHandlerOptions) => {
     }
     await checkLightdashVersion();
     const executionId = uuidv4();
-    const explores = await compile(options);
+    const config = await (getAgentConnectionSelection() === null
+        ? getConfig()
+        : getConfig({ readOnly: true }));
 
-    const config = await getConfig();
+    let existingProjectSelection: ProjectSelection | undefined;
+    let sourceUuid: string | undefined;
+    let connectionRoute: ConnectionRoute | undefined;
+    if (options.create === undefined) {
+        if (!config.context?.serverUrl) {
+            throw new AuthorizationError(
+                `No active Lightdash project. Run 'lightdash login --help'`,
+            );
+        }
+        existingProjectSelection = await selectProject(config, options.project);
+        if (!existingProjectSelection) {
+            throw new AuthorizationError(
+                `No active Lightdash project. Run 'lightdash login --help'`,
+            );
+        }
+
+        // Log current project info
+        logSelectedProject(existingProjectSelection, config, 'Deploying to');
+
+        sourceUuid = await resolveProjectSourceUuid(
+            existingProjectSelection.projectUuid,
+            options.source,
+        );
+
+        const projectSettings = await getProjectDeploySettings(
+            options.disableTimestampConversion,
+            existingProjectSelection.projectUuid,
+            sourceUuid,
+        );
+        options.disableTimestampConversion =
+            projectSettings.disableTimestampConversion;
+        connectionRoute = projectSettings.connectionRoute;
+    }
+
+    const { explores, isProjectComplete, dbtModelNames } =
+        await compileProject(options);
+
     let projectUuid: string;
 
     if (options.create !== undefined) {
@@ -680,25 +886,30 @@ export const deployHandler = async (originalOptions: DeployHandlerOptions) => {
         }
         projectUuid = project.projectUuid;
         await setProject(projectUuid, project.name);
+        sourceUuid = await resolveProjectSourceUuid(
+            projectUuid,
+            options.source,
+        );
+    } else if (existingProjectSelection) {
+        projectUuid = existingProjectSelection.projectUuid;
     } else {
-        if (!config.context?.serverUrl) {
-            throw new AuthorizationError(
-                `No active Lightdash project. Run 'lightdash login --help'`,
-            );
-        }
-        const projectSelection = await selectProject(config, options.project);
-        if (!projectSelection) {
-            throw new AuthorizationError(
-                `No active Lightdash project. Run 'lightdash login --help'`,
-            );
-        }
-        projectUuid = projectSelection.projectUuid;
-
-        // Log current project info
-        logSelectedProject(projectSelection, config, 'Deploying to');
+        throw new AuthorizationError(
+            `No active Lightdash project. Run 'lightdash login --help'`,
+        );
     }
 
-    await deploy(explores, { ...options, projectUuid });
+    await deploy(explores, {
+        ...options,
+        projectUuid,
+        complete: isProjectComplete,
+        dbtModelNames,
+        sourceUuid,
+        deployTarget: await getDeployTarget(
+            options,
+            projectTypeConfig.type,
+            connectionRoute,
+        ),
+    });
 
     const serverUrl = config.context?.serverUrl?.replace(/\/$/, '');
     let displayUrl = options.create

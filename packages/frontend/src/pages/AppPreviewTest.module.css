@@ -1,12 +1,37 @@
 .previewContainer {
-    position: relative;
-    height: calc(100vh - 50px);
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 50px);
     width: 100%;
+    overflow: hidden;
 }
 
-.menuOverlay {
-    position: absolute;
-    top: var(--mantine-spacing-sm);
-    right: var(--mantine-spacing-xl);
-    z-index: 10;
+/* A fixed NavBar banner (preview / impersonation) reserves an extra 35px at
+   the top, so shrink to fit when one is present — otherwise the page overflows
+   the viewport and can be scrolled. Mirrors dashboardTabs/tabs.module.css. */
+:global(body:has(#preview-banner)) .previewContainer,
+:global(body:has(#impersonation-banner)) .previewContainer {
+    height: calc(100dvh - 50px - 35px);
+}
+
+/* Presentation mode: the navbar hides itself, so reclaim the full viewport.
+   Repeats the banner selectors above to out-rank their id-based specificity. */
+.previewContainerFullscreen,
+:global(body:has(#preview-banner)) .previewContainerFullscreen,
+:global(body:has(#impersonation-banner)) .previewContainerFullscreen {
+    height: 100dvh;
+}
+
+.exitFullscreen {
+    position: fixed;
+    top: max(var(--mantine-spacing-sm), env(safe-area-inset-top));
+    right: max(var(--mantine-spacing-sm), env(safe-area-inset-right));
+    z-index: var(--mantine-z-index-app);
+}
+
+.previewBody {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
 }

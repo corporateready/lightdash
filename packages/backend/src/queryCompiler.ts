@@ -1,6 +1,7 @@
 import {
     AdditionalMetric,
     assertUnreachable,
+    CompiledDimension,
     CompiledMetric,
     CompiledMetricQuery,
     CompiledTableCalculation,
@@ -11,8 +12,14 @@ import {
     detectCircularDependencies,
     Explore,
     ExploreCompiler,
+    FieldType,
+    getDimensionMapFromTables,
+    getFilterRules,
     getItemId,
+    getItemMap,
+    getReservedParameterNames,
     isCustomBinDimension,
+    isCustomSqlDimension,
     isFormulaTableCalculation,
     isPeriodOverPeriodAdditionalMetric,
     isPostCalculationMetricType,
@@ -23,6 +30,7 @@ import {
     MetricType,
     PivotConfiguration,
     TableCalculation,
+    TableCalculationTemplate,
     type WarehouseSqlBuilder,
 } from '@lightdash/common';
 import {
@@ -32,6 +40,8 @@ import {
 } from '@lightdash/formula';
 import { mapAdapterToFormulaDialect } from './formulaDialectMapper';
 import { compileTableCalculationFromTemplate } from './tableCalculationTemplateQueryCompiler';
+import { resolveAdditionalMetricsSql } from './utils/embedCompiledSql';
+import { getDimensionFromId } from './utils/QueryBuilder/utils';
 
 const formatFormulaError = (displayName: string, error: unknown): string => {
     const message = error instanceof Error ? error.message : String(error);
@@ -45,6 +55,20 @@ const getTableCalculationReferences = (sql: string): string[] => {
     return matches.map((match) => match.slice(2, -1)); // Remove ${ and }
 };
 
+const getTemplateFieldReferences = (
+    template: TableCalculationTemplate,
+): string[] => [
+    ...('fieldId' in template && template.fieldId !== null
+        ? [template.fieldId]
+        : []),
+    ...('orderBy' in template
+        ? (template.orderBy ?? []).map(({ fieldId }) => fieldId)
+        : []),
+    ...('partitionBy' in template && template.partitionBy
+        ? template.partitionBy
+        : []),
+];
+
 const buildTableCalculationDependencyGraph = (
     tableCalculations: TableCalculation[],
 ): DependencyNode[] =>
@@ -57,28 +81,9 @@ const buildTableCalculationDependencyGraph = (
         }
 
         if (isTemplateTableCalculation(calc)) {
-            const fieldIdDependency =
-                'fieldId' in calc.template && calc.template.fieldId !== null
-                    ? [calc.template.fieldId]
-                    : [];
-
-            const orderByFields =
-                'orderBy' in calc.template
-                    ? calc.template.orderBy.map((ob) => ob.fieldId)
-                    : [];
-
-            const partitionByFields =
-                'partitionBy' in calc.template && calc.template.partitionBy
-                    ? calc.template.partitionBy
-                    : [];
-
             return {
                 name: calc.name,
-                dependencies: [
-                    ...fieldIdDependency,
-                    ...orderByFields,
-                    ...partitionByFields,
-                ],
+                dependencies: getTemplateFieldReferences(calc.template),
             };
         }
 
@@ -230,6 +235,54 @@ const compileTableCalculation = (
     );
 };
 
+// Caller-created identifiers are later rendered inside quoted SQL identifiers.
+// Reject every dialect's field quote chars and backslash before rendering.
+const forbiddenIdentifierChars = /["`\\]/;
+
+const assertSafeGeneratedIdentifier = (
+    value: string,
+    description: string,
+): void => {
+    if (forbiddenIdentifierChars.test(value)) {
+        throw new CompileError(
+            `Invalid ${description} "${value}": identifiers cannot contain quote or backslash characters.`,
+        );
+    }
+};
+
+const assertKnownTemplateReference = (
+    reference: string,
+    validFieldIds: string[],
+    dependencyGraph: DependencyNode[],
+): void => {
+    assertSafeGeneratedIdentifier(
+        reference,
+        'table calculation template reference',
+    );
+
+    if (
+        validFieldIds.includes(reference) ||
+        dependencyGraph.some((dep) => dep.name === reference)
+    ) {
+        return;
+    }
+
+    throw new CompileError(
+        `Table calculation contains a reference "${reference}" to a field or table calculation that isn't included in the query.`,
+        {},
+    );
+};
+
+const assertKnownTemplateReferences = (
+    template: TableCalculationTemplate,
+    validFieldIds: string[],
+    dependencyGraph: DependencyNode[],
+): void => {
+    getTemplateFieldReferences(template).forEach((reference) =>
+        assertKnownTemplateReference(reference, validFieldIds, dependencyGraph),
+    );
+};
+
 const compileTableCalculations = (
     tableCalculations: TableCalculation[],
     validFieldIds: string[],
@@ -241,6 +294,13 @@ const compileTableCalculations = (
     if (tableCalculations.length === 0) {
         return [];
     }
+
+    tableCalculations.forEach((tableCalculation) =>
+        assertSafeGeneratedIdentifier(
+            tableCalculation.name,
+            'table calculation name',
+        ),
+    );
 
     // Build dependency graph to check for circular dependencies
     const dependencyGraph =
@@ -254,6 +314,14 @@ const compileTableCalculations = (
     const compiledTableCalculations: CompiledTableCalculation[] = [];
 
     for (const tableCalculation of tableCalculations) {
+        if (isTemplateTableCalculation(tableCalculation)) {
+            assertKnownTemplateReferences(
+                tableCalculation.template,
+                validFieldIds,
+                dependencyGraph,
+            );
+        }
+
         const compiled = compileTableCalculation(
             tableCalculation,
             validFieldIds,
@@ -300,6 +368,18 @@ const compileAdditionalMetric = ({
         ...metric,
         compiledSql: compiledMetric.sql,
         tablesReferences: Array.from(compiledMetric.tablesReferences),
+        ...(compiledMetric.compiledRelativeDateFilters
+            ? {
+                  compiledRelativeDateFilters:
+                      compiledMetric.compiledRelativeDateFilters,
+              }
+            : {}),
+        ...(compiledMetric.compiledTimestampFilters
+            ? {
+                  compiledTimestampFilters:
+                      compiledMetric.compiledTimestampFilters,
+              }
+            : {}),
     };
 };
 
@@ -387,13 +467,38 @@ type CompileMetricQueryArgs = {
     warehouseSqlBuilder: WarehouseSqlBuilder;
     availableParameters: string[];
 };
+
+const assertSafeSortFieldId = (fieldId: string): void => {
+    assertSafeGeneratedIdentifier(fieldId, 'sort field');
+};
+
 export const compileMetricQuery = ({
     explore,
     metricQuery,
     warehouseSqlBuilder,
     availableParameters,
 }: CompileMetricQueryArgs): CompiledMetricQuery => {
+    metricQuery.sorts.forEach((sort) => assertSafeSortFieldId(sort.fieldId));
+    (metricQuery.customDimensions || []).forEach((customDimension) =>
+        assertSafeGeneratedIdentifier(
+            customDimension.id,
+            'custom dimension id',
+        ),
+    );
+    (metricQuery.additionalMetrics || []).forEach((additionalMetric) =>
+        assertSafeGeneratedIdentifier(
+            additionalMetric.name,
+            'additional metric name',
+        ),
+    );
+
     const fieldQuoteChar = warehouseSqlBuilder.getFieldQuoteChar();
+
+    // Reserved parameters are always referenceable in custom SQL; include them once here.
+    const availableParametersWithReserved = [
+        ...availableParameters,
+        ...getReservedParameterNames(),
+    ];
 
     const popMetricIds = (metricQuery.additionalMetrics ?? [])
         .filter(isPeriodOverPeriodAdditionalMetric)
@@ -405,25 +510,51 @@ export const compileMetricQuery = ({
         ...popMetricIds,
     ];
 
-    const compiledAdditionalMetrics = (metricQuery.additionalMetrics || []).map(
-        (additionalMetric) =>
-            compileAdditionalMetric({
-                additionalMetric,
-                explore,
-                warehouseSqlBuilder,
-                availableParameters,
-            }),
-    );
-
     const compiler = new ExploreCompiler(warehouseSqlBuilder);
     const compiledCustomDimensions = (metricQuery.customDimensions || []).map(
         (customDimension) =>
             compiler.compileCustomDimension(
                 customDimension,
                 explore.tables,
-                availableParameters,
+                availableParametersWithReserved,
             ),
     );
+    const metricTables = { ...explore.tables };
+    compiledCustomDimensions.forEach((dimension) => {
+        if (!isCustomSqlDimension(dimension)) return;
+        const table = metricTables[dimension.table];
+        // Model fields retain precedence, including in existing copied SQL.
+        if (!table || table.dimensions[dimension.id]) return;
+        const metricDimension: CompiledDimension = {
+            ...dimension,
+            name: dimension.id,
+            label: dimension.name,
+            type: dimension.dimensionType,
+            fieldType: FieldType.DIMENSION,
+            tableLabel: table.label,
+            hidden: false,
+        };
+        metricTables[dimension.table] = {
+            ...table,
+            dimensions: {
+                ...table.dimensions,
+                [dimension.id]: metricDimension,
+            },
+        };
+    });
+
+    const compiledAdditionalMetrics = resolveAdditionalMetricsSql(
+        metricQuery.additionalMetrics || [],
+        explore.tables,
+    ).map((additionalMetric) =>
+        compileAdditionalMetric({
+            additionalMetric,
+            explore: { ...explore, tables: metricTables },
+            warehouseSqlBuilder,
+            availableParameters: availableParametersWithReserved,
+        }),
+    );
+
     const customBinDimensionIds = new Set(
         (metricQuery.customDimensions || [])
             .filter(isCustomBinDimension)
@@ -445,4 +576,49 @@ export const compileMetricQuery = ({
         compiledAdditionalMetrics,
         compiledCustomDimensions,
     };
+};
+
+export const validateMetricQueryFields = (
+    args: CompileMetricQueryArgs & { explore: Explore },
+): void => {
+    const query = compileMetricQuery(args);
+    const fields = getItemMap(
+        args.explore,
+        query.compiledAdditionalMetrics,
+        query.compiledTableCalculations,
+        query.compiledCustomDimensions,
+    );
+    const ids = [
+        ...query.dimensions,
+        ...query.metrics,
+        ...query.sorts.map(({ fieldId }) => fieldId),
+        ...getFilterRules(query.filters).map(({ target }) => target.fieldId),
+        ...query.compiledCustomDimensions
+            .filter(isCustomBinDimension)
+            .map(({ dimensionId }) => dimensionId),
+        ...query.compiledCustomDimensions.map(getItemId),
+        ...query.compiledAdditionalMetrics.map(getItemId),
+        ...query.compiledTableCalculations.map(getItemId),
+    ];
+    const dimensions = getDimensionMapFromTables(args.explore.tables);
+    ids.forEach((id) => {
+        try {
+            const field =
+                fields[id] ??
+                getDimensionFromId({
+                    dimId: id,
+                    dimensions,
+                    adapterType: args.warehouseSqlBuilder.getAdapterType(),
+                    startOfWeek: args.warehouseSqlBuilder.getStartOfWeek(),
+                });
+            if ('compilationError' in field && field.compilationError)
+                throw new CompileError(
+                    'The query references a field that is no longer accessible',
+                );
+        } catch {
+            throw new CompileError(
+                'The query references a field that is no longer accessible',
+            );
+        }
+    });
 };

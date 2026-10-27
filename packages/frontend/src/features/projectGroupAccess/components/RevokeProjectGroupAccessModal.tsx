@@ -1,5 +1,5 @@
 import { type GroupWithMembers } from '@lightdash/common';
-import { Button } from '@mantine-8/core';
+import { Button } from '@mantine/core';
 import { IconKey } from '@tabler/icons-react';
 import { type FC } from 'react';
 import MantineModal, {
@@ -20,6 +20,7 @@ const RevokeProjectGroupAccessModal: FC<RevokeProjectGroupAccessModalProps> = ({
         <MantineModal
             opened
             onClose={onClose}
+            role="alertdialog"
             title="Revoke group project access"
             icon={IconKey}
             description={`Are you sure you want to revoke project access for this group "${group.name}"?`}

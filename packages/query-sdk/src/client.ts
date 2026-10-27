@@ -6,10 +6,20 @@
  */
 
 import { createApiTransport } from './apiTransport';
+import { getAppStateStore, type AppStateStore } from './appState';
+import { applyColorSchemeSeed, mountColorScheme } from './colorScheme';
 import { mountInspector } from './inspector';
+import { mountInsights } from './insights';
+import { mountLineage } from './lineage';
 import { createPostMessageTransport } from './postMessageTransport';
 import { QueryBuilder } from './query';
-import type { LightdashClientConfig, LightdashUser, Transport } from './types';
+import type {
+    ExternalFetchOptions,
+    ExternalFetchResult,
+    LightdashClientConfig,
+    LightdashUser,
+    Transport,
+} from './types';
 
 export class LightdashClient {
     readonly config: LightdashClientConfig;
@@ -27,6 +37,41 @@ export class LightdashClient {
     /** Start building a query against a model */
     model(exploreName: string): QueryBuilder {
         return new QueryBuilder(exploreName);
+    }
+
+    /**
+     * Call an external API through a Lightdash-managed connection.
+     *
+     * Supply only the connection `alias` and a relative request — Lightdash
+     * resolves the alias to a stored connection, attaches its credentials,
+     * and proxies the call. The app never sees the request URL, request
+     * headers, or secrets. Safe response headers are available on `res.headers`.
+     *
+     *   const res = await lightdash.externalFetch('stripe', {
+     *       path: '/v1/charges',
+     *       query: { limit: '10' },
+     *   });
+     *   // res.body is the parsed JSON
+     */
+    externalFetch(
+        alias: string,
+        opts: ExternalFetchOptions,
+    ): Promise<ExternalFetchResult> {
+        return this.transport.externalFetch(alias, opts);
+    }
+
+    /**
+     * Imperative access to durable app state, for what the hooks don't
+     * cover: a shared key's change history, deleting keys, forcing a
+     * re-fetch of other people's edits, or flushing pending writes.
+     *
+     *   const versions = await lightdash.appState.history('targets');
+     */
+    get appState(): Pick<
+        AppStateStore,
+        'history' | 'deleteUser' | 'deleteShared' | 'refresh' | 'flush'
+    > {
+        return getAppStateStore(this.transport);
     }
 }
 
@@ -57,6 +102,11 @@ function configFromEnv(): LightdashClientConfig | null {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (globalThis as any).process?.env?.LIGHTDASH_PROJECT_UUID;
 
+    const appUuid =
+        import.meta.env?.VITE_LIGHTDASH_APP_UUID ??
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (globalThis as any).process?.env?.LIGHTDASH_APP_UUID;
+
     if (!apiKey || !baseUrl || !projectUuid) return null;
 
     // Auto-enable proxy when running on a different origin (dev server)
@@ -64,7 +114,13 @@ function configFromEnv(): LightdashClientConfig | null {
         typeof window !== 'undefined' &&
         window.location.origin !== new URL(baseUrl).origin;
 
-    return { apiKey, baseUrl, projectUuid, useProxy };
+    return {
+        apiKey,
+        baseUrl,
+        projectUuid,
+        useProxy,
+        ...(appUuid ? { appUuid } : {}),
+    };
 }
 
 /**
@@ -76,18 +132,28 @@ function configFromEnv(): LightdashClientConfig | null {
 export function createClient(): LightdashClient {
     // 1. postMessage transport (iframe hosted by Lightdash parent)
     if (typeof window !== 'undefined' && window.location.hash) {
-        const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        const params = new URLSearchParams(
+            window.location.hash.replace(/^#/, ''),
+        );
         if (params.get('transport') === 'postMessage') {
             const projectUuid = params.get('projectUuid') ?? '';
             mountInspector(window.parent);
+            mountLineage(window.parent);
+            mountColorScheme(window.parent);
+            mountInsights(window.parent);
             return new LightdashClient(
                 { apiKey: '', baseUrl: '', projectUuid },
-                createPostMessageTransport({ targetWindow: window.parent, projectUuid }),
+                createPostMessageTransport({
+                    targetWindow: window.parent,
+                    projectUuid,
+                }),
             );
         }
     }
 
-    // 2. Env vars → API transport
+    // 2. Env vars → API transport. No host to follow, but honour a `?theme=`
+    // seed so an author running the app top-level can see both modes.
+    applyColorSchemeSeed();
     const config = configFromEnv();
     if (!config) {
         throw new Error(

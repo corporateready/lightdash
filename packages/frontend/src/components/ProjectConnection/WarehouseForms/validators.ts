@@ -1,12 +1,71 @@
-import { WarehouseTypes } from '@lightdash/common';
+import {
+    AthenaAuthenticationType,
+    DatabricksAuthenticationType,
+    DuckdbConnectionType,
+    RedshiftAuthenticationType,
+    SnowflakeAuthenticationType,
+    WarehouseTypes,
+} from '@lightdash/common';
 import {
     everyValidator,
     hasNoWhiteSpaces,
+    isAwsIamRoleArn,
+    isRequired,
     isUppercase,
     startWithHTTPSProtocol,
+    type FieldValidator,
 } from '../../../utils/fieldValidators';
+import { type ProjectConnectionForm } from '../types';
 
-type Validator = (value: string) => string | undefined;
+type Validator = (
+    value: string,
+    values: ProjectConnectionForm,
+) => string | undefined;
+
+const sshTunnelEnabled = (values: ProjectConnectionForm) =>
+    (values.warehouse.type === WarehouseTypes.POSTGRES ||
+        values.warehouse.type === WarehouseTypes.REDSHIFT) &&
+    values.warehouse.useSshTunnel === true;
+
+export const SSH_TUNNEL_PUBLIC_KEY_REQUIRED_MESSAGE =
+    'SSH tunnel is enabled but no public key has been generated. Click "Generate public key" and add it to your SSH host before saving.';
+
+const sshTunnelPublicKeyValidator: Validator = (value, values) =>
+    sshTunnelEnabled(values) && (!value || value.trim() === '')
+        ? SSH_TUNNEL_PUBLIC_KEY_REQUIRED_MESSAGE
+        : undefined;
+
+const requiredWhen =
+    (
+        fieldName: string,
+        predicate: (values: ProjectConnectionForm) => boolean,
+        ...validators: FieldValidator<string>[]
+    ): CreateValidator =>
+    (value, values) =>
+        everyValidator(
+            fieldName,
+            ...(predicate(values) ? [isRequired, ...validators] : validators),
+        )(value);
+
+const athenaAuthIs =
+    (...types: AthenaAuthenticationType[]) =>
+    (values: ProjectConnectionForm) =>
+        values.warehouse.type === WarehouseTypes.ATHENA &&
+        values.warehouse.authenticationType !== undefined &&
+        types.includes(values.warehouse.authenticationType);
+
+const athenaWebIdentityValidators = {
+    assumeRoleArn: requiredWhen(
+        'IAM Role ARN',
+        athenaAuthIs(AthenaAuthenticationType.WEB_IDENTITY),
+        hasNoWhiteSpaces,
+        isAwsIamRoleArn,
+    ),
+    webIdentityAudience: ((value, values) =>
+        athenaAuthIs(AthenaAuthenticationType.WEB_IDENTITY)(values) && !value
+            ? 'Generate an audience to continue.'
+            : undefined) satisfies CreateValidator,
+};
 
 export const warehouseValueValidators: Record<
     WarehouseTypes,
@@ -29,12 +88,14 @@ export const warehouseValueValidators: Record<
         host: hasNoWhiteSpaces('Host'),
         user: hasNoWhiteSpaces('User'),
         dbname: hasNoWhiteSpaces('Database name'),
+        sshTunnelPublicKey: sshTunnelPublicKeyValidator,
     },
     [WarehouseTypes.REDSHIFT]: {
         schema: hasNoWhiteSpaces('Schema'),
         host: hasNoWhiteSpaces('Host'),
         user: hasNoWhiteSpaces('User'),
         dbname: hasNoWhiteSpaces('Database name'),
+        sshTunnelPublicKey: sshTunnelPublicKeyValidator,
     },
     [WarehouseTypes.SNOWFLAKE]: {
         schema: hasNoWhiteSpaces('Schema'),
@@ -65,10 +126,190 @@ export const warehouseValueValidators: Record<
         database: hasNoWhiteSpaces('Catalog'),
         schema: hasNoWhiteSpaces('Database'),
         s3StagingDir: hasNoWhiteSpaces('S3 Staging Directory'),
+        ...athenaWebIdentityValidators,
     },
     [WarehouseTypes.DUCKDB]: {
         database: hasNoWhiteSpaces('Database'),
         schema: hasNoWhiteSpaces('Schema'),
+        token: hasNoWhiteSpaces('Service token'),
+    },
+} as const;
+
+type CreateValidator = (
+    value: string,
+    values: ProjectConnectionForm,
+) => string | undefined;
+
+const required = (
+    fieldName: string,
+    ...validators: FieldValidator<string>[]
+): CreateValidator => everyValidator(fieldName, isRequired, ...validators);
+
+const snowflakeAuthIs =
+    (...types: SnowflakeAuthenticationType[]) =>
+    (values: ProjectConnectionForm) =>
+        values.warehouse.type === WarehouseTypes.SNOWFLAKE &&
+        values.warehouse.authenticationType !== undefined &&
+        types.includes(values.warehouse.authenticationType);
+
+const databricksAuthIs =
+    (...types: DatabricksAuthenticationType[]) =>
+    (values: ProjectConnectionForm) =>
+        values.warehouse.type === WarehouseTypes.DATABRICKS &&
+        values.warehouse.authenticationType !== undefined &&
+        types.includes(values.warehouse.authenticationType);
+
+const redshiftAuthIs =
+    (...types: RedshiftAuthenticationType[]) =>
+    (values: ProjectConnectionForm) =>
+        values.warehouse.type === WarehouseTypes.REDSHIFT &&
+        values.warehouse.authenticationType !== undefined &&
+        types.includes(values.warehouse.authenticationType);
+
+const isRedshiftServerless = (values: ProjectConnectionForm) =>
+    values.warehouse.type === WarehouseTypes.REDSHIFT &&
+    (values.warehouse.isServerless ?? false);
+
+const redshiftUserIsRequired = (values: ProjectConnectionForm) =>
+    redshiftAuthIs(RedshiftAuthenticationType.PASSWORD)(values) ||
+    (redshiftAuthIs(RedshiftAuthenticationType.IAM)(values) &&
+        !isRedshiftServerless(values));
+
+const redshiftClusterIdentifierIsRequired = (values: ProjectConnectionForm) =>
+    redshiftAuthIs(RedshiftAuthenticationType.IAM)(values) &&
+    !isRedshiftServerless(values);
+
+const redshiftWorkgroupNameIsRequired = (values: ProjectConnectionForm) =>
+    redshiftAuthIs(RedshiftAuthenticationType.IAM)(values) &&
+    isRedshiftServerless(values);
+
+const isMotherduck = (values: ProjectConnectionForm) =>
+    values.warehouse.type === WarehouseTypes.DUCKDB &&
+    values.warehouse.connectionType === DuckdbConnectionType.MOTHERDUCK;
+
+export const createWarehouseValueValidators: Record<
+    WarehouseTypes,
+    Record<string, CreateValidator>
+> = {
+    [WarehouseTypes.BIGQUERY]: {
+        dataset: required('Data set', hasNoWhiteSpaces),
+        project: required('Project', hasNoWhiteSpaces),
+        location: hasNoWhiteSpaces('Location'),
+        executionProject: hasNoWhiteSpaces('Execution project'),
+    },
+    [WarehouseTypes.DATABRICKS]: {
+        database: required('Schema', hasNoWhiteSpaces),
+        serverHostName: required('Server host name', hasNoWhiteSpaces),
+        httpPath: required('HTTP Path', hasNoWhiteSpaces),
+        catalog: required('Catalog name', hasNoWhiteSpaces),
+        personalAccessToken: requiredWhen(
+            'Personal access token',
+            databricksAuthIs(
+                DatabricksAuthenticationType.PERSONAL_ACCESS_TOKEN,
+            ),
+        ),
+        oauthClientId: requiredWhen(
+            'OAuth Client ID',
+            databricksAuthIs(DatabricksAuthenticationType.OAUTH_M2M),
+        ),
+        oauthClientSecret: requiredWhen(
+            'OAuth Client Secret',
+            databricksAuthIs(DatabricksAuthenticationType.OAUTH_M2M),
+        ),
+    },
+    [WarehouseTypes.POSTGRES]: {
+        schema: required('Schema', hasNoWhiteSpaces),
+        host: required('Host', hasNoWhiteSpaces),
+        user: required('User', hasNoWhiteSpaces),
+        password: required('Password'),
+        dbname: required('Database name', hasNoWhiteSpaces),
+        sshTunnelPublicKey: sshTunnelPublicKeyValidator,
+    },
+    [WarehouseTypes.REDSHIFT]: {
+        schema: required('Schema', hasNoWhiteSpaces),
+        host: required('Host', hasNoWhiteSpaces),
+        user: requiredWhen('User', redshiftUserIsRequired, hasNoWhiteSpaces),
+        password: requiredWhen(
+            'Password',
+            redshiftAuthIs(RedshiftAuthenticationType.PASSWORD),
+        ),
+        dbname: required('Database name', hasNoWhiteSpaces),
+        sshTunnelPublicKey: sshTunnelPublicKeyValidator,
+        region: requiredWhen(
+            'AWS region',
+            redshiftAuthIs(
+                RedshiftAuthenticationType.IAM,
+                RedshiftAuthenticationType.IAM_BROWSER,
+            ),
+        ),
+        clusterIdentifier: requiredWhen(
+            'Cluster identifier',
+            redshiftClusterIdentifierIsRequired,
+        ),
+        workgroupName: requiredWhen(
+            'Workgroup name',
+            redshiftWorkgroupNameIsRequired,
+        ),
+    },
+    [WarehouseTypes.SNOWFLAKE]: {
+        schema: required('Schema', hasNoWhiteSpaces),
+        account: required('Account', hasNoWhiteSpaces),
+        user: requiredWhen(
+            'User',
+            snowflakeAuthIs(
+                SnowflakeAuthenticationType.PASSWORD,
+                SnowflakeAuthenticationType.PRIVATE_KEY,
+            ),
+            hasNoWhiteSpaces,
+        ),
+        role: hasNoWhiteSpaces('Role'),
+        password: requiredWhen(
+            'Password',
+            snowflakeAuthIs(SnowflakeAuthenticationType.PASSWORD),
+        ),
+        privateKey: requiredWhen(
+            'Private key',
+            snowflakeAuthIs(SnowflakeAuthenticationType.PRIVATE_KEY),
+        ),
+        database: required('Database', isUppercase, hasNoWhiteSpaces),
+        warehouse: required('Warehouse', isUppercase, hasNoWhiteSpaces),
+        accessUrl: everyValidator(
+            'Access URL',
+            hasNoWhiteSpaces,
+            startWithHTTPSProtocol,
+        ),
+    },
+    [WarehouseTypes.TRINO]: {
+        schema: required('Schema', hasNoWhiteSpaces),
+        host: required('Host', hasNoWhiteSpaces),
+        user: required('User', hasNoWhiteSpaces),
+        password: required('Password'),
+        dbname: required('Database name', hasNoWhiteSpaces),
+    },
+    [WarehouseTypes.CLICKHOUSE]: {
+        schema: required('Schema', hasNoWhiteSpaces),
+        host: required('Host', hasNoWhiteSpaces),
+        user: required('User', hasNoWhiteSpaces),
+        password: required('Password'),
+    },
+    [WarehouseTypes.ATHENA]: {
+        region: required('Region', hasNoWhiteSpaces),
+        database: required('Catalog', hasNoWhiteSpaces),
+        schema: required('Database', hasNoWhiteSpaces),
+        s3StagingDir: required('S3 Staging Directory', hasNoWhiteSpaces),
+        accessKeyId: requiredWhen(
+            'AWS Access Key ID',
+            athenaAuthIs(AthenaAuthenticationType.ACCESS_KEY),
+        ),
+        secretAccessKey: requiredWhen(
+            'AWS Secret Access Key',
+            athenaAuthIs(AthenaAuthenticationType.ACCESS_KEY),
+        ),
+        ...athenaWebIdentityValidators,
+    },
+    [WarehouseTypes.DUCKDB]: {
+        database: requiredWhen('Database', isMotherduck, hasNoWhiteSpaces),
+        schema: required('Schema', hasNoWhiteSpaces),
         token: hasNoWhiteSpaces('Service token'),
     },
 } as const;

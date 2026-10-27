@@ -1,6 +1,7 @@
 import {
     CartesianSeriesType,
     ChartType,
+    VizAggregationOptions,
     DimensionType,
     FieldType,
     SupportedDbtAdapter,
@@ -9,6 +10,7 @@ import {
     type Explore,
     type Series,
 } from '@lightdash/common';
+import { type InfiniteQueryResults } from '../useQueryResults';
 import { type GetExpectedSeriesMapArgs } from './utils';
 
 const generateCompiledDimension = (
@@ -81,7 +83,6 @@ export const simpleSeriesMapArgs: GetExpectedSeriesMapArgs = {
     pivotKeys: undefined,
     yFields: ['my_metric', 'my_second_metric'],
     xField: 'my_dimension',
-    availableDimensions: ['my_dimension', 'dimension_x'],
     itemsMap: undefined,
 };
 
@@ -125,6 +126,41 @@ export const expectedSimpleSeriesMap: Record<string, Series> = {
 export const pivotSeriesMapArgs: GetExpectedSeriesMapArgs = {
     ...simpleSeriesMapArgs,
     pivotKeys: ['dimension_x'],
+    resultsData: {
+        ...simpleSeriesMapArgs.resultsData,
+        pivotDetails: {
+            valuesColumns: [
+                {
+                    referenceField: 'my_metric',
+                    pivotColumnName: 'my_metric_any_a',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'a' },
+                    ],
+                },
+                {
+                    referenceField: 'my_second_metric',
+                    pivotColumnName: 'my_second_metric_any_a',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'a' },
+                    ],
+                },
+                {
+                    referenceField: 'my_metric',
+                    pivotColumnName: 'my_metric_any_b',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'b' },
+                    ],
+                },
+                {
+                    referenceField: 'my_second_metric',
+                    pivotColumnName: 'my_second_metric_any_b',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'b' },
+                    ],
+                },
+            ],
+        },
+    } as any,
 };
 
 export const expectedPivotedSeriesMap: Record<string, Series> = {
@@ -233,6 +269,42 @@ export const multiPivotSeriesMapArgs: GetExpectedSeriesMapArgs = {
                 my_metric: { value: { raw: 'a', formatted: 'a' } },
             },
         ],
+        pivotDetails: {
+            valuesColumns: [
+                {
+                    referenceField: 'my_metric',
+                    pivotColumnName: 'my_metric_any_a_a',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'a' },
+                        { referenceField: 'dimension_y', value: 'a' },
+                    ],
+                },
+                {
+                    referenceField: 'my_metric',
+                    pivotColumnName: 'my_metric_any_b_a',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'b' },
+                        { referenceField: 'dimension_y', value: 'a' },
+                    ],
+                },
+                {
+                    referenceField: 'my_metric',
+                    pivotColumnName: 'my_metric_any_b_b',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'b' },
+                        { referenceField: 'dimension_y', value: 'b' },
+                    ],
+                },
+                {
+                    referenceField: 'my_metric',
+                    pivotColumnName: 'my_metric_any_a_b',
+                    pivotValues: [
+                        { referenceField: 'dimension_x', value: 'a' },
+                        { referenceField: 'dimension_y', value: 'b' },
+                    ],
+                },
+            ],
+        },
     } as any,
 };
 
@@ -642,3 +714,99 @@ export const useCartesianChartConfigParamsMock = {
         'orders_fulfillment_rate',
     ],
 };
+
+const mixedBarLineEncode = (
+    field: string,
+    pivotValue?: string,
+): Series['encode'] => ({
+    xRef: { field: 'my_dimension' },
+    yRef: {
+        field,
+        ...(pivotValue !== undefined && {
+            pivotValues: [{ field: 'dimension_x', value: pivotValue }],
+        }),
+    },
+});
+
+export const mixedBarLinePivotedSeries: Series[] = [
+    {
+        type: CartesianSeriesType.BAR,
+        yAxisIndex: 0,
+        encode: mixedBarLineEncode('my_metric', 'a'),
+        name: 'A bar',
+        color: '#111111',
+    },
+    {
+        type: CartesianSeriesType.LINE,
+        yAxisIndex: 1,
+        smooth: true,
+        showSymbol: false,
+        encode: mixedBarLineEncode('my_second_metric', 'a'),
+        name: 'A line',
+        color: '#222222',
+    },
+];
+
+export const mixedBarLineFlatSeries: Series[] = [
+    {
+        type: CartesianSeriesType.BAR,
+        yAxisIndex: 0,
+        encode: mixedBarLineEncode('my_metric'),
+    },
+    {
+        type: CartesianSeriesType.LINE,
+        yAxisIndex: 1,
+        smooth: true,
+        showSymbol: false,
+        encode: mixedBarLineEncode('my_second_metric'),
+    },
+];
+
+type PivotDetails = NonNullable<InfiniteQueryResults['pivotDetails']>;
+
+export const buildPivotDetails = (
+    pivotField: string,
+    pivotValues: string[],
+    metrics: string[] = ['my_metric', 'my_second_metric'],
+): PivotDetails => ({
+    totalColumnCount: pivotValues.length * metrics.length,
+    indexColumn: undefined,
+    groupByColumns: undefined,
+    sortBy: undefined,
+    originalColumns: {},
+    valuesColumns: pivotValues.flatMap((value) =>
+        metrics.map((referenceField) => ({
+            referenceField,
+            pivotColumnName: `${referenceField}_any_${value}`,
+            aggregation: VizAggregationOptions.ANY,
+            pivotValues: [{ referenceField: pivotField, value }],
+        })),
+    ),
+});
+
+export const changedPivotFieldSeriesMapArgs: GetExpectedSeriesMapArgs = {
+    ...simpleSeriesMapArgs,
+    pivotKeys: ['dimension_y'],
+    resultsData: {
+        ...simpleSeriesMapArgs.resultsData,
+        pivotDetails: buildPivotDetails('dimension_y', ['x']),
+    },
+};
+
+export const buildInfiniteQueryResults = (
+    overrides: Partial<InfiniteQueryResults> = {},
+): InfiniteQueryResults => ({
+    rows: [],
+    isInitialLoading: false,
+    isFetchingFirstPage: false,
+    isFetchingRows: false,
+    isFetchingAllPages: false,
+    fetchMoreRows: () => {},
+    refetchRows: () => Promise.resolve(),
+    setFetchAll: () => {},
+    fetchAll: false,
+    hasFetchedAllRows: true,
+    totalClientFetchTimeMs: undefined,
+    error: null,
+    ...overrides,
+});

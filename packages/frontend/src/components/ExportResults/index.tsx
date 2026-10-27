@@ -2,6 +2,7 @@ import { subject } from '@casl/ability';
 import {
     DownloadFileType,
     formatDate,
+    type ConditionalFormattingConfig,
     type DownloadOptions,
     type PivotConfig,
 } from '@lightdash/common';
@@ -9,13 +10,12 @@ import {
     Alert,
     Button,
     Group,
-    NumberInput,
     Paper,
     SegmentedControl,
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
     IconHelpCircle,
@@ -24,13 +24,18 @@ import {
 } from '@tabler/icons-react';
 import { useMutation } from '@tanstack/react-query';
 import { memo, useState, type FC, type ReactNode } from 'react';
+import useIsEmbedded from '../../ee/providers/Embed/useIsEmbedded';
 import { pollJobStatus } from '../../features/scheduler/hooks/useScheduler';
 import useHealth from '../../hooks/health/useHealth';
 import useToaster from '../../hooks/toaster/useToaster';
 import { scheduleDownloadQuery } from '../../hooks/useQueryResults';
 import useUser from '../../hooks/user/useUser';
 import { Can } from '../../providers/Ability';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
 import MantineIcon from '../common/MantineIcon';
+import { NumberInput } from '../common/NumberInput';
+import classes from './ExportResults.module.css';
+import LargeExportWarning from './LargeExportWarning';
 import { Limit } from './types';
 
 type ExportCsvRenderProps = {
@@ -62,6 +67,8 @@ export type ExportResultsProps = {
     showTableNames?: boolean;
     chartName?: string;
     pivotConfig?: PivotConfig;
+    conditionalFormattings?: ConditionalFormattingConfig[];
+    showColumnTotals?: boolean;
     hideLimitSelection?: boolean;
     forceShowLimitSelection?: boolean;
     renderDialogActions?: (renderProps: ExportCsvRenderProps) => ReactNode;
@@ -80,15 +87,19 @@ const ExportResults: FC<ExportResultsProps> = memo(
         showTableNames,
         chartName,
         pivotConfig,
+        conditionalFormattings,
+        showColumnTotals,
         hideLimitSelection = false,
         forceShowLimitSelection = false,
         renderDialogActions,
     }) => {
+        const lightdashApi = useLightdashApi();
         const { showToastError, showToastInfo, showToastWarning } =
             useToaster();
 
         const user = useUser(true);
         const health = useHealth();
+        const isEmbedded = useIsEmbedded();
         const [limit, setLimit] = useState<Limit>(Limit.TABLE);
         const [customLimit, setCustomLimit] = useState<number>(1);
         const [format, setFormat] = useState<string>(Values.FORMATTED);
@@ -97,6 +108,7 @@ const ExportResults: FC<ExportResultsProps> = memo(
             DownloadFileType.CSV,
         );
 
+        const [hasExported, setHasExported] = useState(false);
         const { isLoading: isExporting, mutateAsync: exportMutation } =
             useMutation(
                 ['export-results', fileType],
@@ -125,9 +137,20 @@ const ExportResults: FC<ExportResultsProps> = memo(
                         attachmentDownloadName: chartName
                             ? `${chartName}_${formatDate(new Date())}`
                             : undefined,
+                        conditionalFormattings:
+                            fileType === DownloadFileType.XLSX &&
+                            (!pivotConfig || !exportPivotedData)
+                                ? conditionalFormattings
+                                : undefined,
+                        // Pivoted exports get their totals from `pivotConfig`
+                        showColumnTotals:
+                            exportPivotedData && pivotConfig
+                                ? undefined
+                                : showColumnTotals,
                     };
 
                     return scheduleDownloadQuery(
+                        lightdashApi,
                         projectUuid,
                         queryUuid,
                         downloadOptions,
@@ -135,6 +158,7 @@ const ExportResults: FC<ExportResultsProps> = memo(
                 },
                 {
                     onMutate: () => {
+                        setHasExported(false);
                         showToastInfo({
                             title: 'Exporting results',
                             subtitle: 'This may take a few minutes...',
@@ -144,8 +168,17 @@ const ExportResults: FC<ExportResultsProps> = memo(
                         });
                     },
                     onSuccess: (response) => {
-                        pollJobStatus(response.jobId)
+                        pollJobStatus(
+                            lightdashApi,
+                            response.jobId,
+                            isEmbedded ? projectUuid : undefined,
+                        )
                             .then(async (details) => {
+                                if (!details?.fileUrl) {
+                                    throw new Error(
+                                        'The export did not return a download URL.',
+                                    );
+                                }
                                 const link = document.createElement('a');
                                 link.href = details?.fileUrl;
                                 link.setAttribute(
@@ -157,6 +190,7 @@ const ExportResults: FC<ExportResultsProps> = memo(
                                 document.body.appendChild(link);
                                 link.click();
                                 link.remove();
+                                setHasExported(true);
                                 notifications.hide(TOAST_KEY);
 
                                 if (details?.truncated) {
@@ -213,7 +247,21 @@ const ExportResults: FC<ExportResultsProps> = memo(
                             value: Limit.TABLE,
                         },
                         {
-                            label: 'All results',
+                            label: (
+                                <span
+                                    data-tour-scope="manage:ChangeCsvResults"
+                                    data-tour-step="2"
+                                    data-tour-route="/projects/:projectUuid/saved/:savedQueryUuid"
+                                    data-tour-label="Choose All results"
+                                    data-tour-title="Change the rows exported"
+                                    data-tour-docs="explore/share-charts.mdx#choosing-how-many-rows-an-export-contains:p2:1"
+                                    data-tour-interactive="true"
+                                    data-tour-via='[data-tour-nav="browse"] >> [data-tour-nav="all-charts"] >> [data-tour-anchor="chart-row"][data-tour-value="Orders over time"] >> [data-tour-anchor="results-heading"] >> [data-tour-anchor="export-results"] >> [data-tour-anchor="export-choose-download"]?'
+                                    data-tour-then='[data-tour-anchor="export-download"]'
+                                >
+                                    All results
+                                </span>
+                            ),
                             value: Limit.ALL,
                         },
                         {
@@ -245,9 +293,7 @@ const ExportResults: FC<ExportResultsProps> = memo(
                             Layout
                         </Text>
                         <Tooltip
-                            withinPortal
                             maw={300}
-                            multiline
                             label="Grouped keeps the chart's pivoted columns. Flat exports the raw rows behind the chart."
                             position="top"
                         >
@@ -293,10 +339,26 @@ const ExportResults: FC<ExportResultsProps> = memo(
         ) : null;
 
         return (
-            <Stack gap="md" miw="20rem">
+            <Stack
+                gap="md"
+                miw={0}
+                w={isDialog ? '100%' : 'min(32rem, calc(100vw - 64px))'}
+                maw="100%"
+                mah={isDialog ? undefined : 'calc(100dvh - 160px)'}
+                className={isDialog ? undefined : classes.popover}
+                // Walkthrough result marker for manage:ExportCsv: the export
+                // dialog, still open once the file has been sent.
+                data-tour-scope="manage:ExportCsv"
+                data-tour-step="1"
+                data-tour-route="/projects/:projectUuid/saved/:savedQueryUuid"
+                data-tour-label="A download keeps the table's rows"
+                data-tour-docs="explore/share-charts.mdx#download-results-or-a-chart-image:1"
+                data-tour-return="none"
+                data-tour-resultdocs="explore/share-charts.mdx#choosing-how-many-rows-an-export-contains:p2:1"
+            >
                 {isDialog && (
                     <Stack gap="xs">
-                        <Text fz="xs" fw={700} tt="uppercase" c="dimmed">
+                        <Text fz="xs" fw={600} tt="uppercase" c="dimmed">
                             Export configuration
                         </Text>
                         <Text fz="sm" c="dimmed">
@@ -306,7 +368,22 @@ const ExportResults: FC<ExportResultsProps> = memo(
                     </Stack>
                 )}
 
-                <Paper withBorder p="md">
+                <Paper
+                    p="md"
+                    data-tour-scope="manage:ChangeCsvResults"
+                    data-tour-step="1"
+                    data-tour-route="/projects/:projectUuid/saved/:savedQueryUuid"
+                    data-tour-label="Choose which rows to export"
+                    data-tour-busy='[data-tour-anchor="csv-export-pending"]'
+                    data-tour-docs="explore/share-charts.mdx#choosing-how-many-rows-an-export-contains:1"
+                    data-tour-return="none"
+                    data-tour-resultdocs="explore/share-charts.mdx#choosing-how-many-rows-an-export-contains:p2:1"
+                    data-tour-anchor={
+                        isExporting || !hasExported
+                            ? 'csv-export-pending'
+                            : undefined
+                    }
+                >
                     <Stack gap="lg">
                         <Stack gap="sm">
                             <Stack gap={4}>
@@ -412,7 +489,7 @@ const ExportResults: FC<ExportResultsProps> = memo(
                                 <MantineIcon
                                     icon={IconInfoCircle}
                                     size="sm"
-                                    color="ldGray.6"
+                                    color="dimmed"
                                 />
                                 <Text size="xs" c="dimmed">
                                     <Text span fw={500} c="foreground">
@@ -436,7 +513,7 @@ const ExportResults: FC<ExportResultsProps> = memo(
                                     <MantineIcon
                                         icon={IconInfoCircle}
                                         size="sm"
-                                        color="ldGray.6"
+                                        color="dimmed"
                                     />
                                     <Text size="xs" c="dimmed">
                                         <Text span fw={500} c="foreground">
@@ -450,6 +527,18 @@ const ExportResults: FC<ExportResultsProps> = memo(
                     </Stack>
                 )}
 
+                {!isPivotTable && (
+                    <LargeExportWarning
+                        limit={limit}
+                        customLimit={customLimit}
+                        totalResults={totalResults}
+                        columnOrder={columnOrder}
+                        hiddenFields={hiddenFields}
+                        csvCellsLimit={csvCellsLimit}
+                        exportTimeoutMs={health.data?.query?.exportTimeoutMs}
+                    />
+                )}
+
                 {!renderDialogActions ? (
                     <Button
                         loading={isExporting}
@@ -457,6 +546,9 @@ const ExportResults: FC<ExportResultsProps> = memo(
                         leftSection={<MantineIcon icon={IconTableExport} />}
                         onClick={() => exportMutation()}
                         data-testid="chart-export-results-button"
+                        // Walkthrough anchor (data-tour-then): the download.
+                        data-tour-anchor="export-download"
+                        data-tour-hint="Click Download"
                         ml="auto"
                     >
                         Download

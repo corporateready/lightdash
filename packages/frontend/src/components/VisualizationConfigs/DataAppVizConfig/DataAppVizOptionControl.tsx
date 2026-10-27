@@ -1,0 +1,264 @@
+import {
+    ECHARTS_DEFAULT_COLORS,
+    assertUnreachable,
+    getEffectiveOptionValue,
+    type DataAppVizConfigOption,
+    type DataAppVizGradientValue,
+    type DataAppVizOptionValue,
+} from '@lightdash/common';
+import { Group, Select, Stack, Switch, TextInput } from '@mantine/core';
+import { type FC } from 'react';
+import { NumberInput } from '../../common/NumberInput';
+import ColorSelector from '../ColorSelector';
+import { Config } from '../common/Config';
+import { GradientStopsEditor } from '../common/GradientStopsEditor';
+import { RangeBoundInput } from '../common/RangeBoundInput';
+import { useDebouncedDraft } from '../common/useDebouncedDraft';
+
+// Free-text and colour edits fire continuously while typing / dragging, so
+// they're debounced before reaching chart state (and the iframe re-render).
+const OPTION_DEBOUNCE_MS = 200;
+
+type OptionOfType<T extends DataAppVizConfigOption['type']> = Extract<
+    DataAppVizConfigOption,
+    { type: T }
+>;
+
+const BooleanOptionControl: FC<{
+    option: OptionOfType<'boolean'>;
+    value: boolean;
+    onChange: (value: boolean) => void;
+}> = ({ option, value, onChange }) => (
+    <Config.Group>
+        <Config.Label>{option.label}</Config.Label>
+        <Switch
+            size="xs"
+            aria-label={option.label}
+            checked={value}
+            onChange={(event) => onChange(event.currentTarget.checked)}
+        />
+    </Config.Group>
+);
+
+const SelectOptionControl: FC<{
+    option: OptionOfType<'select'>;
+    value: string;
+    onChange: (value: string) => void;
+}> = ({ option, value, onChange }) => (
+    <Select
+        size="xs"
+        label={option.label}
+        data={option.choices}
+        value={value}
+        allowDeselect={false}
+        onChange={(next) => onChange(next ?? option.default)}
+    />
+);
+
+const NumberOptionControl: FC<{
+    option: OptionOfType<'number'>;
+    value: number;
+    onChange: (value: number) => void;
+}> = ({ option, value, onChange }) => (
+    <NumberInput
+        size="xs"
+        label={option.label}
+        value={value}
+        min={option.min}
+        max={option.max}
+        decimalScale="unlimited"
+        onNumberChange={(next) => onChange(next ?? option.default)}
+    />
+);
+
+const TextOptionControl: FC<{
+    option: OptionOfType<'text'>;
+    value: string;
+    onChange: (value: string) => void;
+}> = ({ option, value, onChange }) => {
+    const [draft, setDraft, flush] = useDebouncedDraft(value, onChange, {
+        delay: OPTION_DEBOUNCE_MS,
+    });
+    return (
+        <TextInput
+            size="xs"
+            label={option.label}
+            value={draft}
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            onBlur={flush}
+        />
+    );
+};
+
+const ColorOptionControl: FC<{
+    option: OptionOfType<'color'>;
+    value: string;
+    colorPalette: string[];
+    onChange: (value: string) => void;
+}> = ({ option, value, colorPalette, onChange }) => {
+    const [draft, setDraft, flush] = useDebouncedDraft(value, onChange, {
+        delay: OPTION_DEBOUNCE_MS,
+    });
+    return (
+        <Config.Group>
+            <Config.Label>{option.label}</Config.Label>
+            <ColorSelector
+                color={draft}
+                swatches={
+                    colorPalette.length > 0
+                        ? colorPalette
+                        : ECHARTS_DEFAULT_COLORS
+                }
+                ariaLabel={option.label}
+                onColorChange={setDraft}
+                onClose={flush}
+            />
+        </Config.Group>
+    );
+};
+
+const GradientOptionControl: FC<{
+    option: OptionOfType<'gradient'>;
+    value: DataAppVizGradientValue;
+    colorPalette: string[];
+    onChange: (value: DataAppVizGradientValue) => void;
+}> = ({ option, value, colorPalette, onChange }) => (
+    <Stack gap="xs" role="group" aria-label={option.label}>
+        <Config.Label>{option.label}</Config.Label>
+        <GradientStopsEditor
+            colors={value.colors}
+            startLabel={option.showBounds === false ? 'Start' : 'Low'}
+            endLabel={option.showBounds === false ? 'End' : 'High'}
+            swatches={
+                colorPalette.length > 0 ? colorPalette : ECHARTS_DEFAULT_COLORS
+            }
+            onAddColor={() =>
+                onChange({
+                    ...value,
+                    colors: [
+                        ...value.colors.slice(0, -1),
+                        '#fab005',
+                        value.colors[value.colors.length - 1],
+                    ],
+                })
+            }
+            onRemoveColor={(index) =>
+                onChange({
+                    ...value,
+                    colors: value.colors.filter(
+                        (_, colorIndex) => colorIndex !== index,
+                    ),
+                })
+            }
+            onColorChange={(index, color) =>
+                onChange({
+                    ...value,
+                    colors: value.colors.map((existing, colorIndex) =>
+                        colorIndex === index ? color : existing,
+                    ),
+                })
+            }
+        />
+        {option.showBounds !== false && (
+            <>
+                <Group gap="xs" wrap="nowrap" align="flex-end">
+                    <RangeBoundInput
+                        label="Minimum"
+                        autoLabel="Auto"
+                        value={value.min}
+                        onChange={(min) => onChange({ ...value, min })}
+                    />
+                </Group>
+                <Group gap="xs" wrap="nowrap" align="flex-end">
+                    <RangeBoundInput
+                        label="Maximum"
+                        autoLabel="Auto"
+                        value={value.max}
+                        onChange={(max) => onChange({ ...value, max })}
+                    />
+                </Group>
+            </>
+        )}
+    </Stack>
+);
+
+type Props = {
+    option: DataAppVizConfigOption;
+    /** Effective value: the stored value, or the declared default. */
+    value: DataAppVizOptionValue;
+    /** The resolved chart palette, including the current color scheme. */
+    colorPalette?: string[];
+    onChange: (value: DataAppVizOptionValue) => void;
+};
+
+/**
+ * Renders one declared config option as a native control. Stored values come
+ * from untyped JSONB, so the same resolver the host pushes into the iframe
+ * decides what each control shows.
+ */
+const DataAppVizOptionControl: FC<Props> = ({
+    option,
+    value,
+    colorPalette = [],
+    onChange,
+}) => {
+    switch (option.type) {
+        case 'boolean':
+            return (
+                <BooleanOptionControl
+                    option={option}
+                    value={getEffectiveOptionValue(option, value)}
+                    onChange={onChange}
+                />
+            );
+        case 'select':
+            return (
+                <SelectOptionControl
+                    option={option}
+                    value={getEffectiveOptionValue(option, value)}
+                    onChange={onChange}
+                />
+            );
+        case 'number':
+            return (
+                <NumberOptionControl
+                    option={option}
+                    value={getEffectiveOptionValue(option, value)}
+                    onChange={onChange}
+                />
+            );
+        case 'text':
+            return (
+                <TextOptionControl
+                    option={option}
+                    value={getEffectiveOptionValue(option, value)}
+                    onChange={onChange}
+                />
+            );
+        case 'gradient':
+            return (
+                <GradientOptionControl
+                    option={option}
+                    value={getEffectiveOptionValue(option, value)}
+                    colorPalette={colorPalette}
+                    onChange={onChange}
+                />
+            );
+        case 'color':
+            return (
+                <ColorOptionControl
+                    option={option}
+                    value={getEffectiveOptionValue(option, value)}
+                    colorPalette={colorPalette}
+                    onChange={onChange}
+                />
+            );
+        default:
+            return assertUnreachable(
+                option,
+                'Unknown data app viz config option type',
+            );
+    }
+};
+
+export default DataAppVizOptionControl;

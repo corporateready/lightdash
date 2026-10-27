@@ -1,0 +1,313 @@
+import {
+    AthenaAuthenticationType,
+    ParameterError,
+    WarehouseTypes,
+    type CreateAthenaCredentials,
+    type CreateDatabricksCredentials,
+    type CreatePostgresCredentials,
+} from '@lightdash/common';
+import {
+    credentialsForListedDatabase,
+    findListedCatalogDatabase,
+    getDatabaseListFailureReason,
+    getDefaultListedDatabase,
+    listConnectionDatabases,
+} from './connectionSqlRunner';
+
+const postgres: CreatePostgresCredentials = {
+    type: WarehouseTypes.POSTGRES,
+    host: 'warehouse.internal',
+    user: 'user',
+    password: 'password',
+    port: 5432,
+    dbname: 'analytics',
+    schema: 'public',
+};
+
+const athena: CreateAthenaCredentials = {
+    type: WarehouseTypes.ATHENA,
+    region: 'eu-west-1',
+    database: 'AwsDataCatalog',
+    schema: 'analytics',
+    s3StagingDir: 's3://staging/',
+    authenticationType: AthenaAuthenticationType.ACCESS_KEY,
+    accessKeyId: 'key',
+    secretAccessKey: 'secret',
+};
+
+const neverListsAll = vi.fn(async () => {
+    throw new Error('listDatabases must not be called');
+});
+
+describe('getDatabaseListFailureReason', () => {
+    test('classifies an Athena Glue permission denial without recording the message', () => {
+        const error = new Error(
+            'AccessDeniedException: not authorized to perform glue:GetDatabases on sensitive catalog',
+        );
+        expect(getDatabaseListFailureReason(error, WarehouseTypes.ATHENA)).toBe(
+            'athena_glue_list_databases_denied',
+        );
+        expect(
+            getDatabaseListFailureReason(
+                new Error(
+                    'Permission denied for glue:ListDatabases in the catalog',
+                ),
+                WarehouseTypes.ATHENA,
+            ),
+        ).toBe('athena_glue_list_databases_denied');
+        expect(
+            getDatabaseListFailureReason(error, WarehouseTypes.POSTGRES),
+        ).toBe('other');
+    });
+
+    test('classifies other Athena failures as other', () => {
+        expect(
+            getDatabaseListFailureReason(
+                new Error('Timeout when listing catalog'),
+                WarehouseTypes.ATHENA,
+            ),
+        ).toBe('other');
+    });
+});
+
+describe('listConnectionDatabases', () => {
+    test('trims, drops blanks and duplicates, and keeps the default first', async () => {
+        await expect(
+            listConnectionDatabases({
+                connection: {
+                    listAllDatabases: false,
+                    additionalDatabases: [' sales ', '', 'analytics', 'sales'],
+                },
+                credentials: postgres,
+                listAllDatabases: neverListsAll,
+            }),
+        ).resolves.toEqual({
+            databases: [
+                {
+                    name: 'analytics',
+                    database: 'analytics',
+                    schema: null,
+                    isDefault: true,
+                },
+                {
+                    name: 'sales',
+                    database: 'sales',
+                    schema: null,
+                    isDefault: false,
+                },
+            ],
+            truncated: false,
+            limit: 100,
+        });
+    });
+
+    test('caps named databases at the listing limit and reports truncation', async () => {
+        const listing = await listConnectionDatabases({
+            connection: {
+                listAllDatabases: false,
+                additionalDatabases: Array.from(
+                    { length: 100 },
+                    (_, index) => `database_${index}`,
+                ),
+            },
+            credentials: postgres,
+            listAllDatabases: neverListsAll,
+        });
+
+        expect(listing.databases).toHaveLength(100);
+        expect(listing.databases[0].name).toBe('analytics');
+        expect(listing.truncated).toBe(true);
+    });
+
+    test('lists Athena databases as schemas of the connection catalog', async () => {
+        const listing = await listConnectionDatabases({
+            connection: {
+                listAllDatabases: false,
+                additionalDatabases: ['sales'],
+            },
+            credentials: athena,
+            listAllDatabases: neverListsAll,
+        });
+
+        expect(listing.databases).toEqual([
+            {
+                name: 'analytics',
+                database: 'AwsDataCatalog',
+                schema: 'analytics',
+                isDefault: true,
+            },
+            {
+                name: 'sales',
+                database: 'AwsDataCatalog',
+                schema: 'sales',
+                isDefault: false,
+            },
+        ]);
+    });
+
+    test('asks the warehouse only when the connection lists all databases', async () => {
+        const listAllDatabases = vi.fn(async () => ({
+            databases: [],
+            truncated: false,
+            limit: 100,
+        }));
+
+        await listConnectionDatabases({
+            connection: { listAllDatabases: true, additionalDatabases: [] },
+            credentials: postgres,
+            listAllDatabases,
+        });
+
+        expect(listAllDatabases).toHaveBeenCalledOnce();
+    });
+
+    test('lists only the default database for a warehouse without listing support', async () => {
+        const databricks = {
+            type: WarehouseTypes.DATABRICKS,
+            database: 'default',
+            serverHostName: 'host',
+            httpPath: '/path',
+        } as CreateDatabricksCredentials;
+
+        await expect(
+            listConnectionDatabases({
+                connection: {
+                    listAllDatabases: true,
+                    additionalDatabases: ['other'],
+                },
+                credentials: databricks,
+                listAllDatabases: neverListsAll,
+            }),
+        ).resolves.toEqual({
+            databases: [
+                {
+                    name: 'DEFAULT',
+                    database: 'DEFAULT',
+                    schema: null,
+                    isDefault: true,
+                },
+            ],
+            truncated: false,
+            limit: 100,
+        });
+    });
+});
+
+describe('credentialsForListedDatabase', () => {
+    test('connects Postgres to the listed database', () => {
+        expect(
+            credentialsForListedDatabase(postgres, {
+                name: 'sales',
+                database: 'sales',
+                schema: null,
+                isDefault: false,
+            }),
+        ).toEqual({ ...postgres, dbname: 'sales' });
+    });
+
+    test('refuses a Postgres database name the connection string cannot carry', () => {
+        expect(() =>
+            credentialsForListedDatabase(postgres, {
+                name: 'sales&host=elsewhere',
+                database: 'sales&host=elsewhere',
+                schema: null,
+                isDefault: false,
+            }),
+        ).toThrow(ParameterError);
+    });
+
+    test('keeps Athena credentials, which name the catalog per request', () => {
+        expect(
+            credentialsForListedDatabase(
+                athena,
+                getDefaultListedDatabase(athena),
+            ),
+        ).toBe(athena);
+    });
+});
+
+describe('findListedCatalogDatabase', () => {
+    const listing = {
+        databases: [
+            {
+                name: 'analytics',
+                database: 'analytics',
+                schema: null,
+                isDefault: true,
+            },
+        ],
+        truncated: false,
+        limit: 100,
+    };
+
+    test('accepts the Snowflake catalog key with its original case', () => {
+        expect(
+            findListedCatalogDatabase(
+                listing,
+                'ANALYTICS',
+                WarehouseTypes.SNOWFLAKE,
+            ),
+        ).toBe(listing.databases[0]);
+    });
+
+    test('accepts a catalog key when the warehouse does not list databases', () => {
+        expect(
+            findListedCatalogDatabase(
+                listing,
+                'hive_metastore',
+                WarehouseTypes.DATABRICKS,
+            ),
+        ).toMatchObject({ database: 'hive_metastore' });
+    });
+
+    test('keeps the strict check for Postgres and Athena', () => {
+        expect(() =>
+            findListedCatalogDatabase(
+                listing,
+                'other',
+                WarehouseTypes.POSTGRES,
+            ),
+        ).toThrow('Warehouse database "other" not found');
+        expect(() =>
+            findListedCatalogDatabase(listing, 'other', WarehouseTypes.ATHENA),
+        ).toThrow('Warehouse database "other" not found');
+    });
+
+    test('prefers the exact Postgres database when listed names differ only by case', () => {
+        const collision = {
+            ...listing,
+            databases: [
+                listing.databases[0],
+                {
+                    name: 'ANALYTICS',
+                    database: 'ANALYTICS',
+                    schema: null,
+                    isDefault: false,
+                },
+            ],
+        };
+        const selected = findListedCatalogDatabase(
+            collision,
+            'ANALYTICS',
+            WarehouseTypes.POSTGRES,
+        );
+        expect(selected.database).toBe('ANALYTICS');
+        expect(credentialsForListedDatabase(postgres, selected)).toMatchObject({
+            dbname: 'ANALYTICS',
+        });
+        expect(() =>
+            findListedCatalogDatabase(
+                listing,
+                'ANALYTICS',
+                WarehouseTypes.POSTGRES,
+            ),
+        ).toThrow('Warehouse database "ANALYTICS" not found');
+        expect(
+            findListedCatalogDatabase(
+                collision,
+                'ANALYTICS',
+                WarehouseTypes.SNOWFLAKE,
+            ),
+        ).toBe(collision.databases[1]);
+    });
+});

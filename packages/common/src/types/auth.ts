@@ -3,6 +3,7 @@ import {
     type DashboardFilterInteractivityOptions,
     type ParameterInteractivityOptions,
 } from '../ee';
+import { type AgentConnectionGrant } from './agentConnectionGrants';
 import { ForbiddenError } from './errors';
 import { type Organization } from './organization';
 import {
@@ -51,12 +52,25 @@ export type ServiceAccountAuth = {
     serviceAccountDescription: string;
 };
 
+export type OAuthAgentConnectionGrant = Pick<
+    AgentConnectionGrant,
+    | 'grantUuid'
+    | 'approvedProjectUuids'
+    | 'approvedCapabilities'
+    | 'expiresAt'
+    | 'clientId'
+    | 'resource'
+    | 'resourceConstraints'
+    | 'grantContractVersion'
+> & { revision: number };
+
 export type OauthAuth = {
     type: 'oauth';
     source: string; // The oauth token
     token: string;
     clientId: string;
     scopes: string[];
+    agentConnectionGrant: OAuthAgentConnectionGrant | null;
     expiresAt?: number;
     resource?: URL;
 };
@@ -69,6 +83,8 @@ export type OssEmbed = {
     allowAllDashboards: boolean;
     chartUuids: string[];
     allowAllCharts: boolean;
+    allowAllApps: boolean;
+    appUuids: string[];
     createdAt: string;
     user: Pick<LightdashUser, 'userUuid' | 'firstName' | 'lastName'> | null;
 };
@@ -95,8 +111,18 @@ export type EmbedContent = {
     chartUuids: string[];
     /** Explores available to the embedded dashboard */
     explores: string[];
+    /** The data app UUID the JWT may have access to (standalone app embed) */
+    appUuid?: string;
+    /** The AI agent UUID the JWT may have access to */
+    agentUuid?: string;
     /** The type of content */
-    type: 'dashboard' | 'chart';
+    type:
+        | 'dashboard'
+        | 'chart'
+        | 'dataApp'
+        | 'aiAgent'
+        | 'metricsCatalog'
+        | 'apiAccess';
 };
 
 export type EmbedAccess = {
@@ -162,12 +188,24 @@ export type SessionAccount = BaseAccountWithHelpers & {
     user: LightdashSessionUser;
 };
 
+export type EmbedWritableSpace = { uuid: string; name: string };
+
 /**
  * Account for anonymous users with JWT authentication (embeds)
  */
 export type AnonymousAccount = BaseAccountWithHelpers & {
     authentication: JwtAuth;
     user: ExternalUser;
+    embedWriteUser?: SessionUser;
+    embedWriteContext?: {
+        canUpdateDashboard: boolean;
+        canUpdateSavedChart: boolean;
+        canCreateSavedChart: boolean;
+        /** Write spaces the actor can create saved charts in, in token order. */
+        writableSpaces: EmbedWritableSpace[];
+        canUseAiAgent: boolean;
+        aiAgentErrorMessage?: string;
+    };
     /** The access permissions the account has */
     access: EmbedAccess;
     /** The embed configuration associated with the JWT */

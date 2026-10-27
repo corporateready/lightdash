@@ -20,6 +20,7 @@ const EXCLUDED_KEYS_FROM_SHARE_STATE = [
     'queryError',
     'editorHighlightError',
     'fetchResultsOnLoad',
+    'connectionRoute',
 ] as const;
 
 type ExcludedKeysFromShareState =
@@ -33,6 +34,7 @@ type SqlRunnerStateWithoutExcludedKeys = Omit<
 type SqlRunnerShareParams = {
     sqlRunnerState: SqlRunnerStateWithoutExcludedKeys;
     chartConfig: AllVizChartConfig | undefined;
+    warehouseConnectionUuid?: string | null;
 };
 
 function isSqlRunnerShareParams(value: unknown): value is SqlRunnerShareParams {
@@ -66,6 +68,14 @@ export const useCreateSqlRunnerShareUrl = () => {
         const shareStateParams: SqlRunnerShareParams = {
             sqlRunnerState: sqlRunnerStateWithoutExcludedKeys,
             chartConfig: config,
+            ...(sqlRunnerState.connectionRoute.route === 'multi' &&
+            sqlRunnerState.connectionRoute.connection
+                ? {
+                      warehouseConnectionUuid:
+                          sqlRunnerState.connectionRoute.connection
+                              .warehouseConnectionUuid,
+                  }
+                : {}),
         };
 
         const shareUrl = await createShareUrl({
@@ -80,6 +90,8 @@ type SqlRunnerShare = {
     sqlRunnerState: SqlRunnerState | undefined;
     chartConfig: AllVizChartConfig | undefined;
     error: Error | null;
+    errorReason: 'share_fetch_failed' | 'share_parse_failed' | null;
+    warehouseConnectionUuid: string | null | undefined;
 };
 
 export const useSqlRunnerShareUrl = (
@@ -91,8 +103,12 @@ export const useSqlRunnerShareUrl = (
         let error: Error | null = apiError
             ? new Error(apiError.error.message)
             : null;
+        let errorReason: SqlRunnerShare['errorReason'] = apiError
+            ? 'share_fetch_failed'
+            : null;
         let sqlRunnerState: SqlRunnerState | undefined;
         let chartConfig: AllVizChartConfig | undefined;
+        let warehouseConnectionUuid: string | null | undefined;
         if (data?.params) {
             try {
                 const sqlRunnerParams = JSON.parse(data.params);
@@ -100,23 +116,36 @@ export const useSqlRunnerShareUrl = (
                     sqlRunnerState = {
                         ...initialState,
                         ...sqlRunnerParams.sqlRunnerState,
+                        connectionRoute: initialState.connectionRoute,
                     };
                     chartConfig = sqlRunnerParams.chartConfig;
+                    if (
+                        typeof sqlRunnerParams.warehouseConnectionUuid ===
+                            'string' ||
+                        sqlRunnerParams.warehouseConnectionUuid === null
+                    ) {
+                        warehouseConnectionUuid =
+                            sqlRunnerParams.warehouseConnectionUuid;
+                    }
                 } else {
                     // handle legacy share links where params are just the sql runner state
                     sqlRunnerState = {
                         ...initialState,
                         ...sqlRunnerParams,
+                        connectionRoute: initialState.connectionRoute,
                     };
                 }
             } catch (e) {
                 error = new Error('Unable to parse SQL runner state json');
+                errorReason = 'share_parse_failed';
             }
         }
         return {
             sqlRunnerState,
             chartConfig,
             error,
+            errorReason,
+            warehouseConnectionUuid,
         };
     }, [data, apiError]);
 };

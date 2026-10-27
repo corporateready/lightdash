@@ -1,16 +1,22 @@
 import { Ability } from '@casl/ability';
 import {
+    AgentActorSurface,
+    buildAgentIdentityClaim,
+    FeatureFlags,
     ForbiddenError,
     OrganizationMemberRole,
     PossibleAbilities,
     SchedulerFormat,
+    type SessionUser,
 } from '@lightdash/common';
 import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
+import { fromApiKey } from '../../auth/account/account';
 import { lightdashConfigMock } from '../../config/lightdashConfig.mock';
 import { AnalyticsModel } from '../../models/AnalyticsModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { SavedSqlModel } from '../../models/SavedSqlModel';
 import { SchedulerModel } from '../../models/SchedulerModel';
+import { type WarehouseConnectionIdentityModel } from '../../models/WarehouseConnectionIdentityModel/WarehouseConnectionIdentityModel';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
 import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
 import { SavedSqlService } from './SavedSqlService';
@@ -39,6 +45,8 @@ const baseUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     isSetupComplete: true,
     isActive: true,
     timezone: null,
@@ -54,6 +62,10 @@ const adminUser = {
     role: OrganizationMemberRole.ADMIN,
     ability: new Ability<PossibleAbilities>([
         {
+            subject: 'SavedChart',
+            action: 'view',
+        },
+        {
             subject: 'ScheduledDeliveries',
             action: 'manage',
             conditions: { organizationUuid },
@@ -66,6 +78,10 @@ const editorUser = {
     userUuid: 'editor-uuid',
     role: OrganizationMemberRole.EDITOR,
     ability: new Ability<PossibleAbilities>([
+        {
+            subject: 'SavedChart',
+            action: 'view',
+        },
         {
             subject: 'ScheduledDeliveries',
             action: 'create',
@@ -98,19 +114,54 @@ const createdScheduler = {
     createdBy: 'editor-uuid',
     targets: [],
     includeLinks: false,
+    plainTextEmail: false,
     enabled: true,
     options: {},
 };
 
 const savedSqlModel = {
-    getByUuid: jest.fn(async () => sqlChart),
+    create: vi.fn(async () => ({
+        savedSqlUuid,
+        slug: 'sql-chart',
+        savedSqlVersionUuid: 'version-uuid',
+    })),
+    getByUuid: vi.fn(async () => sqlChart),
+    resolveColorPalette: vi.fn(async () => undefined),
+    update: vi.fn(async () => ({
+        savedSqlUuid,
+        savedSqlVersionUuid: null,
+    })),
+    softDelete: vi.fn(async () => undefined),
+    moveToSpace: vi.fn(async () => undefined),
 };
 const schedulerModel = {
-    getSqlChartSchedulers: jest.fn(async () => []),
-    createScheduler: jest.fn(async () => createdScheduler),
+    getSqlChartSchedulers: vi.fn(async () => []),
+    createScheduler: vi.fn(async () => createdScheduler),
+};
+const schedulerClient = {
+    runSql: vi.fn(async () => 'job-uuid'),
+    runSqlPivotQuery: vi.fn(async () => 'job-uuid'),
+};
+const projectModel = {
+    getSummary: vi.fn(async () => ({ organizationUuid })),
+    getConnectionRoute: vi.fn(async () => 'single' as const),
 };
 const spacePermissionService = {
-    can: jest.fn(async () => true),
+    can: vi.fn(async () => true),
+    resolveAccessBatch: vi.fn(
+        async (_userUuid: string, targets: { spaceUuid: string }[]) =>
+            targets.map((target) => ({
+                target,
+                context: {
+                    organizationUuid,
+                    projectUuid,
+                    inheritsFromOrgOrProject: false,
+                    access: [],
+                    admins: [],
+                    directOnly: true,
+                },
+            })),
+    ),
 };
 
 const newSchedulerPayload = {
@@ -121,6 +172,7 @@ const newSchedulerPayload = {
     options: {},
     targets: [],
     includeLinks: false,
+    plainTextEmail: false,
     enabled: true,
     appUuid: null,
     appName: null,
@@ -128,30 +180,341 @@ const newSchedulerPayload = {
 
 describe('SavedSqlService - Scheduler authorization (PROD-7098)', () => {
     const service = new SavedSqlService({
+        featureFlagModel: {
+            get: vi.fn().mockResolvedValue({ enabled: false }),
+        },
         lightdashConfig: lightdashConfigMock,
         analytics: analyticsMock,
-        projectModel: {} as unknown as ProjectModel,
+        projectModel: projectModel as unknown as ProjectModel,
         savedSqlModel: savedSqlModel as unknown as SavedSqlModel,
-        schedulerClient: {} as unknown as SchedulerClient,
+        schedulerClient: schedulerClient as unknown as SchedulerClient,
         schedulerModel: schedulerModel as unknown as SchedulerModel,
         analyticsModel: {} as unknown as AnalyticsModel,
         spacePermissionService:
             spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionIdentityModel:
+            {} as unknown as WarehouseConnectionIdentityModel,
     });
 
-    afterEach(() => jest.clearAllMocks());
+    afterEach(() => {
+        vi.clearAllMocks();
+        projectModel.getConnectionRoute.mockReset();
+        projectModel.getConnectionRoute.mockResolvedValue('single');
+    });
+
+    test.each([false, true])(
+        'tracks successful fetches and preserves legacy tracking on palette failure (account=%s)',
+        async (fromAccount) => {
+            const fetchChart = (user: SessionUser) =>
+                fromAccount
+                    ? service.getSqlChartFromAccount(
+                          fromApiKey(user, 'test'),
+                          projectUuid,
+                          savedSqlUuid,
+                      )
+                    : service.getSqlChart(user, projectUuid, savedSqlUuid);
+            const track = vi.spyOn(analyticsMock, 'track');
+            try {
+                await fetchChart(adminUser);
+                expect(track).toHaveBeenCalledTimes(1);
+                expect(track).toHaveBeenCalledWith(
+                    expect.objectContaining({
+                        event: 'sql_chart.view',
+                        userId: adminUser.userUuid,
+                    }),
+                    expect.objectContaining({
+                        contentId: savedSqlUuid,
+                        contentName: sqlChart.name,
+                        context: 'backend',
+                        actorType: 'user',
+                    }),
+                );
+                track.mockClear();
+                await expect(fetchChart(viewerUser)).rejects.toThrow(
+                    ForbiddenError,
+                );
+                expect(track).not.toHaveBeenCalled();
+                savedSqlModel.resolveColorPalette.mockRejectedValueOnce(
+                    new Error('palette unavailable'),
+                );
+                await expect(fetchChart(adminUser)).rejects.toThrow(
+                    'palette unavailable',
+                );
+                expect(track).toHaveBeenCalledExactlyOnceWith({
+                    event: 'sql_chart.view',
+                    userId: adminUser.userUuid,
+                    properties: {
+                        chartId: savedSqlUuid,
+                        projectId: projectUuid,
+                        organizationId: organizationUuid,
+                    },
+                });
+            } finally {
+                track.mockRestore();
+            }
+        },
+    );
+
+    test('loads a saved SQL chart through its resource access target', async () => {
+        const user = {
+            ...baseUser,
+            ability: new Ability<PossibleAbilities>([
+                { subject: 'SavedChart', action: 'view' },
+            ]),
+        };
+
+        await expect(
+            service.getSqlChart(user, projectUuid, savedSqlUuid),
+        ).resolves.toBeDefined();
+        expect(spacePermissionService.resolveAccessBatch).toHaveBeenCalledWith(
+            user.userUuid,
+            [
+                {
+                    type: 'sqlChart',
+                    savedSqlUuid,
+                    spaceUuid,
+                },
+            ],
+        );
+    });
+
+    test('keeps embed write actors scoped to their write space', async () => {
+        const embedWriteUser = {
+            ...baseUser,
+            ability: new Ability<PossibleAbilities>([
+                { subject: 'SavedChart', action: 'view' },
+            ]),
+        };
+
+        await expect(
+            service.getSqlChartFromAccount(
+                {
+                    authentication: {
+                        type: 'jwt',
+                        data: {
+                            content: {
+                                type: 'dashboard',
+                                dashboardUuid: 'dashboard-uuid',
+                            },
+                            writeActions: { spaceUuid },
+                        },
+                    },
+                    embedWriteUser,
+                    isJwtUser: () => true,
+                } as never,
+                projectUuid,
+                savedSqlUuid,
+            ),
+        ).resolves.toBeDefined();
+        expect(spacePermissionService.resolveAccessBatch).toHaveBeenCalledWith(
+            embedWriteUser.userUuid,
+            [{ type: 'space', spaceUuid }],
+        );
+    });
+
+    describe('direct-grant write boundaries', () => {
+        const editor = {
+            ...baseUser,
+            ability: new Ability<PossibleAbilities>([
+                { subject: 'SavedChart', action: ['update', 'delete'] },
+                { subject: 'CustomSql', action: 'manage' },
+            ]),
+        };
+
+        const creator = {
+            ...baseUser,
+            ability: new Ability<PossibleAbilities>([
+                { subject: 'SavedChart', action: ['create', 'update'] },
+                { subject: 'CustomSql', action: 'manage' },
+            ]),
+        };
+        const warehouseConnectionUuid = '5b0f6f59-3f9f-4d8e-9d0a-8f1f6a2e7c11';
+
+        test('updates a saved SQL chart through its resource access target', async () => {
+            await service.updateSqlChart(
+                editor,
+                projectUuid,
+                savedSqlUuid,
+                {} as never,
+            );
+
+            expect(
+                spacePermissionService.resolveAccessBatch,
+            ).toHaveBeenCalledWith(editor.userUuid, [
+                {
+                    type: 'sqlChart',
+                    savedSqlUuid,
+                    spaceUuid,
+                },
+            ]);
+        });
+
+        test('updates a SQL chart in a project that routes single with no binding', async () => {
+            await service.updateSqlChart(editor, projectUuid, savedSqlUuid, {
+                versionedData: { sql: 'select 1', limit: 10, config: {} },
+            } as never);
+
+            expect(savedSqlModel.update).toHaveBeenCalledWith(
+                expect.objectContaining({ savedSqlUuid }),
+                undefined,
+            );
+        });
+
+        test('creates a SQL chart in a project that routes single with no binding', async () => {
+            await service.createSqlChart(creator, projectUuid, {
+                name: 'Orders',
+                sql: 'select 1',
+                limit: 10,
+                config: {},
+                spaceUuid,
+            } as never);
+
+            expect(savedSqlModel.create).toHaveBeenCalledWith(
+                creator.userUuid,
+                projectUuid,
+                expect.objectContaining({ name: 'Orders' }),
+                undefined,
+            );
+        });
+
+        test.each([
+            {
+                name: 'create',
+                save: () =>
+                    service.createSqlChart(creator, projectUuid, {
+                        name: 'Orders',
+                        sql: 'select 1',
+                        limit: 10,
+                        config: {},
+                        spaceUuid,
+                        warehouseConnectionUuid,
+                    } as never),
+            },
+            {
+                name: 'update',
+                save: () =>
+                    service.updateSqlChart(editor, projectUuid, savedSqlUuid, {
+                        versionedData: {
+                            sql: 'select 1',
+                            limit: 10,
+                            config: {},
+                            warehouseConnectionUuid,
+                        },
+                    } as never),
+            },
+        ])(
+            'refuses a connection on a SQL chart $name in a project that routes single',
+            async ({ save }) => {
+                await expect(save()).rejects.toThrow(
+                    'A SQL chart can name a connection only in a project with multiple connections',
+                );
+                expect(savedSqlModel.create).not.toHaveBeenCalled();
+                expect(savedSqlModel.update).not.toHaveBeenCalled();
+            },
+        );
+
+        test('soft-deletes a saved SQL chart through its resource access target', async () => {
+            await service.softDelete(editor, savedSqlUuid);
+
+            expect(
+                spacePermissionService.resolveAccessBatch,
+            ).toHaveBeenCalledWith(editor.userUuid, [
+                {
+                    type: 'sqlChart',
+                    savedSqlUuid,
+                    spaceUuid,
+                },
+            ]);
+        });
+
+        test('requires real access to both spaces when moving a saved SQL chart', async () => {
+            const targetSpaceUuid = 'target-space-uuid';
+            const accessContext = {
+                organizationUuid,
+                projectUuid,
+                inheritsFromOrgOrProject: false,
+                access: [],
+                admins: [],
+                directOnly: false,
+            };
+            spacePermissionService.resolveAccessBatch.mockResolvedValueOnce([
+                {
+                    target: { spaceUuid },
+                    context: accessContext,
+                },
+                {
+                    target: { spaceUuid: targetSpaceUuid },
+                    context: accessContext,
+                },
+            ]);
+
+            await service.moveToSpace(editor, {
+                projectUuid,
+                itemUuid: savedSqlUuid,
+                targetSpaceUuid,
+            });
+
+            expect(
+                spacePermissionService.resolveAccessBatch,
+            ).toHaveBeenCalledWith(editor.userUuid, [
+                { type: 'space', spaceUuid },
+                { type: 'space', spaceUuid: targetSpaceUuid },
+            ]);
+        });
+    });
+
+    describe('deprecated Graphile execution boundaries', () => {
+        test('requires space access to execute a saved SQL pivot query', async () => {
+            spacePermissionService.can.mockResolvedValueOnce(false);
+
+            await expect(
+                service.getResultJobFromSqlPivotQuery(editorUser, projectUuid, {
+                    savedSqlUuid,
+                } as never),
+            ).rejects.toThrow(ForbiddenError);
+            expect(schedulerClient.runSqlPivotQuery).not.toHaveBeenCalled();
+            expect(
+                spacePermissionService.resolveAccessBatch,
+            ).not.toHaveBeenCalled();
+        });
+
+        test('requires space access to execute a saved SQL chart query', async () => {
+            spacePermissionService.can.mockResolvedValueOnce(false);
+
+            await expect(
+                service.getSqlChartResultJob(
+                    editorUser,
+                    projectUuid,
+                    undefined,
+                    savedSqlUuid,
+                ),
+            ).rejects.toThrow(ForbiddenError);
+            expect(schedulerClient.runSql).not.toHaveBeenCalled();
+            expect(
+                spacePermissionService.resolveAccessBatch,
+            ).not.toHaveBeenCalled();
+        });
+    });
 
     describe('getSchedulers', () => {
-        it('admin can list SQL chart schedulers', async () => {
+        it('admin lists all SQL chart schedulers', async () => {
             await expect(
                 service.getSchedulers(adminUser, projectUuid, savedSqlUuid),
             ).resolves.toEqual([]);
+            expect(schedulerModel.getSqlChartSchedulers).toHaveBeenCalledWith(
+                savedSqlUuid,
+                undefined,
+            );
         });
 
-        it('editor can list SQL chart schedulers (PROD-7098 regression)', async () => {
+        it('editor lists only their own SQL chart schedulers', async () => {
             await expect(
                 service.getSchedulers(editorUser, projectUuid, savedSqlUuid),
             ).resolves.toEqual([]);
+            expect(schedulerModel.getSqlChartSchedulers).toHaveBeenCalledWith(
+                savedSqlUuid,
+                'editor-uuid',
+            );
         });
 
         it('viewer is blocked from listing SQL chart schedulers', async () => {
@@ -161,12 +524,17 @@ describe('SavedSqlService - Scheduler authorization (PROD-7098)', () => {
             expect(schedulerModel.getSqlChartSchedulers).not.toHaveBeenCalled();
         });
 
-        it('user without space access is blocked', async () => {
-            spacePermissionService.can.mockResolvedValueOnce(false);
+        it('user without chart access is blocked', async () => {
+            spacePermissionService.resolveAccessBatch.mockResolvedValueOnce([
+                {
+                    target: { spaceUuid },
+                    context: undefined,
+                },
+            ] as never);
             await expect(
                 service.getSchedulers(editorUser, projectUuid, savedSqlUuid),
             ).rejects.toThrow(
-                "You don't have access to the space this chart belongs to",
+                "You don't have access to view this Saved SQL chart",
             );
             expect(schedulerModel.getSqlChartSchedulers).not.toHaveBeenCalled();
         });
@@ -207,8 +575,13 @@ describe('SavedSqlService - Scheduler authorization (PROD-7098)', () => {
             expect(schedulerModel.createScheduler).not.toHaveBeenCalled();
         });
 
-        it('user without space access is blocked from creating scheduler', async () => {
-            spacePermissionService.can.mockResolvedValueOnce(false);
+        it('user without chart access is blocked from creating scheduler', async () => {
+            spacePermissionService.resolveAccessBatch.mockResolvedValueOnce([
+                {
+                    target: { spaceUuid },
+                    context: undefined,
+                },
+            ] as never);
             await expect(
                 service.createScheduler(
                     editorUser,
@@ -217,9 +590,238 @@ describe('SavedSqlService - Scheduler authorization (PROD-7098)', () => {
                     newSchedulerPayload,
                 ),
             ).rejects.toThrow(
-                "You don't have access to the space this chart belongs to",
+                "You don't have access to view this Saved SQL chart",
             );
             expect(schedulerModel.createScheduler).not.toHaveBeenCalled();
         });
     });
+});
+
+describe('SavedSqlService - hasAccess space-move gate', () => {
+    const managerUser = {
+        ...baseUser,
+        userUuid: 'manager-uuid',
+        role: OrganizationMemberRole.EDITOR,
+        ability: new Ability<PossibleAbilities>([
+            { subject: 'SavedChart', action: 'manage' },
+        ]),
+    };
+
+    const service = new SavedSqlService({
+        featureFlagModel: {
+            get: vi.fn().mockResolvedValue({ enabled: false }),
+        },
+        lightdashConfig: lightdashConfigMock,
+        analytics: analyticsMock,
+        projectModel: {} as unknown as ProjectModel,
+        savedSqlModel: savedSqlModel as unknown as SavedSqlModel,
+        schedulerClient: {} as unknown as SchedulerClient,
+        schedulerModel: schedulerModel as unknown as SchedulerModel,
+        analyticsModel: {} as unknown as AnalyticsModel,
+        spacePermissionService:
+            spacePermissionService as unknown as SpacePermissionService,
+        warehouseConnectionIdentityModel:
+            {} as unknown as WarehouseConnectionIdentityModel,
+    });
+    // The gate itself is the unit under test: it correlates the current and
+    // target space contexts from one resolveAccessBatch call.
+    const hasAccess = (resource: {
+        savedSqlUuid: string;
+        spaceUuid?: string;
+    }) =>
+        (
+            service as unknown as {
+                hasAccess: (
+                    action: string,
+                    actor: { user: typeof managerUser; projectUuid: string },
+                    resource: { savedSqlUuid: string; spaceUuid?: string },
+                ) => Promise<unknown>;
+            }
+        ).hasAccess('manage', { user: managerUser, projectUuid }, resource);
+
+    afterEach(() => vi.clearAllMocks());
+
+    it('authorizes a move using target-keyed contexts even when batch results arrive reversed', async () => {
+        (
+            spacePermissionService.resolveAccessBatch as import('vitest').Mock
+        ).mockImplementationOnce(
+            async (_userUuid: string, targets: { spaceUuid: string }[]) =>
+                targets
+                    .map((target) => ({
+                        target,
+                        context: {
+                            organizationUuid,
+                            projectUuid,
+                            inheritsFromOrgOrProject: true,
+                            access: [],
+                            admins: [],
+                            directOnly: false,
+                        },
+                    }))
+                    .reverse(),
+        );
+
+        await expect(
+            hasAccess({ savedSqlUuid, spaceUuid: 'new-space-uuid' }),
+        ).resolves.toBeDefined();
+        expect(spacePermissionService.resolveAccessBatch).toHaveBeenCalledWith(
+            managerUser.userUuid,
+            [
+                { type: 'space', spaceUuid },
+                { type: 'space', spaceUuid: 'new-space-uuid' },
+            ],
+        );
+    });
+
+    it('denies when the current space context is unresolvable', async () => {
+        (
+            spacePermissionService.resolveAccessBatch as import('vitest').Mock
+        ).mockImplementationOnce(
+            async (_userUuid: string, targets: { spaceUuid: string }[]) =>
+                targets.map((target) => ({
+                    target,
+                    context:
+                        target.spaceUuid === spaceUuid
+                            ? undefined
+                            : {
+                                  organizationUuid,
+                                  projectUuid,
+                                  inheritsFromOrgOrProject: true,
+                                  access: [],
+                                  admins: [],
+                                  directOnly: false,
+                              },
+                })),
+        );
+
+        await expect(
+            hasAccess({ savedSqlUuid, spaceUuid: 'new-space-uuid' }),
+        ).rejects.toThrowError(ForbiddenError);
+    });
+
+    it('denies with the new-space error when the target space context is unresolvable', async () => {
+        (
+            spacePermissionService.resolveAccessBatch as import('vitest').Mock
+        ).mockImplementationOnce(
+            async (_userUuid: string, targets: { spaceUuid: string }[]) =>
+                targets.map((target) => ({
+                    target,
+                    context:
+                        target.spaceUuid === 'new-space-uuid'
+                            ? undefined
+                            : {
+                                  organizationUuid,
+                                  projectUuid,
+                                  inheritsFromOrgOrProject: true,
+                                  access: [],
+                                  admins: [],
+                                  directOnly: false,
+                              },
+                })),
+        );
+
+        await expect(
+            hasAccess({ savedSqlUuid, spaceUuid: 'new-space-uuid' }),
+        ).rejects.toThrowError(/new space/);
+    });
+});
+
+describe('SavedSqlService version attribution DTOs', () => {
+    test.each(
+        [true, false].flatMap((fromAccount) =>
+            [true, false].flatMap((enabled) =>
+                ['agent', 'legacy', 'human'].map((kind) => ({
+                    fromAccount,
+                    enabled,
+                    kind,
+                })),
+            ),
+        ),
+    )(
+        'uses viewer override with conflicting org flag (account=$fromAccount enabled=$enabled kind=$kind)',
+        async ({ fromAccount, enabled, kind }) => {
+            const claim = buildAgentIdentityClaim({
+                subject: { type: 'user', uuid: adminUser.userUuid },
+                surface: AgentActorSurface.MCP,
+                clientId: 'oauth-client',
+                agentUuid: kind === 'agent' ? 'agent-uuid' : null,
+            });
+            const storedClaim = { ...claim, act: { ...claim.act } };
+            if (kind === 'legacy') {
+                Reflect.deleteProperty(storedClaim.act, 'agent_uuid');
+            }
+            const model = new SavedSqlModel({
+                database: {} as never,
+                lightdashConfig: lightdashConfigMock,
+            });
+            vi.spyOn(model, 'find').mockResolvedValue([
+                {
+                    saved_sql_uuid: savedSqlUuid,
+                    name: 'SQL chart',
+                    organization_uuid: organizationUuid,
+                    project_uuid: projectUuid,
+                    space_uuid: spaceUuid,
+                    spaceName: 'Space',
+                    agent_identity: kind === 'human' ? null : storedClaim,
+                } as Parameters<typeof SavedSqlModel.convertSelectSavedSql>[0],
+            ]);
+            vi.spyOn(model, 'resolveColorPalette').mockResolvedValue(
+                undefined as never,
+            );
+            const featureFlagModel = {
+                get: vi.fn(async ({ user }) => ({
+                    id: FeatureFlags.AgentIdentity,
+                    enabled:
+                        user.userUuid === adminUser.userUuid
+                            ? enabled
+                            : !enabled,
+                })),
+            };
+            const service = new SavedSqlService({
+                featureFlagModel,
+                lightdashConfig: lightdashConfigMock,
+                analytics: analyticsMock,
+                projectModel: projectModel as unknown as ProjectModel,
+                savedSqlModel: model,
+                schedulerClient: schedulerClient as unknown as SchedulerClient,
+                schedulerModel: schedulerModel as unknown as SchedulerModel,
+                analyticsModel: {} as unknown as AnalyticsModel,
+                spacePermissionService:
+                    spacePermissionService as unknown as SpacePermissionService,
+                warehouseConnectionIdentityModel:
+                    {} as unknown as WarehouseConnectionIdentityModel,
+            });
+            const raw = await model.getByUuid(savedSqlUuid);
+            expect(raw).not.toHaveProperty('agentIdentity');
+            expect(JSON.stringify(raw)).not.toContain('oauth-client');
+            const dto = fromAccount
+                ? await service.getSqlChartFromAccount(
+                      fromApiKey(adminUser, 'test'),
+                      projectUuid,
+                      savedSqlUuid,
+                  )
+                : await service.getSqlChart(
+                      adminUser,
+                      projectUuid,
+                      undefined,
+                      'sql-chart',
+                  );
+            expect(Object.getOwnPropertySymbols(dto)).toHaveLength(0);
+            if (enabled) {
+                expect(dto).toHaveProperty(
+                    'agentIdentity',
+                    kind === 'human' ? null : claim,
+                );
+            } else {
+                expect(dto).not.toHaveProperty('agentIdentity');
+            }
+            expect(featureFlagModel.get).toHaveBeenCalledExactlyOnceWith({
+                featureFlagId: FeatureFlags.AgentIdentity,
+                user: { organizationUuid, userUuid: adminUser.userUuid },
+            });
+            if (kind === 'legacy') {
+                expect(storedClaim.act).not.toHaveProperty('agent_uuid');
+            }
+        },
+    );
 });

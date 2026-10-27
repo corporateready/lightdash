@@ -1,9 +1,11 @@
 import {
     BinType,
+    ChartType,
     CompiledDimension,
     CustomBinDimension,
     CustomDimensionType,
     defaultNullSafeEqualSql,
+    derivePivotConfigurationFromChart,
     DimensionType,
     FieldType,
     ItemsMap,
@@ -25,8 +27,10 @@ import { PivotQueryBuilder } from './PivotQueryBuilder';
 const mockWarehouseSqlBuilder = {
     getFieldQuoteChar: () => '"',
     getAdapterType: () => SupportedDbtAdapter.POSTGRES,
+    supportsCteMaterialization: () => true,
     getStartOfWeek: () => WeekDay.MONDAY,
     getNullSafeEqualSql: defaultNullSafeEqualSql,
+    getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
     getStringQuoteChar: () => "'",
     // Mirrors WarehouseBaseSqlBuilder.escapeString: double quotes, strip SQL
     // comments, escape backslashes, drop null bytes.
@@ -168,7 +172,6 @@ describe('PivotQueryBuilder', () => {
             expect(result).toContain('group_by_query AS (');
             expect(result).toContain('pivot_query AS (');
             expect(result).toContain('filtered_rows AS (');
-            expect(result).toContain('total_columns AS (');
 
             // Should include row_index and column_index metadata
             expect(result.toLowerCase()).toContain(
@@ -182,10 +185,69 @@ describe('PivotQueryBuilder', () => {
             expect(result).toContain('WHERE "row_index" <= 100');
             expect(result).toContain('"column_index" <= 100');
 
-            // Should join with total_columns for metadata
-            expect(result).toContain('CROSS JOIN total_columns t');
-            expect(result).toContain('t.total_columns');
+            // total_columns is computed in a single pass over filtered_rows via
+            // the stacked-window count-distinct idiom.
+            expect(replaceWhitespace(result)).toContain(
+                'ROW_NUMBER() OVER (PARTITION BY "event_type" ORDER BY "event_type") AS "__grp_rn" FROM filtered_rows f',
+            );
+            expect(replaceWhitespace(result)).toContain(
+                'SUM(CASE WHEN p."__grp_rn" = 1 THEN 1 ELSE 0 END) OVER () AS total_columns',
+            );
+
+            // The base pivot data is referenced exactly once (Tier B: was 2×).
+            expect(result.match(/FROM pivot_query\b/g)).toHaveLength(1);
+
+            // The __grp_rn helper must not leak into the final projection.
+            const finalSelect = result.slice(result.indexOf('\nSELECT '));
+            const finalProjection = finalSelect.slice(
+                0,
+                finalSelect.indexOf(' FROM ('),
+            );
+            expect(finalProjection).not.toContain('__grp_rn');
         });
+
+        test.each([SupportedDbtAdapter.TRINO, SupportedDbtAdapter.ATHENA])(
+            'Omits the __grp_rn window ORDER BY on %s (it throws "Could not instantiate sink" otherwise)',
+            (adapterType) => {
+                const pivotConfiguration = {
+                    indexColumn: [
+                        { reference: 'date', type: VizIndexType.TIME },
+                    ],
+                    valuesColumns: [
+                        {
+                            reference: 'event_id',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'event_type' }],
+                    sortBy: [
+                        { reference: 'date', direction: SortByDirection.ASC },
+                    ],
+                };
+
+                const builder = new PivotQueryBuilder(
+                    baseSql,
+                    pivotConfiguration,
+                    {
+                        ...mockWarehouseSqlBuilder,
+                        getAdapterType: () => adapterType,
+                    } as unknown as WarehouseSqlBuilder,
+                    100,
+                );
+
+                const result = replaceWhitespace(
+                    builder.toSql({ columnLimit: 100 }),
+                );
+
+                // Presto-family engines reject any ORDER BY in this nested window.
+                expect(result).toContain(
+                    'ROW_NUMBER() OVER (PARTITION BY "event_type") AS "__grp_rn" FROM filtered_rows f',
+                );
+                expect(result).not.toContain(
+                    'PARTITION BY "event_type" ORDER BY',
+                );
+            },
+        );
 
         test('Should handle multiple group by columns', () => {
             const pivotConfiguration = {
@@ -395,9 +457,6 @@ describe('PivotQueryBuilder', () => {
             // (these are only needed for metric-based sorting)
             expect(result).not.toContain('column_ranking AS (');
             expect(result).not.toContain('anchor_column AS (');
-
-            // Should NOT create row anchor CTEs for revenue
-            expect(result).not.toContain('"revenue_ra" AS (');
         });
 
         test('Dimension sort: should NOT create metric anchor CTEs when sorting by groupBy column', () => {
@@ -431,10 +490,6 @@ describe('PivotQueryBuilder', () => {
             // Should NOT create column_ranking or anchor_column CTEs
             expect(result).not.toContain('column_ranking AS (');
             expect(result).not.toContain('anchor_column AS (');
-
-            // Should NOT create metric anchor CTEs
-            expect(result).not.toContain('"revenue_ra" AS (');
-            expect(result).not.toContain('"revenue_ca" AS (');
         });
 
         test('Metric sort: should create column_ranking and anchor_column CTEs when sorting by value column', () => {
@@ -463,7 +518,7 @@ describe('PivotQueryBuilder', () => {
             // Metric sort: should create column_ranking CTE to compute column_index per groupBy value
             expect(result).toContain('column_ranking AS (');
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ca"."revenue_ca_value" DESC',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ca_value" DESC',
             );
 
             // Metric sort: should create anchor_column CTE to identify first pivot column (column_index = 1)
@@ -473,16 +528,17 @@ describe('PivotQueryBuilder', () => {
                 'SELECT cr."category" AS "anchor_category" FROM column_ranking cr WHERE "col_idx" = 1 ORDER BY cr."category" ASC LIMIT 1',
             );
 
-            // Metric sort: row anchor should use CROSS JOIN with anchor_column
-            // (gets metric value at first pivot column only, not MIN/MAX across all columns)
-            expect(result).toContain('"revenue_ra" AS (');
+            // Metric sort: row anchor aggregation is folded into row_ranking,
+            // CROSS JOINing anchor_column to get the metric value at the first
+            // pivot column only (not MIN/MAX across all columns)
+            expect(result).toContain('row_ranking AS (');
             expect(replaceWhitespace(result)).toContain(
                 'MAX(CASE WHEN (q."category" = ac."anchor_category" OR (q."category" IS NULL AND ac."anchor_category" IS NULL)) THEN q."revenue_sum" END)',
             );
             expect(result).toContain('CROSS JOIN anchor_column ac');
         });
 
-        test('Should include anchor CTEs and joins when sorting by a value column in pivot queries', () => {
+        test('Should fold anchor windows into the ranking CTEs when sorting by a value column in pivot queries', () => {
             const pivotConfiguration = {
                 indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
                 valuesColumns: [
@@ -505,29 +561,27 @@ describe('PivotQueryBuilder', () => {
 
             const result = builder.toSql();
 
-            // Should add additional CTEs for metric first values
-            expect(result).toContain('"revenue_ra" AS (');
-            expect(result).toContain('"revenue_ca" AS (');
-
-            // row_ranking CTE should join with row_anchor and compute DENSE_RANK
+            // row_ranking computes DENSE_RANK over a nested scan that aggregates
+            // the row anchor value in a single pass of group_by_query
             expect(result).toContain('row_ranking AS (');
             expect(replaceWhitespace(result)).toContain(
-                'JOIN "revenue_ra" ON (g."date" = "revenue_ra"."date" OR (g."date" IS NULL AND "revenue_ra"."date" IS NULL))',
+                'MAX(CASE WHEN (q."category" = ac."anchor_category" OR (q."category" IS NULL AND ac."anchor_category" IS NULL)) THEN q."revenue_avg" END) AS "revenue_ra_value" FROM group_by_query q CROSS JOIN anchor_column ac GROUP BY q."date"',
             );
 
-            // column_ranking CTE should join with column_anchor and compute DENSE_RANK
+            // column_ranking computes DENSE_RANK over a nested scan that produces
+            // the column anchor FIRST_VALUE in a single pass of group_by_query
             expect(replaceWhitespace(result)).toContain(
-                'JOIN "revenue_ca" ON (g."category" = "revenue_ca"."category" OR (g."category" IS NULL AND "revenue_ca"."category" IS NULL))',
+                'FIRST_VALUE("revenue_avg") OVER (PARTITION BY "category" ORDER BY "revenue_avg" DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS "revenue_ca_value" FROM group_by_query) g',
             );
 
             // Row index should be computed in row_ranking CTE (not in pivot_query)
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ra"."revenue_ra_value" DESC, g."date" ASC) AS "row_index"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" DESC, g."date" ASC) AS "row_index"',
             );
 
             // Column index should be computed in column_ranking CTE (not in pivot_query)
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ca"."revenue_ca_value" DESC, g."category" ASC) AS "col_idx"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ca_value" DESC, g."category" ASC) AS "col_idx"',
             );
 
             // pivot_query should JOIN with precomputed rankings
@@ -569,7 +623,7 @@ describe('PivotQueryBuilder', () => {
 
             // Row index order must follow: revenue anchor ASC, store_id DESC, then date ASC (appended)
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ra"."revenue_ra_value" ASC, g."store_id" DESC, g."date" ASC) AS "row_index"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" ASC, g."store_id" DESC, g."date" ASC) AS "row_index"',
             );
         });
 
@@ -642,17 +696,258 @@ describe('PivotQueryBuilder', () => {
             // row_ranking CTE should compute row_index with DENSE_RANK in a self-contained CTE
             expect(result).toContain('row_ranking AS (');
             expect(replaceWhitespace(result)).toContain(
-                'row_ranking AS (SELECT DISTINCT g."date", DENSE_RANK() OVER (ORDER BY "revenue_ra"."revenue_ra_value" DESC, g."date" ASC) AS "row_index" FROM group_by_query g LEFT JOIN "revenue_ra" ON (g."date" = "revenue_ra"."date" OR (g."date" IS NULL AND "revenue_ra"."date" IS NULL)))',
+                'row_ranking AS (SELECT DISTINCT g."date" AS "date", DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" DESC, g."date" ASC) AS "row_index" FROM (SELECT q."date", MAX(CASE WHEN (q."category" = ac."anchor_category" OR (q."category" IS NULL AND ac."anchor_category" IS NULL)) THEN q."revenue_sum" END) AS "revenue_ra_value" FROM group_by_query q CROSS JOIN anchor_column ac GROUP BY q."date") g)',
             );
 
             // pivot_query should JOIN with precomputed rankings instead of computing Window functions
             expect(replaceWhitespace(result)).toContain(
-                'pivot_query AS (SELECT g."date", g."category", g."revenue_sum", rr."row_index" AS "row_index", cr."col_idx" AS "column_index" FROM group_by_query g LEFT JOIN row_ranking rr ON (g."date" = rr."date" OR (g."date" IS NULL AND rr."date" IS NULL)) LEFT JOIN column_ranking cr ON (g."category" = cr."category" OR (g."category" IS NULL AND cr."category" IS NULL)))',
+                'pivot_query AS (SELECT g."date" AS "date", g."category" AS "category", g."revenue_sum" AS "revenue_sum", rr."row_index" AS "row_index", cr."col_idx" AS "column_index" FROM group_by_query g LEFT JOIN row_ranking rr ON (g."date" = rr."date" OR (g."date" IS NULL AND rr."date" IS NULL)) LEFT JOIN column_ranking cr ON (g."category" = cr."category" OR (g."category" IS NULL AND cr."category" IS NULL)))',
             );
 
             // pivot_query should NOT contain DENSE_RANK (rankings are precomputed)
             const pivotQueryMatch = result.match(/pivot_query AS \(([^)]+)\)/);
             expect(pivotQueryMatch?.[1]).not.toContain('DENSE_RANK');
+        });
+
+        test('Metric sort: references group_by_query ~3x (anchors folded into the ranking CTEs)', () => {
+            // PROD-8441: each anchor window is folded into its ranking CTE so
+            // group_by_query is scanned once inside column_ranking, once inside
+            // row_ranking, and once by pivot_query — 3 total, not ~6. Keeping
+            // this low is what keeps Trino under its max-stage-count limit.
+            const pivotConfiguration = {
+                indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'category' }],
+                sortBy: [
+                    { reference: 'revenue', direction: SortByDirection.DESC },
+                ],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+            const result = builder.toSql();
+
+            // Count references to group_by_query that are NOT its own CTE
+            // definition (`group_by_query AS (`).
+            const totalMatches = (result.match(/group_by_query/g) ?? []).length;
+            const definitionMatches = (
+                result.match(/group_by_query AS \(/g) ?? []
+            ).length;
+            expect(definitionMatches).toBe(1);
+            expect(totalMatches - definitionMatches).toBe(3);
+        });
+
+        describe('Trino single-scan metric-sort pivot', () => {
+            const mockTrinoWarehouseSqlBuilder = {
+                ...mockWarehouseSqlBuilder,
+                getAdapterType: () => SupportedDbtAdapter.TRINO,
+                supportsCteMaterialization: () => false,
+            } as unknown as WarehouseSqlBuilder;
+
+            const trinoPivotConfiguration = {
+                indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'category' }],
+                sortBy: [
+                    { reference: 'revenue', direction: SortByDirection.DESC },
+                ],
+            };
+
+            test('emits a single-scan stacked pivot_query — one group_by_query reference, no anchor/ranking CTEs', () => {
+                const result = new PivotQueryBuilder(
+                    baseSql,
+                    trinoPivotConfiguration,
+                    mockTrinoWarehouseSqlBuilder,
+                ).toSql();
+
+                const refs =
+                    (result.match(/group_by_query/g) ?? []).length -
+                    (result.match(/group_by_query AS \(/g) ?? []).length;
+                expect(refs).toBe(1);
+                expect(result).not.toContain('column_ranking AS (');
+                expect(result).not.toContain('row_ranking AS (');
+                expect(result).not.toContain('anchor_column AS (');
+                expect(result).not.toContain('CROSS JOIN');
+                expect(replaceWhitespace(result)).toContain(
+                    'pivot_query AS (' +
+                        'SELECT g."date" AS "date", g."category" AS "category", g."revenue_sum" AS "revenue_sum", ' +
+                        'DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" DESC, g."date" ASC) AS "row_index", ' +
+                        'g."col_idx" AS "column_index" ' +
+                        'FROM (' +
+                        'SELECT g.*, MAX(CASE WHEN "col_idx" = 1 THEN g."revenue_sum" END) OVER (PARTITION BY g."date") AS "revenue_ra_value" ' +
+                        'FROM (' +
+                        'SELECT g.*, DENSE_RANK() OVER (ORDER BY g."revenue_ca_value" DESC, g."category" ASC) AS "col_idx" ' +
+                        'FROM (' +
+                        'SELECT g.*, FIRST_VALUE("revenue_sum") OVER (PARTITION BY "category" ORDER BY "revenue_sum" DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS "revenue_ca_value" ' +
+                        'FROM group_by_query g) g) g) g)',
+                );
+            });
+
+            test('emits one FIRST_VALUE and one MAX(CASE) per sorted value column', () => {
+                const pivotConfiguration = {
+                    indexColumn: [
+                        { reference: 'date', type: VizIndexType.TIME },
+                    ],
+                    valuesColumns: [
+                        {
+                            reference: 'revenue',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                        {
+                            reference: 'orders',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'category' }],
+                    sortBy: [
+                        {
+                            reference: 'revenue',
+                            direction: SortByDirection.DESC,
+                        },
+                        { reference: 'orders', direction: SortByDirection.ASC },
+                    ],
+                };
+
+                const result = replaceWhitespace(
+                    new PivotQueryBuilder(
+                        baseSql,
+                        pivotConfiguration,
+                        mockTrinoWarehouseSqlBuilder,
+                    ).toSql(),
+                );
+
+                expect(result).toContain('AS "revenue_ca_value"');
+                expect(result).toContain('AS "orders_ca_value"');
+                expect(result).toContain(
+                    'MAX(CASE WHEN "col_idx" = 1 THEN g."revenue_sum" END) OVER (PARTITION BY g."date") AS "revenue_ra_value"',
+                );
+                expect(result).toContain(
+                    'MAX(CASE WHEN "col_idx" = 1 THEN g."orders_sum" END) OVER (PARTITION BY g."date") AS "orders_ra_value"',
+                );
+            });
+
+            test('per-metric pinned anchors rebase the predicate onto the in-scan columns', () => {
+                const pivotConfiguration = {
+                    indexColumn: [
+                        { reference: 'date', type: VizIndexType.TIME },
+                    ],
+                    valuesColumns: [
+                        {
+                            reference: 'revenue',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                        {
+                            reference: 'orders',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'status' }],
+                    sortBy: [
+                        {
+                            reference: 'revenue',
+                            direction: SortByDirection.DESC,
+                            pivotValues: [
+                                { reference: 'status', value: 'completed' },
+                            ],
+                        },
+                        {
+                            reference: 'orders',
+                            direction: SortByDirection.DESC,
+                            pivotValues: [
+                                { reference: 'status', value: 'pending' },
+                            ],
+                        },
+                    ],
+                };
+
+                const result = replaceWhitespace(
+                    new PivotQueryBuilder(
+                        baseSql,
+                        pivotConfiguration,
+                        mockTrinoWarehouseSqlBuilder,
+                    ).toSql(),
+                );
+
+                expect(result).toContain(
+                    'MAX(CASE WHEN (g."status") IN (\'completed\') THEN g."revenue_sum" END) OVER (PARTITION BY g."date") AS "revenue_ra_value"',
+                );
+                expect(result).toContain(
+                    'MAX(CASE WHEN (g."status") IN (\'pending\') THEN g."orders_sum" END) OVER (PARTITION BY g."date") AS "orders_ra_value"',
+                );
+                expect(result).not.toContain('cr."status"');
+            });
+
+            test('the gate follows supportsCteMaterialization, not the adapter type', () => {
+                // Athena (also no CTE materialization) gets the single-scan form...
+                const athenaResult = new PivotQueryBuilder(
+                    baseSql,
+                    trinoPivotConfiguration,
+                    {
+                        ...mockWarehouseSqlBuilder,
+                        getAdapterType: () => SupportedDbtAdapter.ATHENA,
+                        supportsCteMaterialization: () => false,
+                    } as unknown as WarehouseSqlBuilder,
+                ).toSql();
+                expect(athenaResult).not.toContain('column_ranking AS (');
+                expect(athenaResult).not.toContain('row_ranking AS (');
+
+                // ...while a Trino adapter that DOES materialize keeps the 3-CTE form.
+                const materializedResult = new PivotQueryBuilder(
+                    baseSql,
+                    trinoPivotConfiguration,
+                    {
+                        ...mockWarehouseSqlBuilder,
+                        getAdapterType: () => SupportedDbtAdapter.TRINO,
+                        supportsCteMaterialization: () => true,
+                    } as unknown as WarehouseSqlBuilder,
+                ).toSql();
+                expect(materializedResult).toContain('column_ranking AS (');
+                expect(materializedResult).toContain('row_ranking AS (');
+            });
+
+            test('only the metric-sort path is rewritten — a sorted sortOnlyDimension keeps the 3-CTE form', () => {
+                const pivotConfiguration = {
+                    indexColumn: [
+                        { reference: 'date', type: VizIndexType.TIME },
+                    ],
+                    valuesColumns: [
+                        {
+                            reference: 'revenue',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'category' }],
+                    sortOnlyDimensions: [{ reference: 'priority' }],
+                    sortBy: [
+                        {
+                            reference: 'priority',
+                            direction: SortByDirection.DESC,
+                        },
+                    ],
+                };
+
+                const result = new PivotQueryBuilder(
+                    baseSql,
+                    pivotConfiguration,
+                    mockTrinoWarehouseSqlBuilder,
+                ).toSql();
+
+                expect(result).toContain('column_ranking AS (');
+                expect(result).toContain('row_ranking AS (');
+            });
         });
 
         test('No metric sort: should NOT create row_ranking CTE when no anchor CTEs exist', () => {
@@ -682,12 +977,13 @@ describe('PivotQueryBuilder', () => {
             // pivot_query should compute rankings inline with DENSE_RANK
             expect(result).toContain('DENSE_RANK() OVER');
 
-            // Downstream CTEs should reference pivot_query directly
+            // filtered_rows references pivot_query directly — and it's the only
+            // reference (Tier B single-pass: the base data is scanned once).
             expect(result).toContain('FROM pivot_query WHERE "row_index"');
-            expect(result).toContain('FROM pivot_query p CROSS JOIN');
+            expect(result.match(/FROM pivot_query\b/g)).toHaveLength(1);
         });
 
-        test('Pinned sort: pivotValues swaps WHERE col_idx = 1 for a value match on the pinned column', () => {
+        test('Pinned sort: rows order by the metric at the pinned pivot column, read inline instead of through anchor_column', () => {
             const pivotConfiguration = {
                 indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
                 valuesColumns: [
@@ -715,12 +1011,50 @@ describe('PivotQueryBuilder', () => {
             );
             const result = builder.toSql();
 
-            expect(result).toContain('"revenue_anchor_column" AS (');
             expect(result).not.toContain('anchor_column AS (');
+            expect(result).not.toContain('CROSS JOIN anchor_column');
             expect(replaceWhitespace(result)).toContain(
-                '(cr."status") IN (\'completed\')',
+                'MAX(CASE WHEN (q."status") IN (\'completed\') THEN q."revenue_sum" END) AS "revenue_ra_value"',
             );
-            expect(result).toContain('CROSS JOIN "revenue_anchor_column" ac');
+            expect(result).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" DESC, g."date" ASC) AS "row_index"',
+            );
+        });
+
+        test('Pinned sort: a pinned value with no data keeps every row (NULL anchor, nothing joined that could be empty)', () => {
+            const pivotConfiguration = {
+                indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'status' }],
+                sortBy: [
+                    {
+                        reference: 'revenue',
+                        direction: SortByDirection.DESC,
+                        pivotValues: [
+                            { reference: 'status', value: 'completed' },
+                        ],
+                    },
+                ],
+            };
+
+            const result = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            ).toSql();
+
+            // The row anchor is a plain aggregate over group_by_query: a pin that
+            // matches no column leaves every row's anchor NULL (sorted as empty)
+            // instead of joining an empty anchor CTE that would drop the rows.
+            expect(replaceWhitespace(result)).toContain(
+                'END) AS "revenue_ra_value" FROM group_by_query q GROUP BY q."date"',
+            );
+            expect(result).not.toContain('anchor_column');
         });
 
         test('Pinned sort: numeric and null pivot values emit type-correct SQL', () => {
@@ -757,11 +1091,11 @@ describe('PivotQueryBuilder', () => {
 
             // Number → NUMBER filter (bare numeric literal, IN syntax).
             expect(replaceWhitespace(result)).toContain(
-                '(cr."segment_id") IN (42)',
+                '(q."segment_id") IN (42)',
             );
             // Null → IS NULL (strict equality with NULL never matches).
             expect(replaceWhitespace(result)).toContain(
-                '(cr."channel") IS NULL',
+                '(q."channel") IS NULL',
             );
         });
 
@@ -810,9 +1144,9 @@ describe('PivotQueryBuilder', () => {
             // Native boolean literal — no quotes around `false`, which is what
             // BigQuery / Snowflake require (string='false' is a type error there).
             expect(replaceWhitespace(result)).toContain(
-                '(cr."is_completed") = false',
+                '(q."is_completed") = false',
             );
-            expect(result).not.toContain('(cr."is_completed") = \'false\'');
+            expect(result).not.toContain('(q."is_completed") = \'false\'');
         });
 
         test('Pinned sort: boolean inferred from JS type when dimension is unknown (fallback)', () => {
@@ -846,7 +1180,7 @@ describe('PivotQueryBuilder', () => {
             const result = builder.toSql();
 
             expect(replaceWhitespace(result)).toContain(
-                '(cr."is_completed") = true',
+                '(q."is_completed") = true',
             );
         });
 
@@ -897,7 +1231,7 @@ describe('PivotQueryBuilder', () => {
             // adapter, but the date value should appear and the column-side
             // expression should not be wrapped in a cast in the default path.
             expect(replaceWhitespace(result)).toContain(
-                '(cr."order_date") = (\'2024-01-01\')',
+                '(q."order_date") = (\'2024-01-01\')',
             );
         });
 
@@ -937,7 +1271,7 @@ describe('PivotQueryBuilder', () => {
             expect(result).not.toContain("'completed'); DROP TABLE x;--");
         });
 
-        test('Pinned sort: multiple metrics each get their own per-metric anchor_column', () => {
+        test('Pinned sort: multiple pinned metrics each read their own pinned column', () => {
             const pivotConfiguration = {
                 indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
                 valuesColumns: [
@@ -976,14 +1310,55 @@ describe('PivotQueryBuilder', () => {
             );
             const result = builder.toSql();
 
-            expect(result).toContain('"revenue_anchor_column" AS (');
-            expect(result).toContain('"orders_anchor_column" AS (');
-            expect(result).not.toContain('anchor_column AS (');
+            expect(result).not.toContain('anchor_column');
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(CASE WHEN (q."status") IN (\'completed\') THEN q."revenue_sum" END) AS "revenue_ra_value"',
+            );
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(CASE WHEN (q."status") IN (\'shipped\') THEN q."orders_count" END) AS "orders_ra_value"',
+            );
+        });
 
-            expect(result).toContain('(cr."status") IN (\'completed\')');
-            expect(result).toContain('(cr."status") IN (\'shipped\')');
-            expect(result).toContain('CROSS JOIN "revenue_anchor_column" ac');
-            expect(result).toContain('CROSS JOIN "orders_anchor_column" ac');
+        test('Pinned sort: a pinned metric and an unpinned metric sort together (anchor_column only serves the unpinned one)', () => {
+            const pivotConfiguration = {
+                indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                    {
+                        reference: 'orders',
+                        aggregation: VizAggregationOptions.COUNT,
+                    },
+                ],
+                groupByColumns: [{ reference: 'status' }],
+                sortBy: [
+                    {
+                        reference: 'revenue',
+                        direction: SortByDirection.DESC,
+                        pivotValues: [
+                            { reference: 'status', value: 'completed' },
+                        ],
+                    },
+                    { reference: 'orders', direction: SortByDirection.ASC },
+                ],
+            };
+
+            const result = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            ).toSql();
+
+            expect(result).toContain('anchor_column AS (');
+            expect(result).toContain('CROSS JOIN anchor_column ac');
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(CASE WHEN (q."status") IN (\'completed\') THEN q."revenue_sum" END) AS "revenue_ra_value"',
+            );
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(CASE WHEN (q."status" = ac."anchor_status" OR (q."status" IS NULL AND ac."anchor_status" IS NULL)) THEN q."orders_count" END) AS "orders_ra_value"',
+            );
         });
 
         test('Pinned sort: partial pin (covers only some groupBy columns) falls back to col_idx = 1', () => {
@@ -1017,13 +1392,14 @@ describe('PivotQueryBuilder', () => {
             );
             const result = builder.toSql();
 
-            // Pin doesn't cover 'channel', so the WHERE falls back rather than
-            // matching only on 'status' (which could pick multiple anchor rows).
-            expect(result).toContain('"revenue_anchor_column" AS (');
+            // Pin doesn't cover 'channel', so it is ignored rather than matching
+            // only on 'status' (which could pick multiple anchor rows).
+            expect(result).toContain('anchor_column AS (');
             expect(replaceWhitespace(result)).toContain(
                 'FROM column_ranking cr WHERE "col_idx" = 1',
             );
-            expect(result).not.toContain('cr."status" = \'completed\'');
+            expect(result).toContain('CROSS JOIN anchor_column ac');
+            expect(result).not.toContain("IN ('completed')");
         });
 
         test('Pinned sort: pivotValues with unknown groupBy reference falls back to col_idx = 1', () => {
@@ -1057,13 +1433,14 @@ describe('PivotQueryBuilder', () => {
             );
             const result = builder.toSql();
 
-            // Per-metric anchor CTE still created, but with leftmost-column WHERE
-            // since the pinned reference isn't a valid groupBy.
-            expect(result).toContain('"revenue_anchor_column" AS (');
+            // The pinned reference isn't a valid groupBy, so the sort uses the
+            // leftmost column through anchor_column.
+            expect(result).toContain('anchor_column AS (');
             expect(replaceWhitespace(result)).toContain(
                 'FROM column_ranking cr WHERE "col_idx" = 1',
             );
-            expect(result).not.toContain('cr."not_a_groupby_column"');
+            expect(result).toContain('CROSS JOIN anchor_column ac');
+            expect(result).not.toContain('not_a_groupby_column');
         });
 
         test('Unpinned metric sort: still uses shared anchor_column CTE (backwards compatible)', () => {
@@ -1097,6 +1474,221 @@ describe('PivotQueryBuilder', () => {
                 'FROM column_ranking cr WHERE "col_idx" = 1',
             );
             expect(result).toContain('CROSS JOIN anchor_column ac');
+        });
+    });
+
+    describe('Table calculation sorts (row-level, non-anchor semantics)', () => {
+        // Sort-only (undisplayed) table-calc sorts order rows by MAX across
+        // all pivot columns — anchor semantics would NULL out every index
+        // tuple absent from the anchor group. Column ordering and displayed
+        // table-calc sorts keep the existing anchor behavior.
+        const itemsMap = {
+            month_order: {
+                name: 'month_order',
+                displayName: 'Month Order',
+                sql: 'MOD(CAST(${orders.month_num} AS INT) + 8, 12)',
+                type: TableCalculationType.NUMBER,
+            },
+            cumulative_volume: {
+                name: 'cumulative_volume',
+                displayName: 'Cumulative Volume',
+                sql: 'SUM(${orders.count}) OVER (PARTITION BY ${orders.year} ORDER BY ${orders.month})',
+                type: TableCalculationType.NUMBER,
+            },
+        } as unknown as ItemsMap;
+
+        const tableCalcSortConfiguration = {
+            indexColumn: [
+                { reference: 'month_name', type: VizIndexType.CATEGORY },
+                { reference: 'month', type: VizIndexType.TIME },
+            ],
+            valuesColumns: [
+                {
+                    reference: 'cumulative_volume',
+                    aggregation: VizAggregationOptions.ANY,
+                },
+            ],
+            sortOnlyColumns: [
+                {
+                    reference: 'month_order',
+                    aggregation: VizAggregationOptions.ANY,
+                },
+            ],
+            groupByColumns: [{ reference: 'year' }],
+            sortBy: [
+                { reference: 'month_order', direction: SortByDirection.ASC },
+                { reference: 'year', direction: SortByDirection.ASC },
+            ],
+        };
+
+        test('row_ranking orders by MAX across all groups instead of the anchor column value', () => {
+            const result = new PivotQueryBuilder(
+                baseSql,
+                tableCalcSortConfiguration,
+                mockWarehouseSqlBuilder,
+                500,
+                itemsMap,
+            ).toSql();
+
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(q."month_order_any") AS "month_order_ra_value"',
+            );
+            expect(result).not.toContain('MAX(CASE WHEN');
+            expect(result).not.toContain('anchor_column AS (');
+            expect(replaceWhitespace(result)).toContain(
+                'ORDER BY g."month_order_ra_value" ASC',
+            );
+        });
+
+        test('column ordering still honors the calc anchor — group-companion sorts preserved', () => {
+            const result = new PivotQueryBuilder(
+                baseSql,
+                tableCalcSortConfiguration,
+                mockWarehouseSqlBuilder,
+                500,
+                itemsMap,
+            ).toSql();
+
+            expect(replaceWhitespace(result)).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."month_order_ca_value" ASC, g."year" ASC) AS "col_idx"',
+            );
+        });
+
+        test('metric sorts keep anchor semantics when mixed with a table calc sort', () => {
+            const mixedConfiguration = {
+                indexColumn: [
+                    { reference: 'month_name', type: VizIndexType.CATEGORY },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                sortOnlyColumns: [
+                    {
+                        reference: 'month_order',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                groupByColumns: [{ reference: 'year' }],
+                sortBy: [
+                    { reference: 'revenue', direction: SortByDirection.DESC },
+                    {
+                        reference: 'month_order',
+                        direction: SortByDirection.ASC,
+                    },
+                ],
+            };
+
+            const result = new PivotQueryBuilder(
+                baseSql,
+                mixedConfiguration,
+                mockWarehouseSqlBuilder,
+                500,
+                itemsMap,
+            ).toSql();
+
+            // Metric keeps the anchor path
+            expect(result).toContain('anchor_column AS (');
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(CASE WHEN (q."year" = ac."anchor_year" OR (q."year" IS NULL AND ac."anchor_year" IS NULL)) THEN q."revenue_sum" END) AS "revenue_ra_value"',
+            );
+            expect(result).toContain('revenue_ca_value');
+
+            // Table calc gets row-level MAX; column anchoring stays intact
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(q."month_order_any") AS "month_order_ra_value"',
+            );
+            expect(result).toContain('month_order_ca_value');
+        });
+
+        test('pinned sort-only table calc keeps the anchor path', () => {
+            const pinnedConfiguration = {
+                ...tableCalcSortConfiguration,
+                sortBy: [
+                    {
+                        reference: 'month_order',
+                        direction: SortByDirection.ASC,
+                        pivotValues: [{ reference: 'year', value: '2020' }],
+                    },
+                    { reference: 'year', direction: SortByDirection.ASC },
+                ],
+            };
+
+            const result = new PivotQueryBuilder(
+                baseSql,
+                pinnedConfiguration,
+                mockWarehouseSqlBuilder,
+                500,
+                itemsMap,
+            ).toSql();
+
+            // Pinned: reads the table calc at the pinned column rather than MAX
+            // across all pivot columns.
+            expect(replaceWhitespace(result)).toMatch(
+                /MAX\(CASE WHEN \(q\."year"\) .* THEN q\."month_order_any" END\) AS "month_order_ra_value"/,
+            );
+            expect(replaceWhitespace(result)).not.toContain(
+                'MAX(q."month_order_any") AS "month_order_ra_value"',
+            );
+            expect(result).not.toContain('anchor_column');
+        });
+
+        test('displayed table calc sorts keep anchor semantics', () => {
+            const displayedTcConfiguration = {
+                indexColumn: [
+                    { reference: 'month_name', type: VizIndexType.CATEGORY },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'cumulative_volume',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                groupByColumns: [{ reference: 'year' }],
+                sortBy: [
+                    {
+                        reference: 'cumulative_volume',
+                        direction: SortByDirection.ASC,
+                    },
+                ],
+            };
+
+            const result = new PivotQueryBuilder(
+                baseSql,
+                displayedTcConfiguration,
+                mockWarehouseSqlBuilder,
+                500,
+                itemsMap,
+            ).toSql();
+
+            expect(result).toContain('anchor_column AS (');
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(CASE WHEN (q."year" = ac."anchor_year" OR (q."year" IS NULL AND ac."anchor_year" IS NULL)) THEN q."cumulative_volume_any" END) AS "cumulative_volume_ra_value"',
+            );
+        });
+
+        test('single-scan path (no CTE materialization) also uses plain MAX for table calc sorts', () => {
+            const mockTrinoBuilder = {
+                ...mockWarehouseSqlBuilder,
+                getAdapterType: () => SupportedDbtAdapter.TRINO,
+                supportsCteMaterialization: () => false,
+            } as unknown as WarehouseSqlBuilder;
+
+            const result = new PivotQueryBuilder(
+                baseSql,
+                tableCalcSortConfiguration,
+                mockTrinoBuilder,
+                500,
+                itemsMap,
+            ).toSql();
+
+            expect(replaceWhitespace(result)).toContain(
+                'MAX(g."month_order_any") OVER (PARTITION BY g."month_name", g."month") AS "month_order_ra_value"',
+            );
+            expect(result).not.toContain('MAX(CASE WHEN');
+            expect(result).toContain('month_order_ca_value');
         });
     });
 
@@ -1351,6 +1943,159 @@ describe('PivotQueryBuilder', () => {
         });
     });
 
+    describe('Identifier quoting', () => {
+        test('escapes dynamic identifiers through grouped aggregation and sorting', () => {
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                {
+                    indexColumn: [
+                        {
+                            reference: 'row"dim',
+                            type: VizIndexType.CATEGORY,
+                        },
+                    ],
+                    valuesColumns: [
+                        {
+                            reference: 'amount"value',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'group"dim' }],
+                    sortBy: [
+                        {
+                            reference: 'row"dim',
+                            direction: SortByDirection.ASC,
+                        },
+                    ],
+                },
+                mockWarehouseSqlBuilder,
+            );
+
+            const result = replaceWhitespace(builder.toSql());
+
+            expect(result).toContain(
+                'SELECT "group""dim", "row""dim", sum("amount""value") AS "amount""value_sum"',
+            );
+            expect(result).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."row""dim" ASC)',
+            );
+            expect(result).not.toContain('g."row"dim" ASC');
+        });
+
+        test('quotes a custom-bin _order identifier after composing its name', () => {
+            const reference = 'amount"bin';
+            const binDimension: CustomBinDimension = {
+                id: reference,
+                name: reference,
+                table: 'orders',
+                type: CustomDimensionType.BIN,
+                dimensionId: 'orders_amount',
+                binType: BinType.FIXED_WIDTH,
+                binWidth: 10,
+            };
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                {
+                    indexColumn: [{ reference, type: VizIndexType.CATEGORY }],
+                    valuesColumns: [
+                        {
+                            reference: 'revenue',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'event_type' }],
+                    sortBy: [{ reference, direction: SortByDirection.ASC }],
+                },
+                mockWarehouseSqlBuilder,
+                500,
+                { [reference]: binDimension },
+            );
+
+            const result = replaceWhitespace(builder.toSql());
+
+            expect(result).toContain('"amount""bin_order"');
+            expect(result).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."amount""bin_order" ASC)',
+            );
+            expect(result).not.toContain('"amount""bin"_order');
+        });
+
+        test('quotes table-calculation _any aliases after composing their names', () => {
+            const calculationName = 'calc"name';
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                {
+                    indexColumn: [
+                        { reference: 'date', type: VizIndexType.TIME },
+                    ],
+                    valuesColumns: [
+                        {
+                            reference: 'metric1',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                        {
+                            reference: calculationName,
+                            aggregation: VizAggregationOptions.ANY,
+                        },
+                    ],
+                    groupByColumns: [{ reference: 'category' }],
+                    sortBy: [
+                        {
+                            reference: 'date',
+                            direction: SortByDirection.ASC,
+                        },
+                    ],
+                },
+                mockWarehouseSqlBuilder,
+                500,
+                {
+                    [calculationName]: {
+                        name: calculationName,
+                        table: 'table1',
+                        tableLabel: 'Table 1',
+                        type: TableCalculationType.NUMBER,
+                        displayName: 'Calculated name',
+                        sql: 'pivot_offset(${table1.metric1}, 0)',
+                    },
+                },
+            );
+
+            const result = builder.toSql();
+
+            expect(result).toContain('AS "calc""name_any"');
+            expect(result).not.toContain('AS "calc"name_any"');
+        });
+
+        test('uses BigQuery backtick and backslash escaping at pivot boundaries', () => {
+            const reference = 'row`dim\\path';
+            const bigQuerySqlBuilder = {
+                ...mockWarehouseSqlBuilder,
+                getFieldQuoteChar: () => '`',
+                getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+            } as unknown as WarehouseSqlBuilder;
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                {
+                    indexColumn: [{ reference, type: VizIndexType.CATEGORY }],
+                    valuesColumns: [
+                        {
+                            reference: 'revenue',
+                            aggregation: VizAggregationOptions.SUM,
+                        },
+                    ],
+                    groupByColumns: undefined,
+                    sortBy: [{ reference, direction: SortByDirection.ASC }],
+                },
+                bigQuerySqlBuilder,
+            );
+
+            const result = builder.toSql();
+
+            expect(result).toContain('`row\\`dim\\\\path`');
+            expect(result).not.toContain('`row`dim\\path`');
+        });
+    });
+
     describe('SQL sanitization', () => {
         test('Should remove trailing semicolon from input SQL', () => {
             const pivotConfiguration = {
@@ -1436,6 +2181,51 @@ describe('PivotQueryBuilder', () => {
                 .toBe(`WITH original_query AS (SELECT * FROM events WHERE id > 1),
 group_by_query AS (SELECT "date", sum("event_id") AS "event_id_sum" FROM original_query group by "date")
 SELECT * FROM group_by_query LIMIT 50`);
+        });
+    });
+
+    describe('Scripting statements', () => {
+        const scriptPivotConfiguration = {
+            indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+            valuesColumns: [
+                {
+                    reference: 'event_id',
+                    aggregation: VizAggregationOptions.SUM,
+                },
+            ],
+            groupByColumns: undefined,
+            sortBy: undefined,
+        };
+
+        test('Should hoist leading DECLARE/SET statements above the CTEs', () => {
+            const builder = new PivotQueryBuilder(
+                `DECLARE lookback_days INT64 DEFAULT 30;
+                 SET lookback_days = 60;
+                 SELECT * FROM events WHERE days > lookback_days;`,
+                scriptPivotConfiguration,
+                mockWarehouseSqlBuilder,
+                50,
+            );
+
+            expect(builder.toSql())
+                .toBe(`DECLARE lookback_days INT64 DEFAULT 30;
+SET lookback_days = 60;
+WITH original_query AS (SELECT * FROM events WHERE days > lookback_days),
+group_by_query AS (SELECT "date", sum("event_id") AS "event_id_sum" FROM original_query group by "date")
+SELECT * FROM group_by_query LIMIT 50`);
+        });
+
+        test('Should throw a clear error when a leading statement cannot be hoisted', () => {
+            expect(
+                () =>
+                    new PivotQueryBuilder(
+                        `DECLARE x INT64 DEFAULT 1;
+                         CREATE TEMP TABLE t AS SELECT 1 AS a;
+                         SELECT * FROM t;`,
+                        scriptPivotConfiguration,
+                        mockWarehouseSqlBuilder,
+                    ),
+            ).toThrowError(/DECLARE or SET statement/);
         });
     });
 
@@ -1642,6 +2432,62 @@ SELECT * FROM group_by_query LIMIT 50`);
                 'dense_rank() over (order by g."event_type" asc) as "column_index"',
             );
         });
+
+        test('Should aggregate over every row when there are no index or groupBy columns', () => {
+            const pivotConfiguration = {
+                indexColumn: undefined,
+                valuesColumns: [
+                    {
+                        reference: 'event_id',
+                        aggregation: VizAggregationOptions.COUNT,
+                    },
+                ],
+                groupByColumns: undefined,
+                sortBy: undefined,
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+            const result = replaceWhitespace(builder.toSql());
+
+            expect(result).toContain(
+                'group_by_query AS (SELECT count("event_id") AS "event_id_count" FROM original_query)',
+            );
+            expect(result.toLowerCase()).not.toContain('group by');
+        });
+
+        test('Should aggregate multiple value columns into a single row', () => {
+            const pivotConfiguration = {
+                indexColumn: [],
+                valuesColumns: [
+                    {
+                        reference: 'event_id',
+                        aggregation: VizAggregationOptions.COUNT,
+                    },
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [],
+                sortBy: undefined,
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+            const result = replaceWhitespace(builder.toSql());
+
+            expect(result).toContain(
+                'group_by_query AS (SELECT count("event_id") AS "event_id_count", sum("revenue") AS "revenue_sum" FROM original_query)',
+            );
+            expect(result.toLowerCase()).not.toContain('group by');
+        });
     });
 
     describe('Warehouse type compatibility', () => {
@@ -1649,7 +2495,9 @@ SELECT * FROM group_by_query LIMIT 50`);
             const mockBigQueryBuilder = {
                 getFieldQuoteChar: () => '`',
                 getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+                supportsCteMaterialization: () => true,
                 getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
             } as unknown as WarehouseSqlBuilder;
 
             const pivotConfiguration = {
@@ -1681,7 +2529,9 @@ SELECT * FROM group_by_query LIMIT 50`);
             const mockDatabricksBuilder = {
                 getFieldQuoteChar: () => '`',
                 getAdapterType: () => SupportedDbtAdapter.DATABRICKS,
+                supportsCteMaterialization: () => true,
                 getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
             } as unknown as WarehouseSqlBuilder;
 
             const pivotConfiguration = {
@@ -1755,9 +2605,9 @@ SELECT * FROM group_by_query LIMIT 50`);
                 'dense_rank() over (order by g."date" asc, g."store_id" asc, g."product_category" asc)',
             );
 
-            // Should include all columns in select references (all should be quoted now)
+            // Should include all columns in select references (all should be quoted and aliased now)
             expect(result).toContain(
-                'g."date", g."store_id", g."product_category", g."category", g."region"',
+                'g."date" AS "date", g."store_id" AS "store_id", g."product_category" AS "product_category", g."category" AS "category", g."region" AS "region"',
             );
         });
 
@@ -1821,9 +2671,12 @@ SELECT * FROM group_by_query LIMIT 50`);
             expect(result).toContain(
                 'SELECT "category", "date" FROM original_query group by "category", "date"',
             );
-            // Should calculate total_columns correctly using subquery approach
-            expect(result).toContain(
-                'SELECT COUNT(*) AS total_columns FROM (SELECT DISTINCT "category" FROM filtered_rows) AS distinct_groups',
+            // Should calculate total_columns in a single pass over filtered_rows
+            expect(replaceWhitespace(result)).toContain(
+                'ROW_NUMBER() OVER (PARTITION BY "category" ORDER BY "category") AS "__grp_rn" FROM filtered_rows f',
+            );
+            expect(replaceWhitespace(result)).toContain(
+                'SUM(CASE WHEN p."__grp_rn" = 1 THEN 1 ELSE 0 END) OVER () AS total_columns',
             );
         });
 
@@ -2059,7 +2912,7 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             // Check that row_index ORDER BY has NULLS LAST
             expect(replaceWhitespace(result)).toContain(
-                '"revenue_ra"."revenue_ra_value" DESC NULLS LAST',
+                'g."revenue_ra_value" DESC NULLS LAST',
             );
 
             // Check column anchor CTE has NULLS LAST
@@ -2097,7 +2950,7 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             // Row index should include NULLS FIRST when sorting by value column
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ra"."revenue_ra_value" ASC NULLS FIRST, g."date" ASC) AS "row_index"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" ASC NULLS FIRST, g."date" ASC) AS "row_index"',
             );
         });
 
@@ -2130,7 +2983,7 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             // Column index should include NULLS LAST in column_ranking CTE
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ca"."revenue_ca_value" DESC NULLS LAST, g."category" ASC) AS "col_idx"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ca_value" DESC NULLS LAST, g."category" ASC) AS "col_idx"',
             );
         });
 
@@ -2204,7 +3057,7 @@ SELECT * FROM group_by_query LIMIT 50`);
             expect(result).not.toContain('NULLS LAST');
         });
 
-        test('Should use LEFT JOIN for anchor CTEs to preserve rows with NULL anchor values', () => {
+        test('Should use LEFT JOIN for precomputed rankings to preserve rows with NULL anchor values', () => {
             const pivotConfiguration = {
                 indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
                 valuesColumns: [
@@ -2230,12 +3083,11 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             const result = builder.toSql();
 
-            // Should use LEFT JOIN for both row and column anchor CTEs
-            expect(result).toContain('LEFT JOIN "revenue_ra" ON');
-            expect(result).toContain('LEFT JOIN "revenue_ca" ON');
-            // Should not use regular JOIN (without LEFT)
-            expect(result).not.toMatch(/(?<!LEFT )JOIN "revenue_ra"/);
-            expect(result).not.toMatch(/(?<!LEFT )JOIN "revenue_ca"/);
+            // Anchor windows are folded into the ranking CTEs; pivot_query
+            // LEFT JOINs the precomputed rankings so rows with NULL anchor
+            // values are preserved.
+            expect(result).toContain('LEFT JOIN row_ranking rr ON');
+            expect(result).toContain('LEFT JOIN column_ranking cr ON');
         });
     });
 
@@ -2351,6 +3203,56 @@ SELECT * FROM group_by_query LIMIT 50`);
             expect(result).toContain(
                 '"orders_month_name" = \'January\' THEN 1',
             );
+        });
+
+        test('Should preserve escaped field IDs in chronological sort expressions', () => {
+            const quotedNameDimensions: CompiledDimension[] = [
+                {
+                    ...monthNameDimension,
+                    name: 'month"name',
+                },
+                {
+                    ...dayNameDimension,
+                    name: 'month"name',
+                },
+                {
+                    ...quarterNameDimension,
+                    name: 'month"name',
+                },
+            ];
+            const markers = ['January', 'Sunday', 'Q1'];
+
+            quotedNameDimensions.forEach((dimension, index) => {
+                const reference = 'orders_month"name';
+                const builder = new PivotQueryBuilder(
+                    baseSql,
+                    {
+                        indexColumn: [
+                            { reference, type: VizIndexType.CATEGORY },
+                        ],
+                        valuesColumns: [
+                            {
+                                reference: 'revenue',
+                                aggregation: VizAggregationOptions.SUM,
+                            },
+                        ],
+                        groupByColumns: undefined,
+                        sortBy: [
+                            {
+                                reference,
+                                direction: SortByDirection.ASC,
+                            },
+                        ],
+                    },
+                    mockWarehouseSqlBuilder,
+                    500,
+                    { [reference]: dimension },
+                );
+
+                expect(builder.toSql()).toContain(
+                    `WHEN "orders_month""name" = '${markers[index]}'`,
+                );
+            });
         });
 
         test('Should sort MONTH_NAME in pivot query with groupBy columns', () => {
@@ -2812,6 +3714,55 @@ SELECT * FROM group_by_query LIMIT 50`);
                 'dense_rank() over (order by g."amount_binned_amount_order" asc, g."orders_category" desc)',
             );
         });
+
+        test('Should include _order column in group_by_query when sorted bin dimension is a sortOnlyDimension', () => {
+            // A custom bin dimension used as a hidden, sorted pivot column lands
+            // in sortOnlyDimensions. Its _order companion drives the column
+            // ORDER BY, so it must be carried through group_by_query — otherwise
+            // the warehouse errors with "column amount_binned_amount_order does not exist".
+            const itemsMap: ItemsMap = {
+                amount_binned_amount: binDimension,
+            };
+
+            const pivotConfiguration = {
+                indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'event_type' }],
+                sortBy: [
+                    {
+                        reference: 'amount_binned_amount',
+                        direction: SortByDirection.DESC,
+                    },
+                ],
+                sortOnlyDimensions: [{ reference: 'amount_binned_amount' }],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+                500,
+                itemsMap,
+            );
+
+            const result = builder.toSql();
+
+            // _order column must be carried through group_by_query SELECT and GROUP BY
+            expect(result).toContain('"amount_binned_amount_order"');
+            expect(replaceWhitespace(result)).toContain(
+                'group by "event_type", "amount_binned_amount", "date", "amount_binned_amount_order"',
+            );
+
+            // column ordering should reference the carried-through _order column
+            expect(result.toLowerCase()).toContain(
+                'g."amount_binned_amount_order" desc',
+            );
+        });
     });
 
     describe('Pivot table calculations referencing metrics not in valuesColumns', () => {
@@ -3268,7 +4219,9 @@ SELECT * FROM group_by_query LIMIT 50`);
             const result = builder.toSql();
 
             // total_columns should multiply by 2 (the visible TCs), not 3 (TCs + implicit metric)
-            expect(result).toContain('COUNT(*) * 2 AS total_columns');
+            expect(result).toContain(
+                'SUM(CASE WHEN p."__grp_rn" = 1 THEN 1 ELSE 0 END) OVER () * 2 AS total_columns',
+            );
         });
 
         test('Edge case: TC referencing a dimension (not a metric) via pivot_index', () => {
@@ -3498,8 +4451,10 @@ SELECT * FROM group_by_query LIMIT 50`);
             const mockBigQueryBuilder = {
                 getFieldQuoteChar: () => '`',
                 getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+                supportsCteMaterialization: () => true,
                 getStartOfWeek: () => WeekDay.MONDAY,
                 getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
             } as unknown as WarehouseSqlBuilder;
 
             const itemsMap: ItemsMap = {
@@ -3776,9 +4731,11 @@ SELECT * FROM group_by_query LIMIT 50`);
             }
 
             // total_columns should count only 1 display value column (tc1), not 6
-            expect(result).toContain('COUNT(*) AS total_columns');
-            expect(result).not.toContain('COUNT(*) * 5');
-            expect(result).not.toContain('COUNT(*) * 6');
+            expect(result).toContain(
+                'SUM(CASE WHEN p."__grp_rn" = 1 THEN 1 ELSE 0 END) OVER () AS total_columns',
+            );
+            expect(result).not.toContain('OVER () * 5');
+            expect(result).not.toContain('OVER () * 6');
         });
 
         test('Should produce identical SQL when no pivot TCs exist in itemsMap', () => {
@@ -3888,7 +4845,7 @@ SELECT * FROM group_by_query LIMIT 50`);
             // fieldAliasMap[ref] to handle interdependent table calculation references
             // Field references must be quoted to handle reserved words and special characters
             expect(result).toContain(
-                '"impressions_any" - CASE WHEN LAG("row_index", 1)',
+                '"impressions_any" - CASE WHEN LAG("column_index", 1)',
             );
             expect(result).toContain('LAG("impressions_any", 1)');
 
@@ -3956,8 +4913,10 @@ SELECT * FROM group_by_query LIMIT 50`);
             const mockBigQuerySqlBuilder = {
                 getFieldQuoteChar: () => '`',
                 getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+                supportsCteMaterialization: () => true,
                 getStartOfWeek: () => WeekDay.MONDAY,
                 getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
             } as unknown as WarehouseSqlBuilder;
 
             const itemsMapWithTc: ItemsMap = {
@@ -4108,7 +5067,9 @@ SELECT * FROM group_by_query LIMIT 50`);
         });
 
         test('Should log a warning for unknown field references', () => {
-            const warnSpy = jest.spyOn(Logger, 'warn').mockImplementation();
+            const warnSpy = vi
+                .spyOn(Logger, 'warn')
+                .mockImplementation(() => Logger);
 
             const itemsMap: ItemsMap = {
                 tc_unknown: {
@@ -4212,7 +5173,9 @@ SELECT * FROM group_by_query LIMIT 50`);
         });
 
         test('Should handle table-prefixed unknown references', () => {
-            const warnSpy = jest.spyOn(Logger, 'warn').mockImplementation();
+            const warnSpy = vi
+                .spyOn(Logger, 'warn')
+                .mockImplementation(() => Logger);
 
             const itemsMap: ItemsMap = {
                 tc_missing: {
@@ -4401,21 +5364,13 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             const result = builder.toSql();
 
-            // CTE definitions in the WITH clause must be quoted.
-            expect(result).toContain(`"${fieldWithSpaces}_ca" AS (`);
-            expect(result).toContain(`"${fieldWithSpaces}_ra" AS (`);
-
-            // Every reference of those CTEs (LEFT JOIN, qualified column
-            // accesses) must also be quoted — the original bug was unquoted
-            // names appearing in JOIN clauses, not just CTE definitions.
-            expect(result).toContain(`LEFT JOIN "${fieldWithSpaces}_ra"`);
-            expect(result).toContain(`LEFT JOIN "${fieldWithSpaces}_ca"`);
-            expect(result).toContain(
-                `"${fieldWithSpaces}_ca"."${fieldWithSpaces}_ca_value"`,
-            );
-            expect(result).toContain(
-                `"${fieldWithSpaces}_ra"."${fieldWithSpaces}_ra_value"`,
-            );
+            // Anchor windows are folded into the ranking CTEs, so the
+            // field-with-spaces now appears only in quoted aliases and column
+            // refs — all must be wrapped in the warehouse quote char.
+            expect(result).toContain(`AS "${fieldWithSpaces}_ca_value"`);
+            expect(result).toContain(`AS "${fieldWithSpaces}_ra_value"`);
+            expect(result).toContain(`g."${fieldWithSpaces}_ca_value"`);
+            expect(result).toContain(`g."${fieldWithSpaces}_ra_value"`);
 
             // The bare unquoted form must not appear anywhere — that is what
             // would produce the original `syntax error at or near "TAX"`.
@@ -4438,8 +5393,10 @@ SELECT * FROM group_by_query LIMIT 50`);
             const mockDatabricksBuilder = {
                 getFieldQuoteChar: () => '`',
                 getAdapterType: () => SupportedDbtAdapter.DATABRICKS,
+                supportsCteMaterialization: () => true,
                 getStartOfWeek: () => WeekDay.MONDAY,
                 getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
             } as unknown as WarehouseSqlBuilder;
 
             const pivotConfiguration = {
@@ -4470,10 +5427,11 @@ SELECT * FROM group_by_query LIMIT 50`);
             expect(result).toContain('row_ranking AS (');
             expect(result).toContain('column_ranking AS (');
 
-            // row_ranking is self-contained: it owns its JOIN to row_anchor
-            // and produces row_index as a concrete output column.
+            // row_ranking is self-contained: it folds the row-anchor
+            // aggregation into a nested scan of group_by_query and produces
+            // row_index as a concrete output column.
             expect(replaceWhitespace(result)).toContain(
-                'row_ranking AS (SELECT DISTINCT g.`event_tier`, DENSE_RANK() OVER (ORDER BY `count_ra`.`count_ra_value` DESC, g.`event_tier` ASC) AS `row_index` FROM group_by_query g LEFT JOIN `count_ra` ON (g.`event_tier` = `count_ra`.`event_tier` OR (g.`event_tier` IS NULL AND `count_ra`.`event_tier` IS NULL)))',
+                'row_ranking AS (SELECT DISTINCT g.`event_tier` AS `event_tier`, DENSE_RANK() OVER (ORDER BY g.`count_ra_value` DESC, g.`event_tier` ASC) AS `row_index` FROM (SELECT q.`event_tier`, MAX(CASE WHEN (q.`event` = ac.`anchor_event` OR (q.`event` IS NULL AND ac.`anchor_event` IS NULL)) THEN q.`count_count` END) AS `count_ra_value` FROM group_by_query q CROSS JOIN anchor_column ac GROUP BY q.`event_tier`) g)',
             );
 
             // pivot_query just joins precomputed rankings — no inline
@@ -4503,8 +5461,10 @@ SELECT * FROM group_by_query LIMIT 50`);
             const mockDatabricksBuilder = {
                 getFieldQuoteChar: () => '`',
                 getAdapterType: () => SupportedDbtAdapter.DATABRICKS,
+                supportsCteMaterialization: () => true,
                 getStartOfWeek: () => WeekDay.MONDAY,
                 getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
             } as unknown as WarehouseSqlBuilder;
 
             const pivotConfiguration = {
@@ -4598,7 +5558,7 @@ SELECT * FROM group_by_query LIMIT 50`);
             // column_ranking ORDER BY echoes the NULLS treatment for the
             // anchor value, then falls back to the groupBy field as tiebreaker.
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ca"."revenue_ca_value" DESC NULLS FIRST, g."category" ASC) AS "col_idx"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ca_value" DESC NULLS FIRST, g."category" ASC) AS "col_idx"',
             );
 
             // row_index ORDER BY combines BOTH sort entries with their own
@@ -4606,7 +5566,7 @@ SELECT * FROM group_by_query LIMIT 50`);
             // NULLS LAST. A regression that drops the per-entry nulls flag
             // would collapse one of these.
             expect(replaceWhitespace(result)).toContain(
-                'DENSE_RANK() OVER (ORDER BY "revenue_ra"."revenue_ra_value" DESC NULLS FIRST, g."date" ASC NULLS LAST) AS "row_index"',
+                'DENSE_RANK() OVER (ORDER BY g."revenue_ra_value" DESC NULLS FIRST, g."date" ASC NULLS LAST) AS "row_index"',
             );
         });
 
@@ -4671,7 +5631,7 @@ SELECT * FROM group_by_query LIMIT 50`);
 
         test('Multiple value columns with metric sort produce frame clauses on every column anchor FIRST_VALUE (#18064)', () => {
             // https://github.com/lightdash/lightdash/issues/18064 / GLITCH-90
-            // Repro: USE_SQL_PIVOT_RESULTS + sort by a value column on
+            // Repro: SQL pivot + sort by a value column on
             // Redshift. Window functions with ORDER BY require explicit frame
             // clauses; missing frames produced "Aggregate window functions
             // with an ORDER BY clause require a frame clause".
@@ -4705,9 +5665,10 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             const result = builder.toSql();
 
-            // Both sort metrics produce a column_anchor CTE.
-            expect(result).toContain('"revenue_ca" AS (');
-            expect(result).toContain('"orders_ca" AS (');
+            // Both sort metrics produce a FIRST_VALUE column anchor folded
+            // into column_ranking's nested scan.
+            expect(result).toContain('AS "revenue_ca_value"');
+            expect(result).toContain('AS "orders_ca_value"');
 
             // Count is the assertion: every FIRST_VALUE must be paired with a
             // ROWS BETWEEN frame clause. A regression that leaves frames off
@@ -4838,17 +5799,15 @@ SELECT * FROM group_by_query LIMIT 50`);
             );
         });
 
-        test('total_columns CTE counts via nested DISTINCT subquery, never via COUNT(DISTINCT CONCAT(...)) (#19767)', () => {
+        test('total_columns counts distinct groups via PARTITION BY raw columns, never via COUNT(DISTINCT CONCAT(...)) (#19767)', () => {
             // https://github.com/lightdash/lightdash/issues/19767 / PROD-2762
             // Repro: pivot a chart whose groupBy mixes types (e.g. a
             // TIMESTAMP column AND a STRING column) on Redshift. The bug
             // emitted `COUNT(DISTINCT CONCAT('col1', "col1", '-', 'col2',
             // "col2"))` for total_columns, which Redshift refused because
             // CONCAT across mixed types fails type checking.
-            // Expectation: total_columns is computed via
-            // `SELECT COUNT(*) FROM (SELECT DISTINCT col1, col2 FROM
-            // filtered_rows) AS distinct_groups` — warehouse-agnostic, no
-            // CONCAT, no DISTINCT-CONCAT.
+            // Expectation: the single-pass count PARTITIONs by the raw groupBy
+            // columns (no CONCAT, no DISTINCT-CONCAT) — warehouse-agnostic.
             const pivotConfiguration = {
                 indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
                 valuesColumns: [
@@ -4872,16 +5831,189 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             const result = builder.toSql();
 
-            // Subquery-DISTINCT shape — both groupBy refs appear in the
-            // SELECT DISTINCT list inside the inner subquery.
+            // Single-pass shape: both groupBy refs are the raw PARTITION BY keys
+            // and total_columns sums the per-group first-row markers.
             expect(replaceWhitespace(result)).toContain(
-                'total_columns AS (SELECT COUNT(*) AS total_columns FROM (SELECT DISTINCT "order_date_year", "payment_method" FROM filtered_rows) AS distinct_groups)',
+                'ROW_NUMBER() OVER (PARTITION BY "order_date_year", "payment_method" ORDER BY "order_date_year", "payment_method") AS "__grp_rn" FROM filtered_rows f',
+            );
+            expect(replaceWhitespace(result)).toContain(
+                'SUM(CASE WHEN p."__grp_rn" = 1 THEN 1 ELSE 0 END) OVER () AS total_columns',
             );
 
             // Negative: the bugged Redshift-incompatible form must not
             // appear anywhere. CONCAT-based counting was the original bug.
             expect(result).not.toContain('COUNT(DISTINCT CONCAT(');
             expect(result).not.toContain('COUNT(DISTINCT concat(');
+        });
+
+        test('Tier B: the base pivot data (filtered_rows) is referenced exactly once', () => {
+            // Tier B (PROD-8440): the final assembly used to reference the
+            // pivot subtree twice (filtered_rows -> distinct_groups ->
+            // total_columns AND the final CROSS JOIN), doubling the base scan on
+            // CTE-inlining engines (Trino/Athena/Spark). Now total_columns is a
+            // single-pass window over filtered_rows, referenced once.
+            const pivotConfiguration = {
+                indexColumn: [{ reference: 'date', type: VizIndexType.TIME }],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [
+                    { reference: 'order_date_year' },
+                    { reference: 'payment_method' },
+                ],
+                sortBy: [{ reference: 'date', direction: SortByDirection.ASC }],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+
+            const result = builder.toSql();
+
+            // filtered_rows and pivot_query are each referenced exactly once
+            // (single-pass): the base data is scanned once instead of twice.
+            expect(result.match(/FROM filtered_rows\b/g)).toHaveLength(1);
+            expect(result.match(/FROM pivot_query\b/g)).toHaveLength(1);
+
+            // With multiple pivot columns the count PARTITIONs by the full tuple,
+            // so each distinct (order_date_year, payment_method) combination is
+            // counted once.
+            expect(replaceWhitespace(result)).toContain(
+                'ROW_NUMBER() OVER (PARTITION BY "order_date_year", "payment_method" ORDER BY "order_date_year", "payment_method") AS "__grp_rn" FROM filtered_rows f',
+            );
+            expect(replaceWhitespace(result)).toContain(
+                'SUM(CASE WHEN p."__grp_rn" = 1 THEN 1 ELSE 0 END) OVER () AS total_columns',
+            );
+        });
+
+        test('Metric sort: pivot_query/row_ranking/column_ranking alias every carried column to a bare name (ClickHouse #23711)', () => {
+            // https://github.com/lightdash/lightdash/issues/23711
+            // ClickHouse's v24+ analyzer exposes a CTE's columns only under
+            // their source alias once the CTE LEFT JOINs 2+ relations, so
+            // multi-join CTEs must alias carried columns to bare names or the
+            // downstream filtered_rows/distinct_groups CTEs fail to resolve them.
+            const pivotConfiguration = {
+                indexColumn: [
+                    { reference: 'order_date', type: VizIndexType.TIME },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'unique_count',
+                        aggregation: VizAggregationOptions.COUNT,
+                    },
+                    {
+                        reference: 'amount',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'status' }],
+                sortBy: [
+                    {
+                        reference: 'unique_count',
+                        direction: SortByDirection.DESC,
+                    },
+                    { reference: 'amount', direction: SortByDirection.ASC },
+                ],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+
+            const result = replaceWhitespace(builder.toSql());
+
+            // pivot_query: every carried column has an explicit bare alias.
+            expect(result).toContain('g."order_date" AS "order_date"');
+            expect(result).toContain('g."status" AS "status"');
+            expect(result).toContain(
+                'g."unique_count_count" AS "unique_count_count"',
+            );
+            expect(result).toContain('g."amount_sum" AS "amount_sum"');
+
+            // column_ranking aliases its groupBy dim (2 anchor joins).
+            expect(result).toContain(
+                'column_ranking AS (SELECT DISTINCT g."status" AS "status", DENSE_RANK()',
+            );
+            // row_ranking aliases its index dim (2 anchor joins).
+            expect(result).toContain(
+                'row_ranking AS (SELECT DISTINCT g."order_date" AS "order_date", DENSE_RANK()',
+            );
+
+            // The downstream single-pass count references the bare name the
+            // aliases expose (PARTITION BY "status").
+            expect(result).toContain(
+                'ROW_NUMBER() OVER (PARTITION BY "status" ORDER BY "status") AS "__grp_rn" FROM filtered_rows f',
+            );
+        });
+
+        test('Metric sort: ClickHouse uses the native `<=>` operator in JOIN ON, but keeps the OR form in the row-anchor CASE WHEN (#23711)', () => {
+            // https://github.com/lightdash/lightdash/issues/23711
+            // ClickHouse's analyzer cannot determine join keys from the generic
+            // `a = b OR (a IS NULL AND b IS NULL)` form in the deep pivot CTE
+            // chain. Its native `<=>` operator is accepted as a join key, but is
+            // unsupported in the SELECT list — so the row-anchor MAX(CASE WHEN …)
+            // must keep the OR form.
+            const clickhouseSqlBuilder = {
+                getFieldQuoteChar: () => '"',
+                getAdapterType: () => SupportedDbtAdapter.CLICKHOUSE,
+                supportsCteMaterialization: () => true,
+                getStartOfWeek: () => WeekDay.MONDAY,
+                getNullSafeEqualSql: defaultNullSafeEqualSql,
+                getNullSafeEqualJoinSql: (left: string, right: string) =>
+                    `${left} <=> ${right}`,
+                getStringQuoteChar: () => "'",
+                escapeString: (v: string) => v,
+            } as unknown as WarehouseSqlBuilder;
+
+            const pivotConfiguration = {
+                indexColumn: [
+                    { reference: 'order_date', type: VizIndexType.TIME },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'amount',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'status' }],
+                sortBy: [
+                    { reference: 'amount', direction: SortByDirection.DESC },
+                ],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                clickhouseSqlBuilder,
+            );
+
+            const result = replaceWhitespace(builder.toSql());
+
+            // JOIN ON conditions use the native `<=>` operator.
+            expect(result).toContain(
+                'LEFT JOIN row_ranking rr ON g."order_date" <=> rr."order_date"',
+            );
+            expect(result).toContain(
+                'LEFT JOIN column_ranking cr ON g."status" <=> cr."status"',
+            );
+
+            // No JOIN ON falls back to the OR form on ClickHouse.
+            expect(result).not.toContain(
+                'ON (g."status" = "amount_ca"."status" OR',
+            );
+
+            // The row-anchor MAX(CASE WHEN …) projection keeps the OR form,
+            // since `<=>` is unsupported in the SELECT list.
+            expect(result).toContain(
+                'MAX(CASE WHEN (q."status" = ac."anchor_status" OR (q."status" IS NULL AND ac."anchor_status" IS NULL)) THEN',
+            );
         });
 
         test('Named time-interval index columns sort chronologically via CASE WHEN, not alphabetically (#18245)', () => {
@@ -5097,29 +6229,30 @@ SELECT * FROM group_by_query LIMIT 50`);
             const result = builder.toSql();
             const collapsed = replaceWhitespace(result);
 
-            // Slice out the column_anchor CTE body so the assertions are
-            // scoped to just that CTE rather than the whole SQL. Nested
-            // parens inside FIRST_VALUE / OVER (...) make a regex slice
-            // brittle, so use named CTE markers as bounds.
-            const colAnchorStart = collapsed.indexOf('"revenue_ca" AS (');
-            const rowAnchorStart = collapsed.indexOf(
-                '"revenue_ra" AS (',
-                colAnchorStart,
+            // Slice out the column_ranking CTE body (which the column anchor is
+            // folded into) so the assertions are scoped to just that CTE rather
+            // than the whole SQL. Nested parens inside FIRST_VALUE / OVER (...)
+            // make a regex slice brittle, so use named CTE markers as bounds —
+            // anchor_column is the CTE that immediately follows column_ranking.
+            const colRankingStart = collapsed.indexOf('column_ranking AS (');
+            const anchorColumnStart = collapsed.indexOf(
+                'anchor_column AS (',
+                colRankingStart,
             );
-            expect(colAnchorStart).toBeGreaterThanOrEqual(0);
-            expect(rowAnchorStart).toBeGreaterThan(colAnchorStart);
+            expect(colRankingStart).toBeGreaterThanOrEqual(0);
+            expect(anchorColumnStart).toBeGreaterThan(colRankingStart);
             const colAnchorBody = collapsed.slice(
-                colAnchorStart,
-                rowAnchorStart,
+                colRankingStart,
+                anchorColumnStart,
             );
 
             // FIRST_VALUE PARTITION BY <groupBy> ORDER BY <metric>, with the
-            // explicit ROWS BETWEEN frame, lives inside column_anchor.
+            // explicit ROWS BETWEEN frame, lives inside column_ranking.
             expect(colAnchorBody).toContain(
                 'FIRST_VALUE("revenue_sum") OVER (PARTITION BY "category" ORDER BY "revenue_sum" DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)',
             );
 
-            // Negative: column_anchor must NOT carry row-anchor's
+            // Negative: column_ranking must NOT carry row-anchor's
             // MAX(CASE WHEN…) expression — that is the row-side shape.
             // Mixing them up is the documented regression path.
             expect(colAnchorBody).not.toContain('MAX(CASE WHEN');
@@ -5166,9 +6299,124 @@ SELECT * FROM group_by_query LIMIT 50`);
             );
             expect(overlong).toEqual([]);
 
-            // Sanity check: anchor CTEs use the short suffixes.
-            expect(result).toContain(`"${longRef}_ca" AS (`);
-            expect(result).toContain(`"${longRef}_ra" AS (`);
+            // Sanity check: the folded anchors use the short _ca/_ra suffixes.
+            expect(result).toContain(`AS "${longRef}_ca_value"`);
+            expect(result).toContain(`AS "${longRef}_ra_value"`);
+        });
+
+        test('Hidden row dimension stays in GROUP BY and row_index ranking (PROD-10392)', () => {
+            // https://github.com/lightdash/lightdash/issues/27739
+            // Repro: table pivoted on order_month with row dims
+            // [company_name, company_id], company_id hidden via
+            // columnProperties, sorted DESC by the metric. Two records share
+            // the same company_name and differ only by company_id.
+            // Bug: the derived config dropped the hidden dim from indexColumn,
+            // so group_by_query collapsed both records into one row whose
+            // metric came from an arbitrary record (ANY aggregation).
+            // Expectation: the hidden dim stays a structural index column all
+            // the way into the SQL — grouped, anchored, and ranked — with
+            // hiding left to the renderer.
+            const fields: ItemsMap = {
+                orders_company_name: {
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    name: 'company_name',
+                    table: 'orders',
+                    label: 'Company name',
+                    tableLabel: 'Orders',
+                    sql: '${TABLE}.company_name',
+                    hidden: false,
+                },
+                orders_company_id: {
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    name: 'company_id',
+                    table: 'orders',
+                    label: 'Company ID',
+                    tableLabel: 'Orders',
+                    sql: '${TABLE}.company_id',
+                    hidden: false,
+                },
+                orders_order_month: {
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    name: 'order_month',
+                    table: 'orders',
+                    label: 'Order month',
+                    tableLabel: 'Orders',
+                    sql: '${TABLE}.order_month',
+                    hidden: false,
+                },
+                payments_total_revenue: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.SUM,
+                    name: 'total_revenue',
+                    table: 'payments',
+                    label: 'Total revenue',
+                    tableLabel: 'Payments',
+                    sql: '${TABLE}.amount',
+                    hidden: false,
+                },
+            } as unknown as ItemsMap;
+
+            const pivotConfiguration = derivePivotConfigurationFromChart(
+                {
+                    chartConfig: {
+                        type: ChartType.TABLE,
+                        config: {
+                            columns: {
+                                orders_company_id: { visible: false },
+                            },
+                            showSubtotals: false,
+                        },
+                    },
+                    pivotConfig: { columns: ['orders_order_month'] },
+                },
+                {
+                    exploreName: 'orders',
+                    dimensions: [
+                        'orders_company_name',
+                        'orders_company_id',
+                        'orders_order_month',
+                    ],
+                    metrics: ['payments_total_revenue'],
+                    filters: {},
+                    sorts: [
+                        { fieldId: 'payments_total_revenue', descending: true },
+                    ],
+                    limit: 500,
+                    tableCalculations: [],
+                },
+                fields,
+            );
+
+            expect(pivotConfiguration).toBeDefined();
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration!,
+                mockWarehouseSqlBuilder,
+            );
+
+            const result = replaceWhitespace(builder.toSql());
+
+            // group_by_query groups by the hidden dim too → the two records
+            // stay distinct rows.
+            expect(result).toContain(
+                'group by "orders_order_month", "orders_company_name", "orders_company_id"',
+            );
+
+            // The row anchor is computed per (company_name, company_id), so
+            // the metric sort ranks each underlying record by its own value.
+            expect(result).toContain(
+                'GROUP BY q."orders_company_name", q."orders_company_id"',
+            );
+
+            // row_index dense_rank includes the hidden dim as a tiebreaker →
+            // both records get their own row_index.
+            expect(result).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."payments_total_revenue_ra_value" DESC, g."orders_company_name" ASC, g."orders_company_id" ASC) AS "row_index"',
+            );
         });
     });
 
@@ -5308,7 +6556,7 @@ SELECT * FROM group_by_query LIMIT 50`);
 
             // sortOnly target (orders_status_priority) must lead; orders_status follows as tiebreaker.
             expect(collapsed).toContain(
-                'column_ranking AS (SELECT DISTINCT g."orders_status", DENSE_RANK() OVER (ORDER BY g."orders_status_priority" ASC, g."orders_status" ASC) AS "col_idx"',
+                'column_ranking AS (SELECT DISTINCT g."orders_status" AS "orders_status", DENSE_RANK() OVER (ORDER BY g."orders_status_priority" ASC, g."orders_status" ASC) AS "col_idx"',
             );
         });
 
@@ -5365,7 +6613,7 @@ SELECT * FROM group_by_query LIMIT 50`);
                 'group by "orders_status", "orders_shipping_method", "status_prio_2", "orders_order_date_month"',
             );
             expect(collapsed).toContain(
-                'column_ranking AS (SELECT DISTINCT g."orders_status", g."orders_shipping_method", DENSE_RANK() OVER (ORDER BY g."status_prio_2" ASC, g."orders_status" ASC, g."orders_shipping_method" ASC) AS "col_idx"',
+                'column_ranking AS (SELECT DISTINCT g."orders_status" AS "orders_status", g."orders_shipping_method" AS "orders_shipping_method", DENSE_RANK() OVER (ORDER BY g."status_prio_2" ASC, g."orders_status" ASC, g."orders_shipping_method" ASC) AS "col_idx"',
             );
         });
 
@@ -5475,9 +6723,151 @@ SELECT * FROM group_by_query LIMIT 50`);
             );
             const result = builder.toSql();
 
-            // Standard metric sort anchor CTEs must still be emitted
-            expect(result).toContain('"revenue_ca" AS (');
+            // Standard metric sort ranking CTEs must still be emitted, with the
+            // column anchor folded into column_ranking.
+            expect(result).toContain('AS "revenue_ca_value"');
             expect(result).toContain('column_ranking AS (');
+        });
+
+        test('pivotColumnsOrder makes a hidden sort dim sort at its declared position, not leading, preserving outer column grouping (PROD-8159)', () => {
+            // Repro of the prod bug: two visible groupByColumns (case = outer,
+            // metric_type = inner) plus a hidden sort helper (item_order) that is
+            // declared BETWEEN them and orders the inner level. Hiding item_order
+            // must leave column order identical to when it was visible:
+            // case (outer) first, then item_order ordering metric_type within it.
+            // The old "hoist sort-only to the front" behavior produced
+            // ORDER BY item_order, case, metric_type — which groups columns by
+            // item_order ACROSS cases, breaking the case grouping and scrambling
+            // the rendered headers.
+            const pivotConfiguration = {
+                indexColumn: [
+                    { reference: 'item', type: VizIndexType.CATEGORY },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'value',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                groupByColumns: [
+                    { reference: 'case' },
+                    { reference: 'metric_type' },
+                ],
+                sortOnlyDimensions: [{ reference: 'item_order' }],
+                pivotColumnsOrder: [
+                    { reference: 'case' },
+                    { reference: 'item_order' },
+                    { reference: 'metric_type' },
+                ],
+                sortBy: [
+                    { reference: 'item_order', direction: SortByDirection.ASC },
+                ],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+            const collapsed = replaceWhitespace(builder.toSql());
+
+            // ORDER BY follows declared position: case (outer) leads, item_order
+            // orders the inner metric_type, metric_type trails as tiebreaker.
+            expect(collapsed).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."case" ASC, g."item_order" ASC, g."metric_type" ASC) AS "col_idx"',
+            );
+            // Column identity (DISTINCT) is visible dims only — item_order is
+            // never spread as a pivot column header.
+            expect(collapsed).toContain(
+                'column_ranking AS (SELECT DISTINCT g."case" AS "case", g."metric_type" AS "metric_type",',
+            );
+        });
+
+        test('pivotColumnsOrder holds declared position when the OUTER dim is also a sort target (prod sortBy [outer, helper]) (PROD-8159)', () => {
+            // Mirrors the exact prod payload: the user sorts the visible OUTER
+            // dim AND the hidden helper — sortBy [case ASC, item_order ASC].
+            // The helper must still sort at its declared position (not lead), and
+            // the visible groupByColumns keep their declared order regardless of
+            // sortBy order (issue #16871 invariant).
+            const pivotConfiguration = {
+                indexColumn: [
+                    { reference: 'item', type: VizIndexType.CATEGORY },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'value',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                groupByColumns: [
+                    { reference: 'case' },
+                    { reference: 'metric_type' },
+                ],
+                sortOnlyDimensions: [{ reference: 'item_order' }],
+                pivotColumnsOrder: [
+                    { reference: 'case' },
+                    { reference: 'item_order' },
+                    { reference: 'metric_type' },
+                ],
+                sortBy: [
+                    { reference: 'case', direction: SortByDirection.ASC },
+                    { reference: 'item_order', direction: SortByDirection.ASC },
+                ],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+            const collapsed = replaceWhitespace(builder.toSql());
+
+            // Same declared-position ORDER BY as when only the helper is sorted:
+            // the explicit outer sort does not hoist the helper, and does not
+            // reorder the visible groupByColumns.
+            expect(collapsed).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."case" ASC, g."item_order" ASC, g."metric_type" ASC) AS "col_idx"',
+            );
+        });
+
+        test('pivotColumnsOrder with the hidden sort dim declared first still leads the column ORDER BY (PROD-5789 stays fixed)', () => {
+            // Declared-position rule subsumes the original "lead" behavior: when
+            // the hidden helper is declared outermost (the single-visible-dim
+            // PROD-5789 shape), it naturally leads.
+            const pivotConfiguration = {
+                indexColumn: [
+                    { reference: 'customer_id', type: VizIndexType.CATEGORY },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'revenue',
+                        aggregation: VizAggregationOptions.SUM,
+                    },
+                ],
+                groupByColumns: [{ reference: 'orders_status' }],
+                sortOnlyDimensions: [{ reference: 'orders_status_priority' }],
+                pivotColumnsOrder: [
+                    { reference: 'orders_status_priority' },
+                    { reference: 'orders_status' },
+                ],
+                sortBy: [
+                    {
+                        reference: 'orders_status_priority',
+                        direction: SortByDirection.ASC,
+                    },
+                ],
+            };
+
+            const builder = new PivotQueryBuilder(
+                baseSql,
+                pivotConfiguration,
+                mockWarehouseSqlBuilder,
+            );
+            const collapsed = replaceWhitespace(builder.toSql());
+
+            expect(collapsed).toContain(
+                'DENSE_RANK() OVER (ORDER BY g."orders_status_priority" ASC, g."orders_status" ASC) AS "col_idx"',
+            );
         });
     });
 

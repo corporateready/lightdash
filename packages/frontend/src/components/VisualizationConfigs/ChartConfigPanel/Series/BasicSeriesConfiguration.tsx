@@ -13,11 +13,19 @@ import { IconPalette } from '@tabler/icons-react';
 import { type FC } from 'react';
 import type useCartesianChartConfig from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
 import MantineIcon from '../../../common/MantineIcon';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import {
+    useSeriesColor,
+    useVisualizationInputs,
+} from '../../../LightdashVisualization/useVisualizationContext';
 import ColorSelector from '../../ColorSelector';
 import { Config } from '../../common/Config';
 import { EditableText } from '../../common/EditableText';
 import { GrabIcon } from '../../common/GrabIcon';
+import {
+    SeriesDepthControl,
+    type SeriesDrawOrderControl,
+} from './SeriesDrawOrder';
+import drawOrderStyles from './seriesDrawOrder.module.css';
 import SingleSeriesConfiguration from './SingleSeriesConfiguration';
 
 type BasicSeriesConfigurationProps = {
@@ -27,6 +35,7 @@ type BasicSeriesConfigurationProps = {
     item: Field | TableCalculation | CustomDimension;
     dragHandleProps?: DraggableProvidedDragHandleProps | null;
     isDragDisabled?: boolean;
+    drawOrder?: SeriesDrawOrderControl;
     showColorPickerIcon?: boolean;
 } & Pick<
     ReturnType<typeof useCartesianChartConfig>,
@@ -42,9 +51,11 @@ const BasicSeriesConfiguration: FC<BasicSeriesConfigurationProps> = ({
     updateSingleSeries,
     dragHandleProps,
     isDragDisabled,
+    drawOrder,
     showColorPickerIcon,
 }) => {
-    const { colorPalette, getSeriesColor } = useVisualizationContext();
+    const { colorPalette } = useVisualizationInputs();
+    const getSeriesColor = useSeriesColor();
     const [value, setValue] = useDebouncedState(
         getSingleSeries(series)?.name || getItemLabelWithoutTableName(item),
         500,
@@ -53,7 +64,11 @@ const BasicSeriesConfiguration: FC<BasicSeriesConfigurationProps> = ({
     return (
         <Config>
             <Config.Section>
-                <Group noWrap spacing="two">
+                <Group
+                    wrap="nowrap"
+                    gap="two"
+                    className={drawOrderStyles.seriesHeader}
+                >
                     <GrabIcon
                         dragHandleProps={dragHandleProps}
                         disabled={isDragDisabled}
@@ -83,10 +98,10 @@ const BasicSeriesConfiguration: FC<BasicSeriesConfigurationProps> = ({
                         <Box
                             style={{
                                 flexGrow: 1,
+                                minWidth: 0,
                             }}
                         >
                             <EditableText
-                                sx={{ flexGrow: 1 }}
                                 fw={600}
                                 size="sm"
                                 lighter
@@ -102,6 +117,7 @@ const BasicSeriesConfiguration: FC<BasicSeriesConfigurationProps> = ({
                             />
                         </Box>
                     )}
+                    {drawOrder && <SeriesDepthControl control={drawOrder} />}
                 </Group>
                 <SingleSeriesConfiguration
                     layout={layout}

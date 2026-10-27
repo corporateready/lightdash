@@ -4,23 +4,29 @@
     "private": true,
     "license": "MIT",
     "scripts": {
-        "linter": "eslint -c .eslintrc.js --ignore-path ./../../.gitignore",
+        "linter": "oxlint -c .oxlintrc.json --ignore-path ./../../.gitignore",
         "formatter": "oxfmt",
         "lint": "pnpm run linter .",
         "fix-lint": "pnpm run linter . --fix",
         "format": "oxfmt . --check",
         "fix-format": "oxfmt .",
-        "typecheck": "tsc --project tsconfig.json --noEmit",
+        "typecheck": "tsrs --project tsconfig.json --noEmit",
+        "stub:snowflake-ai": "node stub/snowflake-ai-stub.mjs",
         "test:api": "vitest run --config vitest.config.ts",
+        "test:unit": "vitest run --config vitest.unit.config.ts",
         "test:api:watch": "vitest watch --config vitest.config.ts"
     },
     "dependencies": {
         "@lightdash/common": "workspace:*",
-        "js-yaml": "4.1.1"
+        "js-yaml": "4.3.2"
     },
     "devDependencies": {
         "@types/js-yaml": "4.0.9",
-        "typescript": "6.0.3",
-        "vitest": "3.2.4"
+        "@types/pg": "8.11.10",
+        "oxlint": "1.75.0",
+        "oxlint-tsgolint": "7.0.2001",
+        "pg": "8.13.1",
+        "typescript": "7.0.2",
+        "vitest": "4.1.11"
     }
 }

@@ -1,3 +1,4 @@
+import { type AiAgentModelConfig } from '@lightdash/common';
 import { Knex } from 'knex';
 
 export const AiAgentTableName = 'ai_agent';
@@ -10,9 +11,22 @@ export type DbAiAgent = {
     slug: string;
     description: string | null;
     image_url: string | null;
+    image_url_source: 'upload' | 'url' | null;
     tags: string[] | null;
     enable_data_access: boolean;
     enable_self_improvement: boolean;
+    enable_content_tools: boolean;
+    enable_user_context: boolean;
+    enable_sql_mode: boolean;
+    enable_sql_auto_approval: boolean;
+    enable_composer_queries: boolean;
+    admin_only: boolean;
+    model_config: AiAgentModelConfig | null;
+    /**
+     * AI provider credential this agent's prompts run on. Null resolves the
+     * project pin, then the organization default. FK with ON DELETE RESTRICT.
+     */
+    ai_organization_provider_credential_uuid: string | null;
     /**
      * @deprecated Per-agent reasoning toggle was removed. The gating feature flag
      * `agent-reasoning` was never enabled so this column was effectively
@@ -21,6 +35,7 @@ export type DbAiAgent = {
      */
     enable_reasoning?: boolean;
     version: number;
+    thread_retention_hours: number | null;
     created_at: Date;
     updated_at: Date;
 };
@@ -273,6 +288,11 @@ export const AiAgentMcpServerToolPermissionModes = [
 
 export type DbAiAgentMcpServerToolPermissionMode =
     (typeof AiAgentMcpServerToolPermissionModes)[number];
+
+export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_ALLOW: DbAiAgentMcpServerToolPermissionMode =
+    'always_allow';
+export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_DENY: DbAiAgentMcpServerToolPermissionMode =
+    'always_deny';
 
 export type DbAiAgentMcpServerTool = {
     ai_agent_uuid: string;

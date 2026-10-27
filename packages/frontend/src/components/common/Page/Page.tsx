@@ -1,7 +1,9 @@
 import { ProjectType, type AnyType } from '@lightdash/common';
-import { Box, createStyles } from '@mantine/core';
+import { Box, Button, Drawer, useMatches } from '@mantine/core';
 import { useDisclosure, useElementSize } from '@mantine/hooks';
-import { type FC } from 'react';
+import { IconLayoutSidebarLeftExpand } from '@tabler/icons-react';
+import { useEffect, useState, type FC } from 'react';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
 import ErrorBoundary from '../../../features/errorBoundary/ErrorBoundary';
 import { useActiveProjectUuid } from '../../../hooks/useActiveProject';
 import { useProject } from '../../../hooks/useProject';
@@ -10,16 +12,9 @@ import { TrackSection } from '../../../providers/Tracking/TrackingProvider';
 import { SectionName } from '../../../types/Events';
 import AboutFooter from '../../AboutFooter';
 import { DocumentTitle } from '../DocumentTitle';
-import {
-    BANNER_HEIGHT,
-    FOOTER_HEIGHT,
-    FOOTER_MARGIN,
-    NAVBAR_HEIGHT,
-    PAGE_CONTENT_MAX_WIDTH_LARGE,
-    PAGE_CONTENT_WIDTH,
-    PAGE_HEADER_HEIGHT,
-    PAGE_MIN_CONTENT_WIDTH,
-} from './constants';
+import sidebarDrawerClasses from '../SidebarDrawer.module.css';
+import { StableContent } from '../StableContent';
+import classes from './Page.module.css';
 import Sidebar from './Sidebar';
 import { SidebarPosition, type SidebarWidthProps } from './types';
 
@@ -32,6 +27,9 @@ type StyleProps = {
     withFixedContent?: boolean;
     withFooter?: boolean;
     withFullHeight?: boolean;
+    // Size to the parent container instead of the viewport. Use when the page
+    // renders inside a modal or another host that is not viewport-height.
+    withContainerHeight?: boolean;
     withHeader?: boolean;
     withNavbar?: boolean;
     withPaddedContent?: boolean;
@@ -44,163 +42,25 @@ type StyleProps = {
     noContentPadding?: boolean;
     noSidebarPadding?: boolean;
     isSidebarResizing?: boolean;
-    backgroundColor?: string;
+    reserveSidebarToggle?: boolean;
     fullPageScroll?: boolean;
 };
-
-const usePageStyles = createStyles<string, StyleProps>((theme, params) => {
-    let containerHeight = '100vh';
-
-    if (params.withNavbar && !params.fullPageScroll) {
-        containerHeight = `calc(${containerHeight} - ${NAVBAR_HEIGHT}px)`;
-    }
-    if (params.withHeader) {
-        containerHeight = `calc(${containerHeight} - ${PAGE_HEADER_HEIGHT}px)`;
-    }
-    if (params.hasBanner && !params.fullPageScroll) {
-        containerHeight = `calc(${containerHeight} - ${BANNER_HEIGHT}px)`;
-    }
-
-    return {
-        root: {
-            ...(params.fullPageScroll
-                ? {
-                      minHeight: '100%',
-                  }
-                : params.withFullHeight
-                  ? {
-                        height: containerHeight,
-                        maxHeight: containerHeight,
-                    }
-                  : {
-                        height: containerHeight,
-
-                        overflowY: 'auto',
-                    }),
-
-            ...(params.withSidebar || params.withRightSidebar
-                ? {
-                      display: 'flex',
-                      flexDirection: 'row',
-                  }
-                : {}),
-
-            ...(params.isSidebarResizing
-                ? {
-                      userSelect: 'none',
-                  }
-                : {}),
-
-            ...(params.withCenteredRoot
-                ? {
-                      display: 'flex',
-                      justifyContent: 'center',
-                  }
-                : {}),
-
-            ...(params.backgroundColor
-                ? {
-                      backgroundColor: params.backgroundColor,
-                  }
-                : {}),
-        },
-
-        content: {
-            width: '100%',
-            minWidth: PAGE_CONTENT_WIDTH,
-
-            ...(params.flexContent ? { display: 'flex' } : {}),
-            ...(params.noContentPadding
-                ? {
-                      padding: 0,
-                  }
-                : {
-                      paddingTop: theme.spacing.lg,
-                      paddingBottom: theme.spacing.lg,
-                  }),
-
-            ...(params.withSidebar || params.withRightSidebar
-                ? {
-                      minWidth: PAGE_MIN_CONTENT_WIDTH,
-                  }
-                : {}),
-
-            ...(params.withFooter
-                ? {
-                      minHeight: `calc(100% - ${FOOTER_HEIGHT}px - ${theme.spacing[FOOTER_MARGIN]} - 1px)`,
-                  }
-                : {}),
-
-            ...(params.withFullHeight
-                ? {
-                      display: 'flex',
-                      flexDirection: 'column',
-
-                      height: '100%',
-                      maxHeight: '100%',
-
-                      ...(params.fullPageScroll ? {} : { overflowY: 'auto' }),
-                  }
-                : {}),
-
-            ...(params.withFitContent
-                ? {
-                      width: 'fit-content',
-                      marginLeft: 'auto',
-                      marginRight: 'auto',
-                  }
-                : {}),
-
-            ...(params.withLargeContent
-                ? {
-                      maxWidth: PAGE_CONTENT_MAX_WIDTH_LARGE,
-                  }
-                : {}),
-
-            ...(params.withPaddedContent
-                ? {
-                      paddingLeft: theme.spacing.lg,
-                      paddingRight: theme.spacing.lg,
-                  }
-                : {}),
-
-            ...(params.withXLargePaddedContent
-                ? {
-                      padding: theme.spacing.xxl,
-                  }
-                : {}),
-
-            ...(params.withCenteredContent
-                ? {
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                  }
-                : {}),
-
-            ...(params.withSidebarBorder
-                ? {
-                      borderLeft: `1px solid ${theme.colors.ldGray[3]}`,
-                  }
-                : {}),
-        },
-
-        fixedContainer: {
-            marginLeft: 'auto',
-            marginRight: 'auto',
-
-            width: PAGE_CONTENT_WIDTH,
-            flexShrink: 0,
-        },
-    };
-});
 
 type Props = {
     title?: string;
     sidebar?: React.ReactNode;
+    sidebarTitle?: string;
     isSidebarOpen?: boolean;
+    isSidebarCollapsed?: boolean;
+    isSidebarCollapsible?: boolean;
+    collapsedSidebarContent?: React.ReactNode;
+    sidebarWidthProps?: SidebarWidthProps;
     rightSidebar?: React.ReactNode;
+    rightSidebarTitle?: string;
+    onRightSidebarClose?: () => void;
     isRightSidebarOpen?: boolean;
+    keepRightSidebarMounted?: boolean;
+    noRightSidebarPadding?: boolean;
     rightSidebarWidthProps?: SidebarWidthProps;
     header?: React.ReactNode;
 } & Omit<StyleProps, 'withSidebar' | 'withHeader' | 'hasBanner'>;
@@ -209,9 +69,18 @@ const Page: FC<React.PropsWithChildren<Props>> = ({
     title,
     header,
     sidebar,
+    sidebarTitle = 'Navigation',
     isSidebarOpen = true,
+    isSidebarCollapsed = false,
+    isSidebarCollapsible = false,
+    collapsedSidebarContent,
+    sidebarWidthProps,
     rightSidebar,
+    rightSidebarTitle = 'Details',
+    onRightSidebarClose,
     isRightSidebarOpen = false,
+    keepRightSidebarMounted = false,
+    noRightSidebarPadding,
     rightSidebarWidthProps,
 
     withCenteredContent = false,
@@ -222,6 +91,7 @@ const Page: FC<React.PropsWithChildren<Props>> = ({
     withXLargePaddedContent = false,
     withFooter = false,
     withFullHeight = false,
+    withContainerHeight = false,
     withNavbar = true,
     withPaddedContent = false,
     withSidebarFooter = false,
@@ -229,11 +99,24 @@ const Page: FC<React.PropsWithChildren<Props>> = ({
     noContentPadding = false,
     noSidebarPadding = false,
     flexContent = false,
-    backgroundColor,
     fullPageScroll = false,
     children,
 }) => {
+    const getUiString = useUiStrings();
+    const compact = useMatches(
+        { base: true, sm: false },
+        { getInitialValueInEffect: false },
+    );
+    const [sidebarOpened, { open: openSidebar, close: closeSidebar }] =
+        useDisclosure(false);
+    const [sidebarTarget, setSidebarTarget] = useState<HTMLDivElement | null>(
+        null,
+    );
+    const [rightSidebarTarget, setRightSidebarTarget] =
+        useState<HTMLDivElement | null>(null);
+    useEffect(closeSidebar, [compact, closeSidebar]);
     const { ref: mainRef, width: mainWidth } = useElementSize();
+    const { ref: headerRef, height: headerHeight } = useElementSize();
     const [
         isSidebarResizing,
         { open: startSidebarResizing, close: stopSidebarResizing },
@@ -247,56 +130,109 @@ const Page: FC<React.PropsWithChildren<Props>> = ({
 
     const isCurrentProjectPreview = project?.type === ProjectType.PREVIEW;
     const { isImpersonating } = useImpersonation();
+    const hasBanner = isCurrentProjectPreview || isImpersonating;
 
-    const { classes } = usePageStyles(
-        {
-            withCenteredContent,
-            withCenteredRoot,
-            withFitContent,
-            withFixedContent,
-            withLargeContent,
-            withXLargePaddedContent,
-            withFooter,
-            withFullHeight,
-            withHeader: !!header,
-            withNavbar,
-            withPaddedContent,
-            withSidebar: !!sidebar,
-            withSidebarFooter,
-            withSidebarBorder,
-            withRightSidebar: !!rightSidebar,
-            hasBanner: isCurrentProjectPreview || isImpersonating,
-            noContentPadding,
-            flexContent,
-            isSidebarResizing,
-            backgroundColor,
-            fullPageScroll,
-        },
-        { name: 'Page' },
-    );
+    const withSidebar = !compact && (!!sidebar || !!rightSidebar);
+    const reserveSidebarToggle =
+        !compact && isSidebarCollapsible && isSidebarCollapsed;
 
     return (
         <>
             <DocumentTitle title={title} />
 
-            {header}
+            {header && <Box ref={headerRef}>{header}</Box>}
 
-            <Box id="page-root" className={classes.root}>
-                {sidebar ? (
+            <Box
+                id="page-root"
+                className={classes.root}
+                data-with-navbar={withNavbar}
+                data-with-header={!!header}
+                data-has-banner={hasBanner}
+                data-full-page-scroll={fullPageScroll}
+                data-full-height={withFullHeight}
+                data-container-height={withContainerHeight}
+                data-with-sidebar={withSidebar}
+                data-sidebar-resizing={isSidebarResizing}
+                data-centered-root={withCenteredRoot}
+                data-compact={compact}
+                style={
+                    header
+                        ? { '--header-offset': `${headerHeight}px` }
+                        : undefined
+                }
+            >
+                {sidebar && compact && isSidebarOpen ? (
+                    <Box px="sm" py="xs" className={classes.sidebarToolbar}>
+                        <Button
+                            variant="default"
+                            onClick={openSidebar}
+                            leftSection={
+                                <IconLayoutSidebarLeftExpand size={18} />
+                            }
+                            aria-expanded={sidebarOpened}
+                        >
+                            {sidebarTitle}
+                        </Button>
+                        <Drawer
+                            classNames={sidebarDrawerClasses}
+                            keepMounted
+                            opened={sidebarOpened}
+                            onClose={closeSidebar}
+                            title={sidebarTitle}
+                            closeButtonProps={{
+                                size: 44,
+                                'aria-label': getUiString('page.closeSidebar'),
+                            }}
+                            size="min(100%, 24rem)"
+                            onClickCapture={(event) => {
+                                if (
+                                    event.target instanceof Element &&
+                                    event.target.closest('a[href]')
+                                )
+                                    closeSidebar();
+                            }}
+                        >
+                            <Box
+                                ref={setSidebarTarget}
+                                className={classes.sidebarSlot}
+                            />
+                        </Drawer>
+                    </Box>
+                ) : sidebar && !compact ? (
                     <Sidebar
                         noSidebarPadding={noSidebarPadding}
                         isOpen={isSidebarOpen}
+                        isCollapsed={isSidebarCollapsed}
+                        collapsible={isSidebarCollapsible}
+                        collapsedContent={collapsedSidebarContent}
+                        widthProps={sidebarWidthProps}
                         onResizeStart={startSidebarResizing}
                         onResizeEnd={stopSidebarResizing}
                     >
-                        <ErrorBoundary wrapper={{ mt: '4xl' }}>
-                            {sidebar}
-                        </ErrorBoundary>
-                        {withSidebarFooter ? <AboutFooter minimal /> : null}
+                        <Box
+                            ref={setSidebarTarget}
+                            className={classes.sidebarSlot}
+                        />
                     </Sidebar>
                 ) : null}
 
-                <main className={classes.content} ref={mainRef}>
+                <main
+                    className={classes.content}
+                    ref={mainRef}
+                    data-flex-content={flexContent}
+                    data-no-content-padding={noContentPadding}
+                    data-with-sidebar={withSidebar}
+                    data-with-footer={withFooter}
+                    data-full-height={withFullHeight}
+                    data-full-page-scroll={fullPageScroll}
+                    data-fit-content={withFitContent}
+                    data-large-content={withLargeContent}
+                    data-padded-content={withPaddedContent}
+                    data-reserve-sidebar-toggle={reserveSidebarToggle}
+                    data-xlarge-padded-content={withXLargePaddedContent}
+                    data-centered-content={withCenteredContent}
+                    data-sidebar-border={withSidebarBorder}
+                >
                     <TrackSection name={SectionName.PAGE_CONTENT}>
                         <ErrorBoundary wrapper={{ mt: '4xl' }}>
                             {withFixedContent ? (
@@ -310,21 +246,71 @@ const Page: FC<React.PropsWithChildren<Props>> = ({
                     </TrackSection>
                 </main>
 
-                {rightSidebar ? (
+                {rightSidebar && compact && onRightSidebarClose ? (
+                    <Drawer
+                        classNames={sidebarDrawerClasses}
+                        opened={isRightSidebarOpen}
+                        onClose={onRightSidebarClose}
+                        title={rightSidebarTitle}
+                        closeButtonProps={{
+                            'aria-label': getUiString('page.closeDetails'),
+                            size: 44,
+                        }}
+                        position="right"
+                        size="100%"
+                        keepMounted={keepRightSidebarMounted}
+                        padding="md"
+                        styles={
+                            noRightSidebarPadding
+                                ? { body: { padding: 0 } }
+                                : undefined
+                        }
+                    >
+                        <Box
+                            ref={setRightSidebarTarget}
+                            className={classes.sidebarSlot}
+                        />
+                    </Drawer>
+                ) : rightSidebar ? (
                     <Sidebar
-                        noSidebarPadding={noSidebarPadding}
+                        noSidebarPadding={
+                            noRightSidebarPadding ?? noSidebarPadding
+                        }
                         widthProps={rightSidebarWidthProps}
                         mainWidth={mainWidth}
                         isOpen={isRightSidebarOpen}
+                        keepMounted={keepRightSidebarMounted}
                         position={SidebarPosition.RIGHT}
                         onResizeStart={startSidebarResizing}
                         onResizeEnd={stopSidebarResizing}
                     >
-                        <ErrorBoundary wrapper={{ mt: '4xl' }}>
-                            {rightSidebar}
-                        </ErrorBoundary>
+                        <Box
+                            ref={setRightSidebarTarget}
+                            className={classes.sidebarSlot}
+                        />
                     </Sidebar>
                 ) : null}
+
+                {sidebar && (
+                    <StableContent target={sidebarTarget}>
+                        <TrackSection name={SectionName.SIDEBAR}>
+                            <ErrorBoundary wrapper={{ mt: '4xl' }}>
+                                {sidebar}
+                            </ErrorBoundary>
+                            {withSidebarFooter ? <AboutFooter minimal /> : null}
+                        </TrackSection>
+                    </StableContent>
+                )}
+                {rightSidebar &&
+                    (isRightSidebarOpen || keepRightSidebarMounted) && (
+                        <StableContent target={rightSidebarTarget}>
+                            <TrackSection name={SectionName.SIDEBAR}>
+                                <ErrorBoundary wrapper={{ mt: '4xl' }}>
+                                    {rightSidebar}
+                                </ErrorBoundary>
+                            </TrackSection>
+                        </StableContent>
+                    )}
 
                 {withFooter && !withSidebarFooter ? <AboutFooter /> : null}
             </Box>

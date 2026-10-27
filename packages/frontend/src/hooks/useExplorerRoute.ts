@@ -19,11 +19,15 @@ import {
     useParams,
     useSearchParams,
 } from 'react-router';
+import { validate as isUuidString } from 'uuid';
 import {
     explorerActions,
+    selectChartSidebarStep,
+    selectIsVisualizationConfigOpen,
     selectMetricQuery,
     selectTableName,
     selectUnsavedChartVersion,
+    selectUnsavedColorPaletteUuid,
     useExplorerDispatch,
     useExplorerSelector,
 } from '../features/explorer/store';
@@ -36,7 +40,11 @@ import {
     ExplorerSection,
     type ExplorerReduceState,
 } from '../providers/Explorer/types';
+import { createEmptyTableChartConfig } from '../providers/Explorer/utils';
 import useToaster from './toaster/useToaster';
+
+const CHART_SIDEBAR_PARAM = 'chartSidebar';
+const COLOR_PALETTE_PARAM = 'colorPaletteUuid';
 
 export const DEFAULT_EMPTY_EXPLORE_CONFIG: CreateSavedChartVersion = {
     tableName: '',
@@ -50,33 +58,23 @@ export const DEFAULT_EMPTY_EXPLORE_CONFIG: CreateSavedChartVersion = {
         limit: 500,
     },
     chartConfig: {
-        type: ChartType.CARTESIAN,
-        config: {
-            layout: {},
-            eChartsConfig: {},
-        },
+        type: ChartType.TABLE,
+        config: createEmptyTableChartConfig(),
     },
     tableConfig: {
         columnOrder: [],
     },
 };
 
-export const getExplorerUrlFromCreateSavedChartVersion = (
-    projectUuid: string | undefined,
+// Pass preserveLongUrl to keep the whole chart. This is sometimes desireable
+// when we want all of the information in the URL, but don't use it for
+// navigation. For example, the explore from here button uses the entire URL to
+// create shareable, shortened links.
+export const stringifyCreateSavedChartVersion = (
     createSavedChart: CreateSavedChartVersion,
-    // Pass true to preserve long url. This is sometimes desireable when we want
-    // all of the information in the URL, but don't use it for navigation.
-    // For example, the explore from here button uses the entire URL to create
-    // shareable, shortened links.
     preserveLongUrl?: boolean,
-): { pathname: string; search: string } => {
-    if (!projectUuid) {
-        return { pathname: '', search: '' };
-    }
-    // Preserve existing search params (like fromSpace, fromDashboard, etc)
-    const newParams = new URLSearchParams(window.location.search);
-
-    let stringifiedChart = JSON.stringify(createSavedChart);
+): string => {
+    const stringifiedChart = JSON.stringify(createSavedChart);
     const stringifiedChartSize = stringifiedChart.length;
     if (
         stringifiedChartSize > 3000 &&
@@ -96,12 +94,60 @@ export const getExplorerUrlFromCreateSavedChartVersion = (
                 },
             },
         };
-        stringifiedChart = JSON.stringify(reducedCreateSavedChart);
+        const reducedStringifiedChart = JSON.stringify(reducedCreateSavedChart);
         console.info(
-            `Reduced chart config size from "${stringifiedChartSize}" to "${stringifiedChart.length}"`,
+            `Reduced chart config size from "${stringifiedChartSize}" to "${reducedStringifiedChart.length}"`,
         );
+        return reducedStringifiedChart;
     }
-    newParams.set('create_saved_chart_version', stringifiedChart);
+    return stringifiedChart;
+};
+
+/**
+ * The saved chart's edit page carrying an unsaved version, so an editing
+ * session started elsewhere (the in-dashboard chart editor) survives the move.
+ */
+export const getSavedChartEditUrlFromCreateSavedChartVersion = ({
+    projectUuid,
+    chartSlug,
+    createSavedChart,
+    fromDashboardUuid,
+}: {
+    projectUuid: string;
+    chartSlug: string;
+    createSavedChart: CreateSavedChartVersion;
+    fromDashboardUuid: string | null;
+}): { pathname: string; search: string } => {
+    const params = new URLSearchParams();
+    params.set(
+        'create_saved_chart_version',
+        stringifyCreateSavedChartVersion(createSavedChart),
+    );
+    if (fromDashboardUuid) {
+        params.set('fromDashboard', fromDashboardUuid);
+    }
+
+    return {
+        pathname: `/projects/${projectUuid}/saved/${chartSlug}/edit`,
+        search: params.toString(),
+    };
+};
+
+export const getExplorerUrlFromCreateSavedChartVersion = (
+    projectUuid: string | undefined,
+    createSavedChart: CreateSavedChartVersion,
+    preserveLongUrl?: boolean,
+): { pathname: string; search: string } => {
+    if (!projectUuid) {
+        return { pathname: '', search: '' };
+    }
+    // Preserve existing search params (like fromSpace, fromDashboard, etc)
+    const newParams = new URLSearchParams(window.location.search);
+
+    newParams.set(
+        'create_saved_chart_version',
+        stringifyCreateSavedChartVersion(createSavedChart, preserveLongUrl),
+    );
 
     // Always set isExploreFromHere to true when creating the url for shareable links this ensures the query is executed when the url is loaded
     newParams.set('isExploreFromHere', 'true');
@@ -131,80 +177,160 @@ export const useDateZoomGranularitySearch = ():
     return standardMatch ?? dateZoomParam;
 };
 
-// To handle older url params where exploreName wasn't required
+// Url params come from outside the app (old agent share links, hand-crafted
+// urls), so any key can be missing: older urls lack exploreName, and links
+// generated from AI answers can omit chartConfig, tableConfig, or metricQuery
+// sub-fields entirely.
 type BackwardsCompatibleCreateSavedChartVersionUrlParam = Omit<
     CreateSavedChartVersion,
-    'metricQuery'
+    'metricQuery' | 'chartConfig' | 'tableConfig'
 > & {
-    metricQuery: Omit<MetricQuery, 'exploreName'> & { exploreName?: string };
+    chartConfig?: CreateSavedChartVersion['chartConfig'];
+    tableConfig?: CreateSavedChartVersion['tableConfig'];
+    metricQuery: Omit<
+        MetricQuery,
+        | 'exploreName'
+        | 'dimensions'
+        | 'metrics'
+        | 'filters'
+        | 'sorts'
+        | 'tableCalculations'
+    > & {
+        exploreName?: string;
+        dimensions?: MetricQuery['dimensions'];
+        metrics?: MetricQuery['metrics'];
+        filters?: MetricQuery['filters'];
+        sorts?: MetricQuery['sorts'];
+        tableCalculations?: MetricQuery['tableCalculations'];
+    };
 };
 
-const parseChartFromExplorerSearchParams = (
+/**
+ * The chart type a "Preview in explorer" link carries. The search string
+ * survives picking a table in the explore sidebar, so the link can be minted
+ * before a table is known.
+ */
+export const parseDataAppVizUuidFromSearchParams = (
+    search: string,
+): string | null => {
+    const dataAppVizUuid = new URLSearchParams(search).get('dataAppVizUuid');
+    return dataAppVizUuid && isUuidString(dataAppVizUuid)
+        ? dataAppVizUuid
+        : null;
+};
+
+// The param carries the open step, so its absence means a closed sidebar.
+const parseChartSidebarFromSearchParams = (
+    search: string,
+): Pick<
+    ExplorerReduceState,
+    'isVisualizationConfigOpen' | 'chartSidebarStep'
+> => {
+    const step = new URLSearchParams(search).get(CHART_SIDEBAR_PARAM);
+
+    if (step === 'choose' || step === 'configure') {
+        return {
+            isVisualizationConfigOpen: true,
+            chartSidebarStep: step,
+        };
+    }
+
+    return {
+        isVisualizationConfigOpen: false,
+        chartSidebarStep: defaultState.chartSidebarStep,
+    };
+};
+
+export const parseChartFromExplorerSearchParams = (
     search: string,
 ): CreateSavedChartVersion | undefined => {
-    const searchParams = new URLSearchParams(search);
-    const chartConfigSearchParam = searchParams.get(
+    const chartConfigSearchParam = new URLSearchParams(search).get(
         'create_saved_chart_version',
     );
-    if (chartConfigSearchParam) {
-        const parsedValue: BackwardsCompatibleCreateSavedChartVersionUrlParam =
-            JSON.parse(chartConfigSearchParam);
-        return {
-            ...parsedValue,
-            tableConfig: parsedValue.tableConfig ?? { columnOrder: [] },
-            metricQuery: {
-                ...parsedValue.metricQuery,
-                exploreName:
-                    parsedValue.metricQuery.exploreName ||
-                    parsedValue.tableName,
-                customDimensions:
-                    parsedValue.metricQuery.customDimensions?.map<CustomDimension>(
-                        (customDimension) => {
-                            if (customDimension.type === undefined) {
-                                // backwards compat: old URLs lack type field and use flat shape
-                                const raw =
-                                    customDimension as unknown as Record<
-                                        string,
-                                        unknown
-                                    >;
-                                const base = {
-                                    id: raw.id as string,
-                                    name: raw.name as string,
-                                    type: CustomDimensionType.BIN as const,
-                                    dimensionId: raw.dimensionId as string,
-                                    table: raw.table as string,
-                                };
-                                switch (raw.binType) {
-                                    case BinType.FIXED_WIDTH:
-                                        return {
-                                            ...base,
-                                            binType: BinType.FIXED_WIDTH,
-                                            binWidth:
-                                                (raw.binWidth as number) || 1,
-                                        };
-                                    case BinType.CUSTOM_RANGE:
-                                        return {
-                                            ...base,
-                                            binType: BinType.CUSTOM_RANGE,
-                                            customRange:
-                                                (raw.customRange as BinRange[]) ||
-                                                [],
-                                        };
-                                    case BinType.FIXED_NUMBER:
-                                    default:
-                                        return {
-                                            ...base,
-                                            binType: BinType.FIXED_NUMBER,
-                                            binNumber:
-                                                (raw.binNumber as number) || 1,
-                                        };
-                                }
+    return chartConfigSearchParam
+        ? parseCreateSavedChartVersionParam(chartConfigSearchParam)
+        : undefined;
+};
+
+/** The raw `create_saved_chart_version` value; throws on malformed json. */
+const parseCreateSavedChartVersionParam = (
+    chartConfigSearchParam: string,
+): CreateSavedChartVersion => {
+    const parsedValue: BackwardsCompatibleCreateSavedChartVersionUrlParam =
+        JSON.parse(chartConfigSearchParam);
+    return {
+        ...parsedValue,
+        chartConfig:
+            parsedValue.chartConfig ?? DEFAULT_EMPTY_EXPLORE_CONFIG.chartConfig,
+        tableConfig: parsedValue.tableConfig ?? { columnOrder: [] },
+        metricQuery: {
+            ...parsedValue.metricQuery,
+            exploreName:
+                parsedValue.metricQuery.exploreName || parsedValue.tableName,
+            dimensions: parsedValue.metricQuery.dimensions ?? [],
+            metrics: parsedValue.metricQuery.metrics ?? [],
+            filters: parsedValue.metricQuery.filters ?? {},
+            sorts: parsedValue.metricQuery.sorts ?? [],
+            tableCalculations: parsedValue.metricQuery.tableCalculations ?? [],
+            customDimensions:
+                parsedValue.metricQuery.customDimensions?.map<CustomDimension>(
+                    (customDimension) => {
+                        if (customDimension.type === undefined) {
+                            // backwards compat: old URLs lack type field and use flat shape
+                            const raw = customDimension as unknown as Record<
+                                string,
+                                unknown
+                            >;
+                            const base = {
+                                id: raw.id as string,
+                                name: raw.name as string,
+                                type: CustomDimensionType.BIN as const,
+                                dimensionId: raw.dimensionId as string,
+                                table: raw.table as string,
+                            };
+                            switch (raw.binType) {
+                                case BinType.FIXED_WIDTH:
+                                    return {
+                                        ...base,
+                                        binType: BinType.FIXED_WIDTH,
+                                        binWidth: (raw.binWidth as number) || 1,
+                                    };
+                                case BinType.CUSTOM_RANGE:
+                                    return {
+                                        ...base,
+                                        binType: BinType.CUSTOM_RANGE,
+                                        customRange:
+                                            (raw.customRange as BinRange[]) ||
+                                            [],
+                                    };
+                                case BinType.FIXED_NUMBER:
+                                default:
+                                    return {
+                                        ...base,
+                                        binType: BinType.FIXED_NUMBER,
+                                        binNumber:
+                                            (raw.binNumber as number) || 1,
+                                    };
                             }
-                            return customDimension;
-                        },
-                    ),
-            },
-        };
+                        }
+                        return customDimension;
+                    },
+                ),
+        },
+    };
+};
+
+/**
+ * Same param, for routes that treat it as optional extra state: a malformed
+ * value leaves the page on whatever it loaded instead of throwing.
+ */
+export const tryParseCreateSavedChartVersionParam = (
+    chartConfigSearchParam: string,
+): CreateSavedChartVersion | undefined => {
+    try {
+        return parseCreateSavedChartVersionParam(chartConfigSearchParam);
+    } catch {
+        return undefined;
     }
 };
 
@@ -218,18 +344,37 @@ export const useExplorerRoute = () => {
     const dispatch = useExplorerDispatch();
 
     const unsavedChartVersion = useExplorerSelector(selectUnsavedChartVersion);
+    const colorPaletteUuid = useExplorerSelector(selectUnsavedColorPaletteUuid);
     const metricQuery = useExplorerSelector(selectMetricQuery);
     const tableName = useExplorerSelector(selectTableName);
+    const isVisualizationConfigOpen = useExplorerSelector(
+        selectIsVisualizationConfigOpen,
+    );
+    const chartSidebarStep = useExplorerSelector(selectChartSidebarStep);
 
     // Update url params based on pristine state
     // Only sync URL when we're actually on a table page (pathParams.tableId exists)
     useEffect(() => {
         if (pathParams.tableId && metricQuery && tableName) {
+            const explorerUrl = getExplorerUrlFromCreateSavedChartVersion(
+                pathParams.projectUuid,
+                unsavedChartVersion,
+            );
+            const searchParams = new URLSearchParams(explorerUrl.search);
+            searchParams.delete('dataAppVizUuid');
+            if (colorPaletteUuid)
+                searchParams.set(COLOR_PALETTE_PARAM, colorPaletteUuid);
+            else searchParams.delete(COLOR_PALETTE_PARAM);
+            if (isVisualizationConfigOpen) {
+                searchParams.set(CHART_SIDEBAR_PARAM, chartSidebarStep);
+            } else {
+                searchParams.delete(CHART_SIDEBAR_PARAM);
+            }
             void navigate(
-                getExplorerUrlFromCreateSavedChartVersion(
-                    pathParams.projectUuid,
-                    unsavedChartVersion,
-                ),
+                {
+                    ...explorerUrl,
+                    search: searchParams.toString(),
+                },
                 { replace: true },
             );
         }
@@ -240,6 +385,9 @@ export const useExplorerRoute = () => {
         pathParams.tableId,
         unsavedChartVersion,
         tableName,
+        isVisualizationConfigOpen,
+        chartSidebarStep,
+        colorPaletteUuid,
     ]);
 
     useEffect(() => {
@@ -263,6 +411,7 @@ export const useExplorerUrlState = (): ExplorerReduceState | undefined => {
 
     const [searchParams] = useSearchParams();
     const fromDashboard = searchParams.get('fromDashboard');
+    const colorPaletteUuid = searchParams.get(COLOR_PALETTE_PARAM);
     const isExploreFromHere = useMemo(() => {
         return searchParams.get('isExploreFromHere') === 'true';
     }, [searchParams]);
@@ -271,6 +420,11 @@ export const useExplorerUrlState = (): ExplorerReduceState | undefined => {
         if (pathParams.tableId) {
             try {
                 const parsedChart = parseChartFromExplorerSearchParams(search);
+                // A "Preview in explorer" link preselects the chart type;
+                // explicit chart state wins over the hint.
+                const dataAppVizUuid = parsedChart
+                    ? null
+                    : parseDataAppVizUuidFromSearchParams(search);
                 const unsavedChartVersion = parsedChart || {
                     tableName: pathParams.tableId,
                     metricQuery: {
@@ -287,24 +441,34 @@ export const useExplorerUrlState = (): ExplorerReduceState | undefined => {
                     tableConfig: {
                         columnOrder: [],
                     },
-                    chartConfig: {
-                        type: ChartType.CARTESIAN,
-                        config: { layout: {}, eChartsConfig: {} },
-                    },
+                    chartConfig: dataAppVizUuid
+                        ? {
+                              type: ChartType.DATA_APP_VIZ,
+                              config: {
+                                  dataAppVizUuid,
+                                  fieldMapping: {},
+                                  optionValues: {},
+                              },
+                          }
+                        : {
+                              type: ChartType.TABLE,
+                              config: createEmptyTableChartConfig(),
+                          },
                 };
 
                 return {
                     parameterReferences: [],
                     parameterDefinitions: {},
                     cachedChartConfigs: {},
-                    expandedSections: parsedChart
-                        ? [
-                              ExplorerSection.VISUALIZATION,
-                              ExplorerSection.RESULTS,
-                          ]
-                        : [ExplorerSection.RESULTS],
+                    expandedSections:
+                        parsedChart || dataAppVizUuid
+                            ? [
+                                  ExplorerSection.VISUALIZATION,
+                                  ExplorerSection.RESULTS,
+                              ]
+                            : [ExplorerSection.RESULTS],
                     unsavedChartVersion,
-                    unsavedColorPaletteUuid: null,
+                    unsavedColorPaletteUuid: colorPaletteUuid,
                     modals: {
                         format: {
                             isOpen: false,
@@ -328,8 +492,10 @@ export const useExplorerUrlState = (): ExplorerReduceState | undefined => {
                     parameters: {},
                     fromDashboard: fromDashboard ?? undefined,
                     isExploreFromHere: isExploreFromHere,
+                    ...parseChartSidebarFromSearchParams(search),
                     queryExecution: defaultQueryExecution,
                     preAggregate: defaultState.preAggregate,
+                    chartTypeAuthoring: null,
                 };
             } catch (e: any) {
                 const errorMessage = e.message ? ` Error: "${e.message}"` : '';
@@ -344,6 +510,7 @@ export const useExplorerUrlState = (): ExplorerReduceState | undefined => {
         search,
         showToastError,
         fromDashboard,
+        colorPaletteUuid,
         isExploreFromHere,
         health.data?.query.defaultLimit,
     ]);

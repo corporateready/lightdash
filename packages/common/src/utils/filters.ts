@@ -16,6 +16,7 @@ import {
     TableCalculationType,
     type CompiledField,
     type CustomSqlDimension,
+    type DashboardFilterableField,
     type Dimension,
     type Field,
     type FilterableDimension,
@@ -26,6 +27,7 @@ import {
     type TableCalculation,
 } from '../types/field';
 import {
+    FilterGroupOperator,
     FilterOperator,
     FilterType,
     isAndFilterGroup,
@@ -38,6 +40,7 @@ import {
     type DashboardFilterRule,
     type DashboardFilters,
     type DateFilterRule,
+    type FieldTarget,
     type FilterDashboardToRule,
     type FilterGroup,
     type FilterGroupItem,
@@ -80,6 +83,62 @@ export const getTotalFilterRules = (filters: Filters): FilterRule[] => [
     ...getFilterRulesFromGroup(filters.metrics),
     ...getFilterRulesFromGroup(filters.tableCalculations),
 ];
+
+export type FilterExpression = {
+    operator: FilterGroupOperator;
+    items: Array<FilterRule | FilterExpression>;
+};
+
+export const isFilterExpression = (
+    item: FilterRule | FilterExpression,
+): item is FilterExpression => 'items' in item;
+
+const getFilterGroupExpression = (
+    group: FilterGroup,
+    includeRule: (rule: FilterRule) => boolean,
+): FilterExpression | undefined => {
+    const operator = isAndFilterGroup(group)
+        ? FilterGroupOperator.and
+        : FilterGroupOperator.or;
+    const groupItems = isAndFilterGroup(group) ? group.and : group.or;
+    // Persisted groups can lack their items array; treat them as empty
+    const items = (groupItems ?? []).flatMap<FilterRule | FilterExpression>(
+        (item) => {
+            if (isFilterGroup(item)) {
+                const expression = getFilterGroupExpression(item, includeRule);
+                return expression ? [expression] : [];
+            }
+            return includeRule(item) ? [item] : [];
+        },
+    );
+
+    return items.length > 0 ? { operator, items } : undefined;
+};
+
+export const getFilterExpression = (
+    filters: Filters,
+    includeRule: (rule: FilterRule) => boolean = () => true,
+): FilterExpression | undefined => {
+    const groups = [
+        filters.dimensions,
+        filters.metrics,
+        filters.tableCalculations,
+    ].flatMap((group) => {
+        if (!group) return [];
+        const expression = getFilterGroupExpression(group, includeRule);
+        return expression ? [expression] : [];
+    });
+
+    if (groups.length === 0) return undefined;
+    if (groups.length === 1) return groups[0];
+
+    return {
+        operator: FilterGroupOperator.and,
+        items: groups.flatMap((group) =>
+            group.operator === FilterGroupOperator.and ? group.items : [group],
+        ),
+    };
+};
 
 export const countTotalFilterRules = (filters: Filters): number =>
     getTotalFilterRules(filters).length;
@@ -210,6 +269,29 @@ export const isWithValueFilter = (filterOperator: FilterOperator) =>
     filterOperator !== FilterOperator.NOT_NULL &&
     filterOperator !== FilterOperator.IN_PERIOD_TO_DATE;
 
+/**
+ * An "empty" dashboard filter is active (not disabled), uses a value-requiring
+ * operator, and has no value set — an unset default control the viewer fills in
+ * at runtime. It must not override chart-level filters until a value is picked.
+ *
+ * IN_THE_CURRENT / NOT_IN_THE_CURRENT are excluded: they compile from
+ * settings.unitOfTime, not values, so a value-less one is still an active
+ * filter. `values` uses Array.isArray to tolerate hand-authored YAML where
+ * `values:` / `values: ~` parses to JS `null` instead of `[]`.
+ */
+export const isEmptyDashboardFilterRule = (filter: {
+    operator: FilterOperator;
+    values?: unknown[] | null;
+    disabled?: boolean;
+    includeNull?: boolean;
+}): boolean =>
+    filter.disabled !== true &&
+    isWithValueFilter(filter.operator) &&
+    filter.operator !== FilterOperator.IN_THE_CURRENT &&
+    filter.operator !== FilterOperator.NOT_IN_THE_CURRENT &&
+    filter.includeNull !== true &&
+    (!Array.isArray(filter.values) || filter.values.length === 0);
+
 export const getFilterRuleWithDefaultValue = <T extends FilterRule>(
     filterType: FilterType,
     field: FilterableField | undefined,
@@ -230,6 +312,15 @@ export const getFilterRuleWithDefaultValue = <T extends FilterRule>(
         switch (filterType) {
             case FilterType.DATE: {
                 const value = values ? values[0] : undefined;
+
+                // equals/notEquals match any of the values (see
+                // renderDateOrTimestampFilterSql), so keep the whole list.
+                // Every other date operator takes a single value.
+                const keepsMultipleDateValues =
+                    !!values &&
+                    values.length > 1 &&
+                    (filterRule.operator === FilterOperator.EQUALS ||
+                        filterRule.operator === FilterOperator.NOT_EQUALS);
 
                 const isTimestamp =
                     !field ||
@@ -257,48 +348,20 @@ export const getFilterRuleWithDefaultValue = <T extends FilterRule>(
                         completed: false,
                     } as DateFilterRule['settings'];
                 } else if (isTimestamp) {
-                    const valueIsDate =
-                        value !== undefined && typeof value !== 'number';
-
                     // NOTE: Using .format() makes this a standard ISO string
-                    const timestampValue = valueIsDate
-                        ? dayjs(value).format()
-                        : dayjs().format();
+                    const toTimestampValue = (rawValue: AnyType) =>
+                        rawValue !== undefined && typeof rawValue !== 'number'
+                            ? dayjs(rawValue).format()
+                            : dayjs().format();
 
-                    filterRuleDefaults.values = [timestampValue];
+                    filterRuleDefaults.values = keepsMultipleDateValues
+                        ? (values ?? []).map(toTimestampValue)
+                        : [toTimestampValue(value)];
                 } else {
-                    const valueIsDate =
-                        value !== undefined && typeof value !== 'number';
-
-                    const defaultTimeIntervalValues: Record<
-                        string,
-                        moment.Moment
-                    > = {
-                        [TimeFrames.DAY]: moment(),
-                        [TimeFrames.WEEK]: moment(
-                            valueIsDate ? value : undefined,
-                        ).startOf('week'),
-                        [TimeFrames.QUARTER]: moment(
-                            valueIsDate ? value : undefined,
-                        ).startOf('quarter'),
-                        [TimeFrames.MONTH]: moment(
-                            valueIsDate ? value : undefined,
-                        ).startOf('month'),
-                        [TimeFrames.YEAR]: moment(
-                            valueIsDate ? value : undefined,
-                        ).startOf('year'),
-                    };
-
                     const fieldTimeInterval =
                         isDimension(field) && field.timeInterval
                             ? field.timeInterval
                             : undefined;
-
-                    const defaultDate =
-                        fieldTimeInterval &&
-                        defaultTimeIntervalValues[fieldTimeInterval]
-                            ? defaultTimeIntervalValues[fieldTimeInterval]
-                            : moment();
 
                     // Shift TIMESTAMP-base time-interval dims into the project
                     // TZ before extracting the date. Plain DATE / DATE-base
@@ -307,27 +370,55 @@ export const getFilterRuleWithDefaultValue = <T extends FilterRule>(
                         ? timezone || 'UTC'
                         : 'UTC';
 
-                    const dateValue = valueIsDate
-                        ? formatDate(
-                              moment
-                                  .utc(value)
-                                  .tz(effectiveZone)
-                                  .format('YYYY-MM-DD'),
-                              // For QUARTER, we don't want to use the field's time interval(YYYY-[Q]Q) because the date is already in the correct format when generating the SQL
-                              fieldTimeInterval === TimeFrames.QUARTER
-                                  ? undefined
-                                  : fieldTimeInterval, // Use the field's time interval if it has one
-                              false,
-                          )
-                        : formatDate(defaultDate, undefined, false);
+                    const toDateValue = (rawValue: AnyType) => {
+                        const valueIsDate =
+                            rawValue !== undefined &&
+                            typeof rawValue !== 'number';
 
-                    filterRuleDefaults.values = [dateValue];
+                        if (valueIsDate) {
+                            return formatDate(
+                                moment
+                                    .utc(rawValue)
+                                    .tz(effectiveZone)
+                                    .format('YYYY-MM-DD'),
+                                // For QUARTER, we don't want to use the field's time interval(YYYY-[Q]Q) because the date is already in the correct format when generating the SQL
+                                fieldTimeInterval === TimeFrames.QUARTER
+                                    ? undefined
+                                    : fieldTimeInterval, // Use the field's time interval if it has one
+                                false,
+                            );
+                        }
+
+                        const defaultTimeIntervalValues: Record<
+                            string,
+                            moment.Moment
+                        > = {
+                            [TimeFrames.DAY]: moment(),
+                            [TimeFrames.WEEK]: moment().startOf('week'),
+                            [TimeFrames.QUARTER]: moment().startOf('quarter'),
+                            [TimeFrames.MONTH]: moment().startOf('month'),
+                            [TimeFrames.YEAR]: moment().startOf('year'),
+                        };
+
+                        const defaultDate =
+                            fieldTimeInterval &&
+                            defaultTimeIntervalValues[fieldTimeInterval]
+                                ? defaultTimeIntervalValues[fieldTimeInterval]
+                                : moment();
+
+                        return formatDate(defaultDate, undefined, false);
+                    };
+
+                    filterRuleDefaults.values = keepsMultipleDateValues
+                        ? (values ?? []).map(toDateValue)
+                        : [toDateValue(value)];
                 }
                 break;
             }
             case FilterType.BOOLEAN: {
-                filterRuleDefaults.values =
-                    values !== undefined ? values : [false];
+                // No default value: an unset boolean filter is a no-op until the
+                // user picks true/false (see renderBooleanFilterSql)
+                filterRuleDefaults.values = values !== undefined ? values : [];
                 break;
             }
             default:
@@ -362,27 +453,70 @@ export const getFilterRuleFromFieldWithDefaultValue = <T extends FilterRule>(
         timezone,
     );
 
+// Quick filters created from a cell/chart value are either inclusive or exclusive
+export type QuickFilterOperator =
+    | FilterOperator.EQUALS
+    | FilterOperator.NOT_EQUALS;
+
 export const createFilterRuleFromField = (
     field: FilterableField,
     value?: AnyType,
     timezone?: string,
-): FilterRule =>
-    getFilterRuleFromFieldWithDefaultValue(
+    operator: QuickFilterOperator = FilterOperator.EQUALS,
+): FilterRule => {
+    const isExclude = operator === FilterOperator.NOT_EQUALS;
+    let ruleOperator: FilterOperator = operator;
+    if (value === null) {
+        ruleOperator = isExclude
+            ? FilterOperator.NOT_NULL
+            : FilterOperator.NULL;
+    }
+    return getFilterRuleFromFieldWithDefaultValue(
         field,
         {
             id: uuidv4(),
             target: {
                 fieldId: getItemId(field),
             },
-            operator:
-                value === null ? FilterOperator.NULL : FilterOperator.EQUALS,
+            operator: ruleOperator,
         },
-        value ? [value] : [],
+        // isNil, not truthiness: false and 0 are real filter values
+        isNil(value) ? [] : [value],
         timezone,
     );
+};
 
 export const matchFieldExact = (a: Field) => (b: Field) =>
     a.type === b.type && a.name === b.name && a.table === b.table;
+
+/** Same query field and the same labels; explores that relabel a shared join alias yield distinct dashboard fields. */
+const matchDashboardFilterableField = (a: Field) => (b: Field) =>
+    matchFieldExact(a)(b) &&
+    a.label === b.label &&
+    a.tableLabel === b.tableLabel;
+
+export const getDashboardFilterableFieldKey = (field: Field): string =>
+    `${getItemId(field)}::${field.tableLabel}::${field.label}`;
+
+/** The field a dashboard filter displays: an explicitly targeted tile carries its own explore's labels. */
+export const getDashboardFilterField = <T extends ItemsMap[string]>(
+    itemsMap: Record<string, T>,
+    rule: {
+        target: FieldTarget;
+        tileTargets?: DashboardFilterRule['tileTargets'];
+    },
+    fieldsByTile?: Record<string, DashboardFilterableField[]>,
+): T | DashboardFilterableField | undefined => {
+    for (const [tileUuid, target] of Object.entries(rule.tileTargets ?? {})) {
+        if (target && target.fieldId === rule.target.fieldId) {
+            const field = fieldsByTile?.[tileUuid]?.find(
+                (candidate) => getItemId(candidate) === target.fieldId,
+            );
+            if (field) return field;
+        }
+    }
+    return itemsMap[rule.target.fieldId];
+};
 
 export const matchFieldByTypeAndName = (a: Field) => (b: Field) =>
     a.type === b.type && a.name === b.name;
@@ -396,6 +530,72 @@ export const isTileFilterable = (tile: DashboardTile) =>
         DashboardTileTypes.DATA_APP,
     ].includes(tile.type);
 
+const isChartTile = (tile: Pick<DashboardTile, 'type'>): boolean =>
+    tile.type === DashboardTileTypes.SAVED_CHART ||
+    tile.type === DashboardTileTypes.SQL_CHART;
+
+/**
+ * Tab scoping is emulated by excluding (`tileTargets[uuid] = false`) every
+ * chart tile on the other tabs, so a newly added tile — absent from every
+ * tileTargets — auto-applies filters that were scoped away from its tab.
+ * Infer the tab scope instead: when a filter already excludes every chart
+ * tile on the new tile's tab, exclude the new tile too. Tabs with no chart
+ * tiles keep the auto-apply default (there is no configuration to infer from).
+ */
+export const excludeTilesFromTabScopedFilters = (
+    dashboardFilters: DashboardFilters,
+    newTiles: Array<Pick<DashboardTile, 'uuid' | 'type' | 'tabUuid'>>,
+    existingTiles: Array<Pick<DashboardTile, 'uuid' | 'type' | 'tabUuid'>>,
+): DashboardFilters => {
+    const newChartTiles = newTiles.filter(
+        (tile) => isChartTile(tile) && tile.tabUuid,
+    );
+    if (newChartTiles.length === 0) return dashboardFilters;
+
+    const existingChartTileUuidsByTab = existingTiles
+        .filter((tile) => isChartTile(tile) && tile.tabUuid)
+        .reduce<Record<string, string[]>>((acc, tile) => {
+            acc[tile.tabUuid!] = [...(acc[tile.tabUuid!] ?? []), tile.uuid];
+            return acc;
+        }, {});
+
+    let hasChanges = false;
+    const excludeFromRules = (rules: DashboardFilterRule[]) =>
+        rules.map((rule) => {
+            const excludedTiles = newChartTiles.filter((tile) => {
+                const tabTileUuids =
+                    existingChartTileUuidsByTab[tile.tabUuid!] ?? [];
+                return (
+                    tabTileUuids.length > 0 &&
+                    tabTileUuids.every(
+                        (uuid) => rule.tileTargets?.[uuid] === false,
+                    )
+                );
+            });
+            if (excludedTiles.length === 0) return rule;
+            hasChanges = true;
+            return {
+                ...rule,
+                tileTargets: {
+                    ...rule.tileTargets,
+                    ...Object.fromEntries(
+                        excludedTiles.map((tile) => [
+                            tile.uuid,
+                            false as const,
+                        ]),
+                    ),
+                },
+            };
+        });
+
+    const next: DashboardFilters = {
+        dimensions: excludeFromRules(dashboardFilters.dimensions),
+        metrics: excludeFromRules(dashboardFilters.metrics),
+        tableCalculations: excludeFromRules(dashboardFilters.tableCalculations),
+    };
+    return hasChanges ? next : dashboardFilters;
+};
+
 const getDefaultTileTargets = (
     field: FilterableDimension | Metric | Field,
     availableTileFilters: Record<
@@ -408,7 +608,9 @@ const getDefaultTileTargets = (
     >((acc, [tileUuid, availableFilters]) => {
         if (!availableFilters) return acc;
 
-        const filterableField = availableFilters.find(matchFieldExact(field));
+        const filterableField = availableFilters.find(
+            matchDashboardFilterableField(field),
+        );
         if (!filterableField) return acc;
 
         return {
@@ -419,6 +621,30 @@ const getDefaultTileTargets = (
             },
         };
     }, {});
+
+/** Tiles that carry the same query field under different labels are excluded, not left to auto-apply */
+const getRelabelledTileExclusions = (
+    field: FilterableDimension | Metric | Field,
+    availableTileFilters: Record<
+        string,
+        (FilterableDimension | Metric)[] | undefined
+    >,
+) =>
+    Object.entries(availableTileFilters).reduce<Record<string, false>>(
+        (acc, [tileUuid, availableFilters]) => {
+            if (!availableFilters) return acc;
+            const sameQueryField = availableFilters.some(
+                matchFieldExact(field),
+            );
+            const sameLabels = availableFilters.some(
+                matchDashboardFilterableField(field),
+            );
+            return sameQueryField && !sameLabels
+                ? { ...acc, [tileUuid]: false }
+                : acc;
+        },
+        {},
+    );
 
 export const applyDefaultTileTargets = (
     filterRule: DashboardFilterRule<
@@ -469,7 +695,10 @@ export const createDashboardFilterRuleFromField = ({
                 tableName: field.table,
                 fieldName: field.name,
             },
-            tileTargets: getDefaultTileTargets(field, availableTileFilters),
+            tileTargets: {
+                ...getRelabelledTileExclusions(field, availableTileFilters),
+                ...getDefaultTileTargets(field, availableTileFilters),
+            },
             disabled: !isTemporary,
             label: undefined,
         },
@@ -535,15 +764,20 @@ export const createDashboardFilterRuleFromSqlColumn = ({
 type AddFilterRuleArgs = {
     filters: Filters;
     field: FilterableField;
+    /** Override the display field's id when it represents another source. */
+    targetFieldId?: string;
     value?: AnyType;
     timezone?: string;
+    operator?: QuickFilterOperator;
 };
 
 export const addFilterRule = ({
     filters,
     field,
+    targetFieldId,
     value,
     timezone,
+    operator,
 }: AddFilterRuleArgs): Filters => {
     const groupKey = ((f: AnyType) => {
         if (isDimension(f) || isCustomSqlDimension(f)) {
@@ -555,6 +789,21 @@ export const addFilterRule = ({
         return 'metrics';
     })(field);
     const group = filters[groupKey];
+    const createdRule = createFilterRuleFromField(
+        field,
+        value,
+        timezone,
+        operator,
+    );
+    const rule = targetFieldId
+        ? {
+              ...createdRule,
+              target: {
+                  ...createdRule.target,
+                  fieldId: targetFieldId,
+              },
+          }
+        : createdRule;
     return {
         ...filters,
         [groupKey]: {
@@ -562,7 +811,7 @@ export const addFilterRule = ({
             ...group,
             [getFilterGroupItemsPropertyName(group)]: [
                 ...getItemsFromFilterGroup(group),
-                createFilterRuleFromField(field, value, timezone),
+                rule,
             ],
         },
     };
@@ -758,7 +1007,8 @@ export const getDashboardFilterRulesForTile = (
     needsExplicitTileOverride: boolean = false, // If true, we don't apply the default tile targets to the filter rule'
 ): DashboardFilterRule[] =>
     rules
-        .filter((rule) => !rule.disabled)
+        // Skip disabled and unset (empty) filters — neither applies to a tile.
+        .filter((rule) => !rule.disabled && !isEmptyDashboardFilterRule(rule))
         .map((filter) => {
             const tileConfig = filter.tileTargets?.[tileUuid];
 
@@ -779,6 +1029,13 @@ export const getDashboardFilterRulesForTile = (
 
             return {
                 ...filter,
+                ...(tileConfig.fieldId !== filter.target.fieldId && {
+                    settings: {
+                        ...filter.settings,
+                        sourceTarget:
+                            filter.settings?.sourceTarget ?? filter.target,
+                    },
+                }),
                 target: tileConfig,
             };
         })
@@ -855,7 +1112,13 @@ export const getDashboardFilterRulesForTables = (
     availableFieldIds: string[],
     rules: DashboardFilterRule[],
 ): DashboardFilterRule[] =>
-    rules.filter((f) => availableFieldIds.includes(f.target.fieldId));
+    rules.filter(
+        (f) =>
+            // Unset (empty) filters don't apply, so they must not appear in the
+            // applied-filters set that callers diff against chart-level filters.
+            availableFieldIds.includes(f.target.fieldId) &&
+            !isEmptyDashboardFilterRule(f),
+    );
 
 export const getDashboardFilterRulesForTileAndTables = (
     tileUuid: string,
@@ -1026,6 +1289,158 @@ export const addFiltersToMetricQuery = (
 });
 
 /**
+ * Pairs each saved rule with at most one override: by id first, then the first
+ * unmatched override on the same field (an override authored against a rule
+ * the chart has since recreated). Mirrors getDashboardDimensionOverrideMatches.
+ */
+const getChartFilterRuleOverrideMatches = (
+    savedRules: FilterRule[],
+    overrides: FilterRule[],
+): {
+    overrideBySavedRuleId: Map<string, FilterRule>;
+    appliedIds: Set<string>;
+} => {
+    const savedIds = new Set(savedRules.map((rule) => rule.id));
+    const appliedIds = new Set<string>();
+    const overrideBySavedRuleId = new Map<string, FilterRule>();
+    savedRules.forEach((savedRule) => {
+        const override =
+            overrides.find((candidate) => candidate.id === savedRule.id) ??
+            overrides.find(
+                (candidate) =>
+                    !savedIds.has(candidate.id) &&
+                    !appliedIds.has(candidate.id) &&
+                    candidate.target.fieldId === savedRule.target.fieldId,
+            );
+        if (override) {
+            appliedIds.add(override.id);
+            overrideBySavedRuleId.set(savedRule.id, override);
+        }
+    });
+    return { overrideBySavedRuleId, appliedIds };
+};
+
+const replaceOverriddenRules = (
+    group: FilterGroup,
+    overrideBySavedRuleId: Map<string, FilterRule>,
+): FilterGroup => {
+    const items = getItemsFromFilterGroup(group).map(
+        (item): FilterGroupItem => {
+            if (isFilterGroup(item)) {
+                return replaceOverriddenRules(item, overrideBySavedRuleId);
+            }
+            const override = overrideBySavedRuleId.get(item.id);
+            if (!override) return item;
+            // The saved rule owns identity, target and requirement flag; the
+            // override only carries operator, values, settings and disabled.
+            return {
+                ...override,
+                id: item.id,
+                target: item.target,
+                required: item.required,
+            };
+        },
+    );
+    return isAndFilterGroup(group)
+        ? { id: group.id, and: items }
+        : { id: group.id, or: items };
+};
+
+/** Drops the rules that `keep` rejects, and any group left empty by that. */
+const pruneFilterGroup = (
+    group: FilterGroup,
+    keep: (rule: FilterRule) => boolean,
+): FilterGroup | undefined => {
+    const items = getItemsFromFilterGroup(group).reduce<FilterGroupItem[]>(
+        (acc, item) => {
+            if (isFilterGroup(item)) {
+                const pruned = pruneFilterGroup(item, keep);
+                return pruned ? [...acc, pruned] : acc;
+            }
+            return keep(item)
+                ? [...acc, { ...item, required: undefined }]
+                : acc;
+        },
+        [],
+    );
+    if (items.length === 0) return undefined;
+    return isAndFilterGroup(group)
+        ? { id: group.id, and: items }
+        : { id: group.id, or: items };
+};
+
+/**
+ * Scheduled-delivery overrides for one of a chart's saved filter groups. An
+ * override replaces the saved rule it matches (see
+ * getChartFilterRuleOverrideMatches) in place, so nested AND/OR structure is
+ * kept; overrides matching nothing are ANDed on with `required` stripped, so a
+ * delivery can narrow a chart but never widen a required filter away.
+ */
+export const applyChartFilterOverridesToFilterGroup = (
+    savedGroup: FilterGroup | undefined,
+    overrideGroup: FilterGroup | undefined,
+): FilterGroup | undefined => {
+    if (!overrideGroup) return savedGroup;
+    const { overrideBySavedRuleId, appliedIds } =
+        getChartFilterRuleOverrideMatches(
+            getFilterRulesFromGroup(savedGroup),
+            getFilterRulesFromGroup(overrideGroup),
+        );
+    const replaced = savedGroup
+        ? replaceOverriddenRules(savedGroup, overrideBySavedRuleId)
+        : undefined;
+    const appended = pruneFilterGroup(
+        overrideGroup,
+        (rule) => !appliedIds.has(rule.id),
+    );
+    if (!appended) return replaced;
+    return combineFilterGroups(replaced, appended);
+};
+
+/**
+ * Whether any override would take the place of a saved rule (by id or field),
+ * i.e. change what the chart author saved rather than only narrow it. Callers
+ * gate this on the same permission that allows running ad-hoc explore queries.
+ */
+export const doChartFilterOverridesReplaceSavedRules = (
+    savedFilters: Filters,
+    overrides: Filters,
+): boolean =>
+    (['dimensions', 'metrics', 'tableCalculations'] as const).some(
+        (section) =>
+            getChartFilterRuleOverrideMatches(
+                getFilterRulesFromGroup(savedFilters[section]),
+                getFilterRulesFromGroup(overrides[section]),
+            ).appliedIds.size > 0,
+    );
+
+export const applyChartFilterOverrides = (
+    savedFilters: Filters,
+    overrides: Filters,
+): Filters => ({
+    dimensions: applyChartFilterOverridesToFilterGroup(
+        savedFilters.dimensions,
+        overrides.dimensions,
+    ),
+    metrics: applyChartFilterOverridesToFilterGroup(
+        savedFilters.metrics,
+        overrides.metrics,
+    ),
+    tableCalculations: applyChartFilterOverridesToFilterGroup(
+        savedFilters.tableCalculations,
+        overrides.tableCalculations,
+    ),
+});
+
+export const applyChartFilterOverridesToMetricQuery = (
+    metricQuery: MetricQuery,
+    overrides: Filters,
+): MetricQuery => ({
+    ...metricQuery,
+    filters: applyChartFilterOverrides(metricQuery.filters, overrides),
+});
+
+/**
  * This function is used to override the chart filter with the dashboard filter
  * if the dashboard filter is a time or date dimension and the chart filter is a different granularity of the same dimension
  * or if the dashboard filter is the same dimension as the chart filter
@@ -1041,33 +1456,61 @@ export const addFiltersToMetricQuery = (
  * @param timeBasedOverrideMap - The map of overridden filters
  * @returns The overridden item
  */
+const doesDashboardFilterOverrideChartFilter = (
+    chartFilter: FilterRule,
+    dashboardFilter: FilterRule,
+    timeBasedOverrideMap: TimeBasedOverrideMap | undefined,
+): boolean => {
+    const overrideData = timeBasedOverrideMap?.[dashboardFilter.id];
+
+    return (
+        overrideData?.fieldsToChange.includes(chartFilter.target.fieldId) ||
+        dashboardFilter.target.fieldId === chartFilter.target.fieldId
+    );
+};
+
 const findAndOverrideChartFilter = (
     item: FilterGroupItem,
     filterRulesList: FilterRule[],
     timeBasedOverrideMap: TimeBasedOverrideMap | undefined,
 ): FilterGroupItem => {
-    const identicalDashboardFilter = isFilterRule(item)
-        ? filterRulesList.find((dashboardFilter) => {
-              const overrideData = timeBasedOverrideMap?.[dashboardFilter.id];
-              return (
-                  overrideData?.fieldsToChange.includes(item.target.fieldId) ||
-                  dashboardFilter.target.fieldId === item.target.fieldId
-              );
-          })
-        : undefined;
+    if (isFilterGroup(item)) {
+        const overrideNested = (nested: FilterGroupItem) =>
+            findAndOverrideChartFilter(
+                nested,
+                filterRulesList,
+                timeBasedOverrideMap,
+            );
+        return isAndFilterGroup(item)
+            ? { id: item.id, and: item.and.map(overrideNested) }
+            : { id: item.id, or: item.or.map(overrideNested) };
+    }
 
-    return identicalDashboardFilter
+    const overridingDashboardFilter = filterRulesList.find((dashboardFilter) =>
+        doesDashboardFilterOverrideChartFilter(
+            item,
+            dashboardFilter,
+            timeBasedOverrideMap,
+        ),
+    );
+
+    return overridingDashboardFilter
         ? {
               ...item,
               target: {
-                  fieldId: identicalDashboardFilter.target.fieldId,
+                  fieldId: overridingDashboardFilter.target.fieldId,
               },
-              id: identicalDashboardFilter.id,
-              values: identicalDashboardFilter.values,
-              ...(identicalDashboardFilter.settings && {
-                  settings: identicalDashboardFilter.settings,
+              id: overridingDashboardFilter.id,
+              values: overridingDashboardFilter.values,
+              ...(overridingDashboardFilter.settings && {
+                  settings: overridingDashboardFilter.settings,
               }),
-              operator: identicalDashboardFilter.operator,
+              operator: overridingDashboardFilter.operator,
+              // Set unconditionally: the chart rule's own includeNull and
+              // disabled state must not survive being replaced by an active
+              // dashboard rule.
+              includeNull: overridingDashboardFilter.includeNull,
+              disabled: overridingDashboardFilter.disabled,
           }
         : item;
 };
@@ -1169,10 +1612,20 @@ const convertDashboardFilterRuleToFilterRule = (
     ...(dashboardFilterRule.disabled && {
         disabled: dashboardFilterRule.disabled,
     }),
+    ...(dashboardFilterRule.includeNull === true && {
+        includeNull: dashboardFilterRule.includeNull,
+    }),
 });
 
 const getFieldIdWithoutTable = (fieldId: string, tableName: string) =>
     fieldId.replace(`${tableName}_`, '');
+
+const getBaseTimeDimensionName = (
+    timeDimension: Dimension,
+): string | undefined => {
+    if (timeDimension.isIntervalBase) return timeDimension.name;
+    return timeDimension.timeIntervalBaseDimensionName;
+};
 
 /**
  * Tracks time-based metric filters that need overriding via external map
@@ -1202,7 +1655,11 @@ export const trackWhichTimeBasedMetricFiltersToOverride = (
             )
         ];
 
-    if (!baseDimension?.timeIntervalBaseDimensionName) {
+    const baseTimeDimensionName = baseDimension
+        ? getBaseTimeDimensionName(baseDimension)
+        : undefined;
+
+    if (!baseTimeDimensionName) {
         return { filter: dashboardFilterRule };
     }
 
@@ -1227,8 +1684,9 @@ export const trackWhichTimeBasedMetricFiltersToOverride = (
                             ?.dimensions[itemFieldId];
 
                     const isTimeOrDateDimension =
-                        itemDimension?.timeIntervalBaseDimensionName ===
-                        baseDimension.timeIntervalBaseDimensionName;
+                        itemDimension !== undefined &&
+                        getBaseTimeDimensionName(itemDimension) ===
+                            baseTimeDimensionName;
 
                     if (isTimeOrDateDimension) {
                         return [...acc, item.target.fieldId];
@@ -1247,12 +1705,75 @@ export const trackWhichTimeBasedMetricFiltersToOverride = (
         ? {
               filter: dashboardFilterRule,
               overrideData: {
-                  baseTimeDimensionName:
-                      baseDimension.timeIntervalBaseDimensionName,
+                  baseTimeDimensionName,
                   fieldsToChange,
               },
           }
         : { filter: dashboardFilterRule };
+};
+
+export const getOverriddenChartFilterRuleIds = ({
+    chartFilters,
+    dashboardFilters,
+    explore,
+}: {
+    chartFilters: Filters;
+    dashboardFilters: DashboardFilters | undefined;
+    explore: Explore | undefined;
+}): Set<string> => {
+    if (!dashboardFilters) {
+        return new Set();
+    }
+
+    const timeBasedOverrideMap =
+        dashboardFilters.dimensions.reduce<TimeBasedOverrideMap>(
+            (overrideMap, dashboardFilter) => {
+                const { overrideData } =
+                    trackWhichTimeBasedMetricFiltersToOverride(
+                        chartFilters.dimensions,
+                        dashboardFilter,
+                        explore,
+                    );
+
+                return overrideData
+                    ? {
+                          ...overrideMap,
+                          [dashboardFilter.id]: overrideData,
+                      }
+                    : overrideMap;
+            },
+            {},
+        );
+    const getOverriddenRuleIds = (
+        chartFilterGroup: FilterGroup | undefined,
+        dashboardFilterRules: DashboardFilterRule[],
+        overrideMap: TimeBasedOverrideMap | undefined,
+    ) =>
+        getItemsFromFilterGroup(chartFilterGroup)
+            .filter(isFilterRule)
+            .filter((chartFilter) =>
+                dashboardFilterRules.some((dashboardFilter) =>
+                    doesDashboardFilterOverrideChartFilter(
+                        chartFilter,
+                        dashboardFilter,
+                        overrideMap,
+                    ),
+                ),
+            )
+            .map((filter) => filter.id);
+
+    return new Set([
+        ...getOverriddenRuleIds(
+            chartFilters.dimensions,
+            dashboardFilters.dimensions,
+            timeBasedOverrideMap,
+        ),
+        ...getOverriddenRuleIds(
+            chartFilters.metrics,
+            dashboardFilters.metrics,
+            undefined,
+        ),
+    ]);
 };
 
 /**
@@ -1269,7 +1790,10 @@ export const addDashboardFiltersToMetricQuery = (
 ): MetricQuery => {
     const timeBasedOverrideMap: TimeBasedOverrideMap = {};
 
+    // Drop unset (empty) filters so they neither add a clause nor replace a
+    // chart-level filter on the same field.
     const processedDimensionFilters = dashboardFilters.dimensions
+        .filter((filter) => !isEmptyDashboardFilterRule(filter))
         .map((filter) => {
             const result = trackWhichTimeBasedMetricFiltersToOverride(
                 metricQuery.filters?.dimensions,
@@ -1293,29 +1817,37 @@ export const addDashboardFiltersToMetricQuery = (
             ),
             metrics: overrideFilterGroupWithFilterRules(
                 metricQuery.filters?.metrics,
-                dashboardFilters.metrics.map(
-                    convertDashboardFilterRuleToFilterRule,
-                ),
+                dashboardFilters.metrics
+                    .filter((filter) => !isEmptyDashboardFilterRule(filter))
+                    .map(convertDashboardFilterRuleToFilterRule),
                 undefined,
             ),
             tableCalculations: overrideFilterGroupWithFilterRules(
                 metricQuery.filters?.tableCalculations,
-                dashboardFilters.tableCalculations.map(
-                    convertDashboardFilterRuleToFilterRule,
-                ),
+                dashboardFilters.tableCalculations
+                    .filter((filter) => !isEmptyDashboardFilterRule(filter))
+                    .map(convertDashboardFilterRuleToFilterRule),
                 undefined,
             ),
         },
     };
 };
 
-// Mirrors the UI's getAvailableFiltersForSavedQueries. Matching on field-id (not tableName) is the source of truth — see getDashboardFilterRulesForTables below for why.
-export const getAvailableFilterFieldIds = (explore: Explore): string[] => [
+// Dashboard pickers (getAvailableFiltersForSavedQueries) omit hidden fields, but a saved rule on a hidden field still applies, as in default_filters.
+// Matching on field-id (not tableName) is the source of truth — see getDashboardFilterRulesForTables below for why.
+export const getExecutableFilterFieldIds = (explore: Explore): string[] => [
     ...Object.entries(getDimensionMapFromTables(explore.tables))
-        .filter(([, field]) => isFilterableDimension(field) && !field.hidden)
+        .filter(([, field]) => isFilterableDimension(field))
+        .map(([fieldId]) => fieldId),
+    ...Object.keys(getMetricsMapFromTables(explore.tables)),
+];
+
+export const getHiddenFilterableFieldIds = (explore: Explore): string[] => [
+    ...Object.entries(getDimensionMapFromTables(explore.tables))
+        .filter(([, field]) => isFilterableDimension(field) && field.hidden)
         .map(([fieldId]) => fieldId),
     ...Object.entries(getMetricsMapFromTables(explore.tables))
-        .filter(([, field]) => !field.hidden)
+        .filter(([, field]) => field.hidden)
         .map(([fieldId]) => fieldId),
 ];
 
@@ -1335,7 +1867,7 @@ export const applyDashboardFiltersForTile = ({
 } => {
     const appliedDashboardFilters = getDashboardFiltersForTileAndTables(
         tileUuid,
-        getAvailableFilterFieldIds(explore),
+        getExecutableFilterFieldIds(explore),
         dashboardFilters,
     );
     return {
@@ -1361,6 +1893,12 @@ export const createFilterRuleFromModelRequiredFilterRule = (
     ...(filter.settings?.unitOfTime && {
         settings: {
             unitOfTime: filter.settings.unitOfTime,
+            ...(filter.settings.toDate !== undefined && {
+                toDate: filter.settings.toDate,
+            }),
+            ...(filter.settings.excludeToday !== undefined && {
+                excludeToday: filter.settings.excludeToday,
+            }),
         },
     }),
     required: filter.required === undefined ? true : filter.required,
@@ -1373,13 +1911,6 @@ export const isFilterRuleInQuery = (
     explore: Explore,
 ): undefined | boolean => {
     if (!dimensionsFilterGroup) return undefined;
-
-    const getBaseTimeDimensionName = (
-        timeDimension: Dimension,
-    ): string | undefined => {
-        if (timeDimension.isIntervalBase) return timeDimension.name;
-        return timeDimension.timeIntervalBaseDimensionName;
-    };
 
     const getDimensionFromExplore = (fieldId: string): Dimension | undefined =>
         Object.values(explore.tables)
@@ -1506,3 +2037,93 @@ export const resetRequiredFilterRules = (
         [getFilterGroupItemsPropertyName(filterGroup)]: updatedItems,
     };
 };
+
+export type UnmetFilterRequirement =
+    | { type: 'single'; filter: DashboardFilterRule }
+    | { type: 'group'; groupId: string; filters: DashboardFilterRule[] };
+
+export type FilterRequirementRule = {
+    type: 'single' | 'group';
+    /**
+     * `requiredGroupId` for shared rules; the filter's own id for one-member
+     * rules expressed via `required: true`.
+     */
+    id: string;
+    members: DashboardFilterRule[];
+};
+
+/**
+ * Unified view of filter requirements: every requirement is a rule, a set of
+ * filters where at least one must be set. `required: true` is a one-member
+ * rule; filters sharing a `requiredGroupId` form one rule. Rules are returned
+ * in first-appearance order (dimensions before metrics). `required` wins when
+ * hand-authored JSON sets both flags on the same filter.
+ */
+export const getFilterRequirementRules = (
+    dashboardFilters: Pick<DashboardFilters, 'dimensions' | 'metrics'>,
+): FilterRequirementRule[] => {
+    const filterRules = [
+        ...dashboardFilters.dimensions,
+        ...dashboardFilters.metrics,
+    ];
+
+    const rules: FilterRequirementRule[] = [];
+    const groupRulesById = new Map<string, FilterRequirementRule>();
+    filterRules.forEach((filterRule) => {
+        if (filterRule.required) {
+            rules.push({
+                type: 'single',
+                id: filterRule.id,
+                members: [filterRule],
+            });
+            return;
+        }
+        if (!filterRule.requiredGroupId) return;
+
+        const existingRule = groupRulesById.get(filterRule.requiredGroupId);
+        if (existingRule) {
+            existingRule.members.push(filterRule);
+            return;
+        }
+        const rule: FilterRequirementRule = {
+            type: 'group',
+            id: filterRule.requiredGroupId,
+            members: [filterRule],
+        };
+        groupRulesById.set(filterRule.requiredGroupId, rule);
+        rules.push(rule);
+    });
+    return rules;
+};
+
+/**
+ * A rule only satisfies a requirement when it actually filters the query:
+ * disabled rules and enabled rules with a value-requiring operator and no
+ * values (e.g. a stale URL override) are both valueless. Value-less operators
+ * like `isNull` / `inTheCurrent` still filter.
+ */
+export const isValuelessDashboardFilterRule = (
+    rule: DashboardFilterRule,
+): boolean => rule.disabled === true || isEmptyDashboardFilterRule(rule);
+
+/** A rule is satisfied when any member actually filters the query */
+export const isRequirementRuleSatisfied = (
+    rule: FilterRequirementRule,
+): boolean =>
+    rule.members.some((member) => !isValuelessDashboardFilterRule(member));
+
+/**
+ * Unmet requirements over dimensions + metrics, derived from
+ * `getFilterRequirementRules` so the dashboard lock and the requirement UIs
+ * share a single rule derivation.
+ */
+export const getUnmetFilterRequirements = (
+    dashboardFilters: DashboardFilters,
+): UnmetFilterRequirement[] =>
+    getFilterRequirementRules(dashboardFilters)
+        .filter((rule) => !isRequirementRuleSatisfied(rule))
+        .map<UnmetFilterRequirement>((rule) =>
+            rule.type === 'single'
+                ? { type: 'single', filter: rule.members[0] }
+                : { type: 'group', groupId: rule.id, filters: rule.members },
+        );

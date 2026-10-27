@@ -1,39 +1,55 @@
 {
     "name": "@lightdash/query-sdk",
-    "version": "0.3011.1",
+    "version": "3.68.2",
     "private": false,
-    "type": "module",
     "description": "SDK for building custom data apps against the Lightdash semantic layer",
     "license": "MIT",
     "repository": {
         "type": "git",
         "url": "https://github.com/lightdash/lightdash.git"
     },
-    "sideEffects": false,
     "files": [
         "dist"
     ],
+    "type": "module",
+    "sideEffects": false,
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "exports": {
         ".": {
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js"
+        },
+        "./features": {
+            "types": "./dist/features.d.ts",
+            "import": "./dist/features.js"
         }
     },
     "scripts": {
+        "prebuild": "node ./scripts/generateSdkVersion.mjs",
         "build": "tsc --project tsconfig.build.json",
-        "typecheck": "tsc --noEmit",
+        "typecheck": "tsrs --noEmit",
         "lint": "eslint src/",
+        "pretest": "node ./scripts/generateSdkVersion.mjs",
+        "test": "vitest run",
         "format": "oxfmt ./src --check",
         "fix-format": "oxfmt ./src",
         "release": "pnpm publish --no-git-checks --access public"
     },
+    "devDependencies": {
+        "@lightdash/common": "workspace:*",
+        "@types/node": "22.13.1",
+        "@types/react": "19.3.0",
+        "@types/react-dom": "19.3.0",
+        "jsdom": "26.1.0",
+        "react-dom": "19.3.0",
+        "typescript": "7.0.2",
+        "vitest": "4.1.11"
+    },
     "peerDependencies": {
         "react": "^18.x || ^19.x"
     },
-    "devDependencies": {
-        "@types/react": "19.2.2",
-        "typescript": "6.0.3"
+    "dependencies": {
+        "colorjs.io": "0.5.2"
     }
 }

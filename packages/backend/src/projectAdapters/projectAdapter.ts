@@ -1,17 +1,19 @@
 import {
-    CreateWarehouseCredentials,
+    assertUnreachable,
+    DbtManifestProjectConfig,
     DbtProjectConfig,
     DbtProjectType,
     DbtVersionOption,
-    DbtVersionOptionLatest,
-    getLatestSupportDbtVersion,
     ParameterError,
-    SupportedDbtVersions,
+    resolveDbtVersion,
+    type WarehouseClient,
 } from '@lightdash/common';
-import { warehouseClientFromCredentials } from '@lightdash/warehouses';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
-import { getInstallationToken } from '../clients/github/Github';
 import Logger from '../logging/logger';
+import type {
+    DbtTargetPolicy,
+    DbtTargetResult,
+} from '../services/WarehouseClientFactory/CredentialResolver';
 import { CachedWarehouse, ProjectAdapter } from '../types';
 import { DbtAzureDevOpsProjectAdapter } from './dbtAzureDevOpsProjectAdapter';
 import { DbtBitBucketProjectAdapter } from './dbtBitBucketProjectAdapter';
@@ -19,38 +21,58 @@ import { DbtCloudIdeProjectAdapter } from './dbtCloudIdeProjectAdapter';
 import { DbtGithubProjectAdapter } from './dbtGithubProjectAdapter';
 import { DbtGitlabProjectAdapter } from './dbtGitlabProjectAdapter';
 import { DbtLocalCredentialsProjectAdapter } from './dbtLocalCredentialsProjectAdapter';
-import { DbtManifestProjectAdapter } from './dbtManifestProjectAdapter';
+import {
+    DbtManifestProjectAdapter,
+    ManifestInput,
+} from './dbtManifestProjectAdapter';
 import { DbtNoneCredentialsProjectAdapter } from './dbtNoneCredentialsProjectAdapter';
+import { getGithubToken } from './githubAuthorization';
+import { NativeGitProjectAdapter } from './nativeGitProjectAdapter';
 
 export const projectAdapterFromConfig = async (
-    config: DbtProjectConfig,
-    warehouseCredentials: CreateWarehouseCredentials,
+    config:
+        | Exclude<DbtProjectConfig, DbtManifestProjectConfig>
+        | (Omit<DbtManifestProjectConfig, 'manifest'> & ManifestInput),
+    warehouseClient: WarehouseClient,
     cachedWarehouse: CachedWarehouse,
     dbtVersionOption: DbtVersionOption,
+    environmentVariableAllowlist: string[],
+    partialParseBaselinePath: string | null,
+    dbtTarget: {
+        resolve: () => DbtTargetResult;
+        policy: DbtTargetPolicy;
+    } | null,
     analytics?: LightdashAnalytics,
+    // MANIFEST-only: project dir for Lightdash config and selected model ids.
+    // Ignored by every other adapter type.
+    manifestOptions?: { projectDir?: string; selectedModelIds?: string[] },
 ): Promise<ProjectAdapter> => {
-    Logger.debug(
-        `Initialize warehouse client of type ${warehouseCredentials.type}`,
-    );
-    const warehouseClient =
-        warehouseClientFromCredentials(warehouseCredentials);
     const configType = config.type;
     Logger.debug(`Initialize project adaptor of type ${configType}`);
 
-    const dbtVersion: SupportedDbtVersions =
-        dbtVersionOption === DbtVersionOptionLatest.LATEST
-            ? getLatestSupportDbtVersion()
-            : dbtVersionOption;
+    const dbtVersion = resolveDbtVersion(dbtVersionOption);
+    const resolveTarget = () => {
+        if (dbtTarget === null)
+            throw new ParameterError('A resolved dbt target is required.');
+        const target = dbtTarget.resolve();
+        if (target.kind === 'none') throw new ParameterError(target.reason);
+        return {
+            dbtTarget: target,
+            explicitCredentials: dbtTarget.policy.explicitCredentials,
+        };
+    };
 
     switch (config.type) {
         case DbtProjectType.DBT:
             return new DbtLocalCredentialsProjectAdapter({
+                partialParseBaselinePath,
                 analytics,
                 warehouseClient,
                 projectDir: config.project_dir || '/usr/app/dbt',
-                warehouseCredentials,
+                ...resolveTarget(),
                 targetName: config.target,
                 environment: config.environment,
+                environmentVariableAllowlist,
                 cachedWarehouse,
                 dbtVersion,
 
@@ -67,7 +89,11 @@ export const projectAdapterFromConfig = async (
                 cachedWarehouse,
                 dbtVersion,
                 analytics,
-                manifest: config.manifest,
+                ...(config.parsedManifest !== undefined
+                    ? { parsedManifest: config.parsedManifest }
+                    : { manifest: config.manifest }),
+                dbtProjectDir: manifestOptions?.projectDir,
+                selectedModelIds: manifestOptions?.selectedModelIds,
             });
 
         case DbtProjectType.DBT_CLOUD_IDE:
@@ -83,11 +109,7 @@ export const projectAdapterFromConfig = async (
                 // TODO add selector to dbt cloud
             });
         case DbtProjectType.GITHUB:
-            const githubToken =
-                config.installation_id &&
-                config.authorization_method === 'installation_id'
-                    ? await getInstallationToken(config.installation_id)
-                    : config.personal_access_token;
+            const githubToken = await getGithubToken(config);
             if (githubToken === undefined) {
                 throw new ParameterError(
                     `Missing github token for authorization method: ${
@@ -100,17 +122,34 @@ export const projectAdapterFromConfig = async (
                     `Missing repository for GitHub project`,
                 );
             }
+            if (config.semanticLayer === 'lightdash') {
+                return new NativeGitProjectAdapter({
+                    provider: DbtProjectType.GITHUB,
+                    warehouseClient,
+                    token: githubToken,
+                    repository: config.repository,
+                    branch: config.branch,
+                    projectSubPath: config.project_sub_path,
+                    hostDomain: config.host_domain,
+                });
+            }
             return new DbtGithubProjectAdapter({
+                partialParseBaselinePath,
                 analytics,
                 warehouseClient,
-                githubPersonalAccessToken: githubToken!,
+                githubPersonalAccessToken: githubToken,
+                githubInstallationId:
+                    config.authorization_method === 'installation_id'
+                        ? config.installation_id
+                        : undefined,
                 githubRepository: config.repository,
                 githubBranch: config.branch,
                 projectDirectorySubPath: config.project_sub_path,
                 hostDomain: config.host_domain,
-                warehouseCredentials,
+                ...resolveTarget(),
                 targetName: config.target,
                 environment: config.environment,
+                environmentVariableAllowlist,
                 cachedWarehouse,
                 dbtVersion,
 
@@ -118,6 +157,7 @@ export const projectAdapterFromConfig = async (
             });
         case DbtProjectType.GITLAB:
             return new DbtGitlabProjectAdapter({
+                partialParseBaselinePath,
                 analytics,
                 warehouseClient,
                 gitlabPersonalAccessToken: config.personal_access_token,
@@ -125,16 +165,30 @@ export const projectAdapterFromConfig = async (
                 gitlabBranch: config.branch,
                 projectDirectorySubPath: config.project_sub_path,
                 hostDomain: config.host_domain,
-                warehouseCredentials,
+                ...resolveTarget(),
                 targetName: config.target,
                 environment: config.environment,
+                environmentVariableAllowlist,
                 cachedWarehouse,
                 dbtVersion,
 
                 selector: config.selector,
             });
         case DbtProjectType.BITBUCKET:
+            if (config.semanticLayer === 'lightdash') {
+                return new NativeGitProjectAdapter({
+                    provider: DbtProjectType.BITBUCKET,
+                    warehouseClient,
+                    token: config.personal_access_token,
+                    username: config.username,
+                    repository: config.repository,
+                    branch: config.branch,
+                    projectSubPath: config.project_sub_path,
+                    hostDomain: config.host_domain,
+                });
+            }
             return new DbtBitBucketProjectAdapter({
+                partialParseBaselinePath,
                 analytics,
                 warehouseClient,
                 username: config.username,
@@ -143,9 +197,10 @@ export const projectAdapterFromConfig = async (
                 branch: config.branch,
                 projectDirectorySubPath: config.project_sub_path,
                 hostDomain: config.host_domain,
-                warehouseCredentials,
+                ...resolveTarget(),
                 targetName: config.target,
                 environment: config.environment,
+                environmentVariableAllowlist,
                 cachedWarehouse,
                 dbtVersion,
 
@@ -153,6 +208,7 @@ export const projectAdapterFromConfig = async (
             });
         case DbtProjectType.AZURE_DEVOPS:
             return new DbtAzureDevOpsProjectAdapter({
+                partialParseBaselinePath,
                 analytics,
                 warehouseClient,
                 personalAccessToken: config.personal_access_token,
@@ -161,16 +217,19 @@ export const projectAdapterFromConfig = async (
                 repository: config.repository,
                 branch: config.branch,
                 projectDirectorySubPath: config.project_sub_path,
-                warehouseCredentials,
+                ...resolveTarget(),
                 targetName: config.target,
                 environment: config.environment,
+                environmentVariableAllowlist,
                 cachedWarehouse,
                 dbtVersion,
 
                 selector: config.selector,
             });
         default:
-            const never: never = config;
-            throw new Error(`Adapter not implemented for type: ${configType}`);
+            return assertUnreachable(
+                config,
+                `Adapter not implemented for type: ${configType}`,
+            );
     }
 };

@@ -3,6 +3,8 @@ import {
     Metric,
     SupportedDbtAdapter,
     TimeIntervalUnit,
+    UnnestSql,
+    UnnestSqlArgs,
     WarehouseSqlBuilder,
     WarehouseTypes,
     WeekDay,
@@ -22,6 +24,13 @@ export default abstract class WarehouseBaseSqlBuilder implements WarehouseSqlBui
 
     abstract getAdapterType(): SupportedDbtAdapter;
 
+    // Default: the engine evaluates a multiply-referenced CTE once (materialized
+    // or its result reused). Trino and Athena override this to false, since they
+    // re-run the whole CTE lineage on every reference.
+    supportsCteMaterialization(): boolean {
+        return true;
+    }
+
     getFieldQuoteChar(): string {
         return '"';
     }
@@ -39,6 +48,10 @@ export default abstract class WarehouseBaseSqlBuilder implements WarehouseSqlBui
     }
 
     getNullSafeEqualSql(left: string, right: string): string {
+        return defaultNullSafeEqualSql(left, right);
+    }
+
+    getNullSafeEqualJoinSql(left: string, right: string): string {
         return defaultNullSafeEqualSql(left, right);
     }
 
@@ -73,6 +86,15 @@ export default abstract class WarehouseBaseSqlBuilder implements WarehouseSqlBui
         // Default: ANSI SQL CAST syntax (works for most warehouses)
         // Format as ISO 8601 string
         return `CAST('${date.toISOString()}' AS TIMESTAMP)`;
+    }
+
+    castToDate(date: Date): string {
+        return `CAST('${date.toISOString().slice(0, 10)}' AS DATE)`;
+    }
+
+    castToNaiveTimestamp(date: Date): string {
+        // Default: dialects without a separate zoneless type reuse TIMESTAMP
+        return this.castToTimestamp(date);
     }
 
     protected static readonly intervalUnitsSingular: Record<
@@ -118,5 +140,10 @@ export default abstract class WarehouseBaseSqlBuilder implements WarehouseSqlBui
             return `ARRAY_AGG(${expression} ORDER BY ${orderBy})`;
         }
         return `ARRAY_AGG(${expression})`;
+    }
+
+    // Repeated columns stay opaque unless the warehouse can unnest them.
+    getUnnestSql(_args: UnnestSqlArgs): UnnestSql | null {
+        return null;
     }
 }

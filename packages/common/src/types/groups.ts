@@ -1,4 +1,33 @@
 import type { KnexPaginatedData } from './knex-paginate';
+import type { PromotionAction } from './promotion';
+
+export type GroupAsCode = {
+    version: 1;
+    name: string;
+    members: string[];
+};
+
+export type ApiGroupAsCodeListResponse = {
+    status: 'ok';
+    results: {
+        groups: GroupAsCode[];
+    };
+};
+
+export type ApiGroupAsCodeUpsertResponse = {
+    status: 'ok';
+    results: {
+        action:
+            | PromotionAction.CREATE
+            | PromotionAction.UPDATE
+            | PromotionAction.NO_CHANGES;
+    };
+};
+
+export type GroupSort = {
+    sortBy: 'name';
+    sortDirection: 'asc' | 'desc';
+};
 
 export type Group = {
     /**

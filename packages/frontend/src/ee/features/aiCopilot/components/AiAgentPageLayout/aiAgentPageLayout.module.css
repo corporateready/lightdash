@@ -1,6 +1,6 @@
 .panelGroup {
     @mixin light {
-        background-color: white;
+        background-color: var(--mantine-color-white);
     }
     @mixin dark {
         background-color: var(--mantine-color-dark-8);
@@ -11,22 +11,68 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    overflow-y: auto;
+    overflow: hidden;
 
-    padding: var(--mantine-spacing-xs);
+    padding: var(--mantine-spacing-sm);
     @mixin light {
         background: var(--mantine-color-ldGray-0);
     }
     @mixin dark {
-        background: var(--mantine-color-ldDark-2);
+        background: var(--mantine-color-ldDark-1);
     }
-    &[data-panel-size='0.0'] {
+    &[data-collapsed] {
         min-width: 3rem;
+    }
+
+    &[data-collapsed='true'] {
+        align-items: center;
+        padding: var(--mantine-spacing-sm) rem(6px);
     }
 }
 
-.sidebarTransition {
-    transition: all 300ms ease-in-out;
+.mobileSidebarContent {
+    display: flex;
+    flex-direction: column;
+
+    @mixin light {
+        background: var(--mantine-color-ldGray-0);
+    }
+    @mixin dark {
+        background: var(--mantine-color-ldDark-1);
+    }
+}
+
+.mobileSidebarHeader {
+    background: transparent;
+    min-height: 0;
+    padding-bottom: var(--mantine-spacing-xs);
+}
+
+.mobileSidebarBody {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding: 0 var(--mantine-spacing-sm) var(--mantine-spacing-sm);
+}
+
+.mobileSidebarContext {
+    flex-shrink: 0;
+    margin-bottom: var(--mantine-spacing-sm);
+}
+
+.sidebarHeader {
+    flex-shrink: 0;
+    margin-bottom: var(--mantine-spacing-xs);
+
+    &[data-collapsed] {
+        flex-direction: column-reverse;
+        gap: var(--mantine-spacing-sm);
+    }
+}
+
+.sidebarTitle {
+    letter-spacing: 0;
 }
 
 .chat {
@@ -40,40 +86,45 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    padding: var(--mantine-spacing-md);
+    min-height: rem(52px);
+    padding: rem(6px) var(--mantine-spacing-md);
     border-bottom: 1px solid var(--mantine-color-ldGray-2);
+
+    @mixin light {
+        background-color: var(--mantine-color-white);
+    }
+
+    @mixin dark {
+        background-color: var(--mantine-color-dark-8);
+    }
+}
+
+/* Compact follows the agent's container width, not the viewport */
+.chatHeader[data-compact='true'] {
+    min-height: rem(44px);
+    padding: rem(4px) var(--mantine-spacing-sm);
+    border-bottom: 0;
 }
 
 .chatContent {
     flex: 1;
     overflow-y: auto;
+    background-color: light-dark(
+        var(--mantine-color-white),
+        var(--mantine-color-dark-8)
+    );
 }
 
 .resizeHandle {
     width: 1px;
     background-color: var(--mantine-color-ldGray-2);
     cursor: col-resize;
-    transition: all 0.2s ease;
-
-    &[data-resize-handle-state='hover'],
-    &[data-resize-handle-state='drag'] {
-        background-color: var(--mantine-color-ldGray-4);
-        box-shadow: 0 0 0 1px var(--mantine-color-ldGray-4);
-    }
-}
-
-.artifactResizeHandle {
-    flex: 0 0 0;
-    width: 0;
-    min-width: 0;
-    background-color: transparent;
+    transition: background-color 150ms ease;
     position: relative;
-    z-index: 2;
 
-    &[data-resize-handle-state='hover'],
-    &[data-resize-handle-state='drag'] {
-        background-color: transparent;
-        box-shadow: none;
+    &:hover,
+    &[data-active] {
+        background-color: var(--mantine-color-ldGray-3);
     }
 }
 
@@ -85,12 +136,33 @@
     display: flex;
     flex: 1;
     min-height: 0;
+    overflow: hidden;
+    height: calc(100dvh - var(--navbar-height));
+
     @mixin light {
-        background-color: white;
+        background-color: var(--mantine-color-white);
     }
+
     @mixin dark {
         background-color: var(--mantine-color-dark-8);
     }
+}
+
+/* Embed pages render without the app navbar */
+.workspaceEmbed {
+    height: 100dvh;
+}
+
+/* SDK embeds fill the host's container, not the viewport. Layout
+   containment also makes the drawers' fixed overlays cover only this box. */
+.workspaceSdk {
+    height: 100%;
+    contain: layout;
+}
+
+/* Drawers rendered inside .workspaceSdk span the box, not their flex slot */
+.sdkDrawerInner {
+    inset: 0;
 }
 
 .floatingArtifactRegion {
@@ -99,9 +171,30 @@
     min-height: 0;
     display: flex;
     overflow: hidden;
+
+    @mixin light {
+        background-color: var(--mantine-color-white);
+    }
+
+    @mixin dark {
+        background-color: var(--mantine-color-dark-8);
+    }
 }
 
-.floatingArtifactRegion > * {
+.floatingArtifactWrap {
     flex: 1;
     min-height: 0;
+    background: light-dark(
+        var(--mantine-color-white),
+        var(--mantine-color-dark-8)
+    );
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.resizeHandle:has(+ .floatingArtifactRegion) {
+    flex-basis: 0;
+    width: 0;
+    background: transparent;
+    z-index: 2;
 }

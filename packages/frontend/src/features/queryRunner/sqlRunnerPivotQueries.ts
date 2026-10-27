@@ -13,6 +13,7 @@ import {
     type VizColumn,
     type VizSortBy,
 } from '@lightdash/common';
+import { type LightdashApi } from '../../api';
 import { getVizIndexTypeFromSqlRunnerFieldType } from './BaseResultsRunner';
 import {
     executeDashboardSqlChartPivotQuery,
@@ -29,7 +30,8 @@ const convertSqlRunnerQueryToSqlRunnerPivotQuery = (
     SqlRunnerPivotQueryBody,
     'indexColumn' | 'groupByColumns' | 'valuesColumns'
 > => {
-    const index = fields.find((field) => field.name === query.pivot?.index[0]);
+    const indexReference = query.pivot?.index[0];
+    const index = fields.find((field) => field.name === indexReference);
     const values = query.pivot?.values.map((value) => {
         const customMetric = query.customMetrics?.find(
             (metric) => metric.name === value,
@@ -56,11 +58,18 @@ const convertSqlRunnerQueryToSqlRunnerPivotQuery = (
         return f;
     });
 
-    if (index === undefined || values === undefined || values.length === 0) {
+    // An index is optional: charts that aggregate every row into a single
+    // value (big number) pivot on values alone.
+    if (indexReference !== undefined && index === undefined) {
+        throw new Error(
+            'Unexpected error: incorrect pivot configuration, invalid index',
+        );
+    }
+    if (values === undefined || values.length === 0) {
         throw new Error('Unexpected error: incorrect pivot configuration');
     }
     return {
-        indexColumn: {
+        indexColumn: index && {
             reference: index.name,
             type: getVizIndexTypeFromSqlRunnerFieldType(index.type),
         },
@@ -72,27 +81,30 @@ const convertSqlRunnerQueryToSqlRunnerPivotQuery = (
     };
 };
 // TEMPORARY
-export const getPivotQueryFunctionForSqlQuery = ({
-    projectUuid,
-    limit,
-    sortBy,
-    sql,
-    fields,
-    context,
-    parameters,
-}: {
-    projectUuid: string;
-    limit?: number;
-    sql: string;
-    sortBy?: VizSortBy[];
-    fields: SqlRunnerField[];
-    context?: QueryExecutionContext;
-    parameters: ParametersValuesMap;
-}): RunPivotQuery => {
+export const getPivotQueryFunctionForSqlQuery = (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        limit,
+        sortBy,
+        sql,
+        fields,
+        context,
+        parameters,
+        warehouseConnectionUuid,
+    }: {
+        projectUuid: string;
+        limit?: number;
+        sql: string;
+        sortBy?: VizSortBy[];
+        fields: SqlRunnerField[];
+        context?: QueryExecutionContext;
+        parameters: ParametersValuesMap;
+        warehouseConnectionUuid?: string | null;
+    },
+): RunPivotQuery => {
     return async (query: SqlRunnerQuery) => {
-        const index = query.pivot?.index[0];
-
-        if (index === undefined) {
+        if (!query.pivot?.values.length) {
             return {
                 queryUuid: undefined,
                 results: [],
@@ -107,18 +119,25 @@ export const getPivotQueryFunctionForSqlQuery = ({
         const { indexColumn, valuesColumns, groupByColumns } =
             convertSqlRunnerQueryToSqlRunnerPivotQuery(query, fields);
 
-        const pivotResults = await executeSqlPivotQuery(projectUuid, {
-            context,
-            limit,
-            sql,
-            pivotConfiguration: {
-                indexColumn,
-                valuesColumns,
-                groupByColumns,
-                sortBy,
+        const pivotResults = await executeSqlPivotQuery(
+            lightdashApi,
+            projectUuid,
+            {
+                context,
+                limit,
+                sql,
+                pivotConfiguration: {
+                    indexColumn,
+                    valuesColumns,
+                    groupByColumns,
+                    sortBy,
+                },
+                parameters,
+                ...(warehouseConnectionUuid === undefined
+                    ? {}
+                    : { warehouseConnectionUuid }),
             },
-            parameters,
-        });
+        );
 
         const columns: VizColumn[] = Object.keys(pivotResults.columns).map(
             (field) => ({
@@ -138,27 +157,34 @@ export const getPivotQueryFunctionForSqlQuery = ({
     };
 };
 
-export const getSqlChartPivotChartData = async ({
-    projectUuid,
-    savedSqlUuid,
-    limit,
-    context,
-    parameters,
-}: {
-    projectUuid: string;
-    savedSqlUuid: string;
-    limit?: number;
-    context?: QueryExecutionContext;
-    parameters?: ParametersValuesMap;
-}): Promise<
+export const getSqlChartPivotChartData = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        savedSqlUuid,
+        limit,
+        context,
+        parameters,
+    }: {
+        projectUuid: string;
+        savedSqlUuid: string;
+        limit?: number;
+        context?: QueryExecutionContext;
+        parameters?: ParametersValuesMap;
+    },
+): Promise<
     PivotChartData & { queryUuid: string; originalColumns: ResultColumns }
 > => {
-    const pivotResults = await executeSqlChartPivotQuery(projectUuid, {
-        savedSqlUuid,
-        context,
-        limit,
-        parameters,
-    });
+    const pivotResults = await executeSqlChartPivotQuery(
+        lightdashApi,
+        projectUuid,
+        {
+            savedSqlUuid,
+            context,
+            limit,
+            parameters,
+        },
+    );
 
     const columns: VizColumn[] = Object.keys(pivotResults.columns).map(
         (field) => ({
@@ -172,39 +198,49 @@ export const getSqlChartPivotChartData = async ({
     };
 };
 
-export const getDashboardSqlChartPivotChartData = async ({
-    projectUuid,
-    dashboardUuid,
-    tileUuid,
-    savedSqlUuid,
-    limit,
-    dashboardFilters,
-    dashboardSorts,
-    context,
-    parameters,
-}: {
-    projectUuid: string;
-    dashboardUuid: string;
-    tileUuid: string;
-    savedSqlUuid: string;
-    limit?: number;
-    dashboardFilters: DashboardFilters;
-    dashboardSorts: SortField[]; // TODO: check if dashboardSorts is needed, seems to be unused
-    context?: QueryExecutionContext;
-    parameters?: ParametersValuesMap;
-}): Promise<
-    PivotChartData & { queryUuid: string; originalColumns: ResultColumns }
-> => {
-    const pivotResults = await executeDashboardSqlChartPivotQuery(projectUuid, {
+export const getDashboardSqlChartPivotChartData = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
         dashboardUuid,
         tileUuid,
         savedSqlUuid,
-        context,
+        limit,
         dashboardFilters,
         dashboardSorts,
-        limit,
+        context,
         parameters,
-    });
+        invalidateCache,
+    }: {
+        projectUuid: string;
+        dashboardUuid: string;
+        tileUuid: string;
+        savedSqlUuid: string;
+        limit?: number;
+        dashboardFilters: DashboardFilters;
+        dashboardSorts: SortField[]; // TODO: check if dashboardSorts is needed, seems to be unused
+        context?: QueryExecutionContext;
+        parameters?: ParametersValuesMap;
+        invalidateCache?: boolean;
+    },
+): Promise<
+    PivotChartData & { queryUuid: string; originalColumns: ResultColumns }
+> => {
+    const pivotResults = await executeDashboardSqlChartPivotQuery(
+        lightdashApi,
+        projectUuid,
+        {
+            dashboardUuid,
+            tileUuid,
+            savedSqlUuid,
+            context,
+            dashboardFilters,
+            dashboardSorts,
+            limit,
+            parameters,
+            invalidateCache,
+        },
+    );
 
     const columns: VizColumn[] = Object.keys(pivotResults.columns).map(
         (field) => ({
@@ -218,26 +254,30 @@ export const getDashboardSqlChartPivotChartData = async ({
     };
 };
 
-export const getEmbedDashboardSqlChartPivotChartData = async ({
-    projectUuid,
-    tileUuid,
-    limit,
-    dashboardFilters,
-    dashboardSorts,
-    parameters,
-    invalidateCache,
-}: {
-    projectUuid: string;
-    tileUuid: string;
-    limit?: number;
-    dashboardFilters: DashboardFilters;
-    dashboardSorts: SortField[];
-    parameters?: ParametersValuesMap;
-    invalidateCache?: boolean;
-}): Promise<
+export const getEmbedDashboardSqlChartPivotChartData = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        tileUuid,
+        limit,
+        dashboardFilters,
+        dashboardSorts,
+        parameters,
+        invalidateCache,
+    }: {
+        projectUuid: string;
+        tileUuid: string;
+        limit?: number;
+        dashboardFilters: DashboardFilters;
+        dashboardSorts: SortField[];
+        parameters?: ParametersValuesMap;
+        invalidateCache?: boolean;
+    },
+): Promise<
     PivotChartData & { queryUuid: string; originalColumns: ResultColumns }
 > => {
     const pivotResults = await executeEmbedDashboardSqlChartPivotQuery(
+        lightdashApi,
         projectUuid,
         {
             tileUuid,

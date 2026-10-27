@@ -3,18 +3,24 @@ import {
     CreateWarehouseCredentials,
     DimensionType,
     Metric,
-    NotImplementedError,
-    PartitionColumn,
+    setCatalogTimestampDomain,
     SupportedDbtAdapter,
     TimeIntervalUnit,
+    UnnestSql,
+    UnnestSqlArgs,
     WarehouseCatalog,
+    WarehouseDatabaseListing,
+    WarehouseDatabaseListingNotSupportedError,
+    WarehouseListedDatabase,
     WarehouseResults,
     WarehouseSqlBuilder,
+    WarehouseTables,
     WeekDay,
+    type TimestampDomain,
     type WarehouseExecuteAsyncQuery,
     type WarehouseExecuteAsyncQueryArgs,
-    type WarehouseGetAsyncQueryResults,
-    type WarehouseGetAsyncQueryResultsArgs,
+    type WarehousePhaseTimings,
+    type WarehouseQueryPhase,
 } from '@lightdash/common';
 import { type WarehouseClient } from '../types';
 
@@ -25,13 +31,24 @@ export default abstract class WarehouseBaseClient<
 
     protected sqlBuilder: WarehouseSqlBuilder;
 
-    protected constructor(credentials: T, sqlBuilder: WarehouseSqlBuilder) {
+    protected readonly agentSession: boolean;
+
+    protected constructor(
+        credentials: T,
+        sqlBuilder: WarehouseSqlBuilder,
+        options?: { agentSession?: boolean },
+    ) {
+        this.agentSession = options?.agentSession ?? false;
         this.credentials = credentials;
         this.sqlBuilder = sqlBuilder;
     }
 
     getAdapterType(): SupportedDbtAdapter {
         return this.sqlBuilder.getAdapterType();
+    }
+
+    supportsCteMaterialization(): boolean {
+        return this.sqlBuilder.supportsCteMaterialization();
     }
 
     getStringQuoteChar(): string {
@@ -46,12 +63,20 @@ export default abstract class WarehouseBaseClient<
         return this.sqlBuilder.getFieldQuoteChar();
     }
 
+    getUnnestSql(args: UnnestSqlArgs): UnnestSql | null {
+        return this.sqlBuilder.getUnnestSql(args);
+    }
+
     getFloatingType(): string {
         return this.sqlBuilder.getFloatingType();
     }
 
     getNullSafeEqualSql(left: string, right: string): string {
         return this.sqlBuilder.getNullSafeEqualSql(left, right);
+    }
+
+    getNullSafeEqualJoinSql(left: string, right: string): string {
+        return this.sqlBuilder.getNullSafeEqualJoinSql(left, right);
     }
 
     buildArrayAgg(expression: string, orderBy?: string): string {
@@ -66,15 +91,6 @@ export default abstract class WarehouseBaseClient<
         config: { database: string; schema: string; table: string }[],
     ): Promise<WarehouseCatalog>;
 
-    async getAsyncQueryResults<TFormattedRow extends Record<string, unknown>>(
-        _args: WarehouseGetAsyncQueryResultsArgs,
-        _rowFormatter?: (row: Record<string, unknown>) => TFormattedRow,
-    ): Promise<WarehouseGetAsyncQueryResults<TFormattedRow>> {
-        throw new NotImplementedError(
-            `Native pagination not supported. Please configure S3 Storage to use ${this.getAdapterType()} - https://docs.lightdash.com/self-host/customize-deployment/environment-variables#s3`,
-        );
-    }
-
     abstract streamQuery(
         query: string,
         streamCallback: (data: WarehouseResults) => void | Promise<void>,
@@ -83,6 +99,10 @@ export default abstract class WarehouseBaseClient<
             queryParams?: Record<string, AnyType>;
             tags?: Record<string, string>;
             timezone?: string;
+            onPhaseTiming?: (
+                phase: WarehouseQueryPhase,
+                durationMs: number,
+            ) => void;
         },
     ): Promise<void>;
 
@@ -101,6 +121,7 @@ export default abstract class WarehouseBaseClient<
     ): Promise<WarehouseExecuteAsyncQuery> {
         let rowCount = 0;
 
+        const phaseTimings: WarehousePhaseTimings = {};
         const startTime = performance.now();
         await this.streamQuery(
             sql,
@@ -113,6 +134,10 @@ export default abstract class WarehouseBaseClient<
                 queryParams,
                 tags,
                 timezone,
+                onPhaseTiming: (phase, durationMs) => {
+                    phaseTimings[phase] =
+                        (phaseTimings[phase] ?? 0) + durationMs;
+                },
             },
         );
 
@@ -122,6 +147,7 @@ export default abstract class WarehouseBaseClient<
             queryMetadata: null,
             durationMs: performance.now() - startTime,
             totalRows: rowCount,
+            phaseTimings,
         };
     }
 
@@ -164,6 +190,11 @@ export default abstract class WarehouseBaseClient<
         await this.runQuery('SELECT 1');
     }
 
+    // Adapters that can report their session timezone override this.
+    async getSessionTimezone(): Promise<string | null> {
+        return null;
+    }
+
     concatString(...args: string[]): string {
         return this.sqlBuilder.concatString(...args);
     }
@@ -171,14 +202,7 @@ export default abstract class WarehouseBaseClient<
     abstract getAllTables(
         schema?: string,
         tags?: Record<string, string>,
-    ): Promise<
-        {
-            database: string;
-            schema: string;
-            table: string;
-            partitionColumn?: PartitionColumn;
-        }[]
-    >;
+    ): Promise<WarehouseTables>;
 
     abstract getFields(
         tableName: string,
@@ -187,9 +211,27 @@ export default abstract class WarehouseBaseClient<
         tags?: Record<string, string>,
     ): Promise<WarehouseCatalog>;
 
+    async listDatabases(
+        _tags?: Record<string, string>,
+    ): Promise<WarehouseDatabaseListing> {
+        throw new WarehouseDatabaseListingNotSupportedError(
+            this.credentials.type,
+        );
+    }
+
+    async getTablesForDatabase(
+        _database: WarehouseListedDatabase,
+        _tags?: Record<string, string>,
+    ): Promise<WarehouseTables> {
+        throw new WarehouseDatabaseListingNotSupportedError(
+            this.credentials.type,
+        );
+    }
+
     parseWarehouseCatalog(
         rows: Record<string, AnyType>[],
         mapFieldType: (type: string) => DimensionType,
+        mapTimestampDomain?: (type: string) => TimestampDomain | undefined,
     ): WarehouseCatalog {
         return rows.reduce(
             (
@@ -207,9 +249,18 @@ export default abstract class WarehouseBaseClient<
                     acc[table_catalog][table_schema] || {};
                 acc[table_catalog][table_schema][table_name] =
                     acc[table_catalog][table_schema][table_name] || {};
-                if (column_name && data_type)
+                if (column_name && data_type) {
                     acc[table_catalog][table_schema][table_name][column_name] =
                         mapFieldType(data_type);
+                    setCatalogTimestampDomain(
+                        acc,
+                        table_catalog,
+                        table_schema,
+                        table_name,
+                        column_name,
+                        mapTimestampDomain?.(data_type),
+                    );
+                }
                 return acc;
             },
             {},
@@ -226,6 +277,14 @@ export default abstract class WarehouseBaseClient<
 
     castToTimestamp(date: Date): string {
         return this.sqlBuilder.castToTimestamp(date);
+    }
+
+    castToDate(date: Date): string {
+        return this.sqlBuilder.castToDate(date);
+    }
+
+    castToNaiveTimestamp(date: Date): string {
+        return this.sqlBuilder.castToNaiveTimestamp(date);
     }
 
     getIntervalSql(value: number, unit: TimeIntervalUnit): string {

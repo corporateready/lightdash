@@ -1,14 +1,14 @@
 import {
     Alert,
-    Avatar,
     Box,
-    Button,
     Flex,
     Group,
     Loader,
     Stack,
     Text,
     Title,
+    Button,
+    Avatar,
     Tooltip,
 } from '@mantine/core';
 import {
@@ -27,6 +27,7 @@ import {
 } from '../../common/GithubIntegration/hooks/useGithubIntegration';
 import MantineIcon from '../../common/MantineIcon';
 import { SettingsGridCard } from '../../common/Settings/SettingsCard';
+import classes from './GithubSettingsPanel.module.css';
 
 const GITHUB_INSTALL_URL = `/api/v1/github/install`;
 
@@ -69,9 +70,9 @@ const GithubSettingsPanel: FC = () => {
     return (
         <SettingsGridCard>
             <Box>
-                <Group spacing="sm">
-                    <Avatar src={githubIcon} size="md" />
-                    <Title order={4}>Github</Title>
+                <Group gap="sm">
+                    <Avatar src={githubIcon} size="md" alt="" />
+                    <Title order={5}>GitHub</Title>
                 </Group>
             </Box>
 
@@ -91,12 +92,12 @@ const GithubSettingsPanel: FC = () => {
                     </Alert>
                 )}
                 {isValidGithubInstallation && data && data.length > 0 && (
-                    <Stack spacing="xs">
+                    <Stack gap="xs">
                         <Text c="dimmed" fz="xs">
                             Your GitHub integration has access to the following
                             repositories ({data.length}):
                         </Text>
-                        <Box mah={200} style={{ overflowY: 'auto' }}>
+                        <Box mah={200} className={classes.repositoryList}>
                             <Text
                                 component="ul"
                                 fz="xs"
@@ -121,7 +122,7 @@ const GithubSettingsPanel: FC = () => {
                                 target="_blank"
                                 variant="default"
                                 href={GITHUB_INSTALL_URL}
-                                leftIcon={<MantineIcon icon={IconRefresh} />}
+                                leftSection={<MantineIcon icon={IconRefresh} />}
                                 onClick={() => {
                                     deleteGithubInstallationMutation.mutate(
                                         undefined,
@@ -146,7 +147,7 @@ const GithubSettingsPanel: FC = () => {
                                 onClick={() =>
                                     deleteGithubInstallationMutation.mutate()
                                 }
-                                leftIcon={<MantineIcon icon={IconTrash} />}
+                                leftSection={<MantineIcon icon={IconTrash} />}
                             >
                                 Delete
                             </Button>
@@ -156,7 +157,6 @@ const GithubSettingsPanel: FC = () => {
                     <Flex justify="end">
                         {isWaitingForGithubRequest ? (
                             <Tooltip
-                                multiline
                                 maw={400}
                                 label={`
                                 An admin from your GitHub organization needs to approve this app
@@ -169,7 +169,9 @@ const GithubSettingsPanel: FC = () => {
                                     color="yellow"
                                     variant="outline"
                                     href={GITHUB_INSTALL_URL}
-                                    leftIcon={<MantineIcon icon={IconClock} />}
+                                    leftSection={
+                                        <MantineIcon icon={IconClock} />
+                                    }
                                 >
                                     Pending approval
                                 </Button>
@@ -179,7 +181,6 @@ const GithubSettingsPanel: FC = () => {
                                 size="xs"
                                 component="a"
                                 target="_blank"
-                                color="blue"
                                 href={GITHUB_INSTALL_URL}
                             >
                                 Install

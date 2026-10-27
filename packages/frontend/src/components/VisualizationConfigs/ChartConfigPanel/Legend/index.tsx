@@ -6,6 +6,7 @@ import {
     type CustomDimension,
     type EchartsLegend,
     type Field,
+    type LegendPlacement,
     type Series,
     type TableCalculation,
 } from '@lightdash/common';
@@ -13,17 +14,26 @@ import {
     Collapse,
     Group,
     Loader,
-    SegmentedControl,
     Stack,
+    SegmentedControl,
     Switch,
 } from '@mantine/core';
-import { lazy, Suspense, useMemo, type FC } from 'react';
-import { useParams } from 'react-router';
+import { useDebouncedCallback } from '@mantine/hooks';
+import { lazy, Suspense, useMemo, useState, type FC } from 'react';
 import { useToggle } from 'react-use';
-import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import useEmbed from '../../../../ee/providers/Embed/useEmbed';
+import {
+    selectCartesianEchartsConfig,
+    selectCartesianSeries,
+    useVisualizationSelector,
+    type VisualizationStoreState,
+} from '../../../../features/visualization/store';
+import { useCartesianEditorActions } from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
+import { useProjectUuid } from '../../../../hooks/useProjectUuid';
+import UnitInput from '../../../common/UnitInput';
 import { Config } from '../../common/Config';
 import { UnitInputsGrid } from '../common/UnitInputsGrid';
+import classes from './Legend.module.css';
 import { ReferenceLines } from './ReferenceLines';
 import { TooltipSortConfig } from './TooltipSortConfig';
 
@@ -44,6 +54,41 @@ enum Positions {
 type MarginConfigurationProps = {
     legendConfig: EchartsLegend;
     handleChange: (prop: string, newValue: string | undefined) => void;
+};
+
+type LegendAreaWidthInputProps = {
+    /** Initial value from the chart's grid config. */
+    initialValue: string;
+    /** Called with the debounced value so the chart re-renders less often. */
+    onCommit: (value: string) => void;
+};
+
+const LegendAreaWidthInput: FC<LegendAreaWidthInputProps> = ({
+    initialValue,
+    onCommit,
+}) => {
+    const [value, setValue] = useState(initialValue);
+    const debouncedOnCommit = useDebouncedCallback(onCommit, {
+        delay: 300,
+        flushOnUnmount: true,
+    });
+
+    return (
+        <UnitInput
+            size="xs"
+            w={80}
+            name="legendAreaWidth"
+            units={['%', 'px']}
+            value={value}
+            defaultValue={initialValue}
+            onChange={(next) => {
+                const v = next ?? '';
+                setValue(v);
+                if (v) debouncedOnCommit(v);
+            }}
+            onBlur={() => debouncedOnCommit.flush()}
+        />
+    );
 };
 
 const PositionConfiguration: FC<MarginConfigurationProps> = ({
@@ -75,14 +120,13 @@ const PositionConfiguration: FC<MarginConfigurationProps> = ({
         <Config>
             <Config.Section>
                 <Switch
+                    size="xs"
                     labelPosition="left"
                     label={`Custom position`}
                     checked={!isAutoPosition}
                     onChange={toggleAuto}
-                    styles={{
-                        label: {
-                            paddingLeft: 0,
-                        },
+                    classNames={{
+                        label: classes.leftPositionedSwitchLabel,
                     }}
                 />
 
@@ -105,22 +149,27 @@ type Props = {
     items: (Field | TableCalculation | CompiledDimension | CustomDimension)[];
 };
 
-export const Legend: FC<Props> = ({ items }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+const selectLegend = (state: VisualizationStoreState) =>
+    selectCartesianEchartsConfig(state)?.legend;
+const selectGrid = (state: VisualizationStoreState) =>
+    selectCartesianEchartsConfig(state)?.grid;
 
-    const { visualizationConfig } = useVisualizationContext();
+export const Legend: FC<Props> = ({ items }) => {
+    const projectUuid = useProjectUuid();
+    // The SDK bundle ships no Monaco workers, so the HTML tooltip editor is not offered in embeds.
+    const { embedToken } = useEmbed();
+
+    const series = useVisualizationSelector(selectCartesianSeries);
+    const legend = useVisualizationSelector(selectLegend);
+    const grid = useVisualizationSelector(selectGrid);
+    const { setLegend, mergeGrid } = useCartesianEditorActions();
 
     // Extract fields used in autocomplete for tooltip
     // for non pivot charts, we can use all items in results
     // for pivot charts, we need to extract the fields used in the chart config, including pivot values
     const autocompleteFieldsTooltip = useMemo(() => {
-        if (!isCartesianVisualizationConfig(visualizationConfig)) return [];
-
-        const { dirtyEchartsConfig: echartsConfig } =
-            visualizationConfig.chartConfig;
-
         const allEncodes: Series['encode'][] =
-            echartsConfig?.series?.map((serie) => serie.encode) ?? [];
+            series?.map((serie) => serie.encode) ?? [];
 
         const hasPivot = allEncodes.some((serie) =>
             isPivotReferenceWithValues(serie.yRef),
@@ -150,12 +199,9 @@ export const Legend: FC<Props> = ({ items }) => {
         }, new Set<string>());
 
         return [...fieldSet];
-    }, [visualizationConfig, items]);
-    if (!isCartesianVisualizationConfig(visualizationConfig)) return null;
+    }, [series, items]);
 
-    const { dirtyEchartsConfig, setLegend } = visualizationConfig.chartConfig;
-
-    const legendConfig = dirtyEchartsConfig?.legend ?? {};
+    const legendConfig = legend ?? {};
 
     const handleChange = (
         prop: string,
@@ -166,14 +212,15 @@ export const Legend: FC<Props> = ({ items }) => {
         return newState;
     };
 
-    const showDefault = (dirtyEchartsConfig?.series || []).length > 1;
+    const showDefault = (series || []).length > 1;
     return (
         <Stack>
             <Config>
                 <Config.Section>
-                    <Group spacing="xs" align="center">
+                    <Group gap="xs" align="center">
                         <Config.Heading>Legend</Config.Heading>
                         <Switch
+                            size="xs"
                             checked={legendConfig.show ?? showDefault}
                             onChange={(e) =>
                                 handleChange('show', e.currentTarget.checked)
@@ -181,48 +228,116 @@ export const Legend: FC<Props> = ({ items }) => {
                         />
                     </Group>
 
-                    <Collapse in={legendConfig.show ?? showDefault}>
-                        <Stack spacing="xs">
-                            <Group spacing="xs">
-                                <Config.Label>Scroll behavior</Config.Label>
+                    <Collapse expanded={legendConfig.show ?? showDefault}>
+                        <Stack gap="xs">
+                            <Group gap="xs">
+                                <Config.Label>Placement</Config.Label>
                                 <SegmentedControl
-                                    value={
-                                        dirtyEchartsConfig?.legend?.type ??
-                                        'scroll'
-                                    }
-                                    data={[
-                                        { label: 'Scroll', value: 'scroll' },
-                                        { label: 'Wrap', value: 'plain' },
-                                    ]}
-                                    onChange={(value) =>
-                                        handleChange('type', value)
-                                    }
-                                />
-                            </Group>
-                            <Group spacing="xs">
-                                <Config.Label>Orientation</Config.Label>
-                                <SegmentedControl
-                                    name="orient"
-                                    value={legendConfig.orient ?? 'horizontal'}
+                                    size="xs"
+                                    name="placement"
+                                    value={legendConfig.placement ?? 'custom'}
                                     onChange={(val) =>
-                                        handleChange('orient', val)
+                                        handleChange(
+                                            'placement',
+                                            val as LegendPlacement,
+                                        )
                                     }
                                     data={[
                                         {
-                                            label: 'Horizontal',
-                                            value: 'horizontal',
+                                            label: 'Chart area',
+                                            value: 'custom',
                                         },
                                         {
-                                            label: 'Vertical',
-                                            value: 'vertical',
+                                            label: 'Outside right',
+                                            value: 'outsideRight',
+                                        },
+                                        {
+                                            label: 'Outside left',
+                                            value: 'outsideLeft',
                                         },
                                     ]}
                                 />
                             </Group>
-                            <PositionConfiguration
-                                legendConfig={legendConfig}
-                                handleChange={handleChange}
-                            />
+                            {(legendConfig.placement ?? 'custom') ===
+                                'custom' && (
+                                <>
+                                    <Group gap="xs">
+                                        <Config.Label>
+                                            Scroll behavior
+                                        </Config.Label>
+                                        <SegmentedControl
+                                            size="xs"
+                                            value={legend?.type ?? 'scroll'}
+                                            data={[
+                                                {
+                                                    label: 'Scroll',
+                                                    value: 'scroll',
+                                                },
+                                                {
+                                                    label: 'Wrap',
+                                                    value: 'plain',
+                                                },
+                                            ]}
+                                            onChange={(value) =>
+                                                handleChange('type', value)
+                                            }
+                                        />
+                                    </Group>
+                                    <Group gap="xs">
+                                        <Config.Label>Orientation</Config.Label>
+                                        <SegmentedControl
+                                            size="xs"
+                                            name="orient"
+                                            value={
+                                                legendConfig.orient ??
+                                                'horizontal'
+                                            }
+                                            onChange={(val) =>
+                                                handleChange('orient', val)
+                                            }
+                                            data={[
+                                                {
+                                                    label: 'Horizontal',
+                                                    value: 'horizontal',
+                                                },
+                                                {
+                                                    label: 'Vertical',
+                                                    value: 'vertical',
+                                                },
+                                            ]}
+                                        />
+                                    </Group>
+                                    <PositionConfiguration
+                                        legendConfig={legendConfig}
+                                        handleChange={handleChange}
+                                    />
+                                </>
+                            )}
+                            {(legendConfig.placement === 'outsideRight' ||
+                                legendConfig.placement === 'outsideLeft') && (
+                                <Group gap="xs">
+                                    <Config.Label>
+                                        Legend area width
+                                    </Config.Label>
+                                    <LegendAreaWidthInput
+                                        key={legendConfig.placement}
+                                        initialValue={
+                                            (legendConfig.placement ===
+                                            'outsideRight'
+                                                ? grid?.right
+                                                : grid?.left) || '25%'
+                                        }
+                                        onCommit={(value) => {
+                                            const gridSide =
+                                                legendConfig.placement ===
+                                                'outsideRight'
+                                                    ? 'right'
+                                                    : 'left';
+                                            mergeGrid({ [gridSide]: value });
+                                        }}
+                                    />
+                                </Group>
+                            )}
                         </Stack>
                     </Collapse>
                 </Config.Section>
@@ -234,7 +349,7 @@ export const Legend: FC<Props> = ({ items }) => {
                 <Config.Section>
                     <Config.Heading>Tooltips</Config.Heading>
                     <TooltipSortConfig />
-                    {projectUuid && (
+                    {projectUuid && !embedToken && (
                         <Suspense fallback={<Loader size="sm" />}>
                             <TooltipConfig fields={autocompleteFieldsTooltip} />
                         </Suspense>

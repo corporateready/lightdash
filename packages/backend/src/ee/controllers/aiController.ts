@@ -1,23 +1,26 @@
 import {
-    ApiAiDashboardSummaryResponse,
     ApiAiGenerateChartMetadataResponse,
+    ApiAiGenerateCustomDimensionResponse,
     ApiAiGenerateCustomVizResponse,
     ApiAiGenerateFormulaTableCalculationResponse,
     ApiAiGenerateTableCalculationResponse,
     ApiAiGenerateTooltipResponse,
-    ApiAiGetDashboardSummaryResponse,
+    ApiAiSuggestChartTypeExploreResponse,
+    ApiAiSuggestChartTypeFieldsResponse,
     ApiErrorPayload,
     assertRegisteredAccount,
-    DashboardSummary,
     GenerateChartMetadataRequest,
+    GenerateCustomDimensionRequest,
     GenerateFormulaTableCalculationRequest,
     GenerateTableCalculationRequest,
     GenerateTooltipRequest,
     ItemsMap,
+    SuggestChartTypeExploreRequest,
+    SuggestChartTypeFieldsRequest,
+    UUID,
 } from '@lightdash/common';
 import {
     Body,
-    Get,
     Hidden,
     Middlewares,
     OperationId,
@@ -35,53 +38,39 @@ import {
     isAuthenticated,
 } from '../../controllers/authentication';
 import { BaseController } from '../../controllers/baseController';
+import {
+    GeneratedGoogleSheetsExtensionReportDraft,
+    GenerateGoogleSheetsExtensionReportDraftRequest,
+} from '../services/ai/agents/googleSheetsExtensionReportDraftTypes';
 import { AiService } from '../services/AiService/AiService';
 
 @Route('/api/v1/ai/:projectUuid')
 @Hidden()
 @Response<ApiErrorPayload>('default', 'Error')
 export class AiController extends BaseController {
+    /** @summary Draft Google Sheets report settings without running a query */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
-    @Post('/dashboard/:dashboardUuid/summary')
-    @OperationId('createDashboardSummary')
-    async createDashboardSummary(
+    @Post('/google-sheets-extension/report-draft')
+    @OperationId('generateGoogleSheetsExtensionReportDraft')
+    async generateGoogleSheetsExtensionReportDraft(
         @Request() req: express.Request,
-        @Path() projectUuid: string,
-        @Path() dashboardUuid: string,
-        @Body() body: Pick<DashboardSummary, 'context' | 'tone' | 'audiences'>,
-    ): Promise<ApiAiDashboardSummaryResponse> {
+        @Path() projectUuid: UUID,
+        @Body() body: GenerateGoogleSheetsExtensionReportDraftRequest,
+    ): Promise<{
+        status: 'ok';
+        results: GeneratedGoogleSheetsExtensionReportDraft;
+    }> {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
-            results: await this.getAiService().createDashboardSummary(
-                toSessionUser(req.account),
-                projectUuid,
-                dashboardUuid,
-                body,
-            ),
-        };
-    }
-
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Get('/dashboard/:dashboardUuidOrSlug/summary')
-    @OperationId('getDashboardSummary')
-    async getDashboardSummary(
-        @Request() req: express.Request,
-        @Path() projectUuid: string,
-        @Path() dashboardUuidOrSlug: string,
-    ): Promise<ApiAiGetDashboardSummaryResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.getAiService().getDashboardSummary(
-                toSessionUser(req.account),
-                projectUuid,
-                dashboardUuidOrSlug,
-            ),
+            results:
+                await this.getAiService().generateGoogleSheetsExtensionReportDraft(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    body,
+                ),
         };
     }
 
@@ -142,13 +131,38 @@ export class AiController extends BaseController {
     async generateTableCalculation(
         @Request() req: express.Request,
         @Path() projectUuid: string,
-        @Body() body: GenerateTableCalculationRequest,
+        @Body() body: Omit<GenerateTableCalculationRequest, 'exploreName'> & {
+            exploreName?: string;
+        },
     ): Promise<ApiAiGenerateTableCalculationResponse> {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.getAiService().generateTableCalculation(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+            ),
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/custom-dimension/generate')
+    @OperationId('generateCustomDimension')
+    async generateCustomDimension(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: Omit<GenerateCustomDimensionRequest, 'exploreName'> & {
+            exploreName?: string;
+        },
+    ): Promise<ApiAiGenerateCustomDimensionResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getAiService().generateCustomDimension(
                 toSessionUser(req.account),
                 projectUuid,
                 body,
@@ -191,6 +205,48 @@ export class AiController extends BaseController {
         return {
             status: 'ok',
             results: await this.getAiService().generateTooltip(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+            ),
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/chart-type/suggest-fields')
+    @OperationId('suggestChartTypeFields')
+    async suggestChartTypeFields(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: SuggestChartTypeFieldsRequest,
+    ): Promise<ApiAiSuggestChartTypeFieldsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getAiService().suggestChartTypeFields(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+            ),
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/chart-type/suggest-explore')
+    @OperationId('suggestChartTypeExplore')
+    async suggestChartTypeExplore(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: SuggestChartTypeExploreRequest,
+    ): Promise<ApiAiSuggestChartTypeExploreResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.getAiService().suggestChartTypeExplore(
                 toSessionUser(req.account),
                 projectUuid,
                 body,

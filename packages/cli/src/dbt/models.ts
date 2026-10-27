@@ -3,14 +3,20 @@ import {
     DbtModelNode,
     DbtSchemaEditor,
     DimensionType,
+    getCatalogNestedColumnShape,
     ParseError,
     patchPathParts,
     SupportedDbtVersions,
+    type WarehouseCatalog,
 } from '@lightdash/common';
 import { WarehouseClient, WarehouseTableSchema } from '@lightdash/warehouses';
 import execa from 'execa';
 import inquirer from 'inquirer';
 import * as path from 'path';
+import {
+    getAgentConnectionChildEnvironment,
+    getAgentConnectionSelection,
+} from '../credentials';
 import GlobalState from '../globalState';
 import * as styles from '../styles';
 import { searchForModel } from './schema';
@@ -30,12 +36,53 @@ type GetDatabaseTableForModelArgs = {
     warehouseClient: WarehouseClient;
     preserveColumnCase: boolean;
 };
+type TableRef = { database: string; schema: string; table: string };
+
+/**
+ * Only scalar leaves reachable through non-repeated structs can be queried as
+ * plain columns today, so generated YAML skips container nodes and anything
+ * inside a repeated node.
+ */
+export const isGeneratableColumn = (
+    catalog: WarehouseCatalog,
+    { database, schema, table }: TableRef,
+    columnPath: string,
+): boolean => {
+    const segments = columnPath.split('.');
+    return segments.every((_, index) => {
+        const prefix = segments.slice(0, index + 1).join('.');
+        const shape = getCatalogNestedColumnShape(
+            catalog,
+            database,
+            schema,
+            table,
+            prefix,
+        );
+        const isLeaf = index === segments.length - 1;
+        // An array of scalars is exposed through its container entry, so it
+        // is generated like a leaf; every other container and anything under
+        // an array is left for the user to document by hand.
+        const isScalarArray =
+            shape?.repeated === true && shape.record === false;
+        return isLeaf
+            ? shape === undefined || isScalarArray
+            : shape?.repeated === false;
+    });
+};
+
+export type WarehouseModelColumns = {
+    /** Columns `generate` writes to YAML: scalars, struct leaves and arrays of scalars. */
+    table: WarehouseTableSchema;
+    /** Every column path the warehouse reports, containers and nested leaves included. */
+    warehouseColumnPaths: string[];
+};
+
 export const getWarehouseTableForModel = async ({
     model,
     warehouseClient,
     preserveColumnCase,
-}: GetDatabaseTableForModelArgs): Promise<WarehouseTableSchema> => {
-    const tableRef = {
+}: GetDatabaseTableForModelArgs): Promise<WarehouseModelColumns> => {
+    const tableRef: TableRef = {
         database: model.database,
         schema: model.schema,
         table: model.alias || model.name,
@@ -55,14 +102,36 @@ export const getWarehouseTableForModel = async ({
             `Expected to find materialised model at ${tableRef.database}.${tableRef.schema}.${tableRef.table} but couldn't find (or cannot access) ${missing}`,
         );
     }
-    return Object.entries(table).reduce<WarehouseTableSchema>(
-        (accumulator, [key, value]) => {
-            const columnName = preserveColumnCase ? key : key.toLowerCase();
-            accumulator[columnName] = value;
-            return accumulator;
-        },
-        {},
+    const columnName = (key: string) =>
+        preserveColumnCase ? key : key.toLowerCase();
+    return {
+        table: Object.entries(table).reduce<WarehouseTableSchema>(
+            (accumulator, [key, value]) => {
+                if (!isGeneratableColumn(catalog, tableRef, key)) {
+                    return accumulator;
+                }
+                accumulator[columnName(key)] = value;
+                return accumulator;
+            },
+            {},
+        ),
+        warehouseColumnPaths: Object.keys(table).map(columnName),
+    };
+};
+
+/**
+ * Existing YAML columns the warehouse no longer has. Nested leaves and
+ * containers are not generated, but they are real warehouse paths, so they
+ * are never reported as missing.
+ */
+export const getColumnsMissingFromWarehouse = (
+    existingColumnNames: string[],
+    warehouseColumnPaths: string[],
+): string[] => {
+    const known = new Set(
+        warehouseColumnPaths.map((columnPath) => columnPath.toLowerCase()),
     );
+    return existingColumnNames.filter((name) => !known.has(name.toLowerCase()));
 };
 
 type GenerateModelYamlArgs = {
@@ -154,6 +223,7 @@ const askOverwriteDescription = async (
 type FindAndUpdateModelYamlArgs = {
     model: CompiledModel;
     table: WarehouseTableSchema;
+    warehouseColumnPaths: string[];
     docs: Record<string, DbtDoc>;
     includeMeta: boolean;
     projectDir: string;
@@ -164,6 +234,7 @@ type FindAndUpdateModelYamlArgs = {
 export const findAndUpdateModelYaml = async ({
     model,
     table,
+    warehouseColumnPaths,
     docs,
     includeMeta,
     projectDir,
@@ -285,16 +356,10 @@ export const findAndUpdateModelYaml = async ({
             schemaEditor.addColumn(model.name, column);
         });
 
-        // Delete columns that no longer exist in the warehouse (case-insensitive comparison)
-        const generatedColumnNamesLower = generatedModel.columns.map((gc) =>
-            gc.name.toLowerCase(),
+        const deletedColumnNames = getColumnsMissingFromWarehouse(
+            existingColumns.map((c) => c.name),
+            warehouseColumnPaths,
         );
-        const deletedColumnNames = existingColumns
-            .filter(
-                (c) =>
-                    !generatedColumnNamesLower.includes(c.name.toLowerCase()),
-            )
-            .map((c) => c.name);
         if (deletedColumnNames.length > 0 && !GlobalState.isNonInteractive()) {
             let answers = { isConfirm: assumeYes };
 
@@ -356,20 +421,54 @@ export const getCompiledModels = async (
     if (args.select || args.exclude) {
         const spinner = GlobalState.startSpinner(`Filtering models`);
         try {
-            const { stdout } = await execa('dbt', [
-                'ls',
-                ...(args.projectDir ? ['--project-dir', args.projectDir] : []),
-                ...(args.profilesDir
-                    ? ['--profiles-dir', args.profilesDir]
-                    : []),
-                ...(args.target ? ['--target', args.target] : []),
-                ...(args.profile ? ['--profile', args.profile] : []),
-                ...(args.select ? ['--select', args.select.join(' ')] : []),
-                ...(args.exclude ? ['--exclude', args.exclude.join(' ')] : []),
-                ...(args.vars ? ['--vars', args.vars] : []),
-                '--resource-type=model',
-                '--output=json',
-            ]);
+            const { stdout } = await (getAgentConnectionSelection() !== null
+                ? execa(
+                      'dbt',
+                      [
+                          'ls',
+                          ...(args.projectDir
+                              ? ['--project-dir', args.projectDir]
+                              : []),
+                          ...(args.profilesDir
+                              ? ['--profiles-dir', args.profilesDir]
+                              : []),
+                          ...(args.target ? ['--target', args.target] : []),
+                          ...(args.profile ? ['--profile', args.profile] : []),
+                          ...(args.select
+                              ? ['--select', args.select.join(' ')]
+                              : []),
+                          ...(args.exclude
+                              ? ['--exclude', args.exclude.join(' ')]
+                              : []),
+                          ...(args.vars ? ['--vars', args.vars] : []),
+                          '--resource-type=model',
+                          '--output=json',
+                      ],
+                      {
+                          extendEnv: false,
+                          env: await getAgentConnectionChildEnvironment(),
+                      },
+                  )
+                : execa('dbt', [
+                      'ls',
+                      ...(args.projectDir
+                          ? ['--project-dir', args.projectDir]
+                          : []),
+                      ...(args.profilesDir
+                          ? ['--profiles-dir', args.profilesDir]
+                          : []),
+                      ...(args.target ? ['--target', args.target] : []),
+                      ...(args.profile ? ['--profile', args.profile] : []),
+                      ...(args.select
+                          ? ['--select', args.select.join(' ')]
+                          : []),
+                      ...(args.exclude
+                          ? ['--exclude', args.exclude.join(' ')]
+                          : []),
+                      ...(args.vars ? ['--vars', args.vars] : []),
+                      '--resource-type=model',
+                      '--output=json',
+                  ]));
             const filteredModelIds = stdout
                 .split('\n')
                 .map((l) => l.trim())

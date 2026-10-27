@@ -1,7 +1,10 @@
 import {
+    getCellUrls,
     isField,
+    isMetric,
     isRawResultRow,
     isResultValue,
+    type ConditionalFormattingTextStyle,
     type RawResultRow,
     type ResultRow,
 } from '@lightdash/common';
@@ -12,18 +15,22 @@ import {
     useTimeout,
 } from '@mantine/hooks';
 import { type Cell } from '@tanstack/react-table';
+import { clsx } from 'clsx';
 import {
     useCallback,
     useEffect,
     useMemo,
     useRef,
     useState,
+    type CSSProperties,
     type FC,
 } from 'react';
-import { type CSSProperties } from 'styled-components';
 import useToaster from '../../../../hooks/toaster/useToaster';
+import { JsonCellModal } from '../../JsonViewer/JsonCellViewer';
+import { type JsonCellValue } from '../../JsonViewer/utils';
 import { Td } from '../Table.styles';
 import { type CellContextMenuProps } from '../types';
+import bodyCellStyles from './BodyCell.module.css';
 import CellMenu from './CellMenu';
 import CellTooltip from './CellTooltip';
 
@@ -37,9 +44,12 @@ interface CommonBodyCellProps {
     style?: CSSProperties;
     backgroundColor?: string;
     fontColor?: string;
+    textStyle?: ConditionalFormattingTextStyle;
     isLargeText?: boolean;
     tooltipContent?: string;
     minimal?: boolean;
+    // Set on a row-grouping block-start cell that vertically merges >1 row.
+    rowSpan?: number;
 }
 
 const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
@@ -48,6 +58,7 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
     className,
     backgroundColor,
     fontColor,
+    textStyle,
     hasData,
     cellContextMenu,
     isNumericItem,
@@ -56,13 +67,18 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
     style,
     tooltipContent,
     minimal = false,
+    rowSpan,
 }) => {
+    const isMerged = !!rowSpan && rowSpan > 1;
     const elementRef = useRef<HTMLTableCellElement>(null);
     const { showToastSuccess } = useToaster();
     const { copy } = useClipboard();
 
     const [isCopying, setCopying] = useState(false);
     const [isMenuOpen, { toggle: toggleMenu }] = useDisclosure(false);
+    const [jsonModalValue, setJsonModalValue] = useState<
+        JsonCellValue | undefined
+    >();
     const [isTooltipOpen, { open: openTooltip, close: closeTooltip }] =
         useDisclosure(false);
     const [elementBounds, setElementBounds] = useState<DOMRect | null>(null);
@@ -75,7 +91,6 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
         500,
     );
     const item = cell.column.columnDef.meta?.item;
-    const hasUrls = isField(item) && item.urls ? item.urls.length > 0 : false;
 
     const shouldRenderMenu = canHaveMenu && isMenuOpen && elementRef.current;
     const shouldRenderTooltip =
@@ -108,6 +123,18 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
         }
     }, [hasData, cell]);
 
+    const hasUrls = useMemo(() => {
+        if (!canHaveMenu) return false;
+        const cellValue = cell.getValue();
+        const rawValue = isResultValue(cellValue)
+            ? cellValue.value.raw
+            : cellValue;
+        return (
+            getCellUrls(isField(item) ? item.urls : undefined, rawValue)
+                .length > 0
+        );
+    }, [canHaveMenu, cell, item]);
+
     const handleCopy = useCallback(() => {
         if (!isMenuOpen) return;
 
@@ -138,7 +165,11 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
         <>
             <Td
                 ref={elementRef}
-                className={className}
+                className={clsx(
+                    className,
+                    isMerged && bodyCellStyles.mergedDimCell,
+                )}
+                rowSpan={isMerged ? rowSpan : undefined}
                 style={style}
                 $rowIndex={index}
                 $isSelected={isMenuOpen}
@@ -148,6 +179,7 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
                 $isCopying={isCopying}
                 $backgroundColor={backgroundColor}
                 $fontColor={fontColor}
+                $textStyle={textStyle}
                 $hasData={hasData}
                 $isNaN={!hasData || !isNumericItem}
                 $hasUrls={hasUrls}
@@ -156,6 +188,16 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
                     displayValue.includes('\n')
                 }
                 onClick={canHaveMenu ? toggleMenu : undefined}
+                // Walkthrough anchor (data-tour-via): a metric cell, whose
+                // menu can open the records behind the number. The name is
+                // computed, so the hint is declared here:
+                //   data-tour-anchor="results-metric-cell" data-tour-hint="Click a number in the results"
+                data-tour-anchor={
+                    canHaveMenu && isField(item) && isMetric(item)
+                        ? 'results-metric-cell'
+                        : undefined
+                }
+                data-tour-hint="Click a number in the results"
                 onMouseEnter={canHaveTooltip ? startTooltipTimer : undefined}
                 onMouseLeave={
                     canHaveTooltip
@@ -175,6 +217,15 @@ const BodyCell: FC<React.PropsWithChildren<CommonBodyCellProps>> = ({
                     menuItems={cellContextMenu}
                     elementBounds={elementBounds}
                     onClose={toggleMenu}
+                    onViewJsonCell={setJsonModalValue}
+                />
+            ) : null}
+
+            {jsonModalValue ? (
+                <JsonCellModal
+                    value={jsonModalValue}
+                    opened
+                    onClose={() => setJsonModalValue(undefined)}
                 />
             ) : null}
 

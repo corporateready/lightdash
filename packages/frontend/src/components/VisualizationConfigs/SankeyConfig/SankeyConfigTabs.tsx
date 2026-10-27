@@ -6,52 +6,64 @@ import {
     type CustomDimension,
     type Dimension,
     type Metric,
+    type SankeyNodeLayout,
     type TableCalculation,
 } from '@lightdash/common';
-import {
-    MantineProvider,
-    SegmentedControl,
-    Stack,
-    Tabs,
-    useMantineColorScheme,
-} from '@mantine/core';
+import { Stack, Text, SegmentedControl } from '@mantine/core';
 import { memo, useMemo, type FC } from 'react';
+import {
+    selectSankeyEditor,
+    selectSankeyFieldPools,
+    selectSankeyHasCycle,
+    selectSankeyMetricFieldId,
+    selectSankeySourceFieldId,
+    selectSankeyTargetFieldId,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
+import { useSankeyEditorActions } from '../../../hooks/useSankeyChartConfig';
 import FieldSelect from '../../common/FieldSelect';
-import { isSankeyVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import { useVisualizationInputSelector } from '../../LightdashVisualization/useVisualizationContext';
 import { Config } from '../common/Config';
-import { getVizConfigThemeOverride } from '../mantineTheme';
+import { VisualizationConfigTabs } from '../common/VisualizationConfigTabs';
 
 export const ConfigTabs: FC = memo(() => {
-    const { colorScheme } = useMantineColorScheme();
-    const themeOverride = useMemo(
-        () => getVizConfigThemeOverride(colorScheme),
-        [colorScheme],
+    const pools = useVisualizationInputSelector(selectSankeyFieldPools);
+    const sourceFieldId = useVisualizationInputSelector(
+        selectSankeySourceFieldId,
     );
-
-    const { visualizationConfig } = useVisualizationContext();
-
-    const isSankey = isSankeyVisualizationConfig(visualizationConfig);
+    const targetFieldId = useVisualizationInputSelector(
+        selectSankeyTargetFieldId,
+    );
+    const metricFieldId = useVisualizationInputSelector(
+        selectSankeyMetricFieldId,
+    );
+    const hasCycle = useVisualizationInputSelector(selectSankeyHasCycle);
+    const nodeAlign = useVisualizationSelector(
+        (state) => selectSankeyEditor(state).nodeAlign,
+    );
+    const orient = useVisualizationSelector(
+        (state) => selectSankeyEditor(state).orient,
+    );
+    const nodeLayout = useVisualizationSelector(
+        (state) => selectSankeyEditor(state).nodeLayout,
+    );
+    const {
+        onSourceFieldChange,
+        onTargetFieldChange,
+        onMetricFieldChange,
+        onNodeAlignChange,
+        onOrientChange,
+        onNodeLayoutChange,
+    } = useSankeyEditorActions();
 
     const allDimensions = useMemo(
-        () => (isSankey ? Object.values(visualizationConfig.dimensions) : []),
-        [isSankey, visualizationConfig],
+        () => Object.values(pools.dimensions),
+        [pools],
     );
     const numericFields = useMemo(
-        () =>
-            isSankey ? Object.values(visualizationConfig.numericFields) : [],
-        [isSankey, visualizationConfig],
+        () => Object.values(pools.numericFields),
+        [pools],
     );
-
-    const sourceFieldId = isSankey
-        ? visualizationConfig.chartConfig.sourceFieldId
-        : null;
-    const targetFieldId = isSankey
-        ? visualizationConfig.chartConfig.targetFieldId
-        : null;
-    const metricFieldId = isSankey
-        ? visualizationConfig.chartConfig.metricFieldId
-        : null;
 
     const selectedSource = useMemo(() => {
         if (!sourceFieldId) return undefined;
@@ -80,171 +92,210 @@ export const ConfigTabs: FC = memo(() => {
         });
     }, [metricFieldId, numericFields]);
 
-    if (!isSankey) return null;
-
-    const {
-        onSourceFieldChange,
-        onTargetFieldChange,
-        onMetricFieldChange,
-        nodeAlign,
-        onNodeAlignChange,
-        orient,
-        onOrientChange,
-    } = visualizationConfig.chartConfig;
+    // Merging needs an acyclic graph, so cyclic data falls back to multi-step
+    const effectiveLayout: SankeyNodeLayout =
+        nodeLayout === 'merged' && hasCycle ? 'multi-step' : nodeLayout;
 
     return (
-        <MantineProvider inherit theme={themeOverride}>
-            <Tabs defaultValue="general" keepMounted={false}>
-                <Tabs.List mb="sm">
-                    <Tabs.Tab px="sm" value="general">
-                        General
-                    </Tabs.Tab>
-                    <Tabs.Tab px="sm" value="display">
-                        Display
-                    </Tabs.Tab>
-                </Tabs.List>
-
-                <Tabs.Panel value="general">
-                    <Stack>
-                        <Config>
-                            <Config.Section>
-                                <Config.Heading>Source</Config.Heading>
-                                <FieldSelect<Dimension | CustomDimension>
-                                    placeholder="Select source dimension"
-                                    disabled={allDimensions.length === 0}
-                                    item={selectedSource}
-                                    items={allDimensions}
-                                    onChange={(newField) => {
-                                        if (newField && isField(newField))
-                                            onSourceFieldChange(
-                                                getItemId(newField),
-                                            );
-                                        else if (
-                                            newField &&
-                                            isCustomDimension(newField)
-                                        )
-                                            onSourceFieldChange(newField.id);
-                                        else onSourceFieldChange(null);
-                                    }}
-                                    hasGrouping
-                                />
-                            </Config.Section>
-                        </Config>
-                        <Config>
-                            <Config.Section>
-                                <Config.Heading>Target</Config.Heading>
-                                <FieldSelect<Dimension | CustomDimension>
-                                    placeholder="Select target dimension"
-                                    disabled={allDimensions.length === 0}
-                                    item={selectedTarget}
-                                    items={allDimensions}
-                                    onChange={(newField) => {
-                                        if (newField && isField(newField))
-                                            onTargetFieldChange(
-                                                getItemId(newField),
-                                            );
-                                        else if (
-                                            newField &&
-                                            isCustomDimension(newField)
-                                        )
-                                            onTargetFieldChange(newField.id);
-                                        else onTargetFieldChange(null);
-                                    }}
-                                    hasGrouping
-                                />
-                            </Config.Section>
-                        </Config>
-                        <Config>
-                            <Config.Section>
-                                <Config.Heading>Value</Config.Heading>
-                                <FieldSelect<Metric | TableCalculation>
-                                    placeholder="Select metric"
-                                    disabled={numericFields.length === 0}
-                                    item={selectedMetric}
-                                    items={numericFields}
-                                    onChange={(newField) => {
-                                        if (newField && isField(newField))
-                                            onMetricFieldChange(
-                                                getItemId(newField),
-                                            );
-                                        else if (
-                                            newField &&
-                                            isTableCalculation(newField)
-                                        )
-                                            onMetricFieldChange(newField.name);
-                                        else onMetricFieldChange(null);
-                                    }}
-                                    hasGrouping
-                                />
-                            </Config.Section>
-                        </Config>
-                    </Stack>
-                </Tabs.Panel>
-
-                <Tabs.Panel value="display">
-                    <Stack>
-                        <Config>
-                            <Config.Section>
-                                <Config.Heading>Orientation</Config.Heading>
-                                <SegmentedControl
-                                    value={orient}
-                                    data={[
-                                        {
-                                            value: 'horizontal',
-                                            label: 'Horizontal',
-                                        },
-                                        {
-                                            value: 'vertical',
-                                            label: 'Vertical',
-                                        },
-                                    ]}
-                                    onChange={(value) =>
-                                        onOrientChange(
-                                            value as 'horizontal' | 'vertical',
-                                        )
-                                    }
-                                />
-                            </Config.Section>
-                        </Config>
-                        <Config>
-                            <Config.Section>
-                                <Config.Heading>Node alignment</Config.Heading>
-                                <SegmentedControl
-                                    value={nodeAlign}
-                                    data={[
-                                        {
-                                            value: 'left',
-                                            label:
-                                                orient === 'vertical'
-                                                    ? 'Top'
-                                                    : 'Left',
-                                        },
-                                        {
-                                            value: 'right',
-                                            label:
-                                                orient === 'vertical'
-                                                    ? 'Bottom'
-                                                    : 'Right',
-                                        },
-                                        {
-                                            value: 'justify',
-                                            label: 'Justify',
-                                        },
-                                    ]}
-                                    onChange={(value) =>
-                                        onNodeAlignChange(
-                                            value as
-                                                | 'left'
-                                                | 'right'
-                                                | 'justify',
-                                        )
-                                    }
-                                />
-                            </Config.Section>
-                        </Config>
-                    </Stack>
-                </Tabs.Panel>
-            </Tabs>
-        </MantineProvider>
+        <VisualizationConfigTabs
+            tabs={[
+                {
+                    value: 'general',
+                    label: 'General',
+                    panel: (
+                        <Stack>
+                            <Config>
+                                <Config.Section>
+                                    <Config.Heading>Source</Config.Heading>
+                                    <FieldSelect<Dimension | CustomDimension>
+                                        placeholder="Select source dimension"
+                                        disabled={allDimensions.length === 0}
+                                        item={selectedSource}
+                                        items={allDimensions}
+                                        onChange={(newField) => {
+                                            if (newField && isField(newField))
+                                                onSourceFieldChange(
+                                                    getItemId(newField),
+                                                );
+                                            else if (
+                                                newField &&
+                                                isCustomDimension(newField)
+                                            )
+                                                onSourceFieldChange(
+                                                    newField.id,
+                                                );
+                                            else onSourceFieldChange(null);
+                                        }}
+                                        hasGrouping
+                                    />
+                                </Config.Section>
+                            </Config>
+                            <Config>
+                                <Config.Section>
+                                    <Config.Heading>Target</Config.Heading>
+                                    <FieldSelect<Dimension | CustomDimension>
+                                        placeholder="Select target dimension"
+                                        disabled={allDimensions.length === 0}
+                                        item={selectedTarget}
+                                        items={allDimensions}
+                                        onChange={(newField) => {
+                                            if (newField && isField(newField))
+                                                onTargetFieldChange(
+                                                    getItemId(newField),
+                                                );
+                                            else if (
+                                                newField &&
+                                                isCustomDimension(newField)
+                                            )
+                                                onTargetFieldChange(
+                                                    newField.id,
+                                                );
+                                            else onTargetFieldChange(null);
+                                        }}
+                                        hasGrouping
+                                    />
+                                </Config.Section>
+                            </Config>
+                            <Config>
+                                <Config.Section>
+                                    <Config.Heading>Value</Config.Heading>
+                                    <FieldSelect<Metric | TableCalculation>
+                                        placeholder="Select metric"
+                                        disabled={numericFields.length === 0}
+                                        item={selectedMetric}
+                                        items={numericFields}
+                                        onChange={(newField) => {
+                                            if (newField && isField(newField))
+                                                onMetricFieldChange(
+                                                    getItemId(newField),
+                                                );
+                                            else if (
+                                                newField &&
+                                                isTableCalculation(newField)
+                                            )
+                                                onMetricFieldChange(
+                                                    newField.name,
+                                                );
+                                            else onMetricFieldChange(null);
+                                        }}
+                                        hasGrouping
+                                    />
+                                </Config.Section>
+                            </Config>
+                        </Stack>
+                    ),
+                },
+                {
+                    value: 'display',
+                    label: 'Display',
+                    panel: (
+                        <Stack>
+                            <Config>
+                                <Config.Section>
+                                    <Config.Heading>Orientation</Config.Heading>
+                                    <SegmentedControl
+                                        size="xs"
+                                        value={orient}
+                                        data={[
+                                            {
+                                                value: 'horizontal',
+                                                label: 'Horizontal',
+                                            },
+                                            {
+                                                value: 'vertical',
+                                                label: 'Vertical',
+                                            },
+                                        ]}
+                                        onChange={(value) =>
+                                            onOrientChange(
+                                                value as
+                                                    | 'horizontal'
+                                                    | 'vertical',
+                                            )
+                                        }
+                                    />
+                                </Config.Section>
+                            </Config>
+                            <Config>
+                                <Config.Section>
+                                    <Config.Heading>Node layout</Config.Heading>
+                                    <SegmentedControl
+                                        size="xs"
+                                        value={effectiveLayout}
+                                        data={[
+                                            {
+                                                value: 'multi-step',
+                                                label: 'Multi-step',
+                                            },
+                                            {
+                                                value: 'merged',
+                                                label: 'Merged',
+                                                disabled: hasCycle,
+                                            },
+                                            {
+                                                value: 'direct',
+                                                label: 'Direct',
+                                            },
+                                        ]}
+                                        onChange={(value) =>
+                                            onNodeLayoutChange(
+                                                value as SankeyNodeLayout,
+                                            )
+                                        }
+                                    />
+                                    {hasCycle && (
+                                        <Text size="xs" c="dimmed" mt="xs">
+                                            Merging isn't available for flows
+                                            that loop back on themselves.
+                                        </Text>
+                                    )}
+                                </Config.Section>
+                            </Config>
+                            {effectiveLayout !== 'direct' && (
+                                <Config>
+                                    <Config.Section>
+                                        <Config.Heading>
+                                            Node alignment
+                                        </Config.Heading>
+                                        <SegmentedControl
+                                            size="xs"
+                                            value={nodeAlign}
+                                            data={[
+                                                {
+                                                    value: 'left',
+                                                    label:
+                                                        orient === 'vertical'
+                                                            ? 'Top'
+                                                            : 'Left',
+                                                },
+                                                {
+                                                    value: 'right',
+                                                    label:
+                                                        orient === 'vertical'
+                                                            ? 'Bottom'
+                                                            : 'Right',
+                                                },
+                                                {
+                                                    value: 'justify',
+                                                    label: 'Justify',
+                                                },
+                                            ]}
+                                            onChange={(value) =>
+                                                onNodeAlignChange(
+                                                    value as
+                                                        | 'left'
+                                                        | 'right'
+                                                        | 'justify',
+                                                )
+                                            }
+                                        />
+                                    </Config.Section>
+                                </Config>
+                            )}
+                        </Stack>
+                    ),
+                },
+            ]}
+        />
     );
 });

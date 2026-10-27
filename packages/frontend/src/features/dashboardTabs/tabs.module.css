@@ -37,10 +37,16 @@
         border-bottom: 0;
     }
     @mixin dark {
-        background-color: var(--mantine-color-background-0);
+        background-color: var(
+            --ld-embed-header-surface-color,
+            var(--mantine-color-background-0)
+        );
     }
     @mixin light {
-        background-color: var(--mantine-color-white);
+        background-color: var(
+            --ld-embed-header-surface-color,
+            var(--mantine-color-white)
+        );
     }
 
     align-items: center;
@@ -135,10 +141,5 @@
 
 .filtersBar {
     padding: var(--mantine-spacing-xs) 0;
-    @mixin dark {
-        background-color: var(--mantine-color-ldDark-0);
-    }
-    @mixin light {
-        background-color: var(--mantine-color-ldGray-0);
-    }
+    background-color: var(--ld-color-page);
 }

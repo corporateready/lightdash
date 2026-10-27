@@ -1,17 +1,18 @@
 import { subject } from '@casl/ability';
 import {
     assertUnreachable,
-    type ResourceViewItemType,
+    ResourceViewItemType,
     type SpaceSummary,
 } from '@lightdash/common';
 import { Paper, Stack, TextInput } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
-import { useMemo, useState } from 'react';
+import { useDeferredValue, useMemo, useState } from 'react';
 import useApp from '../../../providers/App/useApp';
 import AdminContentViewFilter from '../ResourceView/AdminContentViewFilter';
 import Tree from '../Tree/Tree';
 import { type NestableItem } from '../Tree/types';
 import useFuzzyTreeSearch from '../Tree/useFuzzyTreeSearch';
+import styles from './SpaceSelector.module.css';
 
 type SpaceSelectorProps = {
     projectUuid: string | undefined;
@@ -39,6 +40,7 @@ const SpaceSelector = ({
     onSelectSpace,
     children,
     isRootSelectionEnabled,
+    itemType,
 }: React.PropsWithChildren<SpaceSelectorProps>) => {
     const { user } = useApp();
 
@@ -57,14 +59,35 @@ const SpaceSelector = ({
     const filteredSpaces = useMemo(() => {
         if (!user.data) return [];
 
+        const destinationSpaces =
+            itemType === ResourceViewItemType.DOCUMENT
+                ? spaces.map((space) => ({
+                      ...space,
+                      restricted:
+                          space.restricted ||
+                          !user.data?.ability.can(
+                              'create',
+                              subject('Document', {
+                                  organizationUuid: user.data.organizationUuid,
+                                  projectUuid,
+                                  inheritsFromOrgOrProject:
+                                      space.inheritsFromOrgOrProject,
+                                  access: space.userAccess
+                                      ? [space.userAccess]
+                                      : [],
+                              }),
+                          ),
+                  }))
+                : spaces;
+
         switch (selectedAdminContentType) {
             case 'all':
-                return spaces;
+                return destinationSpaces;
             case 'shared': {
                 // Instead of dropping inaccessible spaces, keep them in the
                 // tree as non-selectable placeholders so hierarchy is preserved
                 // and same-named children remain visually distinguishable.
-                return spaces.map((space) => {
+                return destinationSpaces.map((space) => {
                     const isAccessible = space.userAccess;
                     if (isAccessible) return space;
                     return { ...space, restricted: true };
@@ -76,14 +99,16 @@ const SpaceSelector = ({
                     `Invalid admin content type when filtering spaces: ${selectedAdminContentType}`,
                 );
         }
-    }, [user.data, selectedAdminContentType, spaces]);
+    }, [user.data, selectedAdminContentType, spaces, itemType, projectUuid]);
 
     const [searchQuery, setSearchQuery] = useState('');
     const [debouncedSearchQuery] = useDebouncedValue(searchQuery, 200);
+    // Deferred so a large tree re-render never blocks the next keystroke.
+    const deferredSearchQuery = useDeferredValue(debouncedSearchQuery);
 
     const fuzzyFilteredSpaces = useFuzzyTreeSearch(
         filteredSpaces,
-        debouncedSearchQuery,
+        deferredSearchQuery,
     );
 
     return (
@@ -91,7 +116,14 @@ const SpaceSelector = ({
             {userCanManageProject ? (
                 <AdminContentViewFilter
                     value={selectedAdminContentType}
-                    onChange={setSelectedAdminContentType}
+                    onChange={(value) => {
+                        // Folder scoping only: this selector never renders the
+                        // all-user "Shared with me" segment, so the control's
+                        // wider union narrows back to the two modes here.
+                        if (value !== 'shared-with-me') {
+                            setSelectedAdminContentType(value);
+                        }
+                    }}
                     withDivider={false}
                     segmentedControlProps={{
                         flex: '0 0 auto',
@@ -105,8 +137,12 @@ const SpaceSelector = ({
                 placeholder="Search spaces"
             />
 
-            <Paper w="100%" h={400} style={{ overflow: 'auto' }} withBorder>
+            <Paper w="100%" h={400} className={styles.treeContainer}>
                 <Tree
+                    // Scope-tour anchor on every space node, named by label
+                    // (the hint's {value} is the space name):
+                    //   data-tour-anchor="space-option" data-tour-hint="Choose the {value} space"
+                    nodeTourAnchor="space-option"
                     withRootSelectable={isRootSelectionEnabled}
                     data={fuzzyFilteredSpaces ?? filteredSpaces}
                     value={selectedSpaceUuid}

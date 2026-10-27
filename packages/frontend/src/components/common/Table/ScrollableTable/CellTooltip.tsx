@@ -1,4 +1,4 @@
-import { Portal, Tooltip, type TooltipProps } from '@mantine-8/core';
+import { Portal, Tooltip, type TooltipProps } from '@mantine/core';
 import { type FC } from 'react';
 
 type CellTooltipProps = Omit<TooltipProps, 'children'> & {
@@ -7,14 +7,14 @@ type CellTooltipProps = Omit<TooltipProps, 'children'> & {
 
 const CellTooltip: FC<CellTooltipProps> = ({ elementBounds, ...rest }) => (
     <Portal>
-        <Tooltip {...rest} opened variant="xs">
+        <Tooltip {...rest} opened>
             <div
                 style={{
                     pointerEvents: 'none',
                     position: 'absolute',
                     zIndex: -1,
-                    left: elementBounds?.x ?? 0,
-                    top: elementBounds?.y ?? 0,
+                    left: (elementBounds?.x ?? 0) + window.scrollX,
+                    top: (elementBounds?.y ?? 0) + window.scrollY,
                     width: elementBounds?.width ?? 0,
                     height: elementBounds?.height ?? 0,
                 }}

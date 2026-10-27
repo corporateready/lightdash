@@ -1,0 +1,238 @@
+import { type DashboardFilterRule } from '@lightdash/common';
+import {
+    Anchor,
+    Badge,
+    Box,
+    Button,
+    Group,
+    Stack,
+    Switch,
+    Text,
+} from '@mantine/core';
+import {
+    IconAlertTriangle,
+    IconCircleDashed,
+    IconPlus,
+} from '@tabler/icons-react';
+import { clsx } from 'clsx';
+import { useCallback, useMemo, useState, type FC } from 'react';
+import { v4 as uuidv4 } from 'uuid';
+import MantineIcon from '../../../components/common/MantineIcon';
+import {
+    selectDashboardFilters,
+    useDashboardSelector,
+} from '../../dashboard/store';
+import FilterSelect, { type SelectableFilter } from './FilterSelect';
+import classes from './RequiredFilterCard.module.css';
+import { useDashboardFilterField } from './useDashboardFilterField';
+import { useUpdateDashboardFilterRule } from './useUpdateDashboardFilterRule';
+import {
+    getDashboardFilterRuleLabel,
+    getRequiredGroupMemberUpdates,
+    getSelectableFilters,
+} from './utils';
+
+type Props = {
+    filterRule: DashboardFilterRule;
+    onToggleRequired: (checked: boolean) => void;
+    onChangeFilterRule: (filterRule: DashboardFilterRule) => void;
+    onEditRules?: () => void;
+    /** Writes the other filter an alternative changes; default: the dashboard filters. */
+    onChangeOtherFilterRule?: (filterRule: DashboardFilterRule) => void;
+    /** Disables the switch and says why under it; default: enabled. */
+    disabledReason?: string;
+    /** Renders the alternative picker's list in a portal; default false. */
+    isListInPortal?: boolean;
+    /** Draws the bordered card, tinted while required; default true. */
+    withCard?: boolean;
+};
+
+const RequiredFilterCard: FC<Props> = ({
+    filterRule,
+    onToggleRequired,
+    onChangeFilterRule,
+    onEditRules,
+    onChangeOtherFilterRule,
+    disabledReason,
+    isListInPortal = false,
+    withCard = true,
+}) => {
+    const dashboardFilters = useDashboardSelector(selectDashboardFilters);
+    const updateFilterRule = useUpdateDashboardFilterRule();
+    const [isAddingAlternative, setIsAddingAlternative] = useState(false);
+
+    const isActive = !!filterRule.required || !!filterRule.requiredGroupId;
+
+    const getField = useDashboardFilterField();
+
+    const allFilterRules = useMemo(
+        () => [...dashboardFilters.dimensions, ...dashboardFilters.metrics],
+        [dashboardFilters],
+    );
+
+    // Siblings come from the saved dashboard filters; this filter's own flags
+    // come from the draft being edited in this popover
+    const siblings = useMemo(
+        () =>
+            filterRule.requiredGroupId
+                ? allFilterRules.filter(
+                      (rule) =>
+                          rule.id !== filterRule.id &&
+                          rule.requiredGroupId === filterRule.requiredGroupId,
+                  )
+                : [],
+        [allFilterRules, filterRule.id, filterRule.requiredGroupId],
+    );
+
+    const sharesRule = isActive && siblings.length > 0;
+    const isOnlyMember = isActive && siblings.length === 0;
+
+    // Adding an alternative writes to the sibling filter immediately, so it
+    // is only offered once this filter itself is saved on the dashboard
+    const isSavedFilter = useMemo(
+        () => allFilterRules.some((rule) => rule.id === filterRule.id),
+        [allFilterRules, filterRule.id],
+    );
+
+    const selectableFilters = useMemo<SelectableFilter[]>(
+        () => getSelectableFilters(allFilterRules, [filterRule.id], getField),
+        [allFilterRules, filterRule.id, getField],
+    );
+
+    const handleAddAlternative = useCallback(
+        (siblingId: string) => {
+            const groupId = filterRule.requiredGroupId ?? uuidv4();
+            // Rule members are valueless by definition; both filters get the
+            // full conversion immediately so cancelling the popover cannot
+            // leave a group member with values
+            const updates = getRequiredGroupMemberUpdates(groupId);
+            if (onChangeOtherFilterRule) {
+                const sibling = allFilterRules.find(
+                    (rule) => rule.id === siblingId,
+                );
+                if (sibling)
+                    onChangeOtherFilterRule({ ...sibling, ...updates });
+            } else {
+                updateFilterRule(siblingId, updates);
+                updateFilterRule(filterRule.id, updates);
+            }
+            onChangeFilterRule({ ...filterRule, ...updates });
+            setIsAddingAlternative(false);
+        },
+        [
+            filterRule,
+            allFilterRules,
+            updateFilterRule,
+            onChangeFilterRule,
+            onChangeOtherFilterRule,
+        ],
+    );
+
+    return (
+        <Box
+            className={clsx(
+                withCard && classes.card,
+                withCard && isActive && classes.cardActive,
+            )}
+        >
+            <Group justify="space-between" wrap="nowrap">
+                <Group gap={6} wrap="nowrap">
+                    <MantineIcon
+                        icon={IconCircleDashed}
+                        size="sm"
+                        color={isActive ? 'yellow.7' : 'ldGray.6'}
+                    />
+                    <Text size="xs" fw={600}>
+                        Required
+                    </Text>
+                </Group>
+                <Switch
+                    size="xs"
+                    color="yellow.6"
+                    aria-label="Required"
+                    checked={isActive}
+                    disabled={!!disabledReason}
+                    onChange={(e) => onToggleRequired(e.currentTarget.checked)}
+                />
+            </Group>
+            {disabledReason && (
+                <Group gap={6} mt={6} wrap="nowrap" align="flex-start">
+                    <MantineIcon
+                        icon={IconAlertTriangle}
+                        size={14}
+                        color="yellow.6"
+                    />
+                    <Text size="xs" c="dimmed">
+                        {disabledReason}
+                    </Text>
+                </Group>
+            )}
+            {isOnlyMember && (
+                <Stack gap={6} mt="xs">
+                    <Text size="xs" c="ldGray.7">
+                        Viewers must set this filter to load the dashboard.
+                    </Text>
+                    {isSavedFilter && selectableFilters.length === 0 && (
+                        <Text size="xs" c="dimmed">
+                            Add another filter to use it as an alternative.
+                        </Text>
+                    )}
+                    {isSavedFilter &&
+                        selectableFilters.length > 0 &&
+                        (isAddingAlternative ? (
+                            <FilterSelect
+                                selectableFilters={selectableFilters}
+                                placeholder="+ Add a filter"
+                                onSelect={handleAddAlternative}
+                                withinPortal={isListInPortal}
+                            />
+                        ) : (
+                            <Button
+                                size="compact-xs"
+                                variant="light"
+                                radius="xl"
+                                w="max-content"
+                                leftSection={<MantineIcon icon={IconPlus} />}
+                                onClick={() => setIsAddingAlternative(true)}
+                            >
+                                Add an alternative filter
+                            </Button>
+                        ))}
+                </Stack>
+            )}
+            {sharesRule && (
+                <Stack gap={6} className={classes.groupSection}>
+                    <Text size="xs" c="dimmed">
+                        Shares a rule. Viewers can satisfy it by setting this or
+                        an alternative:
+                    </Text>
+                    <Group gap={4}>
+                        {siblings.map((member) => (
+                            <Badge
+                                key={member.id}
+                                variant="outline"
+                                color="yellow"
+                                radius="xl"
+                            >
+                                {getDashboardFilterRuleLabel(member, getField)}
+                            </Badge>
+                        ))}
+                        {onEditRules && (
+                            <Anchor
+                                component="button"
+                                type="button"
+                                size="xs"
+                                className={classes.buttonAnchor}
+                                onClick={onEditRules}
+                            >
+                                Edit rule →
+                            </Anchor>
+                        )}
+                    </Group>
+                </Stack>
+            )}
+        </Box>
+    );
+};
+
+export default RequiredFilterCard;

@@ -1,13 +1,18 @@
 import {
+    isPreviewWarehouseSignInExpiredMessage,
     type ApiErrorDetail,
     type QueryHistoryStatus,
 } from '@lightdash/common';
-import { Anchor, Text } from '@mantine-8/core';
+import { Anchor, Text } from '@mantine/core';
 import { IconTableOff } from '@tabler/icons-react';
 import { Fragment, type FC } from 'react';
-import { LD_FIELD_COLORS } from '../../../mantineTheme';
+import { Link } from 'react-router';
+import useIsEmbedded from '../../../ee/providers/Embed/useIsEmbedded';
+import { useProject } from '../../../hooks/useProject';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import { TrackSection } from '../../../providers/Tracking/TrackingProvider';
 import NoTableIcon from '../../../svgs/emptystate-no-table.svg?react';
+import { LD_FIELD_COLORS } from '../../../theme';
 import { SectionName } from '../../../types/Events';
 import { EmptyState } from '../../common/EmptyState';
 import EmptyStateLoader from '../../common/EmptyStateLoader';
@@ -173,36 +178,62 @@ export const ExploreLoadingState = ({
     );
 };
 
+const PreviewSignInExpiredLink: FC = () => {
+    const { data: project } = useProject(useProjectUuid());
+    const upstreamProjectUuid = project?.upstreamProjectUuid;
+    if (!upstreamProjectUuid) return null;
+    return (
+        <Fragment>
+            <br />
+            <Anchor
+                component={Link}
+                to={`/generalSettings/projectManagement/${upstreamProjectUuid}/settings`}
+            >
+                Open the connection settings
+            </Anchor>
+        </Fragment>
+    );
+};
+
 export const ExploreErrorState = ({
     errorDetail,
 }: {
     errorDetail?: ApiErrorDetail | null;
-}) => (
-    <EmptyState
-        icon={<MantineIcon icon={IconTableOff} />}
-        title="Error loading results"
-        description={
-            <Fragment>
-                <Text style={{ whiteSpace: 'pre-wrap' }}>
-                    {errorDetail?.message ||
-                        'There was an error loading the results'}
-                </Text>
-                {errorDetail?.data.documentationUrl && (
-                    <Fragment>
-                        <br />
-                        <Anchor
-                            href={errorDetail.data.documentationUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            Learn how to resolve this in our documentation
-                        </Anchor>
-                    </Fragment>
-                )}
-            </Fragment>
-        }
-    />
-);
+}) => {
+    const isEmbedded = useIsEmbedded();
+
+    return (
+        <EmptyState
+            icon={<MantineIcon icon={IconTableOff} />}
+            title="Error loading results"
+            description={
+                <Fragment>
+                    <Text className={classes.errorMessage}>
+                        {errorDetail?.message ||
+                            'There was an error loading the results'}
+                    </Text>
+                    {errorDetail?.message &&
+                        isPreviewWarehouseSignInExpiredMessage(
+                            errorDetail.message,
+                        ) &&
+                        !isEmbedded && <PreviewSignInExpiredLink />}
+                    {errorDetail?.data.documentationUrl && !isEmbedded && (
+                        <Fragment>
+                            <br />
+                            <Anchor
+                                href={errorDetail.data.documentationUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                            >
+                                Learn how to resolve this in our documentation
+                            </Anchor>
+                        </Fragment>
+                    )}
+                </Fragment>
+            }
+        />
+    );
+};
 
 export const MissingRequiredParameters = ({
     missingRequiredParameters,

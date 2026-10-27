@@ -1,17 +1,49 @@
 import {
+    isApiError,
+    type AiAgentAdminEvalFilters,
     type AiAgentAdminFilters,
+    type AiAgentAdminMemoryFilters,
+    type AiAgentAdminMemorySort,
     type AiAgentAdminSort,
+    type AiAgentReviewItemSummary,
+    type AiAgentReviewItemStatus,
+    type AiAgentThreadDump,
     type ApiAiAgentAdminConversationsResponse,
+    type ApiAiAgentAdminEvalPromptsResponse,
+    type ApiAiAgentAdminEvalsResponse,
+    type ApiAiAgentAdminMemoriesResponse,
+    type ApiAiAgentAdminPromptActivityResponse,
+    type ApiAiAgentReviewItemActivityResponse,
+    type ApiAiAgentReviewItemPrDiffResponse,
+    type ApiAiAgentReviewItemResponse,
+    type ApiAiAgentReviewItemsResponse,
+    type ApiAiAgentReviewItemWritebackPreviewResponse,
+    type ApiAiAgentReviewSignalsResponse,
     type ApiAiAgentSummaryResponse,
+    type ApiAiAgentThreadDumpResponse,
     type ApiAiAgentVerifiedArtifactsResponse,
     type ApiError,
+    type ApiUpstreamDiffResponse,
+    type CreateAiAgentReviewItemComment,
+    type CreateAiAgentReviewItem,
+    type ReorderAiAgentReviewItems,
+    type UpdateAiAgentReviewItemAssignee,
+    type UpdateAiAgentReviewItemPriority,
+    type UpdateAiAgentReviewItemStatus,
 } from '@lightdash/common';
+import { IconArrowRight } from '@tabler/icons-react';
 import {
     useInfiniteQuery,
+    useMutation,
     useQuery,
+    useQueryClient,
+    type QueryClient,
     type UseInfiniteQueryOptions,
+    type UseQueryOptions,
 } from '@tanstack/react-query';
-import { lightdashApi } from '../../../../api';
+import { type LightdashApi } from '../../../../api';
+import useToaster from '../../../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../../../../providers/LightdashApi/useLightdashApi';
 
 export type AiAgentAdminThreadsArgs = {
     filters: AiAgentAdminFilters;
@@ -36,6 +68,7 @@ function createQueryString(params: Record<string, any>): string {
 }
 
 const getAiAgentAdminThreads = async (
+    lightdashApi: LightdashApi,
     args: AiAgentAdminFilters & {
         sortField: AiAgentAdminSort['field'];
         sortDirection: AiAgentAdminSort['direction'];
@@ -60,13 +93,14 @@ export const useInfiniteAiAgentAdminThreads = (
         ApiError
     > = {},
 ) => {
+    const lightdashApi = useLightdashApi();
     return useInfiniteQuery<
         ApiAiAgentAdminConversationsResponse['results'],
         ApiError
     >({
         queryKey: ['ai-agent-admin-threads', args],
         queryFn: async ({ pageParam }) => {
-            return getAiAgentAdminThreads({
+            return getAiAgentAdminThreads(lightdashApi, {
                 ...args.filters,
                 ...(args.sort && {
                     sortField: args.sort.field,
@@ -88,7 +122,194 @@ export const useInfiniteAiAgentAdminThreads = (
     });
 };
 
-const getAiAgentAdminAgents = async () => {
+export type AiAgentAdminEvalsArgs = {
+    filters: AiAgentAdminEvalFilters;
+    sort: AiAgentAdminSort;
+    pagination: {
+        pageSize?: number;
+        page?: number;
+    };
+};
+
+const getAiAgentAdminEvals = async (
+    lightdashApi: LightdashApi,
+    args: AiAgentAdminEvalFilters & {
+        sortField: AiAgentAdminSort['field'];
+        sortDirection: AiAgentAdminSort['direction'];
+    } & {
+        pageSize?: number;
+        page?: number;
+    },
+) => {
+    const params = createQueryString(args);
+    return lightdashApi<ApiAiAgentAdminEvalsResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/evals?${params}`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useInfiniteAiAgentAdminEvals = (
+    args: AiAgentAdminEvalsArgs,
+    infinityQueryOpts: UseInfiniteQueryOptions<
+        ApiAiAgentAdminEvalsResponse['results'],
+        ApiError
+    > = {},
+) => {
+    const lightdashApi = useLightdashApi();
+    return useInfiniteQuery<ApiAiAgentAdminEvalsResponse['results'], ApiError>({
+        queryKey: ['ai-agent-admin-evals', args],
+        queryFn: ({ pageParam }) =>
+            getAiAgentAdminEvals(lightdashApi, {
+                ...args.filters,
+                sortField: args.sort.field,
+                sortDirection: args.sort.direction,
+                ...args.pagination,
+                page: (pageParam as number) ?? 1,
+            }),
+        getNextPageParam: (lastPage) => {
+            if (lastPage.pagination) {
+                return lastPage.pagination.page <
+                    lastPage.pagination.totalPageCount
+                    ? lastPage.pagination.page + 1
+                    : undefined;
+            }
+        },
+        ...infinityQueryOpts,
+    });
+};
+
+const getAiAgentAdminEvalPrompts = async (
+    lightdashApi: LightdashApi,
+    evalUuid: string,
+) =>
+    lightdashApi<ApiAiAgentAdminEvalPromptsResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/evals/${encodeURIComponent(evalUuid)}/prompts`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useAiAgentAdminEvalPrompts = (evalUuid: string | undefined) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentAdminEvalPromptsResponse['results'], ApiError>({
+        queryKey: ['ai-agent-admin-eval-prompts', evalUuid],
+        queryFn: () => getAiAgentAdminEvalPrompts(lightdashApi, evalUuid!),
+        enabled: !!evalUuid,
+        staleTime: 30 * 1000,
+    });
+};
+
+export type AiAgentAdminMemoriesArgs = {
+    filters: AiAgentAdminMemoryFilters;
+    sort: AiAgentAdminMemorySort;
+    pagination: {
+        pageSize?: number;
+        page?: number;
+    };
+};
+
+const getAiAgentAdminMemories = async (
+    lightdashApi: LightdashApi,
+    args: AiAgentAdminMemoryFilters & {
+        sortField: AiAgentAdminMemorySort['field'];
+        sortDirection: AiAgentAdminMemorySort['direction'];
+    } & {
+        pageSize?: number;
+        page?: number;
+    },
+) => {
+    const params = createQueryString(args);
+    return lightdashApi<ApiAiAgentAdminMemoriesResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/memories?${params}`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useInfiniteAiAgentAdminMemories = (
+    args: AiAgentAdminMemoriesArgs,
+    infinityQueryOpts: UseInfiniteQueryOptions<
+        ApiAiAgentAdminMemoriesResponse['results'],
+        ApiError
+    > = {},
+) => {
+    const lightdashApi = useLightdashApi();
+    return useInfiniteQuery<
+        ApiAiAgentAdminMemoriesResponse['results'],
+        ApiError
+    >({
+        queryKey: ['ai-agent-admin-memories', args],
+        queryFn: ({ pageParam }) =>
+            getAiAgentAdminMemories(lightdashApi, {
+                ...args.filters,
+                sortField: args.sort.field,
+                sortDirection: args.sort.direction,
+                ...args.pagination,
+                page: (pageParam as number) ?? 1,
+            }),
+        getNextPageParam: (lastPage) => {
+            if (lastPage.pagination) {
+                return lastPage.pagination.page <
+                    lastPage.pagination.totalPageCount
+                    ? lastPage.pagination.page + 1
+                    : undefined;
+            }
+        },
+        ...infinityQueryOpts,
+    });
+};
+
+const getAiAgentAdminProjectPromptActivity = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        days,
+    }: {
+        projectUuid: string;
+        days: number;
+    },
+) => {
+    const params = createQueryString({ days });
+
+    return lightdashApi<ApiAiAgentAdminPromptActivityResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/projects/${encodeURIComponent(
+            projectUuid,
+        )}/prompt-activity?${params}`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useAiAgentAdminProjectPromptActivity = (
+    projectUuid: string,
+    days: number,
+    options?: { enabled?: boolean },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentAdminPromptActivityResponse['results'], ApiError>(
+        {
+            queryKey: [
+                'ai-agent-admin-project-prompt-activity',
+                projectUuid,
+                days,
+            ],
+            queryFn: () =>
+                getAiAgentAdminProjectPromptActivity(lightdashApi, {
+                    projectUuid,
+                    days,
+                }),
+            keepPreviousData: true,
+            staleTime: 60 * 1000,
+            enabled: options?.enabled ?? true,
+        },
+    );
+};
+
+const getAiAgentAdminAgents = async (lightdashApi: LightdashApi) => {
     return lightdashApi<ApiAiAgentSummaryResponse['results']>({
         version: 'v1',
         url: `/aiAgents/admin/agents`,
@@ -98,15 +319,851 @@ const getAiAgentAdminAgents = async () => {
 };
 
 export const useAiAgentAdminAgents = (options?: { enabled?: boolean }) => {
+    const lightdashApi = useLightdashApi();
     return useQuery<ApiAiAgentSummaryResponse['results'], ApiError>({
         queryKey: ['ai-agent-admin-list'],
-        queryFn: getAiAgentAdminAgents,
+        queryFn: () => getAiAgentAdminAgents(lightdashApi),
         keepPreviousData: true,
         enabled: options?.enabled ?? true,
     });
 };
 
-const getAiAgentAdminEmbedToken = async () => {
+const getAiAgentAdminReviewItems = async (
+    lightdashApi: LightdashApi,
+    args: {
+        statuses?: AiAgentReviewItemStatus[];
+    },
+) => {
+    const params = createQueryString({
+        status: args.statuses,
+    });
+
+    return lightdashApi<ApiAiAgentReviewItemsResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items${params ? `?${params}` : ''}`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+const AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY = 'ai-agent-admin-review-items';
+
+const createAiAgentReviewItem = async (
+    lightdashApi: LightdashApi,
+    body: CreateAiAgentReviewItem,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items`,
+        method: 'POST',
+        body: JSON.stringify(body),
+    });
+};
+
+const getAiAgentAdminThreadDump = async (
+    lightdashApi: LightdashApi,
+    threadUuid: string,
+) =>
+    lightdashApi<ApiAiAgentThreadDumpResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/threads/${threadUuid}/dump`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useDownloadAiAgentAdminThreadDump = () => {
+    const lightdashApi = useLightdashApi();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<AiAgentThreadDump, ApiError, string>({
+        mutationFn: (threadUuid: string) =>
+            getAiAgentAdminThreadDump(lightdashApi, threadUuid),
+        onSuccess: (dump) => {
+            const blob = new Blob([JSON.stringify(dump, null, 2)], {
+                type: 'application/json',
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `ai-thread-dump-${dump.threadUuid}.json`;
+            link.click();
+            URL.revokeObjectURL(url);
+            showToastSuccess({
+                title: 'Thread dump downloaded',
+                subtitle: 'Review the file before sharing it.',
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to download thread dump',
+                apiError: error,
+            });
+        },
+    });
+};
+
+const deleteAiAgentAdminThread = async (
+    lightdashApi: LightdashApi,
+    threadUuid: string,
+) =>
+    lightdashApi<undefined>({
+        version: 'v1',
+        url: `/aiAgents/admin/threads/${threadUuid}`,
+        method: 'DELETE',
+        body: undefined,
+    });
+
+export const useDeleteAiAgentAdminThread = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<undefined, ApiError, string>({
+        mutationFn: (threadUuid: string) =>
+            deleteAiAgentAdminThread(lightdashApi, threadUuid),
+        onSuccess: () => {
+            showToastSuccess({ title: 'Thread deleted' });
+            void queryClient.invalidateQueries({
+                queryKey: ['ai-agent-admin-threads'],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to delete thread',
+                apiError: error,
+            });
+        },
+    });
+};
+
+export const useCreateAiAgentReviewItem = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemResponse['results'],
+        ApiError,
+        CreateAiAgentReviewItem
+    >({
+        mutationFn: (body: CreateAiAgentReviewItem) =>
+            createAiAgentReviewItem(lightdashApi, body),
+        onSuccess: (createdItem) => {
+            showToastSuccess({ title: 'Issue created' });
+            queryClient.setQueryData(
+                ['ai-agent-admin-review-item', createdItem.fingerprint],
+                createdItem,
+            );
+            void queryClient.invalidateQueries({
+                queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to create issue',
+                apiError: error,
+            });
+        },
+    });
+};
+
+export const updateCachedReviewItemLists = (
+    queryClient: QueryClient,
+    updatedItem: AiAgentReviewItemSummary,
+) => {
+    queryClient
+        .getQueryCache()
+        .findAll({
+            queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY],
+        })
+        .forEach((query) => {
+            const [, args] = query.queryKey as [
+                string,
+                { statuses?: AiAgentReviewItemStatus[] } | undefined,
+            ];
+            const matchesStatus =
+                !args?.statuses || args.statuses.includes(updatedItem.status);
+
+            queryClient.setQueryData<ApiAiAgentReviewItemsResponse['results']>(
+                query.queryKey,
+                (current) => {
+                    if (!current) return current;
+
+                    if (!matchesStatus) {
+                        return current.filter(
+                            (item) =>
+                                item.fingerprint !== updatedItem.fingerprint,
+                        );
+                    }
+
+                    return current.map((item) =>
+                        item.fingerprint === updatedItem.fingerprint
+                            ? updatedItem
+                            : item,
+                    );
+                },
+            );
+        });
+};
+
+export const useAiAgentAdminReviewItems = (
+    args: { statuses?: AiAgentReviewItemStatus[] },
+    options?: {
+        enabled?: boolean;
+        select?: (
+            data: ApiAiAgentReviewItemsResponse['results'],
+        ) => ApiAiAgentReviewItemsResponse['results'];
+    },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<
+        ApiAiAgentReviewItemsResponse['results'],
+        ApiError,
+        ApiAiAgentReviewItemsResponse['results']
+    >({
+        queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY, args],
+        queryFn: () => getAiAgentAdminReviewItems(lightdashApi, args),
+        keepPreviousData: true,
+        enabled: options?.enabled ?? true,
+        select: options?.select,
+    });
+};
+
+const getAiAgentAdminReviewItem = async (
+    lightdashApi: LightdashApi,
+    fingerprint: string,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(fingerprint)}`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useAiAgentAdminReviewItem = (
+    fingerprint: string,
+    options?: { enabled?: boolean; refetchInterval?: number | false },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentReviewItemResponse['results'], ApiError>({
+        queryKey: ['ai-agent-admin-review-item', fingerprint],
+        queryFn: () => getAiAgentAdminReviewItem(lightdashApi, fingerprint),
+        enabled: options?.enabled ?? true,
+        refetchInterval: options?.refetchInterval,
+    });
+};
+
+const getAiAgentReviewItemActivity = async (
+    lightdashApi: LightdashApi,
+    fingerprint: string,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemActivityResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            fingerprint,
+        )}/activity`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useAiAgentReviewItemActivity = (
+    fingerprint: string,
+    options?: {
+        enabled?: boolean;
+        refetchInterval?: UseQueryOptions<
+            ApiAiAgentReviewItemActivityResponse['results'],
+            ApiError
+        >['refetchInterval'];
+    },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentReviewItemActivityResponse['results'], ApiError>({
+        queryKey: ['ai-agent-admin-review-item-activity', fingerprint],
+        queryFn: () => getAiAgentReviewItemActivity(lightdashApi, fingerprint),
+        enabled: options?.enabled ?? true,
+        refetchInterval: options?.refetchInterval,
+    });
+};
+
+const retestAiAgentReviewRemediation = async (
+    lightdashApi: LightdashApi,
+    fingerprint: string,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemActivityResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            fingerprint,
+        )}/retest`,
+        method: 'POST',
+        body: undefined,
+    });
+};
+
+export const useRetestAiAgentReviewRemediation = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemActivityResponse['results'],
+        ApiError,
+        { fingerprint: string }
+    >({
+        mutationFn: ({ fingerprint }) =>
+            retestAiAgentReviewRemediation(lightdashApi, fingerprint),
+        onSuccess: (_data, { fingerprint }) => {
+            showToastSuccess({ title: 'Re-testing the fix…' });
+            void queryClient.invalidateQueries({
+                queryKey: ['ai-agent-admin-review-item-activity', fingerprint],
+            });
+            void queryClient.invalidateQueries({
+                queryKey: ['ai-agent-admin-review-item', fingerprint],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({ title: 'Failed to retest', apiError: error });
+        },
+    });
+};
+
+const addAiAgentReviewItemComment = async (
+    lightdashApi: LightdashApi,
+    args: {
+        fingerprint: string;
+        body: string;
+    },
+) => {
+    return lightdashApi<ApiAiAgentReviewItemActivityResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            args.fingerprint,
+        )}/comments`,
+        method: 'POST',
+        body: JSON.stringify({
+            body: args.body,
+        } satisfies CreateAiAgentReviewItemComment),
+    });
+};
+
+export const useAddAiAgentReviewItemComment = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemActivityResponse['results'],
+        ApiError,
+        { fingerprint: string; body: string }
+    >({
+        mutationFn: (args: { fingerprint: string; body: string }) =>
+            addAiAgentReviewItemComment(lightdashApi, args),
+        onSuccess: (activity, { fingerprint }) => {
+            queryClient.setQueryData(
+                ['ai-agent-admin-review-item-activity', fingerprint],
+                activity,
+            );
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to add comment',
+                apiError: error,
+            });
+        },
+    });
+};
+
+const getAiAgentReviewItemPrDiff = async (
+    lightdashApi: LightdashApi,
+    fingerprint: string,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemPrDiffResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            fingerprint,
+        )}/pr-diff`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useAiAgentReviewItemPrDiff = (
+    fingerprint: string,
+    options?: { enabled?: boolean },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentReviewItemPrDiffResponse['results'], ApiError>({
+        queryKey: ['ai-agent-admin-review-item-pr-diff', fingerprint],
+        queryFn: () => getAiAgentReviewItemPrDiff(lightdashApi, fingerprint),
+        enabled: options?.enabled ?? true,
+        retry: false,
+        // Each fetch costs ~2 GitHub API calls per changed file — keep it warm.
+        staleTime: 5 * 60_000,
+    });
+};
+
+const getProjectUpstreamDiff = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+) => {
+    return lightdashApi<ApiUpstreamDiffResponse['results']>({
+        version: 'v1',
+        url: `/projects/${projectUuid}/upstreamDiff`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+// Diffs a preview project's fields against the project it was copied from.
+// Errors (e.g. project is not a preview) are surfaced via the query state.
+export const useProjectUpstreamDiff = (
+    projectUuid: string | undefined,
+    options?: { enabled?: boolean },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiUpstreamDiffResponse['results'], ApiError>({
+        queryKey: ['project-upstream-diff', projectUuid],
+        queryFn: () => getProjectUpstreamDiff(lightdashApi, projectUuid!),
+        enabled: (options?.enabled ?? true) && !!projectUuid,
+        retry: false,
+        staleTime: 5 * 60_000,
+    });
+};
+
+const getAiAgentReviewItemByPreviewThread = async (
+    lightdashApi: LightdashApi,
+    threadUuid: string,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/by-preview-thread/${encodeURIComponent(
+            threadUuid,
+        )}`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+// Resolves the review item a preview work thread belongs to. Most threads
+// are not linked to one — a 404 means "regular thread", not an error.
+export const useAiAgentReviewItemByPreviewThread = (
+    threadUuid: string | undefined,
+    options?: { enabled?: boolean },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentReviewItemResponse['results'] | null, ApiError>({
+        queryKey: ['ai-agent-admin-review-item-by-preview-thread', threadUuid],
+        queryFn: async () => {
+            try {
+                return await getAiAgentReviewItemByPreviewThread(
+                    lightdashApi,
+                    threadUuid!,
+                );
+            } catch (error) {
+                if (isApiError(error) && error.error.statusCode === 404) {
+                    return null;
+                }
+                throw error;
+            }
+        },
+        enabled: (options?.enabled ?? true) && !!threadUuid,
+        retry: false,
+    });
+};
+
+const getAiAgentReviewItemWritebackPreview = async (
+    lightdashApi: LightdashApi,
+    fingerprint: string,
+) => {
+    return lightdashApi<
+        ApiAiAgentReviewItemWritebackPreviewResponse['results']
+    >({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            fingerprint,
+        )}/writeback-preview`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useAiAgentReviewItemWritebackPreview = (
+    fingerprint: string,
+    options?: { enabled?: boolean },
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<
+        ApiAiAgentReviewItemWritebackPreviewResponse['results'],
+        ApiError
+    >({
+        queryKey: ['ai-agent-admin-review-item-writeback-preview', fingerprint],
+        queryFn: () =>
+            getAiAgentReviewItemWritebackPreview(lightdashApi, fingerprint),
+        enabled: options?.enabled ?? true,
+    });
+};
+
+const updateAiAgentReviewItemStatus = async (
+    lightdashApi: LightdashApi,
+    args: {
+        fingerprint: string;
+        body: UpdateAiAgentReviewItemStatus;
+    },
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            args.fingerprint,
+        )}`,
+        method: 'PATCH',
+        body: JSON.stringify(args.body),
+    });
+};
+
+export const useUpdateAiAgentReviewItemStatus = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemResponse['results'],
+        ApiError,
+        { fingerprint: string; body: UpdateAiAgentReviewItemStatus }
+    >({
+        mutationFn: (args: {
+            fingerprint: string;
+            body: UpdateAiAgentReviewItemStatus;
+        }) => updateAiAgentReviewItemStatus(lightdashApi, args),
+        onSuccess: (updatedItem, { fingerprint }) => {
+            showToastSuccess({ title: 'Review item updated' });
+            queryClient.setQueryData(
+                ['ai-agent-admin-review-item', fingerprint],
+                updatedItem,
+            );
+            updateCachedReviewItemLists(queryClient, updatedItem);
+            void queryClient.invalidateQueries({
+                queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY],
+            });
+            void queryClient.invalidateQueries({
+                queryKey: ['ai-agent-admin-review-item-by-preview-thread'],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to update review item',
+                apiError: error,
+            });
+        },
+    });
+};
+
+const updateAiAgentReviewItemAssignee = async (
+    lightdashApi: LightdashApi,
+    args: {
+        fingerprint: string;
+        assignedToUserUuid: string | null;
+    },
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(args.fingerprint)}/assignee`,
+        method: 'PATCH',
+        body: JSON.stringify({
+            assignedToUserUuid: args.assignedToUserUuid,
+        } satisfies UpdateAiAgentReviewItemAssignee),
+    });
+};
+
+export const useUpdateAiAgentReviewItemAssignee = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemResponse['results'],
+        ApiError,
+        { fingerprint: string; assignedToUserUuid: string | null }
+    >({
+        mutationFn: (args: {
+            fingerprint: string;
+            assignedToUserUuid: string | null;
+        }) => updateAiAgentReviewItemAssignee(lightdashApi, args),
+        onSuccess: (updatedItem, { fingerprint }) => {
+            showToastSuccess({ title: 'Assignee updated' });
+            queryClient.setQueryData(
+                ['ai-agent-admin-review-item', fingerprint],
+                updatedItem,
+            );
+            updateCachedReviewItemLists(queryClient, updatedItem);
+            void queryClient.invalidateQueries({
+                queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to update assignee',
+                apiError: error,
+            });
+        },
+    });
+};
+
+const updateAiAgentReviewItemPriority = async (
+    lightdashApi: LightdashApi,
+    args: {
+        fingerprint: string;
+        priority: UpdateAiAgentReviewItemPriority['priority'];
+    },
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(args.fingerprint)}/priority`,
+        method: 'PATCH',
+        body: JSON.stringify({
+            priority: args.priority,
+        } satisfies UpdateAiAgentReviewItemPriority),
+    });
+};
+
+export const useUpdateAiAgentReviewItemPriority = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemResponse['results'],
+        ApiError,
+        {
+            fingerprint: string;
+            priority: UpdateAiAgentReviewItemPriority['priority'];
+        }
+    >({
+        mutationFn: (args: {
+            fingerprint: string;
+            priority: UpdateAiAgentReviewItemPriority['priority'];
+        }) => updateAiAgentReviewItemPriority(lightdashApi, args),
+        onSuccess: (updatedItem, { fingerprint }) => {
+            showToastSuccess({ title: 'Priority updated' });
+            queryClient.setQueryData(
+                ['ai-agent-admin-review-item', fingerprint],
+                updatedItem,
+            );
+            updateCachedReviewItemLists(queryClient, updatedItem);
+            void queryClient.invalidateQueries({
+                queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to update priority',
+                apiError: error,
+            });
+        },
+    });
+};
+
+const reorderAiAgentReviewItems = async (
+    lightdashApi: LightdashApi,
+    orderedFingerprints: string[],
+) => {
+    return lightdashApi<undefined>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/reorder`,
+        method: 'PATCH',
+        body: JSON.stringify({
+            orderedFingerprints,
+        } satisfies ReorderAiAgentReviewItems),
+    });
+};
+
+// Reorders the cached review-item lists so the dragged fingerprints take the
+// given order at the slots they already occupy (other items stay put). Since
+// the board buckets a flat array into lanes by array order, this reflects a
+// drag-reorder without refetching.
+const reorderCachedItems = (
+    items: AiAgentReviewItemSummary[],
+    orderedFingerprints: string[],
+): AiAgentReviewItemSummary[] => {
+    const orderSet = new Set(orderedFingerprints);
+    const byFingerprint = new Map(
+        items
+            .filter((item) => orderSet.has(item.fingerprint))
+            .map((item) => [item.fingerprint, item]),
+    );
+    let next = 0;
+    return items.map((item) => {
+        if (!orderSet.has(item.fingerprint)) return item;
+        const replacement = byFingerprint.get(orderedFingerprints[next]);
+        next += 1;
+        return replacement ?? item;
+    });
+};
+
+// Applies a drop to the cached review-item lists synchronously: reorders the
+// dragged fingerprints into the given order at the slots they occupy, and (for a
+// cross-lane drop) moves the dragged item to the target lane by overriding its
+// status. Call this in the drop handler in the same tick the drag's transient
+// order is cleared, so the board hands off to the server-derived lanes in one
+// commit — without it the board flashes back to the pre-drop order for a frame.
+export const applyOptimisticReviewBoardOrder = (
+    queryClient: QueryClient,
+    orderedFingerprints: string[],
+    statusOverride: {
+        fingerprint: string;
+        status: AiAgentReviewItemStatus;
+    } | null,
+) => {
+    queryClient.setQueriesData<AiAgentReviewItemSummary[]>(
+        { queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY] },
+        (old) => {
+            if (!old) return old;
+            const withStatus = statusOverride
+                ? old.map((item) =>
+                      item.fingerprint === statusOverride.fingerprint
+                          ? { ...item, status: statusOverride.status }
+                          : item,
+                  )
+                : old;
+            return reorderCachedItems(withStatus, orderedFingerprints);
+        },
+    );
+};
+
+// Persists the board order. The optimistic update is applied synchronously by
+// the drop handler (applyOptimisticReviewBoardOrder); here we just write through
+// and reconcile to the authoritative order on settle (which also reverts the
+// optimistic order if the request failed).
+export const useReorderReviewItems = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
+
+    return useMutation<undefined, ApiError, string[]>({
+        mutationFn: (orderedFingerprints: string[]) =>
+            reorderAiAgentReviewItems(lightdashApi, orderedFingerprints),
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to reorder items',
+                apiError: error,
+            });
+        },
+        onSettled: () => {
+            void queryClient.invalidateQueries({
+                queryKey: [AI_AGENT_ADMIN_REVIEW_ITEMS_QUERY_KEY],
+            });
+        },
+    });
+};
+
+const createAiAgentReviewItemWriteback = async (
+    lightdashApi: LightdashApi,
+    fingerprint: string,
+) => {
+    return lightdashApi<ApiAiAgentReviewItemResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-items/${encodeURIComponent(
+            fingerprint,
+        )}/writeback`,
+        method: 'POST',
+        body: undefined,
+    });
+};
+
+export const getReviewItemWritebackSuccessToast = (
+    reviewItem: Pick<
+        AiAgentReviewItemSummary,
+        'linkedPrUrl' | 'prWritebackMessage' | 'prWritebackStatus'
+    >,
+): { title: string; subtitle?: string } => {
+    const isInProgress =
+        reviewItem.prWritebackStatus === 'queued' ||
+        reviewItem.prWritebackStatus === 'running';
+    if (isInProgress) {
+        return {
+            title: 'Writeback queued',
+            subtitle: 'The review item will update as it runs.',
+        };
+    }
+
+    if (reviewItem.linkedPrUrl) {
+        return { title: 'Pull request opened' };
+    }
+
+    if (reviewItem.prWritebackStatus === 'completed') {
+        return {
+            title: 'Writeback completed',
+            subtitle: reviewItem.prWritebackMessage ?? undefined,
+        };
+    }
+
+    return { title: 'Writeback queued' };
+};
+
+export const useCreateAiAgentReviewItemWriteback = () => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    const { showToastSuccess, showToastApiError } = useToaster();
+
+    return useMutation<
+        ApiAiAgentReviewItemResponse['results'],
+        ApiError,
+        string
+    >({
+        mutationFn: (fingerprint: string) =>
+            createAiAgentReviewItemWriteback(lightdashApi, fingerprint),
+        onSuccess: (reviewItem) => {
+            const toast = getReviewItemWritebackSuccessToast(reviewItem);
+            const showPrAction =
+                Boolean(reviewItem.linkedPrUrl) &&
+                reviewItem.prWritebackStatus !== 'queued' &&
+                reviewItem.prWritebackStatus !== 'running';
+            showToastSuccess({
+                ...toast,
+                ...(showPrAction && {
+                    action: {
+                        children: 'View pull request',
+                        icon: IconArrowRight,
+                        onClick: () =>
+                            window.open(reviewItem.linkedPrUrl!, '_blank'),
+                    },
+                }),
+            });
+            void queryClient.invalidateQueries({
+                queryKey: ['ai-agent-admin-review-items'],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to open pull request',
+                apiError: error,
+            });
+        },
+    });
+};
+
+const getAiAgentAdminReviewSignals = async (lightdashApi: LightdashApi) => {
+    return lightdashApi<ApiAiAgentReviewSignalsResponse['results']>({
+        version: 'v1',
+        url: `/aiAgents/admin/review-signals`,
+        method: 'GET',
+        body: undefined,
+    });
+};
+
+export const useAiAgentAdminReviewSignals = (options?: {
+    enabled?: boolean;
+}) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentReviewSignalsResponse['results'], ApiError>({
+        queryKey: ['ai-agent-admin-review-signals'],
+        queryFn: () => getAiAgentAdminReviewSignals(lightdashApi),
+        keepPreviousData: true,
+        enabled: options?.enabled ?? true,
+    });
+};
+
+const getAiAgentAdminEmbedToken = async (lightdashApi: LightdashApi) => {
     return lightdashApi<{ token: string; url: string }>({
         version: 'v1',
         url: `/aiAgents/admin/embed-token`,
@@ -116,26 +1173,30 @@ const getAiAgentAdminEmbedToken = async () => {
 };
 
 export const useAiAgentAdminEmbedToken = () => {
+    const lightdashApi = useLightdashApi();
     return useQuery<{ token: string; url: string }, ApiError>({
         queryKey: ['ai-agent-admin-embed-token'],
-        queryFn: getAiAgentAdminEmbedToken,
+        queryFn: () => getAiAgentAdminEmbedToken(lightdashApi),
         keepPreviousData: true,
         refetchOnWindowFocus: false,
         staleTime: 30 * 60 * 1000, // 30 minutes (token expires in 1 hour)
     });
 };
 
-const getVerifiedArtifacts = async ({
-    projectUuid,
-    agentUuid,
-    page,
-    pageSize,
-}: {
-    projectUuid: string;
-    agentUuid: string;
-    page?: number;
-    pageSize?: number;
-}) => {
+const getVerifiedArtifacts = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        agentUuid,
+        page,
+        pageSize,
+    }: {
+        projectUuid: string;
+        agentUuid: string;
+        page?: number;
+        pageSize?: number;
+    },
+) => {
     const params = createQueryString({ page, pageSize });
     return lightdashApi<ApiAiAgentVerifiedArtifactsResponse['results']>({
         version: 'v1',
@@ -156,6 +1217,7 @@ export const useInfiniteVerifiedArtifacts = (
         ApiError
     > = {},
 ) => {
+    const lightdashApi = useLightdashApi();
     return useInfiniteQuery<
         ApiAiAgentVerifiedArtifactsResponse['results'],
         ApiError
@@ -167,7 +1229,7 @@ export const useInfiniteVerifiedArtifacts = (
             pagination,
         ],
         queryFn: async ({ pageParam }) => {
-            return getVerifiedArtifacts({
+            return getVerifiedArtifacts(lightdashApi, {
                 projectUuid,
                 agentUuid,
                 ...pagination,

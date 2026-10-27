@@ -1,8 +1,28 @@
 import { type DateZoom } from '../../types/api/paginatedQuery';
-import { type DashboardFilters } from '../../types/filter';
+import { type UUID } from '../../types/api/uuid';
+import { type ExternalSourceType } from '../../types/externalSources';
+import {
+    type DashboardFilterRule,
+    type DashboardFilters,
+} from '../../types/filter';
+import { type PullRequestProvider } from '../../types/gitIntegration';
 import { type ParametersValuesMap } from '../../types/parameters';
 import { type ChartKind } from '../../types/savedCharts';
 import { type TraceTaskBase } from '../../types/scheduler';
+import {
+    type AiAgentEvidenceExcerpt,
+    type AiAgentJudgeProjectContextEntry,
+    type AiAgentRecommendation,
+    type AiAgentReviewItemPrState,
+    type AiAgentReviewRemediationStatus,
+    type AiAgentRootCause,
+} from './aiAgentReviewClassifierTypes';
+
+export type AiAgentModelConfig = {
+    modelName: string;
+    modelProvider: string;
+    reasoning?: boolean;
+};
 
 /**
  * Runtime state captured at pin time for a chart context. When a user pins a
@@ -15,6 +35,29 @@ export type AiChartRuntimeOverrides = {
     dateZoom?: DateZoom;
 };
 
+export type AiDashboardFilterRule = Omit<
+    DashboardFilterRule,
+    'id' | 'tileTargets' | 'lockedTabUuids' | 'requiredGroupId' | 'sectionId'
+>;
+
+export type AiDashboardFilters = {
+    dimensions: AiDashboardFilterRule[];
+    metrics: AiDashboardFilterRule[];
+    tableCalculations: AiDashboardFilterRule[];
+};
+
+export type AiDashboardActiveTab = {
+    uuid: string;
+    name: string;
+};
+
+export type AiDashboardRuntimeOverrides = {
+    activeTab?: AiDashboardActiveTab;
+    dashboardFilters?: AiDashboardFilters;
+    dashboardParameters?: ParametersValuesMap;
+    dateZoom?: DateZoom | null;
+};
+
 export type AiThread = {
     aiThreadUuid: string;
     organizationUuid: string;
@@ -24,14 +67,126 @@ export type AiThread = {
     agentUuid: string | null;
 };
 
+/** Persisted shape. `finalStepTotalTokens` is absent on rows written before it existed. */
 export type AiPromptTokenUsage = {
+    /** Billing figure: tokens summed across every step of the run. */
     totalTokens: number;
+    /** Final step's total — the proxy for resident context size, drives compaction. */
+    finalStepTotalTokens?: number;
+    /** TypeSafe/JEV input tokens, tracked separately from the main agent model. */
+    decisionInputTokens?: number;
+    /** TypeSafe/JEV output tokens, tracked separately from the main agent model. */
+    decisionOutputTokens?: number;
 };
+
+/** Write shape: agent figures are required; decision usage is rollout-safe. */
+export type AiPromptTokenUsageUpdate = Required<
+    Pick<AiPromptTokenUsage, 'totalTokens' | 'finalStepTotalTokens'>
+> &
+    Pick<AiPromptTokenUsage, 'decisionInputTokens' | 'decisionOutputTokens'>;
+
+/** Wall-clock timing of one model run, stamped by the agent loop. ISO strings. */
+export type AiPromptResponseStageTiming = {
+    /** Request start through context, catalog and tool preparation. */
+    preparationMs: number;
+    /** Main model inference. Null when the provider hid the split. */
+    providerMs: number | null;
+    /** Exact union of completed query-tool spans. */
+    queryMs: number;
+    /** Exact union of completed non-query/non-render tool spans. */
+    apiMs: number;
+    /** Exact union of chart, dashboard, app and export tool spans. */
+    renderMs: number;
+    /** Query tools whose execution returned a result-cache hit. */
+    queryCacheHits: number;
+    /** Query tools served from a verified prior-query result. */
+    queryReuseHits: number;
+};
+
+export type AiPromptResponseTiming = {
+    startedAt: string;
+    /** First chunk the model produced (text, reasoning, or tool input). Null when nothing streamed. */
+    firstTokenAt: string | null;
+    finishedAt: string;
+    /** Stage spans may overlap when the SDK runs tools concurrently. */
+    stages?: AiPromptResponseStageTiming;
+};
+
+/**
+ * Every origin an ai_thread can be created from. Canonical source for the
+ * DB column type and the admin/list filters — add new origins here.
+ */
+export const AI_THREAD_CREATED_FROM = [
+    'slack',
+    'web_app',
+    'api',
+    'evals',
+    'scheduler',
+    'data_app',
+    'dashboard_analysis',
+] as const;
+export type AiThreadCreatedFrom = (typeof AI_THREAD_CREATED_FROM)[number];
+
+// Subsets use indexed access over const arrays (not Exclude<>, which tsoa
+// can't resolve at API boundaries); `satisfies` keeps each subset inside the
+// canonical union.
+
+/** Origins for threads created through the web app path — everything but Slack. */
+export const AI_WEB_APP_THREAD_CREATED_FROM = [
+    'web_app',
+    'api',
+    'evals',
+    'scheduler',
+    'data_app',
+    'dashboard_analysis',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiWebAppThreadCreatedFrom =
+    (typeof AI_WEB_APP_THREAD_CREATED_FROM)[number];
+
+/**
+ * Threads a person owns in the app. An `api` thread is the same thread started
+ * with an access token instead of a browser session, so it must behave alike.
+ */
+export const AI_APP_THREAD_CREATED_FROM = [
+    'web_app',
+    'api',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiAppThreadCreatedFrom =
+    (typeof AI_APP_THREAD_CREATED_FROM)[number];
+
+export const isAiAppThreadCreatedFrom = (
+    createdFrom: string,
+): createdFrom is AiAppThreadCreatedFrom =>
+    (AI_APP_THREAD_CREATED_FROM as readonly string[]).includes(createdFrom);
+
+/** Threads started by a person, as opposed to evals, schedules and data apps. */
+export const AI_USER_THREAD_CREATED_FROM = [
+    ...AI_APP_THREAD_CREATED_FROM,
+    'slack',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiUserThreadCreatedFrom =
+    (typeof AI_USER_THREAD_CREATED_FROM)[number];
+
+/** Origins handled through the Slack path. */
+export const AI_SLACK_THREAD_CREATED_FROM = [
+    'slack',
+    'web_app',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiSlackThreadCreatedFrom =
+    (typeof AI_SLACK_THREAD_CREATED_FROM)[number];
+
+/** Origins a thread can be cloned into — Slack and scheduler threads are never clone targets. */
+export const AI_CLONED_THREAD_CREATED_FROM = [
+    'web_app',
+    'evals',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiClonedThreadCreatedFrom =
+    (typeof AI_CLONED_THREAD_CREATED_FROM)[number];
 
 export type CreateSlackThread = {
     organizationUuid: string;
     projectUuid: string;
-    createdFrom: 'slack' | 'web_app';
+    createdFrom: AiSlackThreadCreatedFrom;
     slackUserId: string;
     slackChannelId: string;
     slackThreadTs: string;
@@ -42,8 +197,37 @@ export type CreateWebAppThread = {
     organizationUuid: string;
     projectUuid: string;
     userUuid: string;
-    createdFrom: 'web_app' | 'evals';
+    createdFrom: AiWebAppThreadCreatedFrom;
     agentUuid: string | null;
+    // Every write space of the embed token; the first one is used for attribution.
+    embedSpaceUuids?: string[];
+    battleProfile?: AiAgentBattleProfile | null;
+    binding?: AiThreadBinding | null;
+    threadContext?: string | null;
+};
+
+/**
+ * `fast` is the JEV path, `baseline` has no fast decisions.
+ * `classic` and `composer` force the agent's query path.
+ */
+export type AiAgentBattleProfile =
+    | 'fast'
+    | 'baseline'
+    /** @deprecated Accepted for older clients and treated as `baseline`. */
+    | 'luna'
+    | 'classic'
+    | 'composer';
+
+/** The exclusive core of an agent run's loadout. */
+export type AiAgentLoadoutBase =
+    | 'classic'
+    | 'composer'
+    | 'no_data_access'
+    | 'deep_research_worker'
+    | 'deep_research_coordinator';
+
+export type AiAgentPromptLoadout = {
+    base: AiAgentLoadoutBase;
 };
 
 export type AiPrompt = {
@@ -52,17 +236,17 @@ export type AiPrompt = {
     agentUuid: string | null;
     promptUuid: string;
     threadUuid: string;
+    /** Where the thread started; a data-app thread stays read-only for life. */
+    threadCreatedFrom: AiThreadCreatedFrom;
     createdByUserUuid: string;
     prompt: string;
     createdAt: Date;
     response: string | null;
     errorMessage: string | null;
     humanScore: number | null;
-    modelConfig: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    } | null;
+    modelConfig: AiAgentModelConfig | null;
+    /** Internal paired-run profile inherited from the web thread. */
+    battleProfile: AiAgentBattleProfile | null;
 };
 
 export type SlackPrompt = AiPrompt & {
@@ -75,6 +259,10 @@ export type SlackPrompt = AiPrompt & {
 
 export type AiWebAppPrompt = AiPrompt & {
     userUuid: string;
+    /** Set when the thread belongs to an embedded agent chat. */
+    threadEmbedSpaceUuid: string | null;
+    /** Viewer id from the embed token that sent this prompt. */
+    externalUserId: string | null;
 };
 
 export const isSlackPrompt = (prompt: AiPrompt): prompt is SlackPrompt =>
@@ -84,6 +272,7 @@ export type CreateSlackPrompt = {
     threadUuid: string;
     createdByUserUuid: string;
     prompt: string;
+    modelConfig: AiAgentModelConfig | null;
     slackUserId: string;
     slackChannelId: string;
     promptSlackTs: string;
@@ -100,9 +289,143 @@ export type AiPromptContextItemInput =
           type: 'dashboard';
           dashboardUuid: string;
           dashboardSlug?: string | null;
+          runtimeOverrides?: AiDashboardRuntimeOverrides;
+      }
+    | {
+          type: 'thread';
+          threadUuid: string;
+          // The turn the reference points at (e.g. a flagged prompt).
+          promptUuid?: string | null;
+      }
+    | {
+          // A dbt source file the user @-mentioned. `path` is relative to the
+          // dbt sub-folder (as the project-files endpoint returns it); the
+          // agent's repo filesystem mounts that folder at `/dbt`.
+          type: 'file';
+          path: string;
+      }
+    | {
+          // A GitHub repository the user @-mentioned, as `owner/repo`. The
+          // agent's repo filesystem mounts it at `/owner/repo`.
+          type: 'repository';
+          fullName: string;
+      }
+    | {
+          // The server snapshots this source's tables at pin time.
+          type: 'external_source';
+          sourceUuid: string;
+      }
+    | {
+          // A text document the user uploaded for this conversation. Sending
+          // the prompt claims the file for the thread in the same transaction.
+          type: 'thread_file';
+          fileUuid: UUID;
+      }
+    | {
+          // The review-remediation pull request applying the proposed change.
+          type: 'pull_request';
+          prUrl: string;
+      }
+    | {
+          // The change a writeback applies, resolved from the review finding.
+          // System-only: seeded by the remediation flow, never user-attached.
+          type: 'proposed_change';
+          fingerprint: string;
+      }
+    | {
+          // The review finding being remediated. System-only.
+          type: 'review_finding';
+          fingerprint: string;
+      }
+    | {
+          // The preview project where a semantic-layer fix can be tested.
+          type: 'preview_environment';
+          previewProjectUuid: string;
+      }
+    | {
+          // An element reference picked from a data app preview: the app and
+          // version it was picked from plus the element's tag, visible text,
+          // and source location (`path:line`, empty when unavailable).
+          type: 'data_app_element';
+          appUuid: string;
+          version: number;
+          tag: string;
+          text: string;
+          loc: string;
+      }
+    | {
+          // A thread restore: the new version and the ready one it copies.
+          // System-only, never user-attached.
+          type: 'data_app_restore';
+          appUuid: string;
+          version: number;
+          restoredFromVersion: number;
+      }
+    | {
+          // A data app the user pinned; the server snapshots its name and
+          // latest ready version number at attach time.
+          type: 'data_app';
+          appUuid: string;
+          appSlug?: string | null;
+      }
+    | {
+          // A Document the user pinned, e.g. the one open when the launcher
+          // started the thread; the server snapshots its name and version.
+          type: 'document';
+          documentUuid: string;
+          documentSlug?: string | null;
+      }
+    | {
+          // The organization theme picked in the composer for a data app
+          // build; the server snapshots its name at attach time.
+          type: 'design';
+          designUuid: string;
+      }
+    | {
+          // A slash-command invocation: the skill the user picked in the
+          // composer and the text typed after it. The server pins the version.
+          type: 'skill';
+          name: string;
+          arguments: string;
       };
 
 export type AiPromptContextInput = AiPromptContextItemInput[];
+
+/** Resource a thread is bound to for its whole life. Same shape as the matching pinned context item. */
+export type AiThreadBinding =
+    | {
+          type: 'dashboard';
+          dashboardUuid: string;
+      }
+    | {
+          type: 'chart';
+          chartUuid: string;
+      };
+
+/** A thread binding as read back, with the resource name. `displayName` is null once the resource is deleted. */
+export type AiThreadBindingSummary = AiThreadBinding & {
+    displayName: string | null;
+};
+
+// The concrete change a writeback applies — one card concept, two payloads.
+export type AiPromptProposedChangePayload =
+    | { changeKind: 'project_context'; entry: AiAgentJudgeProjectContextEntry }
+    | { changeKind: 'semantic_layer'; recommendation: AiAgentRecommendation };
+
+export type AiPromptExternalSourceTable = {
+    tableUuid: string;
+    tableName: string;
+    displayName: string;
+};
+
+export type AiPromptExternalSourceSnapshot = {
+    sourceType: ExternalSourceType;
+    tables: AiPromptExternalSourceTable[];
+};
+
+export type AiPromptThreadFileSnapshot = {
+    sizeBytes: number;
+};
 
 export type AiPromptContextItem =
     | {
@@ -120,6 +443,117 @@ export type AiPromptContextItem =
           dashboardSlug: string | null;
           pinnedVersionUuid: string | null;
           displayName: string | null;
+          runtimeOverrides: AiDashboardRuntimeOverrides | null;
+      }
+    | {
+          type: 'thread';
+          threadUuid: string;
+          promptUuid: string | null;
+          displayName: string | null;
+      }
+    | {
+          // Resolved file reference — a passthrough of the input (the path is
+          // self-contained, there is nothing to look up server-side).
+          type: 'file';
+          path: string;
+      }
+    | {
+          // Resolved repository reference — a passthrough of the input.
+          type: 'repository';
+          fullName: string;
+      }
+    | {
+          type: 'external_source';
+          sourceUuid: string;
+          displayName: string;
+          sourceType: ExternalSourceType | null;
+          tables: AiPromptExternalSourceTable[];
+      }
+    | {
+          type: 'thread_file';
+          fileUuid: string;
+          fileName: string;
+          sizeBytes: number;
+      }
+    | {
+          type: 'pull_request';
+          prUrl: string;
+          prNumber: number | null;
+          provider: PullRequestProvider | null;
+          status: AiAgentReviewItemPrState | null;
+          title: string | null;
+      }
+    | {
+          type: 'proposed_change';
+          fingerprint: string;
+          payload: AiPromptProposedChangePayload;
+      }
+    | {
+          type: 'review_finding';
+          fingerprint: string;
+          title: string;
+          rootCause: AiAgentRootCause;
+          findingCount: number;
+          evidenceExcerpts: AiAgentEvidenceExcerpt[];
+      }
+    | {
+          type: 'preview_environment';
+          previewProjectUuid: string;
+          previewThreadUuid: string | null;
+          status: AiAgentReviewRemediationStatus | null;
+          projectName: string | null;
+      }
+    | {
+          type: 'data_app_element';
+          appUuid: string;
+          version: number;
+          tag: string;
+          text: string;
+          loc: string;
+          appSlug: string | null;
+          displayName: string | null;
+      }
+    | {
+          type: 'data_app_restore';
+          appUuid: string;
+          version: number;
+          restoredFromVersion: number;
+          appSlug: string | null;
+          displayName: string | null;
+      }
+    | {
+          type: 'data_app';
+          appUuid: string;
+          appSlug: string | null;
+          displayName: string | null;
+          pinnedVersion: number | null;
+          // Personal apps have no space; space-restricted agents cannot read them.
+          isPersonal: boolean;
+      }
+    | {
+          type: 'document';
+          documentUuid: string;
+          documentSlug: string | null;
+          pinnedVersionUuid: string | null;
+          displayName: string | null;
+      }
+    | {
+          type: 'design';
+          designUuid: string;
+          // Null when the theme was deleted after it was pinned.
+          designSlug: string | null;
+          displayName: string | null;
+      }
+    | {
+          type: 'skill';
+          name: string;
+          arguments: string;
+          // Null for a built-in skill, which has no row or version.
+          skillUuid: string | null;
+          pinnedVersionUuid: string | null;
+          versionNumber: number | null;
+          builtIn: boolean;
+          displayName: string | null;
       };
 
 export type AiPromptContext = AiPromptContextItem[];
@@ -129,11 +563,11 @@ export type CreateWebAppPrompt = {
     createdByUserUuid: string;
     prompt: string;
     context?: AiPromptContextInput;
-    modelConfig?: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    };
+    modelConfig: AiAgentModelConfig | null;
+    /** Inject as a hidden turn (agent responds, UI hides the user bubble). */
+    hidden?: boolean;
+    /** Viewer id from the embed token; omitted outside embedded chats. */
+    externalUserId?: string | null;
 };
 
 export type UpdateSlackResponse = {
@@ -141,7 +575,8 @@ export type UpdateSlackResponse = {
     response?: string;
     errorMessage?: string;
     humanScore?: number | null;
-    tokenUsage?: AiPromptTokenUsage | null;
+    tokenUsage?: AiPromptTokenUsageUpdate | null;
+    responseTiming?: AiPromptResponseTiming;
 };
 
 export type UpdateWebAppResponse = {
@@ -149,7 +584,8 @@ export type UpdateWebAppResponse = {
     response?: string;
     errorMessage?: string;
     humanScore?: number | null;
-    tokenUsage?: AiPromptTokenUsage | null;
+    tokenUsage?: AiPromptTokenUsageUpdate | null;
+    responseTiming?: AiPromptResponseTiming;
 };
 
 export type UpdateSlackResponseTs = {
@@ -159,11 +595,54 @@ export type UpdateSlackResponseTs = {
 
 export type SlackPromptJobPayload = TraceTaskBase & {
     slackPromptUuid: string;
+    slackAppId?: string | null;
 };
 
 export type AiAgentEvalRunJobPayload = TraceTaskBase & {
     evalRunResultUuid: string;
     evalRunUuid: string;
+    agentUuid: string;
+    threadUuid: string;
+};
+
+export type AiAgentReviewClassifierEventType =
+    | 'response_saved'
+    | 'feedback_changed';
+
+export type AiAgentReviewClassifierJobPayload = TraceTaskBase & {
+    eventType: AiAgentReviewClassifierEventType;
+    organizationUuid: string;
+    projectUuid: string;
+    agentUuid: string;
+    threadUuid: string;
+    promptUuid: string;
+};
+
+export type AiAgentReviewWritebackJobPayload = TraceTaskBase & {
+    fingerprint: string;
+    organizationUuid: string;
+    projectUuid: string;
+    remediationUuid?: string;
+};
+
+export type AiAgentReviewRemediationPreviewJobPayload = TraceTaskBase & {
+    fingerprint: string;
+    remediationUuid: string;
+    prUrl: string;
+    startedAt: number;
+};
+
+export type AiAgentReviewRemediationCompileJobPayload = TraceTaskBase & {
+    fingerprint: string;
+    remediationUuid: string;
+    previewProjectUuid: string;
+    compileJobUuid: string;
+    startedAt: number;
+};
+
+export type AiAgentReviewRemediationRunJobPayload = TraceTaskBase & {
+    fingerprint: string;
+    remediationUuid: string;
     agentUuid: string;
     threadUuid: string;
 };
@@ -184,5 +663,5 @@ export type CloneThread = {
     sourceThreadUuid: string;
     sourcePromptUuid: string;
     targetUserUuid: string;
-    createdFrom?: 'web_app' | 'evals';
+    createdFrom?: AiClonedThreadCreatedFrom;
 };

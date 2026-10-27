@@ -1,7 +1,7 @@
 import {
     isAiAgentToolName,
-    toolImproveContextArgsSchema,
     toolRunQueryOutputSchema,
+    type ApiAiAgentThreadStreamRequest,
 } from '@lightdash/common';
 import { captureException } from '@sentry/react';
 import {
@@ -12,14 +12,20 @@ import {
     type UIMessage,
 } from 'ai';
 import { useCallback } from 'react';
-import { lightdashApiStream } from '../../../../api';
+import { z } from 'zod';
+import { LightdashApiStreamError, type LightdashApi } from '../../../../api';
+import { getAiAccessRefusal } from '../../../../features/aiAccess/errors';
+import { useLightdashApi } from '../../../../providers/LightdashApi/useLightdashApi';
+import { getAiAgentApiBase } from '../hooks/aiAgentRouting';
 import {
     addReasoning,
-    addMcpUnavailableNotice,
     addToolCall,
+    appendStepProgress,
+    markFirstToken,
+    markStreamRecovering,
     markToolCallDecided,
     setError,
-    setImproveContextNotification,
+    setAccessRefusal,
     setMessage,
     setParts,
     startStreaming,
@@ -27,7 +33,14 @@ import {
     type StreamPart,
 } from '../store/aiAgentThreadStreamSlice';
 import { useAiAgentStoreDispatch } from '../store/hooks';
+import { type AiAgentToolCall, type AiAgentToolResult } from '../types';
 import { useAiAgentThreadStreamAbortController } from './AiAgentThreadStreamAbortControllerContext';
+import {
+    parseStreamRawPartialToolCall,
+    parseStreamRawToolCall,
+    parseStreamRawToolResult,
+} from './parseStreamRawToolResult';
+import { createStreamInactivityMonitor } from './streamInactivityMonitor';
 
 export interface AiAgentThreadStreamOptions {
     projectUuid: string;
@@ -35,35 +48,74 @@ export interface AiAgentThreadStreamOptions {
     threadUuid: string;
     messageUuid: string;
     enableSqlMode?: boolean;
+    autoApproveSql?: boolean;
     toolHints?: string[];
     onFinish?: () => void;
     onError?: (error: string) => void;
-    refetchThread?: () => void;
+    onToolCall?: (toolCall: AiAgentToolCall) => void;
+    onToolResult?: (toolResult: AiAgentToolResult) => void;
+    refetchThread: () => void;
 }
 
-type McpUnavailableNoticeChunk = UIMessageChunk & {
-    type: 'data-mcp-unavailable';
+type StreamToolCallPart = Extract<StreamPart, { type: 'toolCall' }>;
+
+const artifactReadySchema = z.object({
+    promptUuid: z.string().min(1),
+    artifactUuid: z.string().min(1),
+    versionUuid: z.string().min(1),
+});
+
+export const getArtifactReadyFromChunk = (chunk: UIMessageChunk) => {
+    if (chunk.type !== 'data-artifact-ready') return null;
+    const result = artifactReadySchema.safeParse(chunk.data);
+    return result.success ? result.data : null;
+};
+
+type StreamToolPart = {
+    type: string;
+    toolName?: string;
+    toolCallId: string;
+    input?: unknown;
+    output?: unknown;
+    preliminary?: boolean;
+    state: string;
+};
+
+type StepProgressChunk = UIMessageChunk & {
+    type: 'data-step-progress';
     data: {
-        serverUuid: string;
-        serverName: string;
         message: string;
-        status: 'not_connected' | 'connecting' | 'connected' | 'error';
+        // The tool the event belongs to, or null/absent when unattributed.
+        toolName?: string | null;
+        // Correlates repeated events about the same unit of work (e.g. a
+        // composer pipeline node, keyed `${toolCallId}:${nodeId}`).
+        progressId?: string | null;
+        progressStatus?: 'in_progress' | 'complete' | 'error' | null;
     };
     transient?: boolean;
 };
 
 const getAgentThreadReadableStream = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     agentUuid: string,
     threadUuid: string,
-    enableSqlMode: boolean,
+    enableSqlMode: boolean | undefined,
+    autoApproveSql: boolean,
     toolHints: string[],
     { signal }: { signal: AbortSignal },
 ) => {
-    const res = await lightdashApiStream({
-        url: `/projects/${projectUuid}/aiAgents/${agentUuid}/threads/${threadUuid}/stream`,
+    const request: ApiAiAgentThreadStreamRequest = {
+        enableSqlMode,
+        autoApproveSql,
+        toolHints,
+    };
+    const res = await lightdashApi.stream({
+        url: `${getAiAgentApiBase(
+            projectUuid,
+        )}/${agentUuid}/threads/${threadUuid}/stream`,
         method: 'POST',
-        body: JSON.stringify({ enableSqlMode, toolHints }),
+        body: JSON.stringify(request),
         signal,
     });
 
@@ -79,7 +131,7 @@ class ChatStreamParser extends DefaultChatTransport<UIMessage> {
     }
 }
 
-const getReasoningFromPart = (part: ReasoningUIPart) => {
+export const getReasoningFromPart = (part: ReasoningUIPart) => {
     switch (true) {
         case part.providerMetadata?.openai !== undefined:
             return {
@@ -96,35 +148,180 @@ const getReasoningFromPart = (part: ReasoningUIPart) => {
                 reasoningId: part.providerMetadata.bedrock.signature,
                 text: part.text,
             };
+        case part.providerMetadata?.google !== undefined:
+            return {
+                reasoningId: part.providerMetadata.google.signature,
+                text: part.text,
+            };
         default:
             return null;
     }
 };
 
-export const getMcpUnavailableNoticeFromChunk = (
-    chunk: UIMessageChunk,
-): McpUnavailableNoticeChunk['data'] | null => {
+const getStreamToolPart = (
+    part: UIMessage['parts'][number],
+): StreamToolPart | null => {
+    if (!part.type.startsWith('tool-') && part.type !== 'dynamic-tool') {
+        return null;
+    }
+
+    const toolPart = part as StreamToolPart;
+    return {
+        ...toolPart,
+        toolName:
+            toolPart.type === 'dynamic-tool'
+                ? toolPart.toolName
+                : toolPart.type.slice(5),
+    };
+};
+
+export const getStreamToolCallPart = (
+    part: UIMessage['parts'][number],
+): StreamToolCallPart | null => {
+    const toolPart = getStreamToolPart(part);
     if (
-        chunk.type === 'data-mcp-unavailable' &&
+        !toolPart ||
+        !toolPart.toolName ||
+        !isAiAgentToolName(toolPart.toolName)
+    ) {
+        return null;
+    }
+
+    // While the model is still writing the call's input, tools with a lenient
+    // partial parser (the composer query tool) render progressively instead of
+    // waiting for input-available.
+    if (toolPart.state === 'input-streaming') {
+        const partialToolCall = parseStreamRawPartialToolCall({
+            toolName: toolPart.toolName,
+            toolArgs: toolPart.input,
+        });
+        if (!partialToolCall) return null;
+        return {
+            type: 'toolCall',
+            toolCallId: toolPart.toolCallId,
+            ...partialToolCall,
+            toolResult: null,
+        } as StreamToolCallPart;
+    }
+
+    if (
+        toolPart.state !== 'input-available' &&
+        toolPart.state !== 'output-available' &&
+        toolPart.state !== 'output-error'
+    ) {
+        return null;
+    }
+
+    const hasOutput = toolPart.state === 'output-available';
+
+    // Output chunks include both the original args and the tool result. Parse
+    // once through the result schema so toolName, toolArgs, and toolResult stay
+    // correlated in the returned typed stream part.
+    if (hasOutput && toolPart.output !== undefined) {
+        const toolResult = parseStreamRawToolResult({
+            toolName: toolPart.toolName,
+            toolArgs: toolPart.input,
+            toolOutput: toolPart.output,
+            isPreliminary: toolPart.preliminary ?? false,
+        });
+        if (!toolResult) return null;
+
+        return {
+            type: 'toolCall',
+            toolCallId: toolPart.toolCallId,
+            toolName: toolResult.toolName,
+            toolArgs: toolResult.toolArgs,
+            toolResult: toolResult.toolResult,
+            isPreliminary: toolResult.isPreliminary,
+            // Explicit false so merge-by-toolCallId in the stream slice
+            // clears the flag once the full input has arrived.
+            isArgsPartial: false,
+        } as StreamToolCallPart;
+    }
+
+    // Input-only chunks are emitted before any result exists. They still need
+    // typed args for live rendering, while toolResult remains null until an
+    // output chunk for the same toolCallId arrives.
+    const toolCall = parseStreamRawToolCall({
+        toolName: toolPart.toolName,
+        toolArgs: toolPart.input,
+    });
+    if (!toolCall) return null;
+
+    return {
+        type: 'toolCall',
+        toolCallId: toolPart.toolCallId,
+        ...toolCall,
+        toolResult: null,
+        isArgsPartial: false,
+    } as StreamToolCallPart;
+};
+
+type StreamReadResult<T> =
+    | { status: 'success'; value: T }
+    | { status: 'error'; error: unknown };
+
+export const readStreamResult = async <T>(
+    read: () => Promise<T>,
+): Promise<StreamReadResult<T>> => {
+    try {
+        return { status: 'success', value: await read() };
+    } catch (error) {
+        return { status: 'error', error };
+    }
+};
+
+const isStepProgressStatus = (
+    value: unknown,
+): value is 'in_progress' | 'complete' | 'error' =>
+    value === 'in_progress' || value === 'complete' || value === 'error';
+
+export const getStepProgressFromChunk = (
+    chunk: UIMessageChunk,
+): {
+    message: string;
+    toolName: string | null;
+    progressId: string | null;
+    progressStatus: 'in_progress' | 'complete' | 'error' | null;
+} | null => {
+    if (
+        chunk.type === 'data-step-progress' &&
         'data' in chunk &&
         chunk.data &&
         typeof chunk.data === 'object'
     ) {
-        const data = chunk.data as McpUnavailableNoticeChunk['data'];
-        if (
-            typeof data.serverUuid === 'string' &&
-            typeof data.serverName === 'string' &&
-            typeof data.message === 'string' &&
-            typeof data.status === 'string'
-        ) {
-            return data;
+        const data = chunk.data as StepProgressChunk['data'];
+        if (typeof data.message === 'string' && data.message.length > 0) {
+            return {
+                message: data.message,
+                toolName:
+                    typeof data.toolName === 'string' ? data.toolName : null,
+                progressId:
+                    typeof data.progressId === 'string'
+                        ? data.progressId
+                        : null,
+                progressStatus: isStepProgressStatus(data.progressStatus)
+                    ? data.progressStatus
+                    : null,
+            };
         }
     }
 
     return null;
 };
 
+const FIRST_TOKEN_CHUNK_TYPES = new Set<UIMessageChunk['type']>([
+    'text-start',
+    'text-delta',
+    'reasoning-start',
+    'reasoning-delta',
+    'tool-input-start',
+    'tool-input-available',
+]);
+
 export function useAiAgentThreadStreamMutation() {
+    const lightdashApi = useLightdashApi();
+
     const dispatch = useAiAgentStoreDispatch();
     const { setAbortController, abort } =
         useAiAgentThreadStreamAbortController();
@@ -135,28 +332,57 @@ export function useAiAgentThreadStreamMutation() {
             agentUuid,
             threadUuid,
             messageUuid,
-            enableSqlMode = false,
+            enableSqlMode,
+            autoApproveSql = false,
             toolHints = [],
             onFinish,
             onError,
+            onToolCall,
+            onToolResult,
             refetchThread,
         }: AiAgentThreadStreamOptions) => {
             const abortController = new AbortController();
             setAbortController(threadUuid, abortController);
+            let isRecovering = false;
+            const beginRecovery = () => {
+                if (isRecovering || abortController.signal.aborted) return;
+
+                isRecovering = true;
+                dispatch(markStreamRecovering({ threadUuid }));
+                refetchThread();
+                abortController.abort();
+            };
+            let inactivityMonitor: ReturnType<
+                typeof createStreamInactivityMonitor
+            > | null = null;
 
             try {
-                dispatch(startStreaming({ threadUuid, messageUuid }));
+                dispatch(
+                    startStreaming({
+                        threadUuid,
+                        messageUuid,
+                        projectUuid,
+                        agentUuid,
+                        autoApproveSql,
+                    }),
+                );
 
                 const response = await getAgentThreadReadableStream(
+                    lightdashApi,
                     projectUuid,
                     agentUuid,
                     threadUuid,
                     enableSqlMode,
+                    autoApproveSql,
                     toolHints,
                     {
                         signal: abortController.signal,
                     },
                 );
+
+                inactivityMonitor = createStreamInactivityMonitor({
+                    onInactive: beginRecovery,
+                });
 
                 const parser = new ChatStreamParser();
                 const chunkStream = parser.parseStream(response);
@@ -167,21 +393,68 @@ export function useAiAgentThreadStreamMutation() {
                 });
                 const rawChunkReader = rawChunkStream.getReader();
 
+                const handledToolInputIds = new Set<string>();
+                const handledToolDecisionIds = new Set<string>();
                 const handledToolOutputIds = new Set<string>();
+                const notifiedToolCallIds = new Set<string>();
+                const notifiedToolOutputIds = new Set<string>();
+                let receivedTerminalChunk = false;
+                let receivedFirstToken = false;
+                const handleStreamReadError = () => {
+                    if (
+                        !receivedTerminalChunk &&
+                        !abortController.signal.aborted
+                    ) {
+                        beginRecovery();
+                    }
+                };
 
                 const consumeRawChunks = (async () => {
+                    const readyVersions = new Set<string>();
                     while (true) {
-                        const { done, value } = await rawChunkReader.read();
+                        const rawChunkResult = await readStreamResult(() =>
+                            rawChunkReader.read(),
+                        );
+                        if (rawChunkResult.status === 'error') {
+                            handleStreamReadError();
+                            break;
+                        }
+
+                        const { done, value } = rawChunkResult.value;
                         if (done) {
                             break;
                         }
 
-                        const notice = getMcpUnavailableNoticeFromChunk(value);
-                        if (notice) {
+                        inactivityMonitor.reset();
+                        if (value.type === 'finish') {
+                            receivedTerminalChunk = true;
+                        }
+                        if (
+                            !receivedFirstToken &&
+                            FIRST_TOKEN_CHUNK_TYPES.has(value.type)
+                        ) {
+                            receivedFirstToken = true;
+                            dispatch(markFirstToken({ threadUuid }));
+                        }
+
+                        const stepProgress = getStepProgressFromChunk(value);
+                        const artifactReady = getArtifactReadyFromChunk(value);
+                        if (
+                            artifactReady &&
+                            artifactReady.promptUuid === messageUuid &&
+                            !readyVersions.has(artifactReady.versionUuid)
+                        ) {
+                            readyVersions.add(artifactReady.versionUuid);
+                            refetchThread();
+                        }
+                        if (stepProgress) {
                             dispatch(
-                                addMcpUnavailableNotice({
+                                appendStepProgress({
                                     threadUuid,
-                                    notice,
+                                    message: stepProgress.message,
+                                    toolName: stepProgress.toolName,
+                                    progressId: stepProgress.progressId,
+                                    progressStatus: stepProgress.progressStatus,
                                 }),
                             );
                             continue;
@@ -189,8 +462,18 @@ export function useAiAgentThreadStreamMutation() {
                     }
                 })();
 
-                for await (const uiMessage of stream) {
-                    if (abortController.signal.aborted) return;
+                const uiMessageIterator = stream[Symbol.asyncIterator]();
+                while (true) {
+                    const uiMessageResult = await readStreamResult(() =>
+                        uiMessageIterator.next(),
+                    );
+                    if (uiMessageResult.status === 'error') {
+                        handleStreamReadError();
+                        break;
+                    }
+
+                    const { done, value: uiMessage } = uiMessageResult.value;
+                    if (done || abortController.signal.aborted) break;
 
                     // Extract and combine all text content from the complete message
                     const fullTextContent = uiMessage.parts
@@ -216,45 +499,10 @@ export function useAiAgentThreadStreamMutation() {
                                 type: 'text',
                                 text: part.text,
                             });
-                        } else if (
-                            part.type.startsWith('tool-') ||
-                            part.type === 'dynamic-tool'
-                        ) {
-                            const toolPart = part as {
-                                type: string;
-                                toolName?: string;
-                                toolCallId: string;
-                                input?: unknown;
-                                output?: unknown;
-                                preliminary?: boolean;
-                                state: string;
-                            };
-                            if (
-                                toolPart.state === 'input-available' ||
-                                toolPart.state === 'output-available' ||
-                                toolPart.state === 'output-error'
-                            ) {
-                                const toolName =
-                                    toolPart.type === 'dynamic-tool'
-                                        ? toolPart.toolName
-                                        : toolPart.type.slice(5);
-
-                                if (toolName && isAiAgentToolName(toolName)) {
-                                    const hasOutput =
-                                        toolPart.state === 'output-available';
-                                    orderedParts.push({
-                                        type: 'toolCall',
-                                        toolCallId: toolPart.toolCallId,
-                                        toolName,
-                                        toolArgs: toolPart.input,
-                                        toolOutput: hasOutput
-                                            ? toolPart.output
-                                            : undefined,
-                                        isPreliminary: hasOutput
-                                            ? (toolPart.preliminary ?? false)
-                                            : undefined,
-                                    });
-                                }
+                        } else {
+                            const toolCallPart = getStreamToolCallPart(part);
+                            if (toolCallPart) {
+                                orderedParts.push(toolCallPart);
                             }
                         }
                     }
@@ -262,20 +510,59 @@ export function useAiAgentThreadStreamMutation() {
 
                     // Process tool calls from the complete message
                     for (const part of uiMessage.parts) {
-                        if (abortController.signal.aborted) return;
+                        if (abortController.signal.aborted) break;
+
+                        const toolPart = getStreamToolPart(part);
+                        const toolCallPart = getStreamToolCallPart(part);
+
+                        if (toolCallPart) {
+                            const { type: _type, ...toolCall } = toolCallPart;
+                            dispatch(addToolCall({ threadUuid, ...toolCall }));
+                        }
+
+                        if (
+                            toolCallPart &&
+                            toolPart?.toolName &&
+                            toolPart.state === 'input-available' &&
+                            !notifiedToolCallIds.has(toolPart.toolCallId)
+                        ) {
+                            notifiedToolCallIds.add(toolPart.toolCallId);
+                            onToolCall?.(toolCallPart);
+                        }
+
+                        if (
+                            toolCallPart &&
+                            toolCallPart.toolResult !== null &&
+                            toolCallPart.isPreliminary !== undefined
+                        ) {
+                            const outputKey = `${toolCallPart.toolCallId}:${String(
+                                toolCallPart.isPreliminary,
+                            )}`;
+                            if (!notifiedToolOutputIds.has(outputKey)) {
+                                notifiedToolOutputIds.add(outputKey);
+                                onToolResult?.({
+                                    toolName: toolCallPart.toolName,
+                                    toolArgs: toolCallPart.toolArgs,
+                                    toolResult: toolCallPart.toolResult,
+                                    isPreliminary: toolCallPart.isPreliminary,
+                                } as AiAgentToolResult);
+                            }
+                        }
+
                         switch (part.type) {
                             // TODO: this is a temporary solution
                             // there should be a way of leveraging ToolUIPart based on the tools available
-                            case 'tool-generateBarVizConfig':
-                            case 'tool-generateTableVizConfig':
-                            case 'tool-generateTimeSeriesVizConfig':
                             case 'tool-findExplores':
+                            case 'tool-findCustomChartTypes':
                             case 'tool-findFields':
+                            case 'tool-grepFields':
+                            case 'tool-getMetadata':
                             case 'tool-findDashboards':
                             case 'tool-findContent':
                             case 'tool-findCharts':
-                            case 'tool-improveContext':
                             case 'tool-searchFieldValues':
+                            case 'tool-generateVisualization':
+                            case 'tool-runContentQuery':
                             case 'tool-runQuery':
                             case 'tool-runSql':
                             case 'tool-listWarehouseTables':
@@ -287,8 +574,14 @@ export function useAiAgentThreadStreamMutation() {
                                     // any open approval card. Idempotent.
                                     if (
                                         part.type === 'tool-runSql' &&
-                                        part.state === 'output-available'
+                                        part.state === 'output-available' &&
+                                        !handledToolDecisionIds.has(
+                                            part.toolCallId,
+                                        )
                                     ) {
+                                        handledToolDecisionIds.add(
+                                            part.toolCallId,
+                                        );
                                         dispatch(
                                             markToolCallDecided({
                                                 threadUuid,
@@ -298,7 +591,9 @@ export function useAiAgentThreadStreamMutation() {
                                     }
                                     if (
                                         !(
-                                            part.type === 'tool-runQuery' &&
+                                            (part.type === 'tool-runQuery' ||
+                                                part.type ===
+                                                    'tool-generateVisualization') &&
                                             part.state === 'output-available'
                                         )
                                     ) {
@@ -327,9 +622,13 @@ export function useAiAgentThreadStreamMutation() {
                                             part.toolCallId,
                                         );
 
-                                        void refetchThread?.();
+                                        refetchThread();
                                     }
 
+                                    break;
+                                }
+
+                                if (handledToolInputIds.has(part.toolCallId)) {
                                     break;
                                 }
 
@@ -340,35 +639,7 @@ export function useAiAgentThreadStreamMutation() {
                                         break;
                                     }
 
-                                    // Store raw tool args (will be validated in rendering components)
-                                    dispatch(
-                                        addToolCall({
-                                            threadUuid,
-                                            toolCallId: part.toolCallId,
-                                            toolName,
-                                            toolArgs: part.input,
-                                        }),
-                                    );
-
-                                    // Special handling for improveContext - validate to access suggestedInstruction
-                                    if (toolName === 'improveContext') {
-                                        const improveContextArgs =
-                                            toolImproveContextArgsSchema.safeParse(
-                                                part.input,
-                                            );
-
-                                        if (improveContextArgs.success) {
-                                            dispatch(
-                                                setImproveContextNotification({
-                                                    threadUuid,
-                                                    toolCallId: part.toolCallId,
-                                                    suggestedInstruction:
-                                                        improveContextArgs.data
-                                                            .suggestedInstruction,
-                                                }),
-                                            );
-                                        }
-                                    }
+                                    handledToolInputIds.add(part.toolCallId);
                                 } catch (error) {
                                     console.error(
                                         'Error parsing tool call:',
@@ -400,18 +671,17 @@ export function useAiAgentThreadStreamMutation() {
                                     part.state === 'output-available' ||
                                     part.state === 'output-error'
                                 ) {
+                                    if (
+                                        handledToolInputIds.has(part.toolCallId)
+                                    ) {
+                                        break;
+                                    }
+
                                     if (!isAiAgentToolName(part.toolName)) {
                                         break;
                                     }
 
-                                    dispatch(
-                                        addToolCall({
-                                            threadUuid,
-                                            toolCallId: part.toolCallId,
-                                            toolName: part.toolName,
-                                            toolArgs: part.input,
-                                        }),
-                                    );
+                                    handledToolInputIds.add(part.toolCallId);
                                 }
                                 break;
                             case 'file':
@@ -423,16 +693,44 @@ export function useAiAgentThreadStreamMutation() {
                                 break;
                         }
                     }
+
+                    if (abortController.signal.aborted) break;
                 }
 
                 await consumeRawChunks;
+                if (abortController.signal.aborted) {
+                    if (!isRecovering) {
+                        dispatch(stopStreaming({ threadUuid }));
+                    }
+                    return;
+                }
+
+                if (!receivedTerminalChunk) {
+                    beginRecovery();
+                    return;
+                }
+
                 onFinish?.();
                 dispatch(stopStreaming({ threadUuid }));
             } catch (error) {
+                if (isRecovering) return;
+
                 if (error instanceof Error && error.name === 'AbortError') {
                     dispatch(stopStreaming({ threadUuid }));
                     return;
                 }
+
+                const refusal = getAiAccessRefusal(
+                    error instanceof LightdashApiStreamError
+                        ? error.error
+                        : null,
+                );
+                if (refusal) {
+                    dispatch(setAccessRefusal({ threadUuid, refusal }));
+                    onError?.(refusal.message);
+                    return;
+                }
+
                 console.error('Error processing stream:', error);
                 captureException(error, {
                     tags: {
@@ -445,9 +743,11 @@ export function useAiAgentThreadStreamMutation() {
                         : 'Unknown error occurred';
                 dispatch(setError({ threadUuid, error: errorMessage }));
                 onError?.(errorMessage);
+            } finally {
+                inactivityMonitor?.stop();
             }
         },
-        [dispatch, setAbortController],
+        [dispatch, setAbortController, lightdashApi],
     );
 
     const cancelMessageStream = useCallback(

@@ -50,6 +50,8 @@ export const user: SessionUser = {
     lastName: 'lastName',
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     isSetupComplete: true,
     timezone: null,
     userId: 0,
@@ -59,6 +61,8 @@ export const user: SessionUser = {
         { subject: 'Job', action: ['view'] },
         { subject: 'SqlRunner', action: ['manage'] },
         { subject: 'Explore', action: ['manage'] },
+        { subject: 'CustomSqlTableCalculations', action: ['manage'] },
+        { subject: 'CustomFields', action: ['manage'] },
     ]),
     isActive: true,
     abilityRules: [],
@@ -84,9 +88,13 @@ export const buildAccount = ({
             createdAt: new Date(),
             name: 'organizationName',
         },
-        authentication: {
-            type: accountType,
-        },
+        authentication:
+            accountType === 'jwt'
+                ? {
+                      type: accountType,
+                      data: { content: { type: 'dashboard' } },
+                  }
+                : { type: accountType },
         isSessionUser: () => accountType === 'session',
         isRegisteredUser: () => userType === 'registered',
         isJwtUser: () => accountType === 'jwt',
@@ -175,6 +183,44 @@ export const validExplore: Explore = {
     },
 };
 
+const reservedParameterDimensionSql =
+    "{% if ld.parameters.date_zoom == 'week' %}'weekly'{% else %}'other'{% endif %}";
+
+export const exploreWithReservedParameterDimension: Explore = {
+    ...validExplore,
+    tables: {
+        ...validExplore.tables,
+        a: {
+            ...validExplore.tables.a,
+            dimensions: {
+                ...validExplore.tables.a.dimensions,
+                grain_flag: {
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    name: 'grain_flag',
+                    label: 'grain_flag',
+                    table: 'a',
+                    tableLabel: '',
+                    sql: reservedParameterDimensionSql,
+                    hidden: false,
+                    compiledSql: reservedParameterDimensionSql,
+                    tablesReferences: ['a'],
+                },
+            },
+        },
+    },
+};
+
+export const metricQueryReservedParameterDimension: MetricQuery = {
+    exploreName: validExplore.name,
+    filters: {},
+    limit: 10,
+    dimensions: ['a_grain_flag'],
+    metrics: [],
+    sorts: [],
+    tableCalculations: [],
+};
+
 export const exploreWithError: ExploreError = {
     name: 'error',
     label: 'error',
@@ -261,17 +307,20 @@ export const expectedAllExploreSummary: SummaryExplore[] = [
         schemaName: validExplore.tables[validExplore.baseTable].schema,
         description: validExplore.tables[validExplore.baseTable].description,
         type: ExploreType.DEFAULT,
+        warehouseConnectionUuid: null,
     },
     {
         name: exploreWithError.name,
         label: exploreWithError.label,
         errors: exploreWithError.errors,
+        warehouseConnectionUuid: null,
     },
     {
         name: exploreWithTags.name,
         label: exploreWithTags.label,
         tags: exploreWithTags.tags,
         errors: exploreWithTags.errors,
+        warehouseConnectionUuid: null,
     },
 ];
 
@@ -327,6 +376,7 @@ export const sessionAccount = buildAccount();
 export const projectWithSensitiveFields: Project = {
     organizationUuid: sessionAccount.organization.organizationUuid!,
     projectUuid: 'projectUuid',
+    slug: 'name',
     name: 'name',
     type: ProjectType.DEFAULT,
     dbtVersion: DefaultSupportedDbtVersion,
@@ -345,16 +395,21 @@ export const projectWithSensitiveFields: Project = {
     hasDefaultUserSpaces: false,
     colorPaletteUuid: null,
     expiresAt: null,
+    agentSqlScope: null,
+    connectionRoute: 'single',
 };
 
 export const projectSummary: ProjectSummary = {
     organizationUuid: sessionAccount.organization.organizationUuid!,
     projectUuid: 'projectUuid',
+    slug: 'name',
     name: 'name',
     type: ProjectType.DEFAULT,
+    createdByUserUuid: sessionAccount.user.id,
 };
 export const defaultProject: OrganizationProject = {
     projectUuid: 'projectUuid',
+    slug: 'name',
     name: 'name',
     type: ProjectType.DEFAULT,
     createdByUserUuid: sessionAccount.user.id,
@@ -484,13 +539,16 @@ export const lightdashConfigWithNoSMTP: Pick<
     smtp: undefined,
     siteUrl: 'https://test.lightdash.cloud',
     query: {
+        underlyingDataMaxDimensions: 50,
         maxPageSize: 500,
         maxLimit: 100,
         defaultLimit: 500,
         csvCellsLimit: 100,
+        csvMaxLimit: 5000000,
         timezone: undefined,
         retryQueryOnTransientErrors: false,
         enableTimezoneSupport: undefined,
+        exploreSummaryProjectionMinStoredBytesPerExplore: 2048,
     },
 };
 
@@ -594,6 +652,7 @@ export const exploreToSummaryWithAttributes = (
             label: explore.label,
             tags: explore.tags,
             errors: explore.errors,
+            warehouseConnectionUuid: null,
         };
     }
 
@@ -609,6 +668,7 @@ export const exploreToSummaryWithAttributes = (
         type: explore.type,
         preAggregateSource: explore.preAggregateSource,
         baseTableRequiredAttributes: baseTable.requiredAttributes,
+        warehouseConnectionUuid: null,
         ...(explore.warnings ? { warnings: explore.warnings } : {}),
     };
 };

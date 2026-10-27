@@ -10,7 +10,7 @@ import {
     Title,
     Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconCheck,
     IconCircleDotted,
@@ -23,7 +23,7 @@ import { useNavigate } from 'react-router';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
+    type ContentTableColumnDef,
 } from '../../../../../components/common/ContentTable';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import {
@@ -66,155 +66,158 @@ export const EvalRuns: FC<Props> = ({ projectUuid, agentUuid, evalUuid }) => {
         );
     };
 
-    const columns: MRT_ColumnDef<AiAgentEvaluationRunSummary>[] = useMemo(
-        () => [
-            {
-                accessorKey: 'runUuid',
-                header: 'Run ID',
-                enableSorting: false,
-                size: 120,
-                Cell: ({ row }) => (
-                    <Text fz="sm" fw={500}>
-                        {row.original.runUuid.slice(-8)}
-                    </Text>
-                ),
-            },
-            {
-                accessorKey: 'status',
-                header: 'Run Status',
-                enableSorting: false,
-                size: 150,
-                Cell: ({ row }) => {
-                    const evalStatus = statusConfig[row.original.status];
-                    return (
-                        <Badge
-                            color={evalStatus.color}
-                            variant="dot"
-                            size="sm"
-                            radius="sm"
-                            c="ldGray.7"
-                            style={{ border: 'none' }}
-                        >
-                            {evalStatus.label}
-                        </Badge>
-                    );
-                },
-            },
-            {
-                accessorKey: 'assessment',
-                header: 'Assessment',
-                enableSorting: false,
-                size: 140,
-                Cell: ({ row }) => {
-                    const run = row.original;
-                    return isRunning(run.status) ? (
-                        <Tooltip label="Running">
-                            <Loader size={12} color="gray" />
-                        </Tooltip>
-                    ) : !run.passedAssessments && !run.failedAssessments ? (
-                        <Tooltip label="No assessments available">
-                            <MantineIcon
-                                icon={IconCircleDotted}
-                                color="ldGray.6"
-                            />
-                        </Tooltip>
-                    ) : (
-                        <Group gap="sm">
-                            {run.passedAssessments > 0 && (
-                                <Group gap={2}>
-                                    <MantineIcon
-                                        icon={IconCheck}
-                                        color="green.8"
-                                    />
-                                    <Text fz="xs" c="green.8" fw={500}>
-                                        {run.passedAssessments}
-                                    </Text>
-                                </Group>
-                            )}
-                            {run.failedAssessments > 0 && (
-                                <Group gap={2}>
-                                    <MantineIcon icon={IconX} color="red.8" />
-                                    <Text fz="xs" c="red.8" fw={500}>
-                                        {run.failedAssessments}
-                                    </Text>
-                                </Group>
-                            )}
-                        </Group>
-                    );
-                },
-            },
-            {
-                accessorKey: 'createdAt',
-                header: 'Created',
-                enableSorting: false,
-                size: 180,
-                Cell: ({ row }) => {
-                    const run = row.original;
-                    const createdAt = run.createdAt
-                        ? dayjs(run.createdAt).format('DD/MM/YYYY HH:mm:ss')
-                        : '-';
-                    const completedAt = run.completedAt
-                        ? dayjs(run.completedAt).format('DD/MM/YYYY HH:mm:ss')
-                        : '-';
-                    return (
-                        <Tooltip
-                            withinPortal
-                            position="left-start"
-                            label={
-                                <Text size="xs">
-                                    Started {createdAt}
-                                    {run.completedAt && (
-                                        <>
-                                            <br />
-                                            Completed {completedAt}
-                                        </>
-                                    )}
-                                </Text>
-                            }
-                        >
-                            <Text fz="sm" c="ldGray.6">
-                                {createdAt}
-                            </Text>
-                        </Tooltip>
-                    );
-                },
-            },
-            {
-                accessorKey: 'duration',
-                header: 'Duration',
-                enableSorting: false,
-                size: 120,
-                Cell: ({ row }) => {
-                    const run = row.original;
-                    const runDuration = run.completedAt
-                        ? dayjs
-                              .utc(
-                                  dayjs
-                                      .duration(
-                                          dayjs(run.completedAt).diff(
-                                              dayjs(run.createdAt),
-                                          ),
-                                      )
-                                      .asMilliseconds(),
-                              )
-                              .format('mm[m]ss[s]')
-                        : '-';
-                    return (
-                        <Text fz="sm" c="ldGray.6">
-                            {runDuration}
+    const columns: ContentTableColumnDef<AiAgentEvaluationRunSummary>[] =
+        useMemo(
+            () => [
+                {
+                    accessorKey: 'runUuid',
+                    header: 'Run ID',
+                    enableSorting: false,
+                    size: 120,
+                    Cell: ({ row }) => (
+                        <Text fz="sm" fw={500}>
+                            {row.original.runUuid.slice(-8)}
                         </Text>
-                    );
+                    ),
                 },
-            },
-        ],
-        [],
-    );
+                {
+                    accessorKey: 'status',
+                    header: 'Run Status',
+                    enableSorting: false,
+                    size: 150,
+                    Cell: ({ row }) => {
+                        const evalStatus = statusConfig[row.original.status];
+                        return (
+                            <Badge
+                                color={evalStatus.color}
+                                variant="dot"
+                                size="sm"
+                                c="ldGray.7"
+                                style={{ border: 'none' }}
+                            >
+                                {evalStatus.label}
+                            </Badge>
+                        );
+                    },
+                },
+                {
+                    accessorKey: 'assessment',
+                    header: 'Assessment',
+                    enableSorting: false,
+                    size: 140,
+                    Cell: ({ row }) => {
+                        const run = row.original;
+                        return isRunning(run.status) ? (
+                            <Tooltip label="Running">
+                                <Loader size={12} color="gray" />
+                            </Tooltip>
+                        ) : !run.passedAssessments && !run.failedAssessments ? (
+                            <Tooltip label="No assessments available">
+                                <MantineIcon
+                                    icon={IconCircleDotted}
+                                    color="dimmed"
+                                />
+                            </Tooltip>
+                        ) : (
+                            <Group gap="sm">
+                                {run.passedAssessments > 0 && (
+                                    <Group gap={2}>
+                                        <MantineIcon
+                                            icon={IconCheck}
+                                            color="green.8"
+                                        />
+                                        <Text fz="xs" c="green.8" fw={500}>
+                                            {run.passedAssessments}
+                                        </Text>
+                                    </Group>
+                                )}
+                                {run.failedAssessments > 0 && (
+                                    <Group gap={2}>
+                                        <MantineIcon
+                                            icon={IconX}
+                                            color="red.8"
+                                        />
+                                        <Text fz="xs" c="red.8" fw={500}>
+                                            {run.failedAssessments}
+                                        </Text>
+                                    </Group>
+                                )}
+                            </Group>
+                        );
+                    },
+                },
+                {
+                    accessorKey: 'createdAt',
+                    header: 'Created',
+                    enableSorting: false,
+                    size: 180,
+                    Cell: ({ row }) => {
+                        const run = row.original;
+                        const createdAt = run.createdAt
+                            ? dayjs(run.createdAt).format('DD/MM/YYYY HH:mm:ss')
+                            : '-';
+                        const completedAt = run.completedAt
+                            ? dayjs(run.completedAt).format(
+                                  'DD/MM/YYYY HH:mm:ss',
+                              )
+                            : '-';
+                        return (
+                            <Tooltip
+                                position="left-start"
+                                label={
+                                    <Text size="xs">
+                                        Started {createdAt}
+                                        {run.completedAt && (
+                                            <>
+                                                <br />
+                                                Completed {completedAt}
+                                            </>
+                                        )}
+                                    </Text>
+                                }
+                            >
+                                <Text fz="sm" c="dimmed">
+                                    {createdAt}
+                                </Text>
+                            </Tooltip>
+                        );
+                    },
+                },
+                {
+                    accessorKey: 'duration',
+                    header: 'Duration',
+                    enableSorting: false,
+                    size: 120,
+                    Cell: ({ row }) => {
+                        const run = row.original;
+                        const runDuration = run.completedAt
+                            ? dayjs
+                                  .utc(
+                                      dayjs
+                                          .duration(
+                                              dayjs(run.completedAt).diff(
+                                                  dayjs(run.createdAt),
+                                              ),
+                                          )
+                                          .asMilliseconds(),
+                                  )
+                                  .format('mm[m]ss[s]')
+                            : '-';
+                        return (
+                            <Text fz="sm" c="dimmed">
+                                {runDuration}
+                            </Text>
+                        );
+                    },
+                },
+            ],
+            [],
+        );
 
     const table = useContentTable({
         columns,
         data: runs,
         enableSorting: false,
-        enableColumnActions: false,
         enablePagination: false,
         enableBottomToolbar: false,
         enableTopToolbar: false,
@@ -228,16 +231,6 @@ export const EvalRuns: FC<Props> = ({ projectUuid, agentUuid, evalUuid }) => {
         }),
         state: {
             isLoading: isLoadingRuns,
-        },
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
         },
         mantineTableContainerProps: {
             style: { maxHeight: '320px' },
@@ -273,11 +266,6 @@ export const EvalRuns: FC<Props> = ({ projectUuid, agentUuid, evalUuid }) => {
                 },
             };
         },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
-            },
-        },
         mantineTableBodyCellProps: () => {
             return {
                 h: 48,
@@ -302,7 +290,7 @@ export const EvalRuns: FC<Props> = ({ projectUuid, agentUuid, evalUuid }) => {
 
     return (
         <Stack gap="xs">
-            <Title order={5} c="ldGray.9" fw={500}>
+            <Title order={5} fw={500}>
                 Previous Runs
             </Title>
 
@@ -310,7 +298,6 @@ export const EvalRuns: FC<Props> = ({ projectUuid, agentUuid, evalUuid }) => {
                 <Paper
                     variant="dotted"
                     p="xl"
-                    shadow="subtle"
                     component={Stack}
                     gap="xxs"
                     align="center"

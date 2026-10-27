@@ -4,8 +4,8 @@ import {
     ParseError,
     WarehouseTypes,
 } from '@lightdash/common';
+import betterAjvErrors from '@sidvind/better-ajv-errors';
 import { JSONSchemaType } from 'ajv';
-import betterAjvErrors from 'better-ajv-errors';
 import { ajv } from '../../ajv';
 import { Target } from '../types';
 
@@ -18,6 +18,7 @@ export type AthenaTarget = {
     s3_data_dir?: string;
     aws_access_key_id?: string;
     aws_secret_access_key?: string;
+    aws_session_token?: string;
     aws_assume_role_arn?: string;
     aws_assume_role_external_id?: string;
     work_group?: string;
@@ -25,7 +26,7 @@ export type AthenaTarget = {
     num_retries?: number;
 };
 
-export const athenaSchema: JSONSchemaType<AthenaTarget> = {
+const athenaSchema: JSONSchemaType<AthenaTarget> = {
     type: 'object',
     properties: {
         type: {
@@ -53,6 +54,10 @@ export const athenaSchema: JSONSchemaType<AthenaTarget> = {
             nullable: true,
         },
         aws_secret_access_key: {
+            type: 'string',
+            nullable: true,
+        },
+        aws_session_token: {
             type: 'string',
             nullable: true,
         },
@@ -104,6 +109,7 @@ export const convertAthenaSchema = (
                 : AthenaAuthenticationType.IAM_ROLE,
             accessKeyId: target.aws_access_key_id,
             secretAccessKey: target.aws_secret_access_key,
+            sessionToken: target.aws_session_token,
             assumeRoleArn: target.aws_assume_role_arn,
             assumeRoleExternalId: target.aws_assume_role_external_id,
             workGroup: target.work_group,

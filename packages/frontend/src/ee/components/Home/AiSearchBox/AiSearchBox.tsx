@@ -1,4 +1,3 @@
-import { type AiAgentSummary } from '@lightdash/common';
 import {
     ActionIcon,
     Box,
@@ -8,22 +7,35 @@ import {
     Paper,
     Skeleton,
     Text,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import {
     IconArrowUp,
+    IconArrowRight,
     IconCornerDownLeft,
+    IconGitPullRequest,
     IconSettings,
-    IconSparkles,
 } from '@tabler/icons-react';
-import { useEffect, useState, type FC } from 'react';
+import { useState, type FC } from 'react';
 import { Provider } from 'react-redux';
 import { Link, useNavigate } from 'react-router';
+import { CategoryBadge } from '../../../../components/common/CategoryBadge';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import { PolymorphicGroupButton } from '../../../../components/common/PolymorphicGroupButton';
 import { CompactAgentSelector } from '../../../features/aiCopilot/components/AgentSelector';
-import { useAiAgentPermission } from '../../../features/aiCopilot/hooks/useAiAgentPermission';
+import {
+    AI_ROUTING_AUTO_VALUE,
+    AI_ROUTING_SEARCH_PARAM,
+} from '../../../features/aiCopilot/components/AgentSelector/AgentSelectorUtils';
+import { AiAgentIcon } from '../../../features/aiCopilot/components/AiAgentIcon';
+import { usePendingPrompt } from '../../../features/aiCopilot/components/PendingPromptContext/PendingPromptContext';
+import { useAiAgentAdminReviewItems } from '../../../features/aiCopilot/hooks/useAiAgentAdmin';
+import {
+    useAiAgentOrgPermission,
+    useAiAgentPermission,
+} from '../../../features/aiCopilot/hooks/useAiAgentPermission';
 import { useAiOrganizationSettings } from '../../../features/aiCopilot/hooks/useAiOrganizationSettings';
+import { useAiRouterConfig } from '../../../features/aiCopilot/hooks/useAiRouter';
 import {
     useCreateAgentThreadMutation,
     useProjectAiAgents,
@@ -36,9 +48,13 @@ import { SearchDropdown } from './SearchDropdown';
 
 type Props = {
     projectUuid: string;
+    showAiReviewsPromo?: boolean;
 };
 
-const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
+const AiSearchBoxInner: FC<Props> = ({
+    projectUuid,
+    showAiReviewsPromo = false,
+}) => {
     const navigate = useNavigate();
 
     const { data: agents, isLoading: isLoadingAgents } = useProjectAiAgents({
@@ -49,29 +65,65 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
     const isTrial =
         aiOrganizationSettingsQuery.isSuccess &&
         aiOrganizationSettingsQuery.data.isTrial;
+    const reviewsEnabled =
+        aiOrganizationSettingsQuery.data?.aiAgentReviewsEnabled === true;
     const {
         data: userAgentPreferences,
         isLoading: isLoadingUserAgentPreferences,
     } = useGetUserAgentPreferences(projectUuid);
-    const [selectedAgent, setSelectedAgent] = useState<AiAgentSummary>();
+    const aiRouterConfigQuery = useAiRouterConfig();
+    const [selectedAgentUuid, setSelectedAgentUuid] = useState<string>();
+    const { setPendingPrompt } = usePendingPrompt();
     const canManageAgents = useAiAgentPermission({
         action: 'manage',
         projectUuid,
     });
+    const canViewReviews = useAiAgentOrgPermission({
+        action: 'manage',
+    });
+    const showReviewsPromo =
+        showAiReviewsPromo && canViewReviews && reviewsEnabled;
+    const { data: reviewItems } = useAiAgentAdminReviewItems(
+        { statuses: ['open'] },
+        { enabled: showReviewsPromo },
+    );
+    const projectReviewItems =
+        reviewItems?.filter(
+            (item) =>
+                item.projectUuid === projectUuid ||
+                item.latestFinding?.projectUuid === projectUuid,
+        ) ?? [];
+    const prReadyCount = projectReviewItems.filter(
+        (item) => item.writebackEligibility.eligible,
+    ).length;
+    const linkedPrCount = projectReviewItems.filter(
+        (item) => !!item.linkedPrUrl,
+    ).length;
+    const reviewsPromoLabel =
+        prReadyCount > 0
+            ? 'Review issues, ship PRs, improve agents'
+            : 'Review AI issues to improve future answers';
 
     const noAgentsAvailable =
         !isLoadingAgents && (!agents || agents.length === 0);
+    const showAgentSetupPrompt =
+        canManageAgents && (isTrial || noAgentsAvailable);
+    const showFooter = canManageAgents || showReviewsPromo;
 
-    useEffect(() => {
-        if (!agents || agents.length === 0) return;
+    const showAutoOption =
+        (agents?.length ?? 0) > 1 && aiRouterConfigQuery.data?.enabled === true;
 
-        const preferredAgent =
-            agents.find(
-                (agent) =>
-                    agent.uuid === userAgentPreferences?.defaultAgentUuid,
-            ) ?? agents[0];
-        setSelectedAgent(preferredAgent);
-    }, [agents, userAgentPreferences?.defaultAgentUuid]);
+    const validDefaultAgent = agents?.find(
+        (agent) => agent.uuid === userAgentPreferences?.defaultAgentUuid,
+    );
+    const preferredSelection =
+        validDefaultAgent ?? (showAutoOption ? 'auto' : agents?.[0]);
+
+    const selectedAgent =
+        selectedAgentUuid === AI_ROUTING_AUTO_VALUE && showAutoOption
+            ? 'auto'
+            : agents?.find((agent) => agent.uuid === selectedAgentUuid);
+    const activeSelection = selectedAgent ?? preferredSelection;
 
     const form = useForm({
         initialValues: {
@@ -79,16 +131,35 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
         },
     });
 
-    const { mutateAsync: createAgentThread } = useCreateAgentThreadMutation(
-        selectedAgent?.uuid,
-        projectUuid,
-    );
+    const { mutateAsync: createAgentThread } =
+        useCreateAgentThreadMutation(projectUuid);
 
     const handleSubmit = form.onSubmit(async (values) => {
-        if (!selectedAgent) {
+        const prompt = values.prompt.trim();
+
+        if (!prompt) return;
+
+        if (activeSelection === 'auto') {
+            setPendingPrompt(prompt);
+            void navigate(
+                {
+                    pathname: `/projects/${projectUuid}/ai-agents`,
+                    search: new URLSearchParams({
+                        [AI_ROUTING_SEARCH_PARAM]: AI_ROUTING_AUTO_VALUE,
+                    }).toString(),
+                },
+                {
+                    state: { autoSubmitPrompt: prompt },
+                    viewTransition: true,
+                },
+            );
+        } else if (!activeSelection) {
             void navigate(`/projects/${projectUuid}/ai-agents`);
         } else {
-            await createAgentThread({ prompt: values.prompt.trim() });
+            await createAgentThread({
+                agentUuid: activeSelection.uuid,
+                prompt,
+            });
         }
     });
 
@@ -98,15 +169,23 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
 
     const onSelect = (agentUuid: string) => {
         if (!agents) return;
-        setSelectedAgent(
-            (currentSelection) =>
-                agents.find((a) => a.uuid === agentUuid) ?? currentSelection,
-        );
+        if (agentUuid === AI_ROUTING_AUTO_VALUE && showAutoOption) {
+            setSelectedAgentUuid(AI_ROUTING_AUTO_VALUE);
+            return;
+        }
+
+        if (agents.some((agent) => agent.uuid === agentUuid)) {
+            setSelectedAgentUuid(agentUuid);
+        }
     };
 
-    if (isLoadingAgents || isLoadingUserAgentPreferences) {
+    if (
+        isLoadingAgents ||
+        isLoadingUserAgentPreferences ||
+        aiRouterConfigQuery.isLoading
+    ) {
         return (
-            <Paper style={{ overflow: 'hidden' }} p="md">
+            <Paper className={styles.loadingCard} p="md">
                 <Group wrap="nowrap" align="center">
                     <Skeleton circle height={38} width={38} />
                     <Skeleton height={36} flex={1} />
@@ -131,8 +210,9 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
                     <Group>
                         <CompactAgentSelector
                             agents={agents}
-                            selectedAgent={selectedAgent ?? agents[0]}
+                            selectedAgent={activeSelection ?? agents[0]}
                             onSelect={onSelect}
+                            showAutoOption={showAutoOption}
                         />
                         <Group gap="xs" flex={1}>
                             <SearchDropdown
@@ -143,9 +223,11 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
                                 }
                                 onSearchItemSelect={handleSearchItemSelect}
                                 placeholder={
-                                    selectedAgent
-                                        ? `Ask ${selectedAgent.name} or search your data`
-                                        : 'Search your data'
+                                    activeSelection === 'auto'
+                                        ? 'Ask AI or search your data'
+                                        : activeSelection
+                                          ? `Ask ${activeSelection.name} or search your data`
+                                          : 'Search your data'
                                 }
                                 onHeaderClick={handleSubmit}
                                 header={
@@ -157,15 +239,12 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
                                         style={{ overflow: 'hidden' }}
                                         align="flex-start"
                                     >
-                                        <MantineIcon
+                                        <AiAgentIcon
                                             style={{
                                                 flexShrink: 0,
                                                 marginTop: 4,
                                             }}
-                                            icon={IconSparkles}
-                                            color="violet.4"
-                                            fill="violet.4"
-                                            size={16}
+                                            size={14}
                                         />
                                         <Text
                                             size="sm"
@@ -174,9 +253,11 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
                                             mt={2}
                                         >
                                             Ask{' '}
-                                            {selectedAgent
-                                                ? selectedAgent.name
-                                                : 'AI'}
+                                            {activeSelection === 'auto'
+                                                ? 'AI'
+                                                : activeSelection
+                                                  ? activeSelection.name
+                                                  : 'AI'}
                                             :{' '}
                                             <Text
                                                 component="span"
@@ -213,30 +294,17 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
                     </Group>
                 </form>
             </Box>
-            {canManageAgents && (
+            {showFooter && (
                 <>
                     <Divider color="ldGray.2" />
                     <Box bg="ldGray.0" px="md" py="5px">
-                        <Group
-                            flex={1}
-                            justify={
-                                isTrial || noAgentsAvailable
-                                    ? 'space-between'
-                                    : 'flex-end'
-                            }
-                        >
-                            <Group gap={2}>
-                                {noAgentsAvailable ? (
+                        <Group flex={1} justify="space-between">
+                            <Group gap="xs">
+                                {showAgentSetupPrompt && noAgentsAvailable ? (
                                     <Button
                                         size="compact-xs"
                                         variant="subtle"
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconSparkles}
-                                                color="violet.5"
-                                                fill="violet.5"
-                                            />
-                                        }
+                                        leftSection={<AiAgentIcon size={14} />}
                                         component={Link}
                                         to="/ai-agents"
                                     >
@@ -253,40 +321,92 @@ const AiSearchBoxInner: FC<Props> = ({ projectUuid }) => {
                                             </Text>
                                         </Group>
                                     </Button>
-                                ) : isTrial ? (
+                                ) : showAgentSetupPrompt && isTrial ? (
                                     <Group gap="xs">
-                                        <MantineIcon
-                                            icon={IconSparkles}
-                                            color="violet.5"
-                                            fill="violet.5"
-                                        />
+                                        <AiAgentIcon size={14} />
                                         <Text size="xs" c="ldGray.8">
                                             You are trialing the AI Agents
                                             feature.
                                         </Text>
                                     </Group>
                                 ) : null}
+
+                                {showReviewsPromo && (
+                                    <Button
+                                        size="compact-xs"
+                                        variant="transparent"
+                                        leftSection={
+                                            <MantineIcon
+                                                icon={IconGitPullRequest}
+                                                color="ldGray.7"
+                                                strokeWidth={1.7}
+                                            />
+                                        }
+                                        rightSection={
+                                            <MantineIcon
+                                                icon={IconArrowRight}
+                                                size={13}
+                                                color="ldGray.7"
+                                            />
+                                        }
+                                        component={Link}
+                                        to={`/generalSettings/ai/issues?projects=${projectUuid}`}
+                                        className={styles.reviewsPromoButton}
+                                    >
+                                        <Group gap="xs" wrap="nowrap">
+                                            <Text span fz="xs" fw={600}>
+                                                {reviewsPromoLabel}
+                                            </Text>
+                                            <CategoryBadge
+                                                label={`${projectReviewItems.length} open`}
+                                                color="yellow.5"
+                                                className={
+                                                    styles.reviewsPromoBadge
+                                                }
+                                            />
+                                            <CategoryBadge
+                                                label={`${prReadyCount} PR-ready`}
+                                                color="green.5"
+                                                className={
+                                                    styles.reviewsPromoBadge
+                                                }
+                                            />
+                                            {linkedPrCount > 0 && (
+                                                <CategoryBadge
+                                                    label={`${linkedPrCount} linked`}
+                                                    color="blue.5"
+                                                    className={
+                                                        styles.reviewsPromoBadge
+                                                    }
+                                                />
+                                            )}
+                                        </Group>
+                                    </Button>
+                                )}
                             </Group>
 
-                            <Button
-                                size="compact-xs"
-                                variant="subtle"
-                                leftSection={
-                                    <MantineIcon
-                                        color="ldGray.7"
-                                        icon={IconSettings}
-                                        strokeWidth={1.5}
-                                    />
-                                }
-                                component={Link}
-                                to="/ai-agents/admin/agents"
-                                classNames={{
-                                    label: styles.adminSettingsButtonLabel,
-                                    section: styles.adminSettingsButtonSection,
-                                }}
-                            >
-                                Admin Settings
-                            </Button>
+                            {canManageAgents && (
+                                <Button
+                                    size="compact-xs"
+                                    variant="subtle"
+                                    leftSection={
+                                        <MantineIcon
+                                            color="ldGray.7"
+                                            icon={IconSettings}
+                                            strokeWidth={1.5}
+                                        />
+                                    }
+                                    component={Link}
+                                    to="/generalSettings/ai/agents"
+                                    classNames={{
+                                        label: styles.adminSettingsButtonLabel,
+                                        section:
+                                            styles.adminSettingsButtonSection,
+                                    }}
+                                >
+                                    Admin Settings
+                                </Button>
+                            )}
                         </Group>
                     </Box>
                 </>

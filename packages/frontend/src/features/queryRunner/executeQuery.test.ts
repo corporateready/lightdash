@@ -1,12 +1,11 @@
 import { QueryHistoryStatus } from '@lightdash/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { lightdashApi } from '../../api';
+import { sharedLightdashApi } from '../../api';
+import { mockedLightdashApi } from '../../testing/mockedLightdashApi';
 import { getResultsFromStream } from '../../utils/request';
 import { executeSqlPivotQuery, executeSqlQuery } from './executeQuery';
 
-vi.mock('../../api', () => ({
-    lightdashApi: vi.fn(),
-}));
+vi.mock('../../api');
 
 vi.mock('../../utils/request', () => ({
     getResultsFromStream: vi.fn(),
@@ -18,7 +17,7 @@ describe('executeQuery', () => {
     });
 
     it('surfaces expired errors for SQL queries', async () => {
-        vi.mocked(lightdashApi)
+        mockedLightdashApi
             .mockResolvedValueOnce({
                 queryUuid: 'test-query-uuid',
             } as never)
@@ -29,14 +28,14 @@ describe('executeQuery', () => {
             } as never);
 
         await expect(
-            executeSqlQuery('project-uuid', 'select 1'),
+            executeSqlQuery(sharedLightdashApi, 'project-uuid', 'select 1'),
         ).rejects.toThrow('Query expired in queue');
 
         expect(getResultsFromStream).not.toHaveBeenCalled();
     });
 
     it('surfaces expired errors for pivot SQL queries', async () => {
-        vi.mocked(lightdashApi)
+        mockedLightdashApi
             .mockResolvedValueOnce({
                 queryUuid: 'test-query-uuid',
             } as never)
@@ -47,7 +46,7 @@ describe('executeQuery', () => {
             } as never);
 
         await expect(
-            executeSqlPivotQuery('project-uuid', {
+            executeSqlPivotQuery(sharedLightdashApi, 'project-uuid', {
                 sql: 'select 1',
                 pivotConfiguration: {
                     indexColumn: undefined,
@@ -59,5 +58,113 @@ describe('executeQuery', () => {
         ).rejects.toThrow('Query expired in queue');
 
         expect(getResultsFromStream).not.toHaveBeenCalled();
+    });
+
+    it('passes invalidateCache parameter to API when true', async () => {
+        mockedLightdashApi
+            .mockResolvedValueOnce({
+                queryUuid: 'test-query-uuid',
+            } as never)
+            .mockResolvedValueOnce({
+                status: QueryHistoryStatus.READY,
+                queryUuid: 'test-query-uuid',
+                columns: { col1: { type: 'string' } },
+                metadata: { performance: { initialQueryExecutionMs: 120 } },
+            } as never);
+
+        vi.mocked(getResultsFromStream).mockResolvedValueOnce({
+            rows: [{ col1: 'value1' }],
+            columns: { col1: { type: 'string' } },
+        } as never);
+
+        await executeSqlQuery(
+            sharedLightdashApi,
+            'project-uuid',
+            'select 1',
+            100,
+            {},
+            true, // invalidateCache
+        );
+
+        // Verify the first API call (POST /sql) includes invalidateCache in body
+        expect(sharedLightdashApi).toHaveBeenCalledWith(
+            expect.objectContaining({
+                method: 'POST',
+                url: '/projects/project-uuid/query/sql',
+                version: 'v2',
+                body: expect.stringContaining('"invalidateCache":true'),
+            }),
+        );
+    });
+
+    it('passes invalidateCache parameter to API when false', async () => {
+        mockedLightdashApi
+            .mockResolvedValueOnce({
+                queryUuid: 'test-query-uuid',
+            } as never)
+            .mockResolvedValueOnce({
+                status: QueryHistoryStatus.READY,
+                queryUuid: 'test-query-uuid',
+                columns: { col1: { type: 'string' } },
+                metadata: { performance: { initialQueryExecutionMs: 120 } },
+            } as never);
+
+        vi.mocked(getResultsFromStream).mockResolvedValueOnce({
+            rows: [{ col1: 'value1' }],
+            columns: { col1: { type: 'string' } },
+        } as never);
+
+        await executeSqlQuery(
+            sharedLightdashApi,
+            'project-uuid',
+            'select 1',
+            100,
+            {},
+            false, // invalidateCache
+        );
+
+        // Verify the first API call (POST /sql) includes invalidateCache in body
+        expect(sharedLightdashApi).toHaveBeenCalledWith(
+            expect.objectContaining({
+                method: 'POST',
+                url: '/projects/project-uuid/query/sql',
+                version: 'v2',
+                body: expect.stringContaining('"invalidateCache":false'),
+            }),
+        );
+    });
+
+    it('omits invalidateCache from body when not provided', async () => {
+        mockedLightdashApi
+            .mockResolvedValueOnce({
+                queryUuid: 'test-query-uuid',
+            } as never)
+            .mockResolvedValueOnce({
+                status: QueryHistoryStatus.READY,
+                queryUuid: 'test-query-uuid',
+                columns: { col1: { type: 'string' } },
+                metadata: { performance: { initialQueryExecutionMs: 120 } },
+            } as never);
+
+        vi.mocked(getResultsFromStream).mockResolvedValueOnce({
+            rows: [{ col1: 'value1' }],
+            columns: { col1: { type: 'string' } },
+        } as never);
+
+        await executeSqlQuery(
+            sharedLightdashApi,
+            'project-uuid',
+            'select 1',
+            100,
+            {},
+        );
+
+        // Verify the first API call (POST /sql) - invalidateCache should be undefined and not included in JSON
+        const firstCall = mockedLightdashApi.mock.calls[0][0];
+        expect(firstCall.method).toBe('POST');
+        expect(firstCall.url).toBe('/projects/project-uuid/query/sql');
+        expect(firstCall.version).toBe('v2');
+        // When invalidateCache is undefined, JSON.stringify omits it from the body
+        expect(firstCall.body).not.toContain('invalidateCache');
     });
 });

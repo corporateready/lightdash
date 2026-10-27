@@ -1,0 +1,1696 @@
+import { Ability, AbilityBuilder } from '@casl/ability';
+import {
+    buildAbilityFromScopes,
+    ConflictError,
+    ForbiddenError,
+    getTrainingProjectScopes,
+    getTrainingProjectViewerScopes,
+    LEARN_SANDBOX_SCOPES,
+    NotFoundError,
+    ParameterError,
+    ProjectType,
+    type MemberAbility,
+    type PossibleAbilities,
+    type SessionUser,
+} from '@lightdash/common';
+import {
+    mkdir,
+    mkdtemp,
+    readdir,
+    readFile,
+    realpath,
+    rm,
+    utimes,
+    writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { defaultSessionUser } from '../../auth/account/account.mock';
+import { lightdashConfigMock } from '../../config/lightdashConfig.mock';
+import { LearnSandboxService } from './LearnSandboxService';
+import {
+    LEARN_SANDBOX_COMMAND_TIMEOUT_MS,
+    resetSandboxDbtVersionCache,
+} from './runtime';
+
+const user: SessionUser = {
+    ...defaultSessionUser,
+    organizationUuid: 'org',
+    ability: new Ability<PossibleAbilities>([
+        {
+            action: 'manage',
+            subject: 'DeployProject',
+            conditions: { projectUuid: 'copy' },
+        },
+    ]),
+};
+
+const lightdashConfig = {
+    ...lightdashConfigMock,
+    siteUrl: 'https://learn.test',
+};
+
+const isAlive = (pid: number): boolean => {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const waitUntilDead = async (pid: number): Promise<void> => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (!isAlive(pid)) {
+            return;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise<void>((resolve) => {
+            setTimeout(resolve, 50);
+        });
+    }
+};
+
+describe('LearnSandboxService', () => {
+    const files = {
+        listFiles: vi.fn(),
+        getFile: vi.fn(),
+        countFiles: vi.fn(),
+        upsertFile: vi.fn(),
+        createCommand: vi.fn(),
+        getCommand: vi.fn(),
+        findActiveCommand: vi.fn(),
+        countActiveCommands: vi.fn(async () => ({
+            forUser: 0,
+            forOrganization: 0,
+        })),
+        claimCommand: vi.fn(),
+        updateCommand: vi.fn(),
+        appendOutput: vi.fn(),
+        readOutput: vi.fn(),
+        listCommandsWithTokens: vi.fn(),
+        failStaleRunning: vi.fn(),
+        clearToken: vi.fn(),
+    };
+    type ProjectSummaryFixture = {
+        projectUuid: string;
+        organizationUuid: string;
+        type: ProjectType;
+        upstreamProjectUuid: string | undefined;
+        createdByUserUuid: string | null;
+        provisioningSource: string | null;
+        name: string;
+        slug: string;
+    };
+    const projectModel = {
+        getSummary: vi.fn(
+            async (uuid: string): Promise<ProjectSummaryFixture> => ({
+                projectUuid: uuid,
+                organizationUuid: 'org',
+                type: ProjectType.PREVIEW,
+                upstreamProjectUuid: 'training',
+                createdByUserUuid: user.userUuid,
+                provisioningSource: 'training',
+                name: 'copy',
+                slug: 'copy',
+            }),
+        ),
+    };
+    const schedulerClient = { learnSandboxCommand: vi.fn(async () => 'job-1') };
+    const personalAccessTokenService = {
+        createPersonalAccessToken: vi.fn(),
+        deletePersonalAccessToken: vi.fn(async () => undefined),
+    };
+    const userService = { getSessionByUserUuidAndOrg: vi.fn(async () => user) };
+    const service = new LearnSandboxService({
+        lightdashConfig,
+        learnWorkspaceModel: files as never,
+        projectModel,
+        personalAccessTokenService,
+        userService,
+        schedulerClient,
+    });
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('lists bundle files as read-only and overlay models as editable', async () => {
+        files.listFiles.mockResolvedValueOnce([
+            { path: 'models/orders.yml', content: 'version: 2\n' },
+        ]);
+        const result = await service.listFiles(user, 'copy');
+        expect(result).toContainEqual({
+            path: 'dbt_project.yml',
+            editable: false,
+        });
+        expect(result).toContainEqual({
+            path: 'models/orders.yml',
+            editable: true,
+        });
+    });
+
+    it('rejects saving a non-editable path', async () => {
+        await expect(
+            service.saveFile(user, 'copy', 'dbt_project.yml', 'x'),
+        ).rejects.toThrow(ParameterError);
+    });
+
+    it('rejects invalid YAML and oversized content', async () => {
+        await expect(
+            service.saveFile(user, 'copy', 'models/orders.yml', 'a: ['),
+        ).rejects.toThrow(ParameterError);
+        await expect(
+            service.saveFile(
+                user,
+                'copy',
+                'models/orders.yml',
+                'x'.repeat(64 * 1024 + 1),
+            ),
+        ).rejects.toThrow(ParameterError);
+    });
+
+    it('rejects a path longer than 255 characters', async () => {
+        const longPath = `models/${'a'.repeat(250)}.yml`;
+        expect(longPath.length).toBeGreaterThan(255);
+        await expect(
+            service.saveFile(user, 'copy', longPath, 'version: 2\n'),
+        ).rejects.toThrow(ParameterError);
+        expect(files.upsertFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a new file once the workspace already has 200 overlay files', async () => {
+        files.getFile.mockResolvedValueOnce(undefined);
+        files.countFiles.mockResolvedValueOnce(200);
+        await expect(
+            service.saveFile(
+                user,
+                'copy',
+                'models/new_file.yml',
+                'version: 2\n',
+            ),
+        ).rejects.toThrow('Workspace file limit reached');
+        expect(files.upsertFile).not.toHaveBeenCalled();
+    });
+
+    it('allows saving over an existing overlay file without counting against the limit', async () => {
+        files.getFile.mockResolvedValueOnce({
+            path: 'models/orders.yml',
+            content: 'version: 1\n',
+        });
+        await service.saveFile(
+            user,
+            'copy',
+            'models/orders.yml',
+            'version: 2\n',
+        );
+        expect(files.upsertFile).toHaveBeenCalledWith(
+            'copy',
+            'models/orders.yml',
+            'version: 2\n',
+        );
+        expect(files.countFiles).not.toHaveBeenCalled();
+    });
+
+    it('saves a valid model file', async () => {
+        files.getFile.mockResolvedValueOnce(undefined);
+        files.countFiles.mockResolvedValueOnce(5);
+        await service.saveFile(
+            user,
+            'copy',
+            'models/orders.yml',
+            'version: 2\n',
+        );
+        expect(files.upsertFile).toHaveBeenCalledWith(
+            'copy',
+            'models/orders.yml',
+            'version: 2\n',
+        );
+    });
+
+    it('rejects a disallowed command with the terminal message', async () => {
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'run',
+                args: [],
+            }),
+        ).rejects.toThrow(
+            'That command is not available in the Learn terminal',
+        );
+    });
+
+    it('refuses a second concurrent command', async () => {
+        files.findActiveCommand.mockResolvedValueOnce({
+            command_uuid: 'c0',
+            status: 'running',
+        });
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow('A command is already running in this workspace');
+    });
+
+    it('409s with the active command uuid in the message for a queued command', async () => {
+        files.findActiveCommand.mockResolvedValueOnce({
+            command_uuid: 'c-queued',
+            status: 'queued',
+        });
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow(
+            'A command is already running in this workspace (command c-queued)',
+        );
+        expect(files.failStaleRunning).not.toHaveBeenCalled();
+    });
+
+    it('409s for a running command still inside the grace window, without touching failStaleRunning', async () => {
+        files.findActiveCommand.mockResolvedValueOnce({
+            command_uuid: 'c-fresh',
+            status: 'running',
+            started_at: new Date(Date.now() - 1_000),
+        });
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow(
+            'A command is already running in this workspace (command c-fresh)',
+        );
+        expect(files.failStaleRunning).not.toHaveBeenCalled();
+    });
+
+    it('fails a stale running command, revokes its token, and proceeds to enqueue a new one', async () => {
+        const staleStartedAt = new Date(
+            Date.now() -
+                (LEARN_SANDBOX_COMMAND_TIMEOUT_MS + 5 * 60 * 1000 + 1_000),
+        );
+        files.findActiveCommand.mockResolvedValueOnce({
+            command_uuid: 'c-stale',
+            status: 'running',
+            started_at: staleStartedAt,
+        });
+        files.failStaleRunning.mockResolvedValueOnce([
+            {
+                command_uuid: 'c-stale',
+                pat_uuid: 'pat-stale',
+                project_uuid: 'copy',
+                user_uuid: user.userUuid,
+            },
+        ]);
+        files.createCommand.mockResolvedValueOnce({ commandUuid: 'c-new' });
+        const result = await service.enqueueCommand(user, 'copy', {
+            tool: 'dbt',
+            subcommand: 'parse',
+            args: [],
+        });
+        expect(result).toEqual({ commandUuid: 'c-new' });
+        expect(files.failStaleRunning).toHaveBeenCalledOnce();
+        expect(
+            personalAccessTokenService.deletePersonalAccessToken,
+        ).toHaveBeenCalledWith(expect.anything(), 'pat-stale');
+        expect(files.clearToken).toHaveBeenCalledWith('c-stale');
+        expect(schedulerClient.learnSandboxCommand).toHaveBeenCalledWith(
+            expect.objectContaining({ commandUuid: 'c-new' }),
+        );
+    });
+
+    it('refuses a second command while the learner has one in flight elsewhere', async () => {
+        files.findActiveCommand.mockResolvedValueOnce(undefined);
+        files.countActiveCommands.mockResolvedValueOnce({
+            forUser: 1,
+            forOrganization: 1,
+        });
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow(
+            'You already have a command running in another training copy',
+        );
+        expect(files.createCommand).not.toHaveBeenCalled();
+        expect(schedulerClient.learnSandboxCommand).not.toHaveBeenCalled();
+    });
+
+    it('refuses a command once the organization has reached its in-flight limit', async () => {
+        files.findActiveCommand.mockResolvedValueOnce(undefined);
+        files.countActiveCommands.mockResolvedValueOnce({
+            forUser: 0,
+            forOrganization: 4,
+        });
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow(
+            'Your organization has reached its limit of running Learn commands',
+        );
+        expect(files.createCommand).not.toHaveBeenCalled();
+    });
+
+    it('counts only live commands in the organization, from the same stale cutoff as the workspace check', async () => {
+        files.findActiveCommand.mockResolvedValueOnce(undefined);
+        files.countActiveCommands.mockResolvedValueOnce({
+            forUser: 0,
+            forOrganization: 3,
+        });
+        files.createCommand.mockResolvedValueOnce({ commandUuid: 'c1' });
+        const before = Date.now();
+        await service.enqueueCommand(user, 'copy', {
+            tool: 'dbt',
+            subcommand: 'parse',
+            args: [],
+        });
+        expect(files.countActiveCommands).toHaveBeenCalledWith(
+            expect.objectContaining({
+                userUuid: user.userUuid,
+                organizationUuid: user.organizationUuid,
+                staleCutoff: expect.any(Date),
+            }),
+        );
+        const { staleCutoff } = (
+            files.countActiveCommands.mock.calls as unknown as [
+                { staleCutoff: Date },
+            ][]
+        )[0][0];
+        const cutoff = staleCutoff.getTime();
+        expect(cutoff).toBeLessThanOrEqual(
+            before - LEARN_SANDBOX_COMMAND_TIMEOUT_MS,
+        );
+        expect(files.createCommand).toHaveBeenCalledOnce();
+    });
+
+    it('falls back to the database unique index for the 409 when the pre-check races', async () => {
+        files.findActiveCommand.mockResolvedValueOnce(undefined);
+        files.createCommand.mockRejectedValueOnce(
+            Object.assign(new Error('duplicate key value'), { code: '23505' }),
+        );
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow('A command is already running in this workspace');
+    });
+
+    it('rethrows a createCommand failure that is not a unique violation', async () => {
+        files.findActiveCommand.mockResolvedValueOnce(undefined);
+        files.createCommand.mockRejectedValueOnce(new Error('db is down'));
+        await expect(
+            service.enqueueCommand(user, 'copy', {
+                tool: 'dbt',
+                subcommand: 'parse',
+                args: [],
+            }),
+        ).rejects.toThrow('db is down');
+    });
+
+    it('creates the command row and enqueues the task', async () => {
+        files.findActiveCommand.mockResolvedValueOnce(undefined);
+        files.createCommand.mockResolvedValueOnce({ commandUuid: 'c1' });
+        const result = await service.enqueueCommand(user, 'copy', {
+            tool: 'dbt',
+            subcommand: 'parse',
+            args: [],
+        });
+        expect(result).toEqual({ commandUuid: 'c1' });
+        expect(schedulerClient.learnSandboxCommand).toHaveBeenCalledWith(
+            expect.objectContaining({
+                commandUuid: 'c1',
+                projectUuid: 'copy',
+                userUuid: user.userUuid,
+            }),
+        );
+    });
+
+    it('reads output after a sequence number', async () => {
+        files.getCommand.mockResolvedValueOnce({
+            command_uuid: 'c1',
+            project_uuid: 'copy',
+            status: 'done',
+            exit_code: 0,
+            argv: ['dbt', 'parse'],
+        });
+        files.readOutput.mockResolvedValueOnce([
+            { seq: 3, stream: 'stdout', text: 'ok' },
+        ]);
+        const out = await service.getOutput(user, 'copy', 'c1', 2);
+        expect(out.chunks).toEqual([{ seq: 3, stream: 'stdout', text: 'ok' }]);
+        expect(files.readOutput).toHaveBeenCalledWith('c1', 2);
+        expect(out.startedAt).toBeNull();
+        expect(out.finishedAt).toBeNull();
+    });
+
+    it('maps started_at/finished_at to ISO strings in the output response', async () => {
+        files.getCommand.mockResolvedValueOnce({
+            command_uuid: 'c1',
+            project_uuid: 'copy',
+            status: 'done',
+            exit_code: 0,
+            argv: ['dbt', 'parse'],
+            started_at: new Date('2026-09-13T10:00:00.000Z'),
+            finished_at: new Date('2026-09-13T10:00:05.000Z'),
+        });
+        files.readOutput.mockResolvedValueOnce([]);
+        const out = await service.getOutput(user, 'copy', 'c1', 0);
+        expect(out.startedAt).toBe('2026-09-13T10:00:00.000Z');
+        expect(out.finishedAt).toBe('2026-09-13T10:00:05.000Z');
+    });
+
+    it('rejects access to a project the user cannot manage', async () => {
+        await expect(service.listFiles(user, 'other')).rejects.toThrow();
+    });
+
+    it('403s for a real project, even one the ability check alone would allow', async () => {
+        projectModel.getSummary.mockResolvedValueOnce({
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            type: ProjectType.DEFAULT,
+            upstreamProjectUuid: undefined,
+            createdByUserUuid: user.userUuid,
+            provisioningSource: null,
+            name: 'copy',
+            slug: 'copy',
+        });
+        await expect(service.listFiles(user, 'copy')).rejects.toThrow(
+            ForbiddenError,
+        );
+    });
+
+    it("403s for another learner's training copy (different createdByUserUuid)", async () => {
+        projectModel.getSummary.mockResolvedValueOnce({
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            type: ProjectType.PREVIEW,
+            upstreamProjectUuid: 'training',
+            createdByUserUuid: 'someone-else-uuid',
+            provisioningSource: 'training',
+            name: 'copy',
+            slug: 'copy',
+        });
+        await expect(service.listFiles(user, 'copy')).rejects.toThrow(
+            ForbiddenError,
+        );
+    });
+
+    it('403s for a non-training preview the caller created themselves', async () => {
+        projectModel.getSummary.mockResolvedValueOnce({
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            type: ProjectType.PREVIEW,
+            upstreamProjectUuid: undefined,
+            createdByUserUuid: user.userUuid,
+            provisioningSource: null,
+            name: 'copy',
+            slug: 'copy',
+        });
+        await expect(service.listFiles(user, 'copy')).rejects.toThrow(
+            ForbiddenError,
+        );
+    });
+
+    it("grants access via the real trainee ability pipeline on the learner's own training copy, and denies it on the shared training project", async () => {
+        files.listFiles.mockResolvedValue([]);
+        const buildTraineeUser = (
+            scopes: string[],
+            context: {
+                projectUuid: string;
+                projectType: ProjectType;
+                projectCreatedByUserUuid: string | null;
+            },
+        ): SessionUser => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    ...context,
+                    userUuid: user.userUuid,
+                    scopes,
+                    isEnterprise: false,
+                    permissionsConfig: { pat: lightdashConfig.auth.pat },
+                },
+                builder,
+            );
+            return { ...user, ability: builder.build() };
+        };
+
+        const traineeUser = buildTraineeUser(
+            [...getTrainingProjectScopes(), ...LEARN_SANDBOX_SCOPES],
+            {
+                projectUuid: 'copy2',
+                projectType: ProjectType.PREVIEW,
+                projectCreatedByUserUuid: user.userUuid,
+            },
+        );
+        await expect(
+            service.listFiles(traineeUser, 'copy2'),
+        ).resolves.toBeDefined();
+
+        projectModel.getSummary.mockResolvedValueOnce({
+            projectUuid: 'training-project',
+            organizationUuid: 'org',
+            type: ProjectType.TRAINING,
+            upstreamProjectUuid: undefined,
+            createdByUserUuid: null,
+            provisioningSource: 'training',
+            name: 'Training',
+            slug: 'training',
+        });
+        const viewerUser = buildTraineeUser(getTrainingProjectViewerScopes(), {
+            projectUuid: 'training-project',
+            projectType: ProjectType.TRAINING,
+            projectCreatedByUserUuid: null,
+        });
+        await expect(
+            service.listFiles(viewerUser, 'training-project'),
+        ).rejects.toThrow(ForbiddenError);
+    });
+
+    it('404s reading output for a command outside the project', async () => {
+        files.getCommand.mockResolvedValueOnce({
+            command_uuid: 'c1',
+            project_uuid: 'another-project',
+            status: 'done',
+            exit_code: 0,
+            argv: ['dbt', 'parse'],
+        });
+        await expect(service.getOutput(user, 'copy', 'c1', 0)).rejects.toThrow(
+            NotFoundError,
+        );
+    });
+});
+
+describe('LearnSandboxService.sweep', () => {
+    const files = {
+        listFiles: vi.fn(),
+        getFile: vi.fn(),
+        upsertFile: vi.fn(),
+        createCommand: vi.fn(),
+        getCommand: vi.fn(),
+        findActiveCommand: vi.fn(),
+        countActiveCommands: vi.fn(async () => ({
+            forUser: 0,
+            forOrganization: 0,
+        })),
+        claimCommand: vi.fn(),
+        updateCommand: vi.fn(),
+        appendOutput: vi.fn(),
+        readOutput: vi.fn(),
+        listCommandsWithTokens: vi.fn(),
+        failStaleRunning: vi.fn(),
+        clearToken: vi.fn(),
+    };
+    const projectModel = {
+        getSummary: vi.fn(async (uuid: string) => ({
+            projectUuid: uuid,
+            organizationUuid: 'org',
+            type: ProjectType.PREVIEW,
+            upstreamProjectUuid: 'training',
+            createdByUserUuid: user.userUuid,
+            name: uuid,
+            slug: uuid,
+        })),
+    };
+    const userService = { getSessionByUserUuidAndOrg: vi.fn(async () => user) };
+    const personalAccessTokenService = {
+        createPersonalAccessToken: vi.fn(),
+        deletePersonalAccessToken: vi.fn(async () => undefined),
+    };
+    const schedulerClient = { learnSandboxCommand: vi.fn(async () => 'job-1') };
+    let workspaceRoot: string;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        files.listCommandsWithTokens.mockResolvedValue([]);
+        files.failStaleRunning.mockResolvedValue([]);
+        workspaceRoot = await mkdtemp(path.join(tmpdir(), 'learn-sweep-ws-'));
+    });
+
+    afterEach(async () => {
+        await rm(workspaceRoot, { recursive: true, force: true });
+    });
+
+    const buildService = () =>
+        new LearnSandboxService({
+            lightdashConfig,
+            learnWorkspaceModel: files as never,
+            projectModel,
+            personalAccessTokenService,
+            userService,
+            schedulerClient,
+            workspaceRoot,
+        });
+
+    it('revokes tokens for finished commands and for stale running commands', async () => {
+        files.listCommandsWithTokens.mockResolvedValue([
+            {
+                command_uuid: 'c-done',
+                pat_uuid: 'pat-done',
+                status: 'done',
+                project_uuid: 'p1',
+                user_uuid: 'u1',
+            },
+        ]);
+        files.failStaleRunning.mockResolvedValue([
+            {
+                command_uuid: 'c-stale',
+                pat_uuid: 'pat-stale',
+                project_uuid: 'p2',
+                user_uuid: 'u2',
+            },
+        ]);
+        const result = await buildService().sweep();
+        expect(result.tokensDeleted).toBe(2);
+        expect(
+            personalAccessTokenService.deletePersonalAccessToken,
+        ).toHaveBeenCalledWith(expect.anything(), 'pat-done');
+        expect(
+            personalAccessTokenService.deletePersonalAccessToken,
+        ).toHaveBeenCalledWith(expect.anything(), 'pat-stale');
+        expect(files.clearToken).toHaveBeenCalledWith('c-done');
+        expect(files.clearToken).toHaveBeenCalledWith('c-stale');
+    });
+
+    it('calls failStaleRunning with a cutoff based on commandTimeoutMs plus a grace window', async () => {
+        const before = Date.now();
+        await buildService().sweep();
+        const [cutoff] = files.failStaleRunning.mock.calls[0] as [Date];
+        const expectedMs = before - 120_000 - 5 * 60_000;
+        expect(cutoff.getTime()).toBeLessThanOrEqual(expectedMs + 5);
+        expect(cutoff.getTime()).toBeGreaterThan(expectedMs - 5_000);
+    });
+
+    it('clears the token reference when the project/user is gone (not-found), without counting it as revoked', async () => {
+        files.listCommandsWithTokens.mockResolvedValue([
+            {
+                command_uuid: 'c-orphan',
+                pat_uuid: 'pat-orphan',
+                status: 'done',
+                project_uuid: 'deleted-project',
+                user_uuid: 'u1',
+            },
+        ]);
+        projectModel.getSummary.mockRejectedValueOnce(
+            new NotFoundError('Cannot find project'),
+        );
+        const result = await buildService().sweep();
+        expect(result.tokensDeleted).toBe(0);
+        expect(files.clearToken).toHaveBeenCalledWith('c-orphan');
+        expect(
+            personalAccessTokenService.deletePersonalAccessToken,
+        ).not.toHaveBeenCalled();
+    });
+
+    it('leaves the token reference in place on an unexpected error, for the next sweep to retry', async () => {
+        files.listCommandsWithTokens.mockResolvedValue([
+            {
+                command_uuid: 'c-retry',
+                pat_uuid: 'pat-retry',
+                status: 'done',
+                project_uuid: 'p1',
+                user_uuid: 'u1',
+            },
+        ]);
+        projectModel.getSummary.mockRejectedValueOnce(new Error('db timeout'));
+        const result = await buildService().sweep();
+        expect(result.tokensDeleted).toBe(0);
+        expect(files.clearToken).not.toHaveBeenCalled();
+    });
+
+    it('removes workspace directories older than an hour and keeps fresh ones', async () => {
+        const oldDir = path.join(workspaceRoot, 'copy-old');
+        const freshDir = path.join(workspaceRoot, 'copy-fresh');
+        await mkdir(oldDir, { recursive: true });
+        await mkdir(freshDir, { recursive: true });
+        const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+        await utimes(oldDir, old, old);
+        const result = await buildService().sweep();
+        expect(result.workspacesRemoved).toBe(1);
+        await expect(rm(oldDir, { recursive: false })).rejects.toThrow();
+        await rm(freshDir, { recursive: true, force: true });
+    });
+});
+
+describe('LearnSandboxService.runCommand', () => {
+    const files = {
+        listFiles: vi.fn(),
+        listFilePaths: vi.fn(),
+        getFile: vi.fn(),
+        countFiles: vi.fn(),
+        upsertFile: vi.fn(),
+        createCommand: vi.fn(),
+        getCommand: vi.fn(),
+        findActiveCommand: vi.fn(),
+        countActiveCommands: vi.fn(async () => ({
+            forUser: 0,
+            forOrganization: 0,
+        })),
+        claimCommand: vi.fn(),
+        updateCommand: vi.fn(),
+        appendOutput: vi.fn(),
+        readOutput: vi.fn(),
+        listCommandsWithTokens: vi.fn(),
+        failStaleRunning: vi.fn(),
+        clearToken: vi.fn(),
+    };
+    const projectModel = {
+        getSummary: vi.fn(async (uuid: string) => ({
+            projectUuid: uuid,
+            organizationUuid: 'org',
+            type: ProjectType.PREVIEW,
+            upstreamProjectUuid: 'training',
+            createdByUserUuid: user.userUuid,
+            provisioningSource: 'training',
+            name: 'copy',
+            slug: 'copy',
+        })),
+    };
+    const schedulerClient = { learnSandboxCommand: vi.fn(async () => 'job-1') };
+
+    const originalEnv = { ...process.env };
+    let workspaceRoot: string;
+    let partialParseRoot: string;
+    let bin: string;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        files.claimCommand.mockResolvedValue(true);
+        // Resolved so it matches what a spawned shell's `pwd` reports: on
+        // macOS os.tmpdir() lives under a /var/folders symlink that
+        // resolves to /private/var/folders.
+        workspaceRoot = await realpath(
+            await mkdtemp(path.join(tmpdir(), 'learn-run-ws-')),
+        );
+        partialParseRoot = path.join(workspaceRoot, '.partial-parse');
+        bin = await mkdtemp(path.join(tmpdir(), 'learn-bin-'));
+        process.env.LEARN_SANDBOX_PATH_PREFIX = bin;
+        resetSandboxDbtVersionCache();
+    });
+
+    afterEach(async () => {
+        process.env = { ...originalEnv };
+        await rm(workspaceRoot, { recursive: true, force: true });
+        await rm(bin, { recursive: true, force: true });
+    });
+
+    // Partial parsing stays off unless a test asks for it: its baseline
+    // builds in the background after a command and would otherwise race
+    // the afterEach cleanup.
+    const buildService = ({
+        partialParse = false,
+        commandTimeoutMs,
+    }: { partialParse?: boolean; commandTimeoutMs?: number } = {}) => {
+        const pat = {
+            createPersonalAccessToken: vi.fn(async () => ({
+                uuid: 'pat-1',
+                token: 'ldpat_abc',
+                createdAt: new Date(),
+                lastUsedAt: null,
+                rotatedAt: null,
+                expiresAt: null,
+                description: 'Learn sandbox command',
+            })),
+            deletePersonalAccessToken: vi.fn(async () => undefined),
+        };
+        const userService = {
+            getSessionByUserUuidAndOrg: vi.fn(async () => user),
+        };
+        const service = new LearnSandboxService({
+            lightdashConfig,
+            learnWorkspaceModel: files as never,
+            projectModel,
+            personalAccessTokenService: pat,
+            userService,
+            schedulerClient,
+            workspaceRoot,
+            partialParseRoot: partialParse ? partialParseRoot : null,
+            ...(commandTimeoutMs === undefined ? {} : { commandTimeoutMs }),
+        });
+        return { service, pat, userService };
+    };
+
+    it('runs a fake dbt, streams output, scrubs the token, keeps the child in the workspace, and revokes the PAT', async () => {
+        await writeFile(
+            path.join(bin, 'dbt'),
+            [
+                '#!/bin/sh',
+                'echo "parse ok key=${LIGHTDASH_API_KEY:-unset} project=$LIGHTDASH_PROJECT"',
+                // The CLI reads its token from $HOME/.config/lightdash/config.yaml;
+                // dbt's env_var() cannot reach a file, so that is where it lives.
+                'echo "config-mode=$(ls -l "$HOME/.config/lightdash/config.yaml" | cut -c1-10)"',
+                'cat "$HOME/.config/lightdash/config.yaml"',
+                'echo "warn" 1>&2',
+                'echo "home=$HOME profiles=$DBT_PROFILES_DIR project_dir=$DBT_PROJECT_DIR pwd=$(pwd) sentinel=$SANDBOX_HOST_SENTINEL"',
+                'exit 0',
+                '',
+            ].join('\n'),
+            { mode: 0o755 },
+        );
+        process.env.SANDBOX_HOST_SENTINEL = 'host-secret-should-not-leak';
+        const appended: unknown[] = [];
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c1',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['dbt', 'parse'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const pat = {
+            createPersonalAccessToken: vi.fn(async () => ({
+                uuid: 'pat-1',
+                token: 'ldpat_abc',
+                createdAt: new Date(),
+                lastUsedAt: null,
+                rotatedAt: null,
+                expiresAt: null,
+                description: 'Learn sandbox command c1',
+            })),
+            deletePersonalAccessToken: vi.fn(async () => undefined),
+        };
+        const userService = {
+            getSessionByUserUuidAndOrg: vi.fn(async () => user),
+        };
+        const svc = new LearnSandboxService({
+            lightdashConfig,
+            learnWorkspaceModel: files as never,
+            projectModel,
+            personalAccessTokenService: pat,
+            userService,
+            schedulerClient,
+            workspaceRoot,
+            partialParseRoot: null,
+        });
+        await svc.runCommand({
+            commandUuid: 'c1',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        const text = (appended as { text: string }[])
+            .map((c) => c.text)
+            .join('');
+        const workspaceDir = path.join(workspaceRoot, 'copy-c1');
+        const projectDir = path.join(workspaceDir, 'project');
+        expect(text).toContain('parse ok key=unset project=copy');
+        expect(text).toContain('config-mode=-rw-------');
+        // The file carries the token (redacted here, as all output is) and
+        // points the CLI at the copy on this instance.
+        expect(text).toContain('apiKey: ***');
+        expect(text).toContain('project: copy');
+        expect(text).toContain('serverUrl: ');
+        expect(text).toContain('warn');
+        expect(text).not.toContain('ldpat_abc');
+        expect(text).toContain(`home=${workspaceDir}`);
+        expect(text).toContain(`profiles=${workspaceDir}`);
+        expect(text).toContain(`project_dir=${projectDir}`);
+        expect(text).toContain(`pwd=${projectDir}`);
+        expect(text).not.toContain('host-secret-should-not-leak');
+        expect(pat.deletePersonalAccessToken).toHaveBeenCalledWith(
+            expect.anything(),
+            'pat-1',
+        );
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c1',
+            expect.objectContaining({
+                status: 'done',
+                exit_code: 0,
+                pat_uuid: null,
+            }),
+        );
+    });
+
+    it("uses the fetched command row's project/user, not the payload's, for the overlay, LIGHTDASH_PROJECT and the PAT session", async () => {
+        await writeFile(
+            path.join(bin, 'dbt'),
+            '#!/bin/sh\necho "project=$LIGHTDASH_PROJECT"\nexit 0\n',
+            { mode: 0o755 },
+        );
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c-m1',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['dbt', 'parse'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        const appended: { text: string }[] = [];
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const { service, userService } = buildService();
+        // The scheduler payload deliberately disagrees with the command
+        // row: only the row's values should ever reach the workspace.
+        await service.runCommand({
+            commandUuid: 'c-m1',
+            projectUuid: 'wrong-project-from-payload',
+            organizationUuid: 'org',
+            userUuid: 'wrong-user-from-payload',
+        });
+        expect(files.listFiles).toHaveBeenCalledWith('copy');
+        expect(userService.getSessionByUserUuidAndOrg).toHaveBeenCalledWith(
+            user.userUuid,
+            'org',
+        );
+        const text = appended.map((c) => c.text).join('');
+        expect(text).toContain('project=copy');
+    });
+
+    const runWithFakeDbt = async (
+        script: string[],
+        {
+            keepOverlay = false,
+            service = buildService().service,
+        }: { keepOverlay?: boolean; service?: LearnSandboxService } = {},
+    ) => {
+        await writeFile(path.join(bin, 'dbt'), [...script, ''].join('\n'), {
+            mode: 0o755,
+        });
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c-v',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['dbt', 'parse'],
+            pat_uuid: null,
+        });
+        if (!keepOverlay) {
+            files.listFiles.mockResolvedValue([]);
+        }
+        const appended: { text: string }[] = [];
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        await service.runCommand({
+            commandUuid: 'c-v',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        return appended.map((c) => c.text).join('');
+    };
+
+    it('tells the child the detected dbt version so the CLI need not ask dbt', async () => {
+        const text = await runWithFakeDbt([
+            '#!/bin/sh',
+            'if [ "$1" = "--version" ]; then',
+            '  printf "Core:\\n  - installed: 1.12.3\\n"',
+            '  exit 0',
+            'fi',
+            'echo "dbt_version=${LIGHTDASH_DBT_VERSION:-unset}"',
+        ]);
+        expect(text).toContain('dbt_version=1.12.3');
+    });
+
+    it('leaves LIGHTDASH_DBT_VERSION unset when the version cannot be detected', async () => {
+        const text = await runWithFakeDbt([
+            '#!/bin/sh',
+            'if [ "$1" = "--version" ]; then exit 1; fi',
+            'echo "dbt_version=${LIGHTDASH_DBT_VERSION:-unset}"',
+        ]);
+        expect(text).toContain('dbt_version=unset');
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c-v',
+            expect.objectContaining({ status: 'done', exit_code: 0 }),
+        );
+    });
+
+    describe('keeping what lightdash download wrote', () => {
+        const CHART = 'lightdash/charts/revenue-by-payment-method.yml';
+        const DASHBOARD = 'lightdash/dashboards/jaffle-shop-overview.yml';
+        const SPACE = 'lightdash/spaces/training.space.yml';
+        const CHART_CONTENT =
+            'name: Revenue by payment method\nslug: revenue-by-payment-method\n';
+        // A fake CLI that writes what a real download writes, plus files a
+        // download never writes, into the command's project directory.
+        const fakeDownload = (exitCode: number, extra: string[] = []) =>
+            [
+                '#!/bin/sh',
+                'mkdir -p lightdash/charts lightdash/dashboards lightdash/spaces',
+                `printf 'name: Revenue by payment method\\nslug: revenue-by-payment-method\\n' > ${CHART}`,
+                `printf 'name: Overview\\n' > ${DASHBOARD}`,
+                `printf 'name: Training\\n' > ${SPACE}`,
+                "printf '{}' > lightdash/.lightdash-metadata.json",
+                ...extra,
+                `exit ${exitCode}`,
+                '',
+            ].join('\n');
+        // Workspace files that are not downloads, to fill it towards its cap.
+        const others = (count: number) =>
+            Array.from({ length: count }, (_, i) => ({
+                path: `models/other_${i}.yml`,
+                content: 'version: 2\n',
+            }));
+        const runDownload = async (
+            script: string,
+            workspace: { path: string; content: string }[] = [],
+        ) => {
+            await writeFile(path.join(bin, 'lightdash'), script, {
+                mode: 0o755,
+            });
+            const appended: { stream: string; text: string }[] = [];
+            files.getCommand.mockResolvedValue({
+                command_uuid: 'c-download',
+                project_uuid: 'copy',
+                user_uuid: user.userUuid,
+                status: 'queued',
+                argv: [
+                    'lightdash',
+                    'download',
+                    '--charts',
+                    'revenue-by-payment-method',
+                ],
+                pat_uuid: null,
+            });
+            // The workspace as the command finds it: its files are written
+            // into the command's directory, and its paths are what the keep
+            // step reads back. The two always agree.
+            files.listFiles.mockResolvedValue(workspace);
+            files.listFilePaths.mockResolvedValue(
+                workspace.map((file) => file.path),
+            );
+            files.appendOutput.mockImplementation(async (_id, chunks) => {
+                appended.push(...chunks);
+            });
+            const { service } = buildService();
+            await service.runCommand({
+                commandUuid: 'c-download',
+                projectUuid: 'copy',
+                organizationUuid: 'org',
+                userUuid: user.userUuid,
+            });
+            return appended.map((c) => c.text).join('');
+        };
+        const keptPaths = () =>
+            files.upsertFile.mock.calls.map(([, filePath]) => filePath);
+
+        it('keeps the chart, dashboard and space files exactly as written, but not the metadata file', async () => {
+            const text = await runDownload(fakeDownload(0));
+            expect(keptPaths()).toEqual([CHART, DASHBOARD, SPACE]);
+            expect(files.upsertFile).toHaveBeenCalledWith(
+                'copy',
+                CHART,
+                CHART_CONTENT,
+            );
+            expect(text).toContain(
+                'Kept 3 downloaded files in your workspace.\n',
+            );
+            expect(text).not.toContain('Skipped');
+        });
+
+        it('leaves alone a file the workspace held that the download did not write', async () => {
+            const text = await runDownload(fakeDownload(0), [
+                {
+                    path: 'lightdash/charts/earlier.yml',
+                    content: 'name: Earlier download\n',
+                },
+            ]);
+            // Not saved again (a save made meanwhile would be undone) and
+            // not counted as downloaded.
+            expect(keptPaths()).toEqual([CHART, DASHBOARD, SPACE]);
+            expect(text).toContain(
+                'Kept 3 downloaded files in your workspace.\n',
+            );
+        });
+
+        it('counts a file the download wrote again unchanged, without saving it again', async () => {
+            const text = await runDownload(
+                // The rewrite lands a moment after the workspace was written.
+                fakeDownload(0).replace(
+                    'mkdir -p',
+                    '/bin/sleep 0.05\nmkdir -p',
+                ),
+                [{ path: CHART, content: CHART_CONTENT }],
+            );
+            expect(keptPaths()).toEqual([DASHBOARD, SPACE]);
+            expect(text).toContain(
+                'Kept 3 downloaded files in your workspace.\n',
+            );
+        });
+
+        it('replaces a file the workspace held when the download brings other content', async () => {
+            await runDownload(fakeDownload(0), [
+                { path: CHART, content: 'name: My edit\nslug: x\n' },
+            ]);
+            expect(files.upsertFile).toHaveBeenCalledWith(
+                'copy',
+                CHART,
+                CHART_CONTENT,
+            );
+        });
+
+        it('says so when the download wrote nothing under lightdash/', async () => {
+            const text = await runDownload(
+                [
+                    '#!/bin/sh',
+                    'mkdir -p exports/charts',
+                    "printf 'name: Elsewhere\\n' > exports/charts/elsewhere.yml",
+                    'exit 0',
+                    '',
+                ].join('\n'),
+                [{ path: CHART, content: CHART_CONTENT }],
+            );
+            expect(files.upsertFile).not.toHaveBeenCalled();
+            expect(text).toContain(
+                'The download wrote no files under lightdash/, so none were kept in your workspace.\n',
+            );
+            expect(text).not.toContain('Kept');
+        });
+
+        it('skips a file over the size limit and names it, and does not follow a link to a real file', async () => {
+            const text = await runDownload(
+                fakeDownload(0, [
+                    "head -c 70000 /dev/zero | tr '\\0' a > lightdash/charts/huge.yml",
+                    // The link's target exists and is valid YAML: following
+                    // it would keep the file.
+                    "printf 'name: Outside\\n' > outside.yml",
+                    'ln -s ../../outside.yml lightdash/charts/link.yml',
+                    'test -r lightdash/charts/link.yml || exit 9',
+                ]),
+            );
+            expect(keptPaths()).toEqual([CHART, DASHBOARD, SPACE]);
+            expect(text).toContain(
+                'Kept 3 downloaded files in your workspace. Skipped 1: lightdash/charts/huge.yml (over 64 KiB).\n',
+            );
+        });
+
+        it('skips a file that is not valid YAML, as a save would', async () => {
+            const text = await runDownload(
+                fakeDownload(0, [
+                    "printf 'name: [unclosed\\n' > lightdash/charts/broken.yml",
+                ]),
+            );
+            expect(keptPaths()).toEqual([CHART, DASHBOARD, SPACE]);
+            expect(text).toContain(
+                'Kept 3 downloaded files in your workspace. Skipped 1: lightdash/charts/broken.yml (not valid YAML).\n',
+            );
+        });
+
+        it('reads nothing from a content folder that is a symlink', async () => {
+            await runDownload(
+                fakeDownload(0, [
+                    'mkdir -p elsewhere',
+                    "printf 'name: Leak\\n' > elsewhere/leak.yml",
+                    'rm -rf lightdash/dashboards',
+                    'ln -s ../elsewhere lightdash/dashboards',
+                    'test -r lightdash/dashboards/leak.yml || exit 9',
+                ]),
+            );
+            expect(keptPaths()).toEqual([CHART, SPACE]);
+        });
+
+        it('reads nothing when lightdash/ itself is a symlink', async () => {
+            const text = await runDownload(
+                fakeDownload(0, [
+                    'mkdir -p real',
+                    'mv lightdash real/lightdash',
+                    'ln -s real/lightdash lightdash',
+                    `test -r ${CHART} || exit 9`,
+                ]),
+            );
+            expect(files.upsertFile).not.toHaveBeenCalled();
+            expect(text).toContain('The download wrote no files');
+        });
+
+        it('stops at the workspace file cap without reading what it cannot keep', async () => {
+            const text = await runDownload(fakeDownload(0), others(200));
+            expect(files.upsertFile).not.toHaveBeenCalled();
+            expect(files.listFilePaths).toHaveBeenCalledTimes(1);
+            expect(text).toContain(
+                `Kept 0 downloaded files in your workspace. Skipped 3: ${CHART} (the workspace is full), ${DASHBOARD} (the workspace is full), ${SPACE} (the workspace is full).\n`,
+            );
+        });
+
+        it('still updates a file the workspace already holds when the cap is full', async () => {
+            const text = await runDownload(fakeDownload(0), [
+                ...others(199),
+                { path: CHART, content: 'name: My edit\nslug: x\n' },
+            ]);
+            expect(keptPaths()).toEqual([CHART]);
+            expect(text).toContain(
+                'Kept 1 downloaded file in your workspace. Skipped 2: ',
+            );
+        });
+
+        it('takes only the free slots, and sums up a long list of skipped files', async () => {
+            const text = await runDownload(
+                fakeDownload(0, [
+                    "printf 'name: Extra one\\n' > lightdash/spaces/extra-one.space.yml",
+                    "printf 'name: Extra two\\n' > lightdash/spaces/extra-two.space.yml",
+                ]),
+                others(199),
+            );
+            expect(keptPaths()).toEqual([CHART]);
+            expect(text).toContain(
+                `Kept 1 downloaded file in your workspace. Skipped 4: ${DASHBOARD} (the workspace is full), lightdash/spaces/extra-one.space.yml (the workspace is full), lightdash/spaces/extra-two.space.yml (the workspace is full), and 1 more.\n`,
+            );
+        });
+
+        it('fails the command in plain words when the files cannot be saved', async () => {
+            files.upsertFile.mockRejectedValueOnce(
+                new Error('Connection terminated unexpectedly'),
+            );
+            const text = await runDownload(fakeDownload(0));
+            expect(text).toContain(
+                'The download finished, but its files could not be saved to your workspace. Run the command again.\n',
+            );
+            expect(text).not.toContain('Connection terminated');
+            expect(text).not.toContain('Kept');
+            expect(files.updateCommand).toHaveBeenLastCalledWith(
+                'c-download',
+                expect.objectContaining({ status: 'error', exit_code: null }),
+            );
+        });
+
+        it('keeps nothing from a download that failed', async () => {
+            await runDownload(fakeDownload(1));
+            expect(files.upsertFile).not.toHaveBeenCalled();
+        });
+    });
+
+    it("runs start-preview as a deploy to the learner's copy, without the name, and reports the named preview", async () => {
+        await writeFile(
+            path.join(bin, 'lightdash'),
+            '#!/bin/sh\necho "args=$*" 1>&2\nexit 0\n',
+            { mode: 0o755 },
+        );
+        const appended: { stream: string; text: string }[] = [];
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c-preview',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: [
+                'lightdash',
+                'start-preview',
+                '--name',
+                'my-preview',
+                '--select',
+                'payments',
+            ],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const { service } = buildService();
+        await service.runCommand({
+            commandUuid: 'c-preview',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        const text = appended.map((c) => c.text).join('');
+        // The name the learner gave, as the CLI prints it; the deploy gets
+        // the selector and not the name.
+        expect(text).toContain('Updating preview project: my-preview\n');
+        expect(text).toContain('args=deploy --select payments\n');
+        // The CLI's own closing line, which links to the project's tables.
+        expect(text).toContain(
+            'Project updated on https://learn.test/projects/copy/tables\n',
+        );
+        expect(text.indexOf('Updating preview project')).toBeLessThan(
+            text.indexOf('args=deploy'),
+        );
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c-preview',
+            expect.objectContaining({ status: 'done', exit_code: 0 }),
+        );
+    });
+
+    it('does not claim the preview was updated when start-preview fails', async () => {
+        await writeFile(
+            path.join(bin, 'lightdash'),
+            '#!/bin/sh\necho "compile failed" 1>&2\nexit 1\n',
+            { mode: 0o755 },
+        );
+        const appended: { stream: string; text: string }[] = [];
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c-preview-fail',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['lightdash', 'start-preview', '--name', 'my-preview'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const { service } = buildService();
+        await service.runCommand({
+            commandUuid: 'c-preview-fail',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        const text = appended.map((c) => c.text).join('');
+        expect(text).toContain('compile failed');
+        expect(text).not.toContain('Project updated on');
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c-preview-fail',
+            expect.objectContaining({ status: 'error', exit_code: 1 }),
+        );
+    });
+
+    it('does not claim the preview was updated when start-preview times out', async () => {
+        await writeFile(
+            path.join(bin, 'lightdash'),
+            '#!/bin/sh\n/bin/sleep 30\n',
+            { mode: 0o755 },
+        );
+        const appended: { stream: string; text: string }[] = [];
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c-preview-timeout',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['lightdash', 'start-preview', '--name', 'my-preview'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const { service } = buildService({ commandTimeoutMs: 1_000 });
+        await service.runCommand({
+            commandUuid: 'c-preview-timeout',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        const text = appended.map((c) => c.text).join('');
+        expect(text).toContain('Command stopped after 1s');
+        expect(text).not.toContain('Project updated on');
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c-preview-timeout',
+            expect.objectContaining({ status: 'timeout' }),
+        );
+    });
+
+    // A fake dbt for the partial-parse tests. The baseline build is the
+    // only dbt run without a LIGHTDASH_PROJECT; it logs itself and writes
+    // a msgpack that records whether a learner's overlay file was present.
+    const partialParseDbt = (baselineExit: number) => [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then',
+        '  printf "Core:\\n  - installed: 1.12.3\\n"',
+        '  exit 0',
+        'fi',
+        'if [ -z "$LIGHTDASH_PROJECT" ]; then',
+        `  echo baseline >> "${partialParseRoot}.calls"`,
+        '  mkdir -p "$DBT_TARGET_PATH"',
+        '  if grep -rq OVERLAY_MARKER models; then state=tainted; else state=pristine; fi',
+        '  echo "$state" > "$DBT_TARGET_PATH/partial_parse.msgpack"',
+        `  exit ${baselineExit}`,
+        'fi',
+        'echo "partial=$DBT_PARTIAL_PARSE seeded=$(cat "$DBT_TARGET_PATH/partial_parse.msgpack" 2>/dev/null || echo none)"',
+    ];
+    const baselineCalls = async () =>
+        (await readFile(`${partialParseRoot}.calls`, 'utf8').catch(() => ''))
+            .split('\n')
+            .filter(Boolean).length;
+    const baselineFiles = async () =>
+        (await readdir(partialParseRoot).catch(() => [] as string[])).filter(
+            (name) => name.endsWith('.msgpack'),
+        );
+
+    it('seeds later commands with a partial parse of the pristine bundle', async () => {
+        files.listFiles.mockResolvedValue([
+            { path: 'models/marker.yml', content: '# OVERLAY_MARKER\n' },
+        ]);
+        const { service } = buildService({ partialParse: true });
+        const first = await runWithFakeDbt(partialParseDbt(0), {
+            keepOverlay: true,
+            service,
+        });
+        // No baseline yet: a full parse, and the baseline builds afterwards.
+        expect(first).toContain('partial=false seeded=none');
+        await vi.waitFor(async () => {
+            expect(await baselineFiles()).toHaveLength(1);
+        });
+        const second = await runWithFakeDbt(partialParseDbt(0), {
+            keepOverlay: true,
+            service,
+        });
+        // Built from the bundle alone: the learner's overlay never reaches
+        // the baseline another learner's workspace is seeded with.
+        expect(second).toContain('partial=true seeded=pristine');
+        expect(await baselineCalls()).toBe(1);
+    });
+
+    it('keeps running full parses when the baseline cannot be built, without retrying on every command', async () => {
+        const { service } = buildService({ partialParse: true });
+        await runWithFakeDbt(partialParseDbt(1), { service });
+        await vi.waitFor(async () => {
+            expect(await baselineCalls()).toBe(1);
+        });
+        const second = await runWithFakeDbt(partialParseDbt(1), { service });
+        expect(second).toContain('partial=false seeded=none');
+        await new Promise((resolve) => {
+            setTimeout(resolve, 200);
+        });
+        expect(await baselineCalls()).toBe(1);
+        expect(await baselineFiles()).toHaveLength(0);
+    });
+
+    it('marks a non-zero exit as error and still revokes the PAT', async () => {
+        await writeFile(
+            path.join(bin, 'dbt'),
+            '#!/bin/sh\necho "boom" 1>&2\nexit 3\n',
+            { mode: 0o755 },
+        );
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c2',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['dbt', 'parse'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        files.appendOutput.mockResolvedValue(undefined);
+        const pat = {
+            createPersonalAccessToken: vi.fn(async () => ({
+                uuid: 'pat-2',
+                token: 'ldpat_xyz',
+                createdAt: new Date(),
+                lastUsedAt: null,
+                rotatedAt: null,
+                expiresAt: null,
+                description: 'Learn sandbox command c2',
+            })),
+            deletePersonalAccessToken: vi.fn(async () => undefined),
+        };
+        const userService = {
+            getSessionByUserUuidAndOrg: vi.fn(async () => user),
+        };
+        const svc = new LearnSandboxService({
+            lightdashConfig,
+            learnWorkspaceModel: files as never,
+            projectModel,
+            personalAccessTokenService: pat,
+            userService,
+            schedulerClient,
+            workspaceRoot,
+            partialParseRoot: null,
+        });
+        await svc.runCommand({
+            commandUuid: 'c2',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        expect(pat.deletePersonalAccessToken).toHaveBeenCalledWith(
+            expect.anything(),
+            'pat-2',
+        );
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c2',
+            expect.objectContaining({ status: 'error', exit_code: 3 }),
+        );
+    });
+
+    it('marks a timeout and kills the whole process tree, not just the shell', async () => {
+        await writeFile(
+            path.join(bin, 'sleep'),
+            [
+                '#!/bin/sh',
+                '/bin/sleep 5 &',
+                'echo "child_pid=$!"',
+                'wait',
+                '',
+            ].join('\n'),
+            { mode: 0o755 },
+        );
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c3',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['sleep', '5'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        const appended: { text: string }[] = [];
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const pat = {
+            createPersonalAccessToken: vi.fn(async () => ({
+                uuid: 'pat-3',
+                token: 'ldpat_timeout',
+                createdAt: new Date(),
+                lastUsedAt: null,
+                rotatedAt: null,
+                expiresAt: null,
+                description: 'Learn sandbox command c3',
+            })),
+            deletePersonalAccessToken: vi.fn(async () => undefined),
+        };
+        const userService = {
+            getSessionByUserUuidAndOrg: vi.fn(async () => user),
+        };
+        const svc = new LearnSandboxService({
+            lightdashConfig,
+            learnWorkspaceModel: files as never,
+            projectModel,
+            personalAccessTokenService: pat,
+            userService,
+            schedulerClient,
+            workspaceRoot,
+            // Generous relative to the immediate `echo` the fake binary does
+            // before backgrounding sleep, so the timeout firing early under
+            // load (parallel test workers) doesn't race the child_pid line.
+            commandTimeoutMs: 1_000,
+        });
+        await svc.runCommand({
+            commandUuid: 'c3',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        expect(pat.deletePersonalAccessToken).toHaveBeenCalledWith(
+            expect.anything(),
+            'pat-3',
+        );
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c3',
+            expect.objectContaining({ status: 'timeout' }),
+        );
+        const text = appended.map((c) => c.text).join('');
+        const match = /child_pid=(\d+)/.exec(text);
+        expect(match).not.toBeNull();
+        const childPid = Number((match as RegExpExecArray)[1]);
+        await waitUntilDead(childPid);
+        expect(isAlive(childPid)).toBe(false);
+    }, 10_000);
+
+    it('does not mint a PAT when the command cannot be claimed (duplicate delivery)', async () => {
+        files.claimCommand.mockResolvedValueOnce(false);
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c4',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'running',
+            argv: ['dbt', 'parse'],
+            pat_uuid: null,
+        });
+        const { service, pat } = buildService();
+        await service.runCommand({
+            commandUuid: 'c4',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        expect(pat.createPersonalAccessToken).not.toHaveBeenCalled();
+        expect(files.updateCommand).not.toHaveBeenCalled();
+    });
+
+    it('reports a spawn failure instead of leaving the terminal blank', async () => {
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c5',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['this-binary-does-not-exist-xyz'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        const appended: { text: string }[] = [];
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            appended.push(...chunks);
+        });
+        const { service } = buildService();
+        await service.runCommand({
+            commandUuid: 'c5',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        const text = appended.map((c) => c.text).join('');
+        expect(text).toMatch(/ENOENT|failed to start|Command failed/i);
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c5',
+            expect.objectContaining({ status: 'error' }),
+        );
+    });
+
+    it('tells the learner some output was lost when the buffer fails to flush once, and still reports the real exit status', async () => {
+        await writeFile(
+            path.join(bin, 'dbt'),
+            '#!/bin/sh\necho "hello"\nexit 0\n',
+            { mode: 0o755 },
+        );
+        files.getCommand.mockResolvedValue({
+            command_uuid: 'c6',
+            project_uuid: 'copy',
+            user_uuid: user.userUuid,
+            status: 'queued',
+            argv: ['dbt', 'parse'],
+            pat_uuid: null,
+        });
+        files.listFiles.mockResolvedValue([]);
+        const appended: { text: string }[] = [];
+        let flushCalls = 0;
+        files.appendOutput.mockImplementation(async (_id, chunks) => {
+            flushCalls += 1;
+            if (flushCalls === 1) {
+                throw new Error('disk full');
+            }
+            appended.push(...chunks);
+        });
+        const { service } = buildService();
+        await service.runCommand({
+            commandUuid: 'c6',
+            projectUuid: 'copy',
+            organizationUuid: 'org',
+            userUuid: user.userUuid,
+        });
+        const text = appended.map((c) => c.text).join('');
+        expect(text).toContain('Some output could not be stored');
+        expect(files.updateCommand).toHaveBeenLastCalledWith(
+            'c6',
+            expect.objectContaining({ status: 'done', exit_code: 0 }),
+        );
+    });
+});

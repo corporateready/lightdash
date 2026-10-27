@@ -1,0 +1,954 @@
+import { S3 } from '@aws-sdk/client-s3';
+import { WarehouseTypes } from '@lightdash/common';
+import {
+    DuckdbWarehouseClient,
+    warehouseSqlBuilderFromType,
+} from '@lightdash/warehouses';
+import { randomUUID } from 'crypto';
+import knex from 'knex';
+import { gzipSync } from 'zlib';
+import Logger from '../../logging/logger';
+import { UsageDimensionsModel } from '../../models/UsageDimensionsModel';
+import { createAnalyticsExplores } from '../../services/ProjectService/analyticsProject/createAnalyticsExplores';
+import { createS3AnalyticsSourceResolver } from '../../services/ProjectService/analyticsProject/S3AnalyticsSource';
+import { MetricQueryBuilder } from '../../utils/QueryBuilder/MetricQueryBuilder';
+import { peopleMembershipHistoryKey } from './peopleMembership';
+import { usageDimensionKey } from './usageDimensions';
+import { UsageEventsCompactor } from './UsageEventsCompactor';
+
+// Opt-in: dedicated schema and bucket on an isolated local development stack.
+describe.skipIf(!process.env.USAGE_DIMENSIONS_SMOKE_PGPORT)(
+    'Postgres usage dimensions to local S3 and joined explores',
+    () => {
+        it('pages chart dimensions across tenant projects without including interleaved tenants', async () => {
+            vi.unstubAllGlobals();
+            const schema = `usage_chart_pages_${randomUUID().replaceAll('-', '')}`;
+            const db = knex({
+                client: 'pg',
+                connection: {
+                    host: 'localhost',
+                    port: Number(process.env.USAGE_DIMENSIONS_SMOKE_PGPORT),
+                    user: process.env.PGUSER ?? 'postgres',
+                    password: process.env.PGPASSWORD ?? 'password',
+                    database: process.env.PGDATABASE ?? 'postgres',
+                },
+                searchPath: [schema],
+                pool: { min: 0, max: 1 },
+            });
+            const fixture = (table: string) => db(table);
+            const org = randomUUID();
+            const project = randomUUID();
+            const secondProject = randomUUID();
+            const otherProject = randomUUID();
+            const dashboard = randomUUID();
+            const deletedDashboard = randomUUID();
+            const space = randomUUID();
+            const sqlChart = randomUUID();
+            try {
+                await db.raw('CREATE SCHEMA ??', [schema]);
+                await db.raw(`
+                    CREATE TABLE projects (project_uuid uuid PRIMARY KEY, organization_id integer);
+                    CREATE TABLE spaces (space_id integer PRIMARY KEY, space_uuid uuid UNIQUE, name text, deleted_at timestamptz);
+                    CREATE TABLE dashboards (dashboard_uuid uuid PRIMARY KEY, space_id integer, deleted_at timestamptz);
+                    CREATE TABLE saved_queries (saved_query_id integer PRIMARY KEY, saved_query_uuid uuid UNIQUE, project_uuid uuid, space_id integer, dashboard_uuid uuid, name text, slug text, last_version_chart_kind text, deleted_at timestamptz);
+                    CREATE UNIQUE INDEX ON saved_queries(project_uuid, slug);
+                    CREATE TABLE saved_sql (saved_sql_uuid uuid PRIMARY KEY, project_uuid uuid, space_uuid uuid, dashboard_uuid uuid, name text, slug text, last_version_chart_kind text, deleted_at timestamptz);
+                `);
+                await fixture('projects').insert([
+                    { project_uuid: project, organization_id: 1 },
+                    { project_uuid: secondProject, organization_id: 1 },
+                    { project_uuid: otherProject, organization_id: 2 },
+                ]);
+                await fixture('spaces').insert([
+                    { space_id: 1, space_uuid: space, name: 'First space' },
+                    {
+                        space_id: 2,
+                        space_uuid: randomUUID(),
+                        name: 'Second space',
+                    },
+                    {
+                        space_id: 3,
+                        space_uuid: randomUUID(),
+                        name: 'Deleted space',
+                        deleted_at: new Date(),
+                    },
+                ]);
+                await fixture('dashboards').insert([
+                    { dashboard_uuid: dashboard, space_id: 1 },
+                    {
+                        dashboard_uuid: deletedDashboard,
+                        space_id: 2,
+                        deleted_at: new Date(),
+                    },
+                ]);
+                await db.raw(
+                    `INSERT INTO saved_queries (saved_query_id, saved_query_uuid, project_uuid, space_id, name, slug, last_version_chart_kind)
+                    SELECT n * 2, md5('tenant-chart-' || n)::uuid,
+                        CASE WHEN n % 2 = 0 THEN ?::uuid ELSE ?::uuid END,
+                        CASE WHEN n % 2 = 0 THEN 2 ELSE 1 END,
+                        'Tenant chart ' || n, 'tenant-chart-' || n, 'table'
+                    FROM generate_series(1, 1005) n`,
+                    [secondProject, project],
+                );
+                await db.raw(
+                    `INSERT INTO saved_queries (saved_query_id, saved_query_uuid, project_uuid, name, slug, last_version_chart_kind)
+                    SELECT n * 2 - 1, md5('other-chart-' || n)::uuid, ?::uuid,
+                        'Other chart ' || n, 'other-chart-' || n, 'table'
+                    FROM generate_series(1, 1006) n`,
+                    [otherProject],
+                );
+                await fixture('saved_queries')
+                    .where('saved_query_id', 2)
+                    .update({ space_id: null, dashboard_uuid: dashboard });
+                await fixture('saved_queries')
+                    .where('saved_query_id', 4)
+                    .update({ deleted_at: new Date() });
+                await fixture('saved_queries')
+                    .where('saved_query_id', 6)
+                    .update({ space_id: 3 });
+                await fixture('saved_queries')
+                    .where('saved_query_id', 8)
+                    .update({
+                        space_id: null,
+                        dashboard_uuid: deletedDashboard,
+                    });
+                await fixture('saved_sql').insert([
+                    {
+                        saved_sql_uuid: sqlChart,
+                        project_uuid: project,
+                        space_uuid: space,
+                        name: 'Tenant SQL chart',
+                        slug: 'tenant-sql-chart',
+                        last_version_chart_kind: 'table',
+                    },
+                    {
+                        saved_sql_uuid: randomUUID(),
+                        project_uuid: otherProject,
+                        name: 'Other SQL chart',
+                        slug: 'other-sql-chart',
+                    },
+                ]);
+                const result: Record<string, unknown>[] = [];
+                for await (const line of new UsageDimensionsModel(
+                    db,
+                    'https://lightdash.example.com/base',
+                ).getJsonLines(
+                    { organization_id: 1, organization_uuid: org },
+                    'charts',
+                )) {
+                    result.push(JSON.parse(line));
+                }
+                expect(result).toHaveLength(1006);
+                expect(new Set(result.map((row) => row.chart_id)).size).toBe(
+                    1006,
+                );
+                expect(result.every((row) => row.org_id === org)).toBe(true);
+                expect(result.slice(0, 1005).map((row) => row.name)).toEqual(
+                    Array.from(
+                        { length: 1005 },
+                        (_, n) => `Tenant chart ${n + 1}`,
+                    ),
+                );
+                expect(result[0]).toEqual({
+                    org_id: org,
+                    chart_id: expect.any(String),
+                    name: 'Tenant chart 1',
+                    slug: 'tenant-chart-1',
+                    url: `https://lightdash.example.com/projects/${project}/saved/${result[0].chart_id}/view`,
+                    chart_kind: 'table',
+                    space_name: 'First space',
+                    is_deleted: false,
+                });
+                expect(result.slice(1, 4).map((row) => row.is_deleted)).toEqual(
+                    [true, true, true],
+                );
+                expect(result[999].url).toContain(
+                    `/projects/${secondProject}/`,
+                );
+                expect(result[1000].url).toContain(`/projects/${project}/`);
+                expect(result[1005]).toEqual({
+                    org_id: org,
+                    chart_id: sqlChart,
+                    name: 'Tenant SQL chart',
+                    slug: 'tenant-sql-chart',
+                    url: `https://lightdash.example.com/projects/${project}/sql-runner/${sqlChart}`,
+                    chart_kind: 'table',
+                    space_name: 'First space',
+                    is_deleted: false,
+                });
+                const emptyResult = [];
+                for await (const line of new UsageDimensionsModel(
+                    db,
+                    'https://lightdash.example.com',
+                ).getJsonLines(
+                    { organization_id: 3, organization_uuid: randomUUID() },
+                    'charts',
+                )) {
+                    emptyResult.push(line);
+                }
+                expect(emptyResult).toEqual([]);
+            } finally {
+                await db.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
+                await db.destroy();
+            }
+        });
+
+        it('refreshes batched snapshots and joins current names without losing events', async () => {
+            vi.unstubAllGlobals();
+            const endpoint = process.env.USAGE_EVENTS_S3_ENDPOINT ?? '';
+            if (
+                !['localhost', '127.0.0.1'].includes(new URL(endpoint).hostname)
+            ) {
+                throw new Error('Dimension smoke tests require local S3');
+            }
+            const schema = `usage_dims_${randomUUID().replaceAll('-', '')}`;
+            const db = knex({
+                client: 'pg',
+                connection: {
+                    host: 'localhost',
+                    port: Number(process.env.USAGE_DIMENSIONS_SMOKE_PGPORT),
+                    user: process.env.PGUSER ?? 'postgres',
+                    password: process.env.PGPASSWORD ?? 'password',
+                    database: process.env.PGDATABASE ?? 'postgres',
+                },
+                searchPath: [schema],
+                pool: { min: 0, max: 2 },
+            });
+            const fixture = (table: string) => db(table);
+            const storage = {
+                endpoint,
+                bucket: `usage-dims-${randomUUID()}`,
+                region: 'us-east-1',
+                accessKey: process.env.USAGE_EVENTS_S3_ACCESS_KEY,
+                secretKey: process.env.USAGE_EVENTS_S3_SECRET_KEY,
+                forcePathStyle: true,
+            };
+            const s3 = new S3({
+                endpoint,
+                region: storage.region,
+                forcePathStyle: true,
+                credentials: {
+                    accessKeyId: storage.accessKey!,
+                    secretAccessKey: storage.secretKey!,
+                },
+            });
+            const org = randomUUID();
+            const otherOrg = randomUUID();
+            const user = randomUUID();
+            const otherUser = randomUUID();
+            const chart = randomUUID();
+            const sqlChart = randomUUID();
+            const dashboard = randomUUID();
+            const project = randomUUID();
+            const agent = randomUUID();
+            const otherAgent = randomUUID();
+            const rows = Number(
+                process.env.USAGE_DIMENSIONS_SMOKE_ROWS ?? 2500,
+            );
+            let bucketCreated = false;
+            try {
+                await db.raw('CREATE SCHEMA ??', [schema]);
+                await db.raw(`
+                    CREATE TABLE apps (app_id uuid PRIMARY KEY, name text, project_uuid uuid, space_uuid uuid, created_at timestamp, deleted_at timestamp);
+                    CREATE TABLE dashboard_versions (dashboard_version_id integer, dashboard_id integer);
+                    CREATE TABLE dashboard_tile_charts (dashboard_version_id integer, saved_chart_id integer);
+                    CREATE TABLE dashboard_tile_sql_charts (dashboard_version_id integer, saved_sql_uuid uuid);
+                    CREATE TABLE dashboard_tile_data_apps (dashboard_version_id integer, app_uuid uuid);
+                    CREATE TABLE content_verification (content_uuid uuid, project_uuid uuid, content_type text);
+                    CREATE TABLE scheduler (enabled boolean, deleted_at timestamp, project_uuid uuid, saved_chart_uuid uuid, saved_sql_uuid uuid, dashboard_uuid uuid, app_uuid uuid);
+                    CREATE TABLE ai_agent (ai_agent_uuid uuid PRIMARY KEY, organization_uuid uuid, name text);
+                    CREATE TABLE organizations (organization_id integer PRIMARY KEY, organization_uuid uuid UNIQUE);
+                    CREATE TABLE projects (project_id integer PRIMARY KEY, project_uuid uuid UNIQUE, organization_id integer, name text);
+                    CREATE TABLE spaces (space_id integer PRIMARY KEY, space_uuid uuid UNIQUE, project_id integer, name text, deleted_at timestamp);
+                    CREATE TABLE dashboards (dashboard_id integer PRIMARY KEY, dashboard_uuid uuid UNIQUE, space_id integer, name text, slug text, deleted_at timestamp, created_at timestamp DEFAULT CURRENT_TIMESTAMP, owner_user_uuid uuid);
+                    CREATE TABLE saved_queries (saved_query_id integer PRIMARY KEY, saved_query_uuid uuid UNIQUE, project_uuid uuid, space_id integer, dashboard_uuid uuid, name text, slug text, last_version_chart_kind text, deleted_at timestamp, created_at timestamp DEFAULT CURRENT_TIMESTAMP);
+                    CREATE INDEX ON saved_queries(project_uuid);
+                    CREATE TABLE saved_sql (saved_sql_uuid uuid PRIMARY KEY, project_uuid uuid, space_uuid uuid, dashboard_uuid uuid, name text, slug text, last_version_chart_kind text, deleted_at timestamp, created_at timestamp DEFAULT CURRENT_TIMESTAMP);
+                    CREATE TABLE users (user_id integer PRIMARY KEY, user_uuid uuid UNIQUE, first_name text, last_name text, is_active boolean, is_internal boolean, is_setup_complete boolean DEFAULT true);
+                    CREATE TABLE organization_memberships (organization_id integer, user_id integer, role text DEFAULT 'member', role_uuid uuid, created_at timestamp DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(organization_id, user_id));
+                    CREATE TABLE groups (group_uuid uuid PRIMARY KEY, organization_id integer, name text);
+                    CREATE TABLE group_memberships (group_uuid uuid, organization_id integer, user_id integer, PRIMARY KEY(group_uuid, user_id));
+                    CREATE INDEX group_memberships_user_org_idx ON group_memberships (user_id, organization_id);
+                `);
+                await fixture('organizations').insert([
+                    { organization_id: 1, organization_uuid: org },
+                    { organization_id: 2, organization_uuid: otherOrg },
+                ]);
+                await fixture('projects').insert({
+                    project_id: 1,
+                    project_uuid: project,
+                    organization_id: 1,
+                });
+                await fixture('ai_agent').insert([
+                    {
+                        ai_agent_uuid: agent,
+                        organization_uuid: org,
+                        name: 'Sales analyst',
+                    },
+                    {
+                        ai_agent_uuid: otherAgent,
+                        organization_uuid: otherOrg,
+                        name: 'Other org agent',
+                    },
+                ]);
+                await db.raw(
+                    `INSERT INTO ai_agent SELECT md5('agent-' || n)::uuid, ?::uuid, 'Agent ' || n FROM generate_series(1, 1001) n`,
+                    [org],
+                );
+                await fixture('spaces').insert({
+                    space_id: 1,
+                    space_uuid: randomUUID(),
+                    project_id: 1,
+                    name: 'Shared space',
+                });
+                await fixture('dashboards').insert({
+                    dashboard_id: 1,
+                    dashboard_uuid: dashboard,
+                    space_id: 1,
+                    owner_user_uuid: user,
+                    name: 'Dashboard before',
+
+                    slug: 'dashboard',
+                });
+                await fixture('dashboard_versions').insert({
+                    dashboard_version_id: 1,
+                    dashboard_id: 1,
+                });
+                await fixture('dashboard_tile_charts').insert([
+                    { dashboard_version_id: 1, saved_chart_id: 1 },
+                    { dashboard_version_id: 1, saved_chart_id: 1 },
+                ]);
+                await fixture('scheduler').insert({
+                    enabled: true,
+                    saved_chart_uuid: chart,
+                    project_uuid: project,
+                });
+                await fixture('saved_queries').insert({
+                    saved_query_id: 1,
+                    saved_query_uuid: chart,
+                    project_uuid: project,
+                    dashboard_uuid: dashboard,
+                    name: 'Chart before',
+                    slug: 'chart',
+                    last_version_chart_kind: 'cartesian',
+                });
+                await db.raw(
+                    `INSERT INTO saved_queries (saved_query_id, saved_query_uuid, project_uuid, space_id, name, slug, last_version_chart_kind)
+                    SELECT n + 1, md5('chart-' || n)::uuid, ?::uuid, 1, 'Chart ' || n, 'chart-' || n, 'table' FROM generate_series(1, ?) n`,
+                    [project, rows],
+                );
+                await fixture('saved_sql').insert({
+                    saved_sql_uuid: sqlChart,
+                    project_uuid: project,
+                    dashboard_uuid: dashboard,
+                    name: 'SQL chart',
+                    slug: 'sql-chart',
+                    last_version_chart_kind: 'table',
+                });
+                await fixture('users').insert([
+                    {
+                        user_id: 1,
+                        user_uuid: user,
+                        first_name: 'Same',
+                        last_name: 'Name',
+                        is_active: true,
+                        is_internal: false,
+                    },
+                    {
+                        user_id: 2,
+                        user_uuid: randomUUID(),
+                        first_name: 'Same',
+                        last_name: 'Name',
+                        is_active: true,
+                        is_internal: false,
+                    },
+                    {
+                        user_id: 3,
+                        user_uuid: otherUser,
+                        first_name: 'Other',
+                        last_name: 'Org',
+                        is_active: true,
+                        is_internal: false,
+                    },
+                ]);
+                await fixture('organization_memberships').insert([
+                    { organization_id: 1, user_id: 1 },
+                    { organization_id: 1, user_id: 2 },
+                    { organization_id: 2, user_id: 3 },
+                ]);
+                await db.raw(
+                    'ANALYZE projects; ANALYZE spaces; ANALYZE dashboards; ANALYZE saved_queries; ANALYZE users; ANALYZE organization_memberships',
+                );
+                await s3.createBucket({ Bucket: storage.bucket });
+                bucketCreated = true;
+                const rawKey = `events/raw/org_id=${org}/stream=query_events/dt=2026-01-01/test.jsonl.gz`;
+                const events = [
+                    { user_id: user, chart_id: chart, dashboard_id: dashboard },
+                    {
+                        user_id: otherUser,
+                        chart_id: randomUUID(),
+                        dashboard_id: null,
+                    },
+                    { user_id: null, chart_id: null, dashboard_id: null },
+                ].map((event) => ({
+                    ...event,
+                    org_id: org,
+                    project_id: project,
+                    event_name: 'query.completed',
+                    event_ts: '2026-01-01T00:00:00Z',
+                    status: 'success',
+                    query_id: randomUUID(),
+                }));
+                await s3.putObject({
+                    Bucket: storage.bucket,
+                    Key: rawKey,
+                    Body: gzipSync(
+                        events.map((row) => JSON.stringify(row)).join('\n'),
+                    ),
+                });
+                await s3.putObject({
+                    Bucket: storage.bucket,
+                    Key: `events/raw/org_id=${org}/stream=export_events/dt=2026-01-01/test.jsonl.gz`,
+                    Body: gzipSync(
+                        [
+                            events[0],
+                            events[1],
+                            { ...events[2], query_id: randomUUID() },
+                        ]
+                            .map((event) =>
+                                JSON.stringify({
+                                    ...event,
+                                    event_name: 'download_results.completed',
+                                }),
+                            )
+                            .join('\n'),
+                    ),
+                });
+                await s3.putObject({
+                    Bucket: storage.bucket,
+                    Key: `events/raw/org_id=${org}/stream=ai_usage/dt=2026-01-01/test.jsonl.gz`,
+                    Body: gzipSync(
+                        [agent, otherAgent, null]
+                            .map((agentId) =>
+                                JSON.stringify({
+                                    org_id: org,
+                                    user_id: user,
+                                    event_name: 'ai.usage',
+                                    event_ts: '2026-01-01T00:00:00Z',
+                                    agent_id: agentId,
+                                }),
+                            )
+                            .join('\n'),
+                    ),
+                });
+                const run = () =>
+                    new UsageEventsCompactor({
+                        featureFlagModel: {
+                            get: async () => ({
+                                id: 'analytics-project',
+                                enabled: true,
+                            }),
+                        },
+                        s3Config: storage,
+                        prometheusMetrics: null,
+                        usageDimensionsModel: new UsageDimensionsModel(
+                            db,
+                            'https://lightdash.example.com/base/?query=value#hash',
+                        ),
+                    }).run(new Date('2026-01-02'));
+                const summary = await run();
+                expect(summary.dimensions).toEqual({
+                    refreshed: 14,
+                    failed: 0,
+                });
+                const source = createS3AnalyticsSourceResolver({
+                    storage,
+                    organizationUuid: org,
+                });
+                const reader = new DuckdbWarehouseClient({
+                    type: 'duckdb_parquet',
+                    resolveSource: source,
+                });
+                const explore = createAnalyticsExplores()[0];
+                const sql = (
+                    dimensions: string[],
+                    queryExplore = explore,
+                    metrics = ['query_events_total_queries'],
+                ) =>
+                    new MetricQueryBuilder({
+                        explore: queryExplore,
+                        compiledMetricQuery: {
+                            exploreName: queryExplore.name,
+                            dimensions,
+                            metrics,
+                            filters: {},
+                            sorts: [],
+                            limit: 100,
+                            tableCalculations: [],
+                            compiledAdditionalMetrics: [],
+                            compiledTableCalculations: [],
+                            compiledCustomDimensions: [],
+                        },
+                        warehouseSqlBuilder: warehouseSqlBuilderFromType(
+                            WarehouseTypes.DUCKDB,
+                        ),
+                        intrinsicUserAttributes: {},
+                        parameterDefinitions: {},
+                        timezone: 'UTC',
+                    }).compileQuery().query;
+                const peopleExplore = createAnalyticsExplores().find(
+                    (e) => e.name === 'people_adoption',
+                )!;
+                const peopleQuery = sql([], peopleExplore, [
+                    'people_adoption_eligible_people',
+                    'people_adoption_people_without_observed_activity',
+                ]);
+                // Legacy queries have unknown intent; a UUID is not human activity.
+                expect((await reader.runQuery(peopleQuery)).rows).toEqual([
+                    {
+                        people_adoption_eligible_people: '2',
+                        people_adoption_people_without_observed_activity: '2',
+                    },
+                ]);
+                const snapshotKey = peopleMembershipHistoryKey(org, new Date());
+                expect(
+                    (
+                        await s3.headObject({
+                            Bucket: storage.bucket,
+                            Key: snapshotKey,
+                        })
+                    ).ContentLength,
+                ).toBeGreaterThan(0);
+                expect(sql([])).not.toContain('JOIN');
+                const healthExplore = createAnalyticsExplores().find(
+                    (e) => e.name === 'content_health',
+                )!;
+                const healthSql = sql(
+                    [
+                        'content_health_content_type',
+                        'content_health_owner_status',
+                    ],
+                    healthExplore,
+                    [
+                        'content_health_total_content',
+                        'content_health_total_observed_queries',
+                    ],
+                );
+                expect((await reader.runQuery(healthSql)).rows).toEqual(
+                    expect.arrayContaining([
+                        {
+                            content_health_content_type: 'dashboard',
+                            content_health_owner_status:
+                                'Active organization member',
+                            content_health_total_content: '1',
+                            content_health_total_observed_queries: '1',
+                        },
+                        {
+                            content_health_content_type: 'saved_chart',
+                            content_health_owner_status: 'Not recorded',
+                            content_health_total_content: String(rows + 1),
+                            content_health_total_observed_queries: '1',
+                        },
+                    ]),
+                );
+                expect(
+                    (
+                        await reader.runQuery(
+                            `SELECT dashboard_references, enabled_schedules FROM lightdash_content WHERE content_id = '${chart}'`,
+                        )
+                    ).rows,
+                ).toEqual([
+                    { dashboard_references: '1', enabled_schedules: '1' },
+                ]);
+
+                const exportResult = await reader.runQuery(
+                    sql(
+                        [
+                            'lightdash_charts_name',
+                            'lightdash_dashboards_name',
+                            'lightdash_users_name',
+                        ],
+                        createAnalyticsExplores()[3],
+                        ['export_events_total_events'],
+                    ),
+                );
+                expect(exportResult.rows).toEqual(
+                    expect.arrayContaining([
+                        {
+                            lightdash_charts_name: 'Chart before',
+                            lightdash_dashboards_name: 'Dashboard before',
+
+                            lightdash_users_name: 'Same Name',
+                            export_events_total_events: '1',
+                        },
+                        {
+                            lightdash_charts_name: null,
+                            lightdash_dashboards_name: null,
+                            lightdash_users_name: 'Unknown user',
+                            export_events_total_events: '2',
+                        },
+                    ]),
+                );
+                expect(
+                    (
+                        await reader.runQuery(
+                            sql([], createAnalyticsExplores()[3], [
+                                'export_events_total_events',
+                            ]),
+                        )
+                    ).rows,
+                ).toEqual([{ export_events_total_events: '3' }]);
+                const agentSql = sql(
+                    ['lightdash_agents_name'],
+                    createAnalyticsExplores()[1],
+                    ['ai_usage_total_ai_calls'],
+                );
+                expect((await reader.runQuery(agentSql)).rows).toEqual(
+                    expect.arrayContaining([
+                        {
+                            lightdash_agents_name: 'Sales analyst',
+                            ai_usage_total_ai_calls: '1',
+                        },
+                        {
+                            lightdash_agents_name: 'Unknown agent',
+                            ai_usage_total_ai_calls: '2',
+                        },
+                    ]),
+                );
+                expect(
+                    (
+                        await reader.runQuery(
+                            'SELECT count(*) AS n FROM lightdash_agents',
+                        )
+                    ).rows,
+                ).toEqual([{ n: '1002' }]);
+                expect(
+                    (
+                        await reader.runQuery(
+                            sql([], createAnalyticsExplores()[1], [
+                                'ai_usage_total_ai_calls',
+                            ]),
+                        )
+                    ).rows,
+                ).toEqual([{ ai_usage_total_ai_calls: '3' }]);
+                const joinedSql = sql([
+                    'lightdash_charts_name',
+                    'lightdash_dashboards_name',
+                    'lightdash_users_name',
+                ]);
+                const result = await reader.runQuery(joinedSql);
+                expect(result.rows).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            lightdash_charts_name: 'Chart before',
+                            lightdash_dashboards_name: 'Dashboard before',
+                            lightdash_users_name: 'Same Name',
+                            query_events_total_queries: '1',
+                        }),
+                        expect.objectContaining({
+                            lightdash_charts_name: null,
+                            lightdash_users_name: 'Unknown user',
+                            query_events_total_queries: '2',
+                        }),
+                    ]),
+                );
+                expect(
+                    (await reader.runQuery(sql([]))).rows[0]
+                        .query_events_total_queries,
+                ).toBe('3');
+                expect(
+                    (
+                        await reader.runQuery(
+                            'SELECT count(*) AS n FROM lightdash_charts',
+                        )
+                    ).rows[0].n,
+                ).toBe(String(rows + 2));
+                expect(
+                    (
+                        await reader.runQuery(
+                            "SELECT name, space_name, url FROM lightdash_charts WHERE name = 'SQL chart'",
+                        )
+                    ).rows,
+                ).toEqual([
+                    {
+                        name: 'SQL chart',
+                        space_name: 'Shared space',
+                        url: `https://lightdash.example.com/projects/${project}/sql-runner/${sqlChart}`,
+                    },
+                ]);
+                expect(
+                    (
+                        await reader.runQuery(
+                            sql([
+                                'query_events_chart_url',
+                                'query_events_dashboard_url',
+                            ]),
+                        )
+                    ).rows,
+                ).toContainEqual({
+                    query_events_chart_url: `https://lightdash.example.com/projects/${project}/saved/${chart}/view`,
+                    query_events_dashboard_url: `https://lightdash.example.com/projects/${project}/dashboards/${dashboard}/view`,
+                    query_events_total_queries: '1',
+                });
+                expect(
+                    (
+                        await reader.runQuery(
+                            `SELECT content_type, content_url FROM lightdash_content WHERE content_id IN ('${chart}', '${sqlChart}', '${dashboard}')`,
+                        )
+                    ).rows,
+                ).toEqual(
+                    expect.arrayContaining([
+                        {
+                            content_type: 'saved_chart',
+                            content_url: `https://lightdash.example.com/projects/${project}/saved/${chart}/view`,
+                        },
+                        {
+                            content_type: 'sql_chart',
+                            content_url: `https://lightdash.example.com/projects/${project}/sql-runner/${sqlChart}`,
+                        },
+                        {
+                            content_type: 'dashboard',
+                            content_url: `https://lightdash.example.com/projects/${project}/dashboards/${dashboard}/view`,
+                        },
+                    ]),
+                );
+                const originalSnapshot = await s3.headObject({
+                    Bucket: storage.bucket,
+                    Key: usageDimensionKey(org, 'charts'),
+                });
+                const originalPeopleSnapshot = await s3.headObject({
+                    Bucket: storage.bucket,
+                    Key: usageDimensionKey(org, 'people'),
+                });
+                const originalPeopleHistory = await s3.headObject({
+                    Bucket: storage.bucket,
+                    Key: snapshotKey,
+                });
+                const originalContentSnapshot = await s3.headObject({
+                    Bucket: storage.bucket,
+                    Key: usageDimensionKey(org, 'content'),
+                });
+                const failingModel = new UsageDimensionsModel(
+                    db,
+                    'https://lightdash.example.com/base/?query=value#hash',
+                );
+                const read = failingModel.getJsonLines.bind(failingModel);
+                vi.spyOn(failingModel, 'getJsonLines').mockImplementation(
+                    async function* interruptedExport(organization, dimension) {
+                        if (
+                            organization.organization_uuid === org &&
+                            (dimension === 'charts' ||
+                                dimension === 'content' ||
+                                dimension === 'people')
+                        ) {
+                            yield '{}\n';
+                            throw new Error(
+                                'Injected interrupted database export',
+                            );
+                        }
+                        yield* read(organization, dimension);
+                    },
+                );
+                await expect(
+                    new UsageEventsCompactor({
+                        featureFlagModel: {
+                            get: async () => ({
+                                id: 'analytics-project',
+                                enabled: true,
+                            }),
+                        },
+                        s3Config: storage,
+                        prometheusMetrics: null,
+                        usageDimensionsModel: failingModel,
+                    }).run(new Date('2026-01-02')),
+                ).rejects.toThrow('3 refreshes failed');
+                expect(
+                    (
+                        await s3.headObject({
+                            Bucket: storage.bucket,
+                            Key: usageDimensionKey(org, 'charts'),
+                        })
+                    ).ETag,
+                ).toBe(originalSnapshot.ETag);
+                expect(
+                    (
+                        await s3.headObject({
+                            Bucket: storage.bucket,
+                            Key: usageDimensionKey(org, 'content'),
+                        })
+                    ).ETag,
+                ).toBe(originalContentSnapshot.ETag);
+                expect(
+                    (
+                        await s3.headObject({
+                            Bucket: storage.bucket,
+                            Key: usageDimensionKey(org, 'people'),
+                        })
+                    ).ETag,
+                ).toBe(originalPeopleSnapshot.ETag);
+                expect(
+                    (
+                        await s3.headObject({
+                            Bucket: storage.bucket,
+                            Key: snapshotKey,
+                        })
+                    ).ETag,
+                ).toBe(originalPeopleHistory.ETag);
+                expect((await run()).dimensions).toEqual({
+                    refreshed: 14,
+                    failed: 0,
+                });
+                await fixture('ai_agent')
+                    .where('ai_agent_uuid', agent)
+                    .update({ name: 'Sales renamed' });
+                await fixture('saved_queries')
+                    .where('saved_query_id', 1)
+                    .update({ name: 'Chart renamed' });
+                await fixture('dashboards')
+                    .where('dashboard_id', 1)
+                    .update({ name: 'Dashboard renamed' });
+                await fixture('users')
+                    .where('user_id', 1)
+                    .update({ first_name: 'User renamed' });
+                expect((await run()).dimensions).toEqual({
+                    refreshed: 14,
+                    failed: 0,
+                });
+                expect((await reader.runQuery(joinedSql)).rows).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            lightdash_charts_name: 'Chart renamed',
+                            lightdash_dashboards_name: 'Dashboard renamed',
+                            lightdash_users_name: 'User renamed Name',
+                        }),
+                    ]),
+                );
+                expect((await reader.runQuery(agentSql)).rows).toContainEqual({
+                    lightdash_agents_name: 'Sales renamed',
+                    ai_usage_total_ai_calls: '1',
+                });
+                await fixture('ai_agent')
+                    .where('ai_agent_uuid', agent)
+                    .delete();
+                await fixture('organization_memberships')
+                    .where({ organization_id: 1, user_id: 1 })
+                    .delete();
+                await fixture('saved_queries')
+                    .where('saved_query_id', 1)
+                    .update({ deleted_at: new Date() });
+                await run();
+                expect(
+                    (
+                        await reader.runQuery(
+                            `SELECT owner_status FROM lightdash_content WHERE content_id = '${dashboard}'`,
+                        )
+                    ).rows,
+                ).toEqual([{ owner_status: 'Not an organization member' }]);
+                expect(
+                    (
+                        await reader.runQuery(
+                            `SELECT is_deleted FROM lightdash_content WHERE content_id = '${chart}'`,
+                        )
+                    ).rows,
+                ).toEqual([{ is_deleted: true }]);
+                expect(
+                    (await reader.runQuery(joinedSql)).rows.every(
+                        (row) => row.lightdash_users_name === 'Unknown user',
+                    ),
+                ).toBe(true);
+                expect(
+                    (
+                        await reader.runQuery(
+                            `SELECT is_deleted FROM lightdash_charts WHERE chart_id = '${chart}'`,
+                        )
+                    ).rows[0].is_deleted,
+                ).toBe(true);
+                expect((await reader.runQuery(agentSql)).rows).toEqual([
+                    {
+                        lightdash_agents_name: 'Unknown agent',
+                        ai_usage_total_ai_calls: '3',
+                    },
+                ]);
+                await s3.deleteObject({
+                    Bucket: storage.bucket,
+                    Key: usageDimensionKey(org, 'agents'),
+                });
+                expect((await reader.runQuery(agentSql)).rows).toEqual([
+                    {
+                        lightdash_agents_name: 'Unknown agent',
+                        ai_usage_total_ai_calls: '3',
+                    },
+                ]);
+                await s3.deleteObject({
+                    Bucket: storage.bucket,
+                    Key: usageDimensionKey(org, 'users'),
+                });
+                expect(
+                    (await reader.runQuery(joinedSql)).rows.every(
+                        (row) => row.lightdash_users_name === 'Unknown user',
+                    ),
+                ).toBe(true);
+
+                // Exercise bounded population pagination without a user-id group
+                // index that production does not have. Enrichment stays set-based.
+                await db.raw(`INSERT INTO users (user_id,user_uuid,first_name,is_active,is_internal)
+                    SELECT n, md5('person-' || n)::uuid, 'Person ' || n, true, false
+                    FROM generate_series(100, 10099) n`);
+                await db.raw(`INSERT INTO organization_memberships (organization_id,user_id)
+                    SELECT 1, n FROM generate_series(100,10099) n`);
+                const groupA = randomUUID();
+                const groupB = randomUUID();
+                await fixture('groups').insert([
+                    { group_uuid: groupA, organization_id: 1, name: 'Group A' },
+                    { group_uuid: groupB, organization_id: 1, name: 'Group B' },
+                ]);
+                await db.raw(
+                    `INSERT INTO group_memberships SELECT g.group_uuid, 1, u.user_id FROM groups g CROSS JOIN users u WHERE u.user_id >= 100`,
+                );
+                await db.raw('DROP INDEX group_memberships_user_org_idx');
+                const started = Date.now();
+                const exported = [];
+                for await (const line of new UsageDimensionsModel(
+                    db,
+                    'https://lightdash.example.com/',
+                ).getJsonLines(
+                    { organization_id: 1, organization_uuid: org },
+                    'people',
+                ))
+                    exported.push(JSON.parse(line));
+                expect(exported).toHaveLength(10001);
+                expect(new Set(exported.map((p) => p.user_id)).size).toBe(
+                    10001,
+                );
+                expect(
+                    exported.find((p) => p.name === 'Person 100').group_names,
+                ).toContain('Group A');
+                expect(
+                    exported.find((p) => p.name === 'Person 100').group_names,
+                ).toContain('Group B');
+                Logger.info(
+                    `People snapshot: 10001 members, 20000 group memberships, ${Date.now() - started}ms`,
+                );
+            } finally {
+                if (bucketCreated) {
+                    const objects = await s3.listObjectsV2({
+                        Bucket: storage.bucket,
+                    });
+                    if (objects.Contents?.length)
+                        await s3.deleteObjects({
+                            Bucket: storage.bucket,
+                            Delete: {
+                                Objects: objects.Contents.map(({ Key }) => ({
+                                    Key,
+                                })),
+                            },
+                        });
+                    await s3.deleteBucket({ Bucket: storage.bucket });
+                }
+                s3.destroy();
+                await db.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
+                await db.destroy();
+            }
+        }, 600_000);
+    },
+);

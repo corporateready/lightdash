@@ -1,0 +1,885 @@
+import {
+    BYO_AI_PROVIDERS,
+    FeatureFlags,
+    getDefaultBedrockInferenceGeography,
+    MissingConfigError,
+    type AiOrgModelVisibility,
+    type ByoAiApiKeyProvider,
+    type ByoAiProvider,
+    type DataAppModelVisibility,
+} from '@lightdash/common';
+import {
+    AiCopilotConfigSchemaType,
+    DEFAULT_BEDROCK_EMBEDDING_MODEL,
+} from '../../../config/aiConfigSchema';
+import { LightdashConfig } from '../../../config/parseConfig';
+import { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
+import { AiModelCatalog } from '../../clients/Ai/AiModelCatalog';
+import {
+    AiOrganizationProviderCredentialModel,
+    type AiProviderCredentialResolution,
+} from '../../models/AiOrganizationProviderCredentialModel';
+import {
+    AiOrganizationSettingsModel,
+    AiOrgProviderApiKeys,
+} from '../../models/AiOrganizationSettingsModel';
+import {
+    resolveAiDecisionClient,
+    type AiDecisionClient,
+} from './decisions/AiDecisionClient';
+import {
+    getAvailableModels,
+    getFastModelForAccessibleKey,
+    getOrgModelCatalogue,
+    ModelCatalogue,
+    OrgModelOverrides,
+} from './models';
+import { keyGrantsModel } from './models/presets';
+
+export type CopilotConfig = AiCopilotConfigSchemaType;
+
+/**
+ * A copilot config resolved for a specific org, annotated with which providers
+ * are served by the org's own self-managed (BYO) key. `byoProviders` is empty
+ * for the instance (Lightdash-managed) config. The model builders read it to
+ * stamp `keyManagement` onto usage analytics.
+ */
+export type ResolvedCopilotConfig = CopilotConfig & {
+    byoProviders: ByoAiProvider[];
+};
+
+// Review turns run on a fast Anthropic model; a BYO Anthropic key must be able
+// to serve it for reviews to run on the org's own key instead of being paused.
+const REVIEW_JUDGE_ANTHROPIC_MODEL = 'claude-haiku-4-5';
+
+export type ReviewJudgeAvailability = {
+    hasActiveByoKey: boolean;
+    canJudgeOnByoKey: boolean;
+    // Provider the org's own credential judges on; null when reviews fall back
+    // to the instance provider.
+    byoJudgeProvider: 'anthropic' | 'bedrock' | null;
+};
+
+// No conflict once the org supplies its own base URL: it replaces the instance gateway.
+const hasAnthropicByoGatewayConflict = (
+    config: CopilotConfig,
+    orgKeys: AiOrgProviderApiKeys,
+): boolean =>
+    Boolean(
+        orgKeys.anthropic &&
+        config.providers.anthropic?.baseUrl &&
+        !orgKeys.providerBaseUrls?.anthropic,
+    );
+
+const hasGoogleByoGatewayConflict = (
+    config: CopilotConfig,
+    orgKeys: AiOrgProviderApiKeys,
+): boolean =>
+    Boolean(
+        orgKeys.google &&
+        config.providers.google?.baseUrl &&
+        !orgKeys.providerBaseUrls?.google,
+    );
+
+// An org base URL replaces the instance endpoint AND its custom headers:
+// those headers are the instance gateway's credential and must not leak.
+const orgBaseUrlOverride = (
+    orgKeys: AiOrgProviderApiKeys,
+    provider: ByoAiApiKeyProvider,
+): { baseUrl: string; customHeaders: Record<string, string> } | undefined => {
+    const baseUrl = orgKeys.providerBaseUrls?.[provider];
+    return baseUrl ? { baseUrl, customHeaders: {} } : undefined;
+};
+
+const orgCatalogOptions = (
+    orgKeys: AiOrgProviderApiKeys,
+    provider: ByoAiApiKeyProvider,
+): { baseUrl?: string } => ({
+    baseUrl: orgKeys.providerBaseUrls?.[provider],
+});
+
+/**
+ * Overlay an org's own API key onto the instance copilot config. Only the
+ * apiKey is org-supplied — every other provider option comes from the instance
+ * config. Keys for providers the instance does not configure are ignored here
+ * (the write path rejects them), so BYO can only swap the key of a provider
+ * this instance already runs. Two exceptions: custom provider endpoints, whose
+ * instance credential may authenticate an arbitrary gateway, so an org key is
+ * rejected rather than sent to that endpoint unless the org brings its own
+ * base URL, which replaces the endpoint and its headers; and Bedrock, which
+ * carries its own region, so it is constructed rather than overlaid and
+ * replaces the provider set outright.
+ */
+/**
+ * Effective model visibility = stored settings on top of an implicit default:
+ * an org with any BYO key hides every BYO provider it has not keyed, so chat
+ * never silently falls back to an instance key. Explicit stored settings win,
+ * so an admin can re-enable a provider if they intentionally want fallback.
+ */
+export const resolveEffectiveModelVisibility = (
+    orgKeys: AiOrgProviderApiKeys,
+    stored: AiOrgModelVisibility | null,
+): AiOrgModelVisibility | null => {
+    const implicit: AiOrgModelVisibility = {};
+    if (BYO_AI_PROVIDERS.some((provider) => orgKeys[provider])) {
+        BYO_AI_PROVIDERS.forEach((provider) => {
+            if (!orgKeys[provider]) {
+                implicit[provider] = { enabled: false };
+            }
+        });
+    }
+    const merged = { ...implicit, ...(stored ?? {}) };
+    return Object.keys(merged).length > 0 ? merged : null;
+};
+
+export const overlayOrgProviderApiKeys = (
+    config: CopilotConfig,
+    orgKeys: AiOrgProviderApiKeys,
+): ResolvedCopilotConfig => {
+    // Bedrock replaces the provider set instead of joining it. Model visibility
+    // filters model LISTINGS only — `getModel` still honours an agent's pinned
+    // provider — so leaving the instance providers in place would let a pinned
+    // agent keep sending prompts outside the configured region. With only
+    // Bedrock present, such a pin fails closed in `getModelPreset`.
+    //
+    // It is also the one provider an org can bring without the instance running
+    // it: the org supplies the region, so there is nothing to overlay onto.
+    if (orgKeys.bedrock) {
+        const { apiKey, region, allowedModels, inferenceGeography } =
+            orgKeys.bedrock;
+        return {
+            ...config,
+            defaultProvider: 'bedrock',
+            byoProviders: ['bedrock'],
+            providers: {
+                bedrock: {
+                    apiKey,
+                    region,
+                    // The profile, not the region, decides where inference
+                    // runs. Default to the narrowest geography the region
+                    // supports (Japan pins `jp`: the region-derived `apac`
+                    // profile may serve from Sydney or Mumbai, which defeats
+                    // the point of choosing Tokyo or Osaka); a stored
+                    // geography is the admin's explicit choice.
+                    inferenceProfilePrefix:
+                        inferenceGeography ??
+                        getDefaultBedrockInferenceGeography(region),
+                    modelName: allowedModels[0],
+                    availableModels: allowedModels,
+                    embeddingModelName: DEFAULT_BEDROCK_EMBEDDING_MODEL,
+                    customHeaders: {},
+                    supportsStreaming: true,
+                },
+            },
+        };
+    }
+
+    const providers = { ...config.providers };
+
+    if (orgKeys.anthropic && providers.anthropic) {
+        if (hasAnthropicByoGatewayConflict(config, orgKeys)) {
+            throw new MissingConfigError(
+                'Organization Anthropic API keys cannot be used while ANTHROPIC_BASE_URL is configured. Remove the organization key or disable the instance Anthropic gateway.',
+            );
+        }
+        providers.anthropic = {
+            ...providers.anthropic,
+            apiKey: orgKeys.anthropic,
+            ...orgBaseUrlOverride(orgKeys, 'anthropic'),
+        };
+    }
+
+    if (orgKeys.google && providers.google) {
+        if (hasGoogleByoGatewayConflict(config, orgKeys)) {
+            throw new MissingConfigError(
+                'Organization Google Gemini API keys cannot be used while GEMINI_BASE_URL is configured. Remove the organization key or disable the instance Gemini gateway.',
+            );
+        }
+        providers.google = {
+            ...providers.google,
+            apiKey: orgKeys.google,
+            baseUrl:
+                orgKeys.providerBaseUrls?.google ?? providers.google.baseUrl,
+        };
+    }
+
+    if (orgKeys.openai && providers.openai) {
+        providers.openai = {
+            ...providers.openai,
+            apiKey: orgKeys.openai,
+            ...orgBaseUrlOverride(orgKeys, 'openai'),
+        };
+    }
+
+    // When the org brings its own key(s), never resolve to a provider it did
+    // not supply — that would silently use the instance key (a billing +
+    // data-governance leak for a BYO org). If the instance default provider
+    // isn't one the org keyed, switch the default to a provider the org's own
+    // key serves, so auxiliary AI (titles, suggestions, routing, compaction)
+    // runs on the org's key instead of falling back to the instance provider.
+    const usableByoProviders = BYO_AI_PROVIDERS.filter(
+        (provider) => orgKeys[provider] && providers[provider],
+    );
+    const defaultProvider =
+        usableByoProviders.length > 0 &&
+        !usableByoProviders.some(
+            (provider) => provider === config.defaultProvider,
+        )
+            ? usableByoProviders[0]
+            : config.defaultProvider;
+
+    return {
+        ...config,
+        providers,
+        defaultProvider,
+        byoProviders: usableByoProviders,
+    };
+};
+
+/**
+ * Which organization and project a config resolution is for. `projectUuid` is
+ * required rather than optional: a caller must state that it has no project,
+ * because that case falls back to the organization default credential, which
+ * may be a different region than the data in play.
+ */
+export type AiConfigScope = {
+    organizationUuid: string | null | undefined;
+    projectUuid: string | null;
+    /**
+     * Explicit credential pin (an agent-level selection), winning over the
+     * project and organization-default selection. Required for the same
+     * reason as `projectUuid`: an agent-scoped caller must state its pin — or
+     * state that it has none — so a forgotten pin is a compile error, not a
+     * silent resolve to another region's credential.
+     */
+    credentialUuid: string | null;
+};
+
+export type OrgModelCatalogue = {
+    copilotConfig: ResolvedCopilotConfig;
+    overrides: OrgModelOverrides;
+    catalogue: ModelCatalogue;
+};
+
+const NO_ORG_MODEL_OVERRIDES: OrgModelOverrides = {
+    modelVisibility: null,
+    keyAccessibleModelIds: null,
+};
+
+type Dependencies = {
+    lightdashConfig: LightdashConfig;
+    featureFlagModel: FeatureFlagModel;
+    aiOrganizationSettingsModel: AiOrganizationSettingsModel;
+    aiOrganizationProviderCredentialModel: AiOrganizationProviderCredentialModel;
+    aiModelCatalog: AiModelCatalog;
+};
+
+export class OrgAiCopilotConfigResolver {
+    private lightdashConfig: LightdashConfig;
+
+    private featureFlagModel: FeatureFlagModel;
+
+    private aiOrganizationSettingsModel: AiOrganizationSettingsModel;
+
+    private aiOrganizationProviderCredentialModel: AiOrganizationProviderCredentialModel;
+
+    private aiModelCatalog: AiModelCatalog;
+
+    constructor(dependencies: Dependencies) {
+        this.lightdashConfig = dependencies.lightdashConfig;
+        this.featureFlagModel = dependencies.featureFlagModel;
+        this.aiOrganizationSettingsModel =
+            dependencies.aiOrganizationSettingsModel;
+        this.aiOrganizationProviderCredentialModel =
+            dependencies.aiOrganizationProviderCredentialModel;
+        this.aiModelCatalog = dependencies.aiModelCatalog;
+    }
+
+    /**
+     * Effective BYO keys for an organization. A named default credential wins
+     * over the legacy single-blob Bedrock config, so an org that has moved to
+     * credentials stops reading the old blob. The other BYO providers always
+     * come from the blob — only Bedrock has named credentials, because only
+     * Bedrock carries a region.
+     *
+     * A credential that exists but cannot be decrypted throws rather than
+     * falling through: the fallback would be the legacy key or the instance
+     * provider, either of which can be a different region than the one the
+     * organization deliberately selected. Failing the request is the only safe
+     * answer — the alternative is silently processing data somewhere it is not
+     * allowed. This is why the model distinguishes `none` from `unreadable`.
+     */
+    private async resolveOrgProviderKeys(
+        organizationUuid: string,
+        // Named rather than positional: `projectUuid` is a nullable string and
+        // `onUnreadable` a string union, so a positional mix-up between them
+        // type-checks silently.
+        {
+            projectUuid,
+            credentialUuid = null,
+            onUnreadable = 'fail-closed',
+        }: {
+            projectUuid: string | null;
+            /**
+             * Explicit credential pin; wins over the project and default
+             * selection. Optional here only because the resolver's own
+             * non-agent methods never carry one — the public `AiConfigScope`
+             * keeps it required.
+             */
+            credentialUuid?: string | null;
+            /**
+             * `fail-closed` throws when the selected credential cannot be read
+             * — correct for anything that will serve a prompt.
+             *
+             * `tolerate-unreadable` ignores the broken credential and resolves
+             * the legacy or instance keys instead. ONLY for admin read paths,
+             * which must load in order to repair that credential: failing them
+             * closed would hide the screen that fixes the problem behind the
+             * problem.
+             */
+            onUnreadable?: 'fail-closed' | 'tolerate-unreadable';
+        },
+    ): Promise<AiOrgProviderApiKeys | null> {
+        // `pin` records that the credential was deliberately selected (an
+        // agent or project pin) rather than inherited from the organization
+        // default — pins fail closed where the default may degrade.
+        const resolveSelected = async (): Promise<{
+            resolution: AiProviderCredentialResolution;
+            pin: 'agent' | 'project' | null;
+        }> => {
+            if (credentialUuid) {
+                return {
+                    resolution:
+                        await this.aiOrganizationProviderCredentialModel.findDecrypted(
+                            organizationUuid,
+                            credentialUuid,
+                        ),
+                    pin: 'agent',
+                };
+            }
+            if (projectUuid) {
+                const { resolution, fromProjectPin } =
+                    await this.aiOrganizationProviderCredentialModel.findForProjectDecrypted(
+                        organizationUuid,
+                        projectUuid,
+                    );
+                return { resolution, pin: fromProjectPin ? 'project' : null };
+            }
+            return {
+                resolution:
+                    await this.aiOrganizationProviderCredentialModel.findDefaultDecrypted(
+                        organizationUuid,
+                    ),
+                pin: null,
+            };
+        };
+        const [legacyKeys, { resolution, pin }] = await Promise.all([
+            this.aiOrganizationSettingsModel.findDecryptedProviderApiKeys(
+                organizationUuid,
+            ),
+            resolveSelected(),
+        ]);
+
+        if (credentialUuid && resolution.status === 'none') {
+            // An explicitly pinned credential that resolves to nothing is an
+            // org mismatch or a lost row — the FK stops ordinary deletion.
+            // Falling through would select a different region than the one
+            // deliberately pinned, so only admin display paths may tolerate it.
+            if (onUnreadable === 'fail-closed') {
+                throw new MissingConfigError(
+                    'The AI provider credential pinned to this agent no longer exists. Repoint the agent in its settings; AI features are unavailable until then.',
+                );
+            }
+            return legacyKeys;
+        }
+
+        if (resolution.status === 'unreadable') {
+            if (onUnreadable === 'fail-closed') {
+                throw new MissingConfigError(
+                    `The AI provider credential "${resolution.label}" cannot be read with the current encryption secret. Replace its API key in organization settings; AI features are unavailable until then.`,
+                );
+            }
+            return legacyKeys;
+        }
+        const keys =
+            resolution.status === 'none'
+                ? legacyKeys
+                : {
+                      ...(legacyKeys ?? {}),
+                      bedrock: resolution.credential.config,
+                  };
+
+        // A pin must never be silently discarded: with the org flag off,
+        // falling through to the instance provider would process the pinned
+        // agent's or project's content out of region. Pin writes are rejected
+        // while the flag is off, so this only fires when the flag was turned
+        // off after the pin was saved — degrade to "unavailable", never
+        // reroute.
+        if (pin && resolution.status === 'ok') {
+            if (await this.isCustomProvidersEnabled(organizationUuid)) {
+                return keys;
+            }
+            if (onUnreadable === 'fail-closed') {
+                throw new MissingConfigError(
+                    pin === 'agent'
+                        ? 'This agent is pinned to an AI provider credential, but custom AI providers are not enabled for this organization. Enable them or clear the pin; AI features are unavailable for this agent until then.'
+                        : 'This project is pinned to an AI provider credential, but custom AI providers are not enabled for this organization. Enable them or clear the pin in the project settings; AI features are unavailable for this project until then.',
+                );
+            }
+            return this.withCustomProvidersIfEnabled(
+                organizationUuid,
+                legacyKeys,
+            );
+        }
+        return this.withCustomProvidersIfEnabled(organizationUuid, keys);
+    }
+
+    private async isCustomProvidersEnabled(
+        organizationUuid: string,
+    ): Promise<boolean> {
+        const { enabled } = await this.featureFlagModel.get({
+            user: { organizationUuid },
+            featureFlagId: FeatureFlags.OrgAiCustomProviders,
+        });
+        return enabled;
+    }
+
+    // Stored org provider config (keys, base URLs) only takes effect while
+    // the org flag is on, so it can be enabled per organization from Console.
+    private async withCustomProvidersIfEnabled(
+        organizationUuid: string,
+        keys: AiOrgProviderApiKeys | null,
+    ): Promise<AiOrgProviderApiKeys | null> {
+        if (!keys) return null;
+        return (await this.isCustomProvidersEnabled(organizationUuid))
+            ? keys
+            : null;
+    }
+
+    async getCopilotConfig({
+        organizationUuid,
+        projectUuid,
+        credentialUuid,
+    }: AiConfigScope): Promise<ResolvedCopilotConfig> {
+        const base = this.lightdashConfig.ai.copilot;
+        const managed: ResolvedCopilotConfig = { ...base, byoProviders: [] };
+        if (!organizationUuid) return managed;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid,
+            credentialUuid,
+        });
+        if (!orgKeys) return managed;
+        return overlayOrgProviderApiKeys(base, orgKeys);
+    }
+
+    /**
+     * Copilot config for rendering admin settings — never for serving a prompt.
+     *
+     * When the organization's selected credential cannot be decrypted this
+     * resolves the legacy or instance keys instead of throwing, so the settings
+     * screen still loads. That screen is where the broken credential is
+     * replaced, so failing it closed would put the fix behind the fault. The
+     * credential list reports the unreadable rows separately, so the admin is
+     * told the truth rather than shown a working-looking configuration.
+     *
+     * Execution paths use `getCopilotConfig`, which fails closed.
+     */
+    async getCopilotConfigForDisplay(
+        organizationUuid: string | null | undefined,
+    ): Promise<ResolvedCopilotConfig> {
+        const base = this.lightdashConfig.ai.copilot;
+        const managed: ResolvedCopilotConfig = { ...base, byoProviders: [] };
+        if (!organizationUuid) return managed;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+            onUnreadable: 'tolerate-unreadable',
+        });
+        if (!orgKeys) return managed;
+        return overlayOrgProviderApiKeys(base, orgKeys);
+    }
+
+    /**
+     * Copilot config for the data-apps sandbox (the `claude` CLI). Claude Code
+     * supports only Anthropic and Bedrock, and Bedrock is instance infra (never
+     * BYO) — so a BYO org must run the sandbox on its own Anthropic key. This
+     * forces Anthropic and drops any instance Anthropic key the org didn't
+     * bring, so the sandbox can never silently fall back to the instance key (a
+     * billing + data-governance leak). With no usable org Anthropic key the
+     * config carries none and key resolution fails only where a Claude turn
+     * needs it — not for key-less sandbox work (dependency builds, restores).
+     * Non-BYO orgs get the instance config unchanged.
+     */
+    async getClaudeCodeConfig(
+        organizationUuid: string | null | undefined,
+    ): Promise<ResolvedCopilotConfig> {
+        const base = this.lightdashConfig.ai.copilot;
+        const managed: ResolvedCopilotConfig = { ...base, byoProviders: [] };
+        if (!organizationUuid) return managed;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+        });
+        if (!orgKeys) return managed;
+        const overlaid = overlayOrgProviderApiKeys(base, orgKeys);
+        return {
+            ...overlaid,
+            defaultProvider: 'anthropic',
+            providers: {
+                ...overlaid.providers,
+                anthropic: orgKeys.anthropic
+                    ? overlaid.providers.anthropic
+                    : undefined,
+            },
+        };
+    }
+
+    /**
+     * Copilot config for a data-app sandbox running Codex. Mirrors the Claude
+     * resolver's BYOK boundary: once an org supplies any provider key, Codex
+     * may use only that org's OpenAI key and never the instance OpenAI key.
+     */
+    async getCodexConfig(
+        organizationUuid: string | null | undefined,
+    ): Promise<ResolvedCopilotConfig> {
+        const base = this.lightdashConfig.ai.copilot;
+        const managed: ResolvedCopilotConfig = { ...base, byoProviders: [] };
+        if (!organizationUuid) return managed;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+        });
+        if (!orgKeys) return managed;
+        const overlaid = overlayOrgProviderApiKeys(base, orgKeys);
+        return {
+            ...overlaid,
+            defaultProvider: 'openai',
+            providers: {
+                ...overlaid.providers,
+                openai: orgKeys.openai ? overlaid.providers.openai : undefined,
+            },
+        };
+    }
+
+    /**
+     * Org overrides for model LISTINGS (visibility settings + which hidden
+     * models the org's own Anthropic key unlocks). Both are null unless the
+     * org has at least one BYO key, so deleting the key leaves stored
+     * visibility settings inert.
+     */
+    async getOrgModelOverrides(
+        organizationUuid: string | null | undefined,
+    ): Promise<OrgModelOverrides> {
+        if (!organizationUuid) return NO_ORG_MODEL_OVERRIDES;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+            onUnreadable: 'tolerate-unreadable',
+        });
+        if (!orgKeys) return NO_ORG_MODEL_OVERRIDES;
+        return this.buildOrgModelOverrides(organizationUuid, orgKeys);
+    }
+
+    private async buildOrgModelOverrides(
+        organizationUuid: string,
+        orgKeys: AiOrgProviderApiKeys,
+    ): Promise<OrgModelOverrides> {
+        const settings =
+            await this.aiOrganizationSettingsModel.findByOrganizationUuid(
+                organizationUuid,
+            );
+        const keyAccessibleModelIds = orgKeys.anthropic
+            ? {
+                  anthropic: hasAnthropicByoGatewayConflict(
+                      this.lightdashConfig.ai.copilot,
+                      orgKeys,
+                  )
+                      ? null
+                      : await this.aiModelCatalog.getAccessibleModelIds(
+                            'anthropic',
+                            orgKeys.anthropic,
+                            orgCatalogOptions(orgKeys, 'anthropic'),
+                        ),
+              }
+            : null;
+        return {
+            modelVisibility: resolveEffectiveModelVisibility(
+                orgKeys,
+                settings?.modelVisibility ?? null,
+            ),
+            keyAccessibleModelIds,
+        };
+    }
+
+    /**
+     * The copilot config that serves a prompt together with the model
+     * catalogue the org may pick from, resolving the org's provider keys once.
+     * Fails closed like `getCopilotConfig`.
+     */
+    async getOrgModelCatalogue(
+        scope: AiConfigScope,
+    ): Promise<OrgModelCatalogue> {
+        return this.resolveOrgModelCatalogue(scope, 'fail-closed');
+    }
+
+    /** Display-only counterpart, see `getCopilotConfigForDisplay`. */
+    async getOrgModelCatalogueForDisplay(
+        organizationUuid: string | null | undefined,
+    ): Promise<OrgModelCatalogue> {
+        return this.resolveOrgModelCatalogue(
+            { organizationUuid, projectUuid: null, credentialUuid: null },
+            'tolerate-unreadable',
+        );
+    }
+
+    private async resolveOrgModelCatalogue(
+        { organizationUuid, projectUuid, credentialUuid }: AiConfigScope,
+        onUnreadable: 'fail-closed' | 'tolerate-unreadable',
+    ): Promise<OrgModelCatalogue> {
+        const base = this.lightdashConfig.ai.copilot;
+        const orgKeys = organizationUuid
+            ? await this.resolveOrgProviderKeys(organizationUuid, {
+                  projectUuid,
+                  credentialUuid,
+                  onUnreadable,
+              })
+            : null;
+        const resolved =
+            organizationUuid && orgKeys
+                ? {
+                      copilotConfig: overlayOrgProviderApiKeys(base, orgKeys),
+                      overrides: await this.buildOrgModelOverrides(
+                          organizationUuid,
+                          orgKeys,
+                      ),
+                  }
+                : {
+                      copilotConfig: { ...base, byoProviders: [] },
+                      overrides: NO_ORG_MODEL_OVERRIDES,
+                  };
+        return {
+            ...resolved,
+            catalogue: getOrgModelCatalogue(
+                getAvailableModels(resolved.copilotConfig),
+                resolved.overrides,
+            ),
+        };
+    }
+
+    /**
+     * Effective model visibility for a *submitted* payload — merges the implicit
+     * auto-hide (Anthropic-only key ⇒ OpenAI hidden) under the submission, the
+     * same way getOrgModelOverrides does for stored settings. Used to validate a
+     * save against what the selector will actually show, so an admin can't hide
+     * every model by disabling the one provider whose toggle isn't locked.
+     */
+    async resolveEffectiveModelVisibilityForOrg(
+        organizationUuid: string,
+        submitted: AiOrgModelVisibility | null,
+    ): Promise<AiOrgModelVisibility | null> {
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+            onUnreadable: 'tolerate-unreadable',
+        });
+        if (!orgKeys) return submitted;
+        return resolveEffectiveModelVisibility(orgKeys, submitted);
+    }
+
+    /**
+     * Org-admin visibility settings for Data App Claude models (opus/sonnet/
+     * haiku). Gated the same way as getOrgModelOverrides: null unless the org
+     * brings its own Anthropic key, so removing the key
+     * leaves stored settings inert rather than restricting models on the
+     * instance's own key. Anthropic specifically — getClaudeCodeConfig only
+     * swaps in an org key for Anthropic, since the Claude CLI speaks no other
+     * BYO provider.
+     */
+    async getDataAppModelVisibility(
+        organizationUuid: string | null | undefined,
+    ): Promise<DataAppModelVisibility | null> {
+        if (!organizationUuid) return null;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+            onUnreadable: 'tolerate-unreadable',
+        });
+        if (!orgKeys?.anthropic) return null;
+        const settings =
+            await this.aiOrganizationSettingsModel.findByOrganizationUuid(
+                organizationUuid,
+            );
+        return settings?.dataAppModelVisibility ?? null;
+    }
+
+    /**
+     * The model ids a provider API key can access (cached in the catalog).
+     * Null on any failure so callers fail closed.
+     */
+    async getAccessibleModelIds(
+        provider: ByoAiProvider,
+        apiKey: string,
+        options?: {
+            baseUrl?: string;
+            availableModels?: string[];
+            customHeaders?: Record<string, string>;
+        },
+    ): Promise<string[] | null> {
+        if (options?.baseUrl && options.availableModels?.length) {
+            return options.availableModels;
+        }
+        return this.aiModelCatalog.getAccessibleModelIds(provider, apiKey, {
+            baseUrl: options?.baseUrl,
+            headers: options?.customHeaders,
+        });
+    }
+
+    /**
+     * A fast/lightweight-task model for the given (already overlaid) config,
+     * BYO-key-aware: on a BYO Anthropic key it picks a fast model the key can
+     * actually serve (falling back to an accessible preset like opus 4.8 rather
+     * than erroring on haiku). Auxiliary AI (titles, suggestions, compaction)
+     * uses this so it runs on the org's own key without the fast model breaking.
+     */
+    async resolveFastModel(
+        config: ResolvedCopilotConfig,
+        options?: { enableReasoning?: boolean },
+    ) {
+        const { anthropic } = config.providers;
+        const anthropicAllowed =
+            config.byoProviders.length === 0 ||
+            config.byoProviders.includes('anthropic');
+        const accessibleModelIds =
+            anthropic?.apiKey && anthropicAllowed
+                ? await this.getAccessibleModelIds(
+                      'anthropic',
+                      anthropic.apiKey,
+                      {
+                          baseUrl: anthropic.baseUrl,
+                          availableModels: anthropic.availableModels,
+                          customHeaders: anthropic.customHeaders,
+                      },
+                  )
+                : null;
+        return getFastModelForAccessibleKey(
+            config,
+            accessibleModelIds,
+            options,
+        );
+    }
+
+    /**
+     * True when the org, or the project's pinned credential, brings any of its
+     * own provider keys. Instance-only AI such as external decisions is skipped
+     * for these orgs: BYOK content never leaves the org's chosen provider.
+     */
+    async isOrgOnOwnProviderKeys(
+        organizationUuid: string | null | undefined,
+        projectUuid: string | null,
+    ): Promise<boolean> {
+        if (!organizationUuid) return false;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid,
+        });
+        return BYO_AI_PROVIDERS.some((provider) => orgKeys?.[provider]);
+    }
+
+    /**
+     * The instance decision client for an organization, or undefined when
+     * decisions must not run for it: no instance key, or the org brings its
+     * own provider keys. The one gate every decision call site goes through.
+     */
+    async getDecisionClient(
+        organizationUuid: string | null | undefined,
+        projectUuid: string | null,
+    ): Promise<AiDecisionClient | undefined> {
+        const client = resolveAiDecisionClient(
+            this.lightdashConfig.ai?.decisions,
+        );
+        if (!client) return undefined;
+        if (await this.isOrgOnOwnProviderKeys(organizationUuid, projectUuid)) {
+            return undefined;
+        }
+        return client;
+    }
+
+    /**
+     * True when the org, or the project's pinned credential, routes AI through
+     * its own Bedrock config. Auxiliary AI that can only run on the instance
+     * provider is skipped for these orgs: the point of choosing a Bedrock
+     * region is that content does not leave it. `projectUuid` is required for
+     * the same reason as in `AiConfigScope`: a credential can serve a project
+     * without being the organization default, so a caller must state that it
+     * has no project rather than silently checking only the org default.
+     */
+    async isOrgBedrockRouted(
+        organizationUuid: string | null | undefined,
+        projectUuid: string | null,
+    ): Promise<boolean> {
+        if (!organizationUuid) return false;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid,
+        });
+        return Boolean(orgKeys?.bedrock);
+    }
+
+    /**
+     * Whether review turns may run for an org while honoring BYO isolation.
+     * Reviews run on a fast Anthropic model, so an org with its own key can only
+     * run them if that key can serve it — never by falling back to the instance
+     * provider.
+     */
+    async getReviewJudgeAvailability(
+        organizationUuid: string | null | undefined,
+    ): Promise<ReviewJudgeAvailability> {
+        const none: ReviewJudgeAvailability = {
+            hasActiveByoKey: false,
+            canJudgeOnByoKey: false,
+            byoJudgeProvider: null,
+        };
+        if (!organizationUuid) return none;
+        const orgKeys = await this.resolveOrgProviderKeys(organizationUuid, {
+            projectUuid: null,
+            onUnreadable: 'tolerate-unreadable',
+        });
+        if (!orgKeys) return none;
+        const hasActiveByoKey = BYO_AI_PROVIDERS.some(
+            (provider) => orgKeys[provider],
+        );
+        // A Bedrock org judges on its own Bedrock config: falling back to the
+        // instance provider would send review content out of its region.
+        if (orgKeys.bedrock) {
+            return {
+                hasActiveByoKey,
+                canJudgeOnByoKey: true,
+                byoJudgeProvider: 'bedrock',
+            };
+        }
+        if (!orgKeys.anthropic) {
+            return {
+                hasActiveByoKey,
+                canJudgeOnByoKey: false,
+                byoJudgeProvider: null,
+            };
+        }
+        if (
+            hasAnthropicByoGatewayConflict(
+                this.lightdashConfig.ai.copilot,
+                orgKeys,
+            )
+        ) {
+            return {
+                hasActiveByoKey,
+                canJudgeOnByoKey: false,
+                byoJudgeProvider: null,
+            };
+        }
+        const modelIds = await this.aiModelCatalog.getAccessibleModelIds(
+            'anthropic',
+            orgKeys.anthropic,
+            orgCatalogOptions(orgKeys, 'anthropic'),
+        );
+        const canJudgeOnByoKey = modelIds
+            ? keyGrantsModel(modelIds, REVIEW_JUDGE_ANTHROPIC_MODEL)
+            : false;
+        return {
+            hasActiveByoKey,
+            canJudgeOnByoKey,
+            byoJudgeProvider: canJudgeOnByoKey ? 'anthropic' : null,
+        };
+    }
+}

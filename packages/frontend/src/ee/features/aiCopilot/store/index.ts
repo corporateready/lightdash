@@ -1,15 +1,21 @@
 import { configureStore } from '@reduxjs/toolkit';
 import { aiAgentLauncherSlice } from './aiAgentLauncherSlice';
+import { aiAgentThreadElementRefsSlice } from './aiAgentThreadElementRefsSlice';
 import { aiAgentThreadModeSlice } from './aiAgentThreadModeSlice';
 import { aiAgentThreadStreamSlice } from './aiAgentThreadStreamSlice';
 import { aiArtifactSlice } from './aiArtifactSlice';
+import { buildWatchesSlice } from './buildWatchesSlice';
+import { createIssueSlice } from './createIssueSlice';
 
 export const store = configureStore({
     reducer: {
         aiAgentThreadStream: aiAgentThreadStreamSlice.reducer,
         aiAgentThreadMode: aiAgentThreadModeSlice.reducer,
+        aiAgentThreadElementRefs: aiAgentThreadElementRefsSlice.reducer,
         aiArtifact: aiArtifactSlice.reducer,
         aiAgentLauncher: aiAgentLauncherSlice.reducer,
+        createIssue: createIssueSlice.reducer,
+        buildWatches: buildWatchesSlice.reducer,
     },
 });
 

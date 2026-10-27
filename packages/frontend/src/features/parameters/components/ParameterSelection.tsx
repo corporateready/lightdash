@@ -13,11 +13,12 @@ import {
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconInfoCircle, IconPin, IconPinFilled } from '@tabler/icons-react';
 import { type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
 import { ParameterInput } from './ParameterInput';
+import { ShadowedReservedNameWarning } from './ShadowedReservedNameWarning';
 
 type ParameterSelectionProps = {
     parameters?: Record<string, LightdashProjectParameter>;
@@ -36,6 +37,7 @@ type ParameterSelectionProps = {
     isEditMode?: boolean;
     pinnedParameters?: string[];
     onParameterPin?: (paramKey: string) => void;
+    shadowedReservedNames?: string[];
 };
 
 export const ParameterSelection: FC<ParameterSelectionProps> = ({
@@ -54,6 +56,7 @@ export const ParameterSelection: FC<ParameterSelectionProps> = ({
     isEditMode = false,
     pinnedParameters = [],
     onParameterPin,
+    shadowedReservedNames = [],
 }) => {
     const parameterKeys = parameters ? Object.keys(parameters) : [];
     const selectedParametersCount = Object.values(parameterValues).filter(
@@ -95,16 +98,19 @@ export const ParameterSelection: FC<ParameterSelectionProps> = ({
                         );
                     }
                     return (
-                        <Box key={paramKey}>
+                        <Box key={paramKey} miw={0}>
                             <Group align="center" gap="xs" mb="xxs">
                                 <Group align="center" gap="xs">
-                                    <Text size={size} fw={500}>
+                                    <Text
+                                        size={size}
+                                        fw={500}
+                                        style={{ overflowWrap: 'anywhere' }}
+                                    >
                                         {parameters?.[paramKey]?.label ||
                                             paramKey}
                                     </Text>
                                     {parameters?.[paramKey]?.description && (
                                         <Tooltip
-                                            withinPortal
                                             position="top"
                                             maw={350}
                                             label={
@@ -114,10 +120,17 @@ export const ParameterSelection: FC<ParameterSelectionProps> = ({
                                         >
                                             <MantineIcon
                                                 icon={IconInfoCircle}
-                                                color="ldGray.6"
+                                                color="dimmed"
                                                 size="sm"
                                             />
                                         </Tooltip>
+                                    )}
+                                    {shadowedReservedNames.includes(
+                                        paramKey,
+                                    ) && (
+                                        <ShadowedReservedNameWarning
+                                            paramKey={paramKey}
+                                        />
                                     )}
                                 </Group>
                                 {isEditMode && onParameterPin && (

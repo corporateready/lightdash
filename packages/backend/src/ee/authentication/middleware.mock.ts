@@ -1,5 +1,6 @@
 import { Ability } from '@casl/ability';
 import {
+    CommercialFeatureFlags,
     OrganizationMemberRole,
     PossibleAbilities,
     ServiceAccount,
@@ -57,13 +58,55 @@ export const mockRequest = {
         path: '/Users',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateScim: jest.fn().mockResolvedValue(mockServiceAccount),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateScim: vi.fn().mockResolvedValue({
+                result: 'authenticated',
+                serviceAccount: mockServiceAccount,
+            }),
         }),
-        getUserService: jest.fn().mockReturnValue({
-            getSessionUserForServiceAccount: jest
+        getUserService: vi.fn().mockReturnValue({
+            getSessionUserForServiceAccount: vi
                 .fn()
                 .mockResolvedValue(mockSaSessionUser),
+        }),
+        getFeatureFlagService: vi.fn().mockReturnValue({
+            get: vi.fn().mockResolvedValue({
+                id: CommercialFeatureFlags.Scim,
+                enabled: true,
+            }),
+        }),
+    },
+} as unknown as express.Request;
+
+export const mockRequestWithScimDisabled = {
+    ...mockRequest,
+    services: {
+        ...mockRequest.services,
+        getUserService: vi.fn().mockReturnValue({
+            getSessionUserForServiceAccount: vi
+                .fn()
+                .mockResolvedValue(mockSaSessionUser),
+        }),
+        getFeatureFlagService: vi.fn().mockReturnValue({
+            get: vi.fn().mockResolvedValue({
+                id: CommercialFeatureFlags.Scim,
+                enabled: false,
+            }),
+        }),
+    },
+} as unknown as express.Request;
+
+export const mockRequestWithExpiredToken = {
+    ...mockRequest,
+    headers: {
+        authorization: 'Bearer scim_expired_token',
+    },
+    services: {
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateScim: vi.fn().mockResolvedValue({
+                result: 'expired',
+                serviceAccount: mockServiceAccount,
+            }),
         }),
     },
 } as unknown as express.Request;
@@ -74,8 +117,8 @@ export const mockRequestWithInvalidToken = {
         authorization: 'Bearer invalid_token',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateScim: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateScim: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;
@@ -100,11 +143,20 @@ export const mockRequestWithMalformedToken = {
 } as unknown as express.Request;
 
 export const mockResponse = {
-    status: jest.fn().mockReturnThis(),
-    json: jest.fn(),
+    status: vi.fn().mockReturnThis(),
+    json: vi.fn(),
 } as unknown as express.Response;
 
-export const mockNext = jest.fn();
+type MockNextError = {
+    status?: string;
+    message?: string;
+    detail?: string;
+};
+
+export const mockNext = vi.fn<
+    (error: MockNextError) => void
+>() as import('vitest').Mock<(error: MockNextError) => void> &
+    express.NextFunction;
 
 export class MockScimService extends BaseService {
     // eslint-disable-next-line class-methods-use-this

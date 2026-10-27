@@ -1,0 +1,623 @@
+import {
+    buildWarehouseColumnTotals,
+    buildWarehouseRowTotals,
+    getSubtotalKey,
+    isApiError,
+    QueryHistoryStatus,
+    type ApiError,
+    type ApiExecuteAsyncMetricQueryResults,
+    type ApiGetAsyncQueryResults,
+    type CalculateTotalKind,
+    type GroupedPivotRowSubtotals,
+    type PivotRowTotalsByIndex,
+    type RawResultRow,
+    type ResultRow,
+} from '@lightdash/common';
+import { useQuery } from '@tanstack/react-query';
+import { type LightdashApi } from '../api';
+import useEmbed from '../ee/providers/Embed/useEmbed';
+import { pollForResults } from '../features/queryRunner/executeQuery';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
+import { useProject } from './useProject';
+
+// Reads every page of a ready query from the paginated results endpoint.
+const fetchAllResultRows = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    queryUuid: string,
+): Promise<ResultRow[]> => {
+    const rows: ResultRow[] = [];
+    let page = 1;
+    let totalPageCount = 1;
+    do {
+        const result = await lightdashApi<ApiGetAsyncQueryResults>({
+            url: `/projects/${projectUuid}/query/${queryUuid}?page=${page}`,
+            version: 'v2',
+            method: 'GET',
+            body: undefined,
+        });
+        if (result.status !== QueryHistoryStatus.READY) {
+            throw new Error('Unexpected query status while reading results');
+        }
+        rows.push(...result.rows);
+        totalPageCount = result.totalPageCount ?? 1;
+        page += 1;
+    } while (page <= totalPageCount);
+    return rows;
+};
+
+type StartCalculateTotalArgs = {
+    projectUuid: string;
+    sourceQueryUuid: string;
+    kind: CalculateTotalKind;
+    subtotalDimensions?: string[];
+    invalidateCache?: boolean;
+};
+
+const getMockTotalError = (kind: CalculateTotalKind) => {
+    if (!import.meta.env.DEV) return undefined;
+
+    const mockedKinds = new URLSearchParams(window.location.search)
+        .get('mockTotalErrors')
+        ?.split(',');
+
+    return mockedKinds?.includes('all') || mockedKinds?.includes(kind)
+        ? new Error(`Mock ${kind} calculation error`)
+        : undefined;
+};
+
+// The backend refuses to build a totals query with nothing to select (for
+// example a dimension-only table, or one whose only metrics are
+// period-over-period). That is "no totals", not a failure to surface.
+export const isTotalsNotSupportedError = (error: unknown): boolean =>
+    isApiError(error) && error.error.name === 'NotSupportedError';
+
+const requestCalculateTotalQuery = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        sourceQueryUuid,
+        kind,
+        subtotalDimensions,
+        invalidateCache,
+    }: StartCalculateTotalArgs,
+): Promise<ApiExecuteAsyncMetricQueryResults> => {
+    const mockError = getMockTotalError(kind);
+    if (mockError) return Promise.reject(mockError);
+
+    return lightdashApi<ApiExecuteAsyncMetricQueryResults>({
+        url: `/projects/${projectUuid}/query/${sourceQueryUuid}/calculate-total`,
+        version: 'v2',
+        method: 'POST',
+        body: JSON.stringify({
+            kind,
+            subtotalDimensions,
+            invalidateCache,
+        }),
+    });
+};
+
+// Resolves to null when the backend reports there is nothing to total.
+const startCalculateTotalQuery = async (
+    lightdashApi: LightdashApi,
+    args: StartCalculateTotalArgs,
+): Promise<ApiExecuteAsyncMetricQueryResults | null> => {
+    try {
+        return await requestCalculateTotalQuery(lightdashApi, args);
+    } catch (error) {
+        if (isTotalsNotSupportedError(error)) return null;
+        throw error;
+    }
+};
+
+// Single wide row of totals. Keys are pivoted SQL column names for pivoted
+// sources, plain metric field ids otherwise.
+export type AsyncTotalsMap = Record<string, number>;
+
+const fetchTotals = async (
+    lightdashApi: LightdashApi,
+    args: Omit<StartCalculateTotalArgs, 'kind'> & {
+        kind: Extract<CalculateTotalKind, 'columnTotal' | 'grandTotal'>;
+    },
+): Promise<AsyncTotalsMap> => {
+    const started = await startCalculateTotalQuery(lightdashApi, args);
+    if (!started) return {};
+
+    // Polling endpoint defaults to page=1, so the READY response already
+    // contains the single totals row — no separate stream fetch needed.
+    const query = await pollForResults(
+        lightdashApi,
+        args.projectUuid,
+        started.queryUuid,
+    );
+
+    if (
+        query.status === QueryHistoryStatus.ERROR ||
+        query.status === QueryHistoryStatus.EXPIRED
+    ) {
+        throw new Error(query.error || 'Error computing totals');
+    }
+    if (query.status !== QueryHistoryStatus.READY) {
+        throw new Error('Unexpected query status while polling totals');
+    }
+
+    // Polling endpoint defaults to page=1, so the READY response already
+    // contains the single totals row — no separate stream fetch needed.
+    return buildWarehouseColumnTotals(query.rows);
+};
+
+/**
+ * Resolves the `column_totals` project default for callers with no explicit
+ * "Show column totals" toggle (e.g. the explorer results table). Returns false
+ * while loading so the totals query never fires before the default is known;
+ * embed mode skips the app-only project endpoint and keeps default behavior.
+ */
+export const useColumnTotalsEnabledByDefault = (
+    projectUuid: string | undefined,
+): boolean => {
+    const { embedToken } = useEmbed();
+    const projectQuery = useProject(projectUuid, {
+        enabled: !embedToken && !!projectUuid,
+        // Errors fall back to totals enabled, so don't surface them
+        onError: () => {},
+    });
+    if (embedToken) return true;
+    if (projectQuery.isInitialLoading) return false;
+    return projectQuery.data?.projectDefaults?.column_totals !== false;
+};
+
+const useAsyncCalculateSingleRowTotal = ({
+    projectUuid,
+    sourceQueryUuid,
+    kind,
+    enabled,
+    invalidateCache,
+}: {
+    projectUuid: string | undefined;
+    sourceQueryUuid: string | undefined;
+    kind: Extract<CalculateTotalKind, 'columnTotal' | 'grandTotal'>;
+    enabled: boolean;
+    invalidateCache?: boolean;
+}) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<AsyncTotalsMap, ApiError>({
+        queryKey: [
+            'calculate_async_total',
+            kind,
+            projectUuid,
+            sourceQueryUuid,
+            invalidateCache,
+        ],
+        queryFn: () => {
+            if (!projectUuid || !sourceQueryUuid) {
+                return Promise.reject(
+                    new Error(
+                        'Missing projectUuid or sourceQueryUuid for async totals',
+                    ),
+                );
+            }
+            return fetchTotals(lightdashApi, {
+                projectUuid,
+                sourceQueryUuid,
+                kind,
+                invalidateCache,
+            });
+        },
+        enabled: enabled && !!projectUuid && !!sourceQueryUuid,
+        retry: false,
+    });
+};
+
+export const useAsyncCalculateTotal = (
+    args: Omit<Parameters<typeof useAsyncCalculateSingleRowTotal>[0], 'kind'>,
+) => useAsyncCalculateSingleRowTotal({ ...args, kind: 'columnTotal' });
+
+export const useAsyncCalculateGrandTotal = (
+    args: Omit<Parameters<typeof useAsyncCalculateSingleRowTotal>[0], 'kind'>,
+) => useAsyncCalculateSingleRowTotal({ ...args, kind: 'grandTotal' });
+
+// Row totals re-run the source query collapsed across the pivot columns, so the
+// result is one flat row per index-value combination (index dims + metrics),
+// not the single wide row column totals return. We stream every row and key it
+// by the index-dim values so the pivot worker can match each rendered row.
+const fetchRowTotals = async (
+    lightdashApi: LightdashApi,
+    args: Omit<StartCalculateTotalArgs, 'kind'> & {
+        indexFieldIds: string[];
+    },
+): Promise<PivotRowTotalsByIndex> => {
+    const { projectUuid, sourceQueryUuid, indexFieldIds, invalidateCache } =
+        args;
+    const started = await startCalculateTotalQuery(lightdashApi, {
+        projectUuid,
+        sourceQueryUuid,
+        kind: 'rowTotal',
+        invalidateCache,
+    });
+    if (!started) return {};
+    const { queryUuid } = started;
+
+    const query = await pollForResults(lightdashApi, projectUuid, queryUuid);
+
+    if (
+        query.status === QueryHistoryStatus.ERROR ||
+        query.status === QueryHistoryStatus.EXPIRED
+    ) {
+        throw new Error(query.error || 'Error computing totals');
+    }
+    if (query.status !== QueryHistoryStatus.READY) {
+        throw new Error('Unexpected query status while polling totals');
+    }
+
+    const rows = await fetchAllResultRows(lightdashApi, projectUuid, queryUuid);
+
+    return buildWarehouseRowTotals(rows, indexFieldIds);
+};
+
+export const useAsyncCalculateRowTotal = ({
+    projectUuid,
+    sourceQueryUuid,
+    indexFieldIds,
+    enabled,
+    invalidateCache,
+}: {
+    projectUuid: string | undefined;
+    sourceQueryUuid: string | undefined;
+    indexFieldIds: string[];
+    enabled: boolean;
+    invalidateCache?: boolean;
+}) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<PivotRowTotalsByIndex, ApiError>({
+        queryKey: [
+            'calculate_async_row_total',
+            projectUuid,
+            sourceQueryUuid,
+            indexFieldIds,
+            invalidateCache,
+        ],
+        queryFn: () => {
+            if (!projectUuid || !sourceQueryUuid) {
+                return Promise.reject(
+                    new Error(
+                        'Missing projectUuid or sourceQueryUuid for async row totals',
+                    ),
+                );
+            }
+            return fetchRowTotals(lightdashApi, {
+                projectUuid,
+                sourceQueryUuid,
+                indexFieldIds,
+                invalidateCache,
+            });
+        },
+        enabled: enabled && !!projectUuid && !!sourceQueryUuid,
+        retry: false,
+    });
+};
+
+// Map keyed by `getSubtotalKey(dims)`; each entry is one flat row per
+// subtotal-group × pivot-value, with dimension raw values and metric numbers.
+export type GroupedSubtotals = Record<string, Record<string, number>[]>;
+
+// Mirrors the backend SubtotalsCalculator.prepareDimensionGroups: order the
+// non-pivot dimensions by columnOrder, drop the most-detailed (last) one, and
+// build the nesting prefixes that each get their own subtotal level.
+const getSubtotalDimensionGroups = (
+    dimensions: string[],
+    columnOrder: string[],
+    pivotDimensions: string[],
+): string[][] => {
+    const ordered = [...dimensions].sort((a, b) => {
+        const aIndex = columnOrder.indexOf(a);
+        const bIndex = columnOrder.indexOf(b);
+        if (aIndex === -1) return 1;
+        if (bIndex === -1) return -1;
+        return aIndex - bIndex;
+    });
+    const withoutPivot = ordered.filter((d) => !pivotDimensions.includes(d));
+    const toSubtotal = withoutPivot.slice(0, -1);
+    return toSubtotal.map((_, index) => toSubtotal.slice(0, index + 1));
+};
+
+const buildGroupedRowSubtotals = (
+    entries: Array<[dimensions: string[], rows: ResultRow[]]>,
+): GroupedPivotRowSubtotals =>
+    Object.fromEntries(
+        entries.map(([dimensions, rows]) => [
+            getSubtotalKey(dimensions),
+            buildWarehouseRowTotals(rows, dimensions),
+        ]),
+    );
+
+const fetchRowSubtotals = async (
+    lightdashApi: LightdashApi,
+    args: {
+        projectUuid: string;
+        sourceQueryUuid: string;
+        dimensionGroups: string[][];
+        invalidateCache?: boolean;
+    },
+): Promise<GroupedPivotRowSubtotals> => {
+    const entries = await Promise.all(
+        args.dimensionGroups.map(
+            async (
+                group,
+            ): Promise<[dimensions: string[], rows: ResultRow[]]> => {
+                const started = await startCalculateTotalQuery(lightdashApi, {
+                    projectUuid: args.projectUuid,
+                    sourceQueryUuid: args.sourceQueryUuid,
+                    kind: 'rowSubtotal',
+                    subtotalDimensions: group,
+                    invalidateCache: args.invalidateCache,
+                });
+                if (!started) return [group, []];
+                const { queryUuid } = started;
+
+                const query = await pollForResults(
+                    lightdashApi,
+                    args.projectUuid,
+                    queryUuid,
+                );
+                if (
+                    query.status === QueryHistoryStatus.ERROR ||
+                    query.status === QueryHistoryStatus.EXPIRED
+                ) {
+                    throw new Error(
+                        query.error || 'Error computing row subtotals',
+                    );
+                }
+                if (query.status !== QueryHistoryStatus.READY) {
+                    throw new Error(
+                        'Unexpected query status while polling row subtotals',
+                    );
+                }
+
+                const rows = await fetchAllResultRows(
+                    lightdashApi,
+                    args.projectUuid,
+                    queryUuid,
+                );
+                return [group, rows];
+            },
+        ),
+    );
+
+    return buildGroupedRowSubtotals(entries);
+};
+
+export const useAsyncCalculateRowSubtotals = ({
+    projectUuid,
+    sourceQueryUuid,
+    dimensions,
+    columnOrder,
+    pivotDimensions,
+    enabled,
+    invalidateCache,
+}: {
+    projectUuid: string | undefined;
+    sourceQueryUuid: string | undefined;
+    dimensions: string[] | undefined;
+    columnOrder: string[];
+    pivotDimensions: string[] | undefined;
+    enabled: boolean;
+    invalidateCache?: boolean;
+}) => {
+    const lightdashApi = useLightdashApi();
+    const dimensionGroups = getSubtotalDimensionGroups(
+        dimensions ?? [],
+        columnOrder,
+        pivotDimensions ?? [],
+    );
+
+    return useQuery<GroupedPivotRowSubtotals, ApiError>({
+        queryKey: [
+            'calculate_async_row_subtotals',
+            projectUuid,
+            sourceQueryUuid,
+            dimensionGroups,
+            invalidateCache,
+        ],
+        queryFn: () => {
+            if (!projectUuid || !sourceQueryUuid) {
+                return Promise.reject(
+                    new Error(
+                        'Missing projectUuid or sourceQueryUuid for async row subtotals',
+                    ),
+                );
+            }
+            return fetchRowSubtotals(lightdashApi, {
+                projectUuid,
+                sourceQueryUuid,
+                dimensionGroups,
+                invalidateCache,
+            });
+        },
+        enabled:
+            enabled &&
+            !!projectUuid &&
+            !!sourceQueryUuid &&
+            dimensionGroups.length > 0,
+        retry: false,
+    });
+};
+
+// One async calculate-total call per nesting level (kind 'columnSubtotal'),
+// run in parallel. Each level's flat result is keyed by getSubtotalKey so the
+// pivot worker / treemap can match each rendered group. Dimension keys keep
+// their raw value (for === matching); metric keys are coerced to numbers.
+const fetchSubtotals = async (
+    lightdashApi: LightdashApi,
+    args: {
+        projectUuid: string;
+        sourceQueryUuid: string;
+        dimensionGroups: string[][];
+        pivotDimensions: string[];
+        invalidateCache?: boolean;
+    },
+): Promise<GroupedSubtotals> => {
+    const { projectUuid, sourceQueryUuid, dimensionGroups, pivotDimensions } =
+        args;
+    // Dimension columns keep their raw value (for === matching); everything
+    // else is a metric and is coerced to a number.
+    const dimensionKeys = new Set<string>([
+        ...pivotDimensions,
+        ...dimensionGroups.flat(),
+    ]);
+
+    const entries = await Promise.all(
+        dimensionGroups.map(
+            async (group): Promise<[string, RawResultRow[]]> => {
+                const started = await startCalculateTotalQuery(lightdashApi, {
+                    projectUuid,
+                    sourceQueryUuid,
+                    kind: 'columnSubtotal',
+                    subtotalDimensions: group,
+                    invalidateCache: args.invalidateCache,
+                });
+                if (!started) return [getSubtotalKey(group), []];
+                const { queryUuid } = started;
+
+                const query = await pollForResults(
+                    lightdashApi,
+                    projectUuid,
+                    queryUuid,
+                );
+                if (
+                    query.status === QueryHistoryStatus.ERROR ||
+                    query.status === QueryHistoryStatus.EXPIRED
+                ) {
+                    throw new Error(query.error || 'Error computing subtotals');
+                }
+                if (query.status !== QueryHistoryStatus.READY) {
+                    throw new Error(
+                        'Unexpected query status while polling subtotals',
+                    );
+                }
+
+                const rows = await fetchAllResultRows(
+                    lightdashApi,
+                    projectUuid,
+                    queryUuid,
+                );
+
+                const records = rows.map((row) => {
+                    const record: Record<string, unknown> = {};
+                    for (const [fieldId, cell] of Object.entries(row)) {
+                        const raw = cell?.value.raw;
+                        if (dimensionKeys.has(fieldId)) {
+                            record[fieldId] = raw;
+                        } else {
+                            const numeric = Number(raw);
+                            record[fieldId] = Number.isFinite(numeric)
+                                ? numeric
+                                : raw;
+                        }
+                    }
+                    return record as RawResultRow;
+                });
+
+                return [getSubtotalKey(group), records];
+            },
+        ),
+    );
+
+    return Object.fromEntries(entries) as GroupedSubtotals;
+};
+
+// One subtotal level as formatted rows: a row per group, times series value
+// when the source query is pivoted. A refusal rejects with the backend's reason.
+export const fetchColumnSubtotalRows = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        sourceQueryUuid,
+        subtotalDimensions,
+    }: {
+        projectUuid: string;
+        sourceQueryUuid: string;
+        subtotalDimensions: string[];
+    },
+): Promise<ResultRow[]> => {
+    const started = await requestCalculateTotalQuery(lightdashApi, {
+        projectUuid,
+        sourceQueryUuid,
+        kind: 'columnSubtotal',
+        subtotalDimensions,
+    });
+
+    const query = await pollForResults(
+        lightdashApi,
+        projectUuid,
+        started.queryUuid,
+    );
+    if (
+        query.status === QueryHistoryStatus.ERROR ||
+        query.status === QueryHistoryStatus.EXPIRED
+    ) {
+        throw new Error(query.error || 'Error computing subtotals');
+    }
+    if (query.status !== QueryHistoryStatus.READY) {
+        throw new Error('Unexpected query status while polling subtotals');
+    }
+
+    return fetchAllResultRows(lightdashApi, projectUuid, started.queryUuid);
+};
+
+export const useAsyncCalculateSubtotals = ({
+    projectUuid,
+    sourceQueryUuid,
+    dimensions,
+    columnOrder,
+    pivotDimensions,
+    enabled,
+    invalidateCache,
+}: {
+    projectUuid: string | undefined;
+    sourceQueryUuid: string | undefined;
+    dimensions: string[] | undefined;
+    columnOrder: string[];
+    pivotDimensions: string[] | undefined;
+    enabled: boolean;
+    invalidateCache?: boolean;
+}) => {
+    const lightdashApi = useLightdashApi();
+    const dimensionGroups = getSubtotalDimensionGroups(
+        dimensions ?? [],
+        columnOrder,
+        pivotDimensions ?? [],
+    );
+
+    return useQuery<GroupedSubtotals, ApiError>({
+        queryKey: [
+            'calculate_async_subtotals',
+            projectUuid,
+            sourceQueryUuid,
+            dimensionGroups,
+            pivotDimensions,
+            invalidateCache,
+        ],
+        queryFn: () => {
+            if (!projectUuid || !sourceQueryUuid) {
+                return Promise.reject(
+                    new Error(
+                        'Missing projectUuid or sourceQueryUuid for async subtotals',
+                    ),
+                );
+            }
+            return fetchSubtotals(lightdashApi, {
+                projectUuid,
+                sourceQueryUuid,
+                dimensionGroups,
+                pivotDimensions: pivotDimensions ?? [],
+                invalidateCache,
+            });
+        },
+        enabled:
+            enabled &&
+            !!projectUuid &&
+            !!sourceQueryUuid &&
+            dimensionGroups.length > 0,
+        retry: false,
+    });
+};

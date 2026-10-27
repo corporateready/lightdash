@@ -26,6 +26,8 @@ export const user: SessionUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     userId: 0,
@@ -34,6 +36,10 @@ export const user: SessionUser = {
         {
             subject: 'Dashboard',
             action: ['view', 'update', 'delete', 'create'],
+        },
+        {
+            subject: 'SavedChart',
+            action: ['view'],
         },
         {
             subject: 'Project',
@@ -98,6 +104,7 @@ export const dashboard: Dashboard = {
     name: 'name',
     slug: 'name',
     verification: null,
+    owner: null,
 
     dashboardVersionId: 1,
     versionUuid: 'dashboard-version-uuid',
@@ -179,6 +186,7 @@ export const dashboardsDetails: DashboardBasicDetails[] = [
         organizationUuid: user.organizationUuid!,
         projectUuid: dashboard.projectUuid,
         uuid: dashboard.uuid,
+        slug: dashboard.slug,
         name: dashboard.name,
         description: dashboard.description,
         updatedAt: dashboard.updatedAt,

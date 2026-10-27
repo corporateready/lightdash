@@ -3,44 +3,102 @@ import {
     AgentToolOutput,
     AiAgentDocumentContent,
     AiAgentDocumentSummary,
+    AiAgentJudgeProjectContextEntry,
+    AiAgentPromptLoadout,
     AiArtifact,
     AiMetricQueryWithFilters,
+    AiPromptSteer,
     AiWebAppPrompt,
     AllChartsSearchResult,
     AnyType,
+    ApiExecuteAsyncMetricQueryResults,
     CacheMetadata,
     CatalogField,
     ChartAsCode,
-    CreateChangeParams,
+    ComposerNodeColumn,
+    CreateSchedulerAndTargetsWithoutIds,
+    CustomChartType,
+    CustomChartTypeLibrary,
     DashboardAsCode,
+    DashboardChartSummary,
     DashboardSearchResult,
+    DataAppBuildTemplate,
+    DataAppSearchResult,
+    DataAppVizSchema,
+    DbtProjectType,
     Explore,
-    ExploreCompiler,
+    ExternalConnectionAuthType,
+    FieldImpactReport,
     Filters,
     ItemsMap,
     KnexPaginateArgs,
+    McpDocumentAsCode,
+    McpDocumentEdit,
+    McpDocumentRead,
+    ParameterDefinitions,
+    ParametersValuesMap,
+    ProjectType,
+    QueryExecutionContext,
+    ReadContentType,
+    ResultColumns,
     SavedChart,
+    SchedulerAndTargets,
     SlackPrompt,
+    SourceQuery,
+    SourceQuerySubmission,
+    SqlChartAsCode,
+    ThreadComposerQueryNode,
     ToolFindContentArgs,
     ToolFindFieldsArgs,
+    ToolListContentArgs,
     UpdateSlackResponse,
     UpdateWebAppResponse,
+    WarehouseExecutionStats,
     WarehouseTablesCatalog,
+    WarehouseTypes,
+    type SqlApprovalToolName,
 } from '@lightdash/common';
 import {
     AiAgentFindContentCoverageEvent,
     AiAgentResponseStreamed,
+    AiAgentSqlApprovalDecidedEvent,
+    AiAgentStepCompletedEvent,
+    AiAgentToolCallCompletedEvent,
     AiAgentToolCallEvent,
+    AiAgentToolCallFailedEvent,
 } from '../../../../analytics/LightdashAnalytics';
 import { PostSlackFile } from '../../../../clients/Slack/SlackClient';
+import type { DbAiPromptTurnDecision } from '../../../database/entities/ai';
+import type { DataAppRead } from '../../AiAgentToolsService/dataAppRead';
+import type { DataAppBuildStatusSource } from '../../AppGenerateService/AppGenerateService';
 import { AiAgentSkill } from '../skills/types';
+import type {
+    ApproveSqlFn,
+    SqlApprovalDecisionOnCall,
+    SqlAutoApprovalSource,
+} from '../tools/sqlApprovals';
 
 type Pagination = KnexPaginateArgs & {
     totalPageCount: number;
     totalResults: number;
 };
 
+export type AiAgentRequiredFilterMetadata = {
+    fieldId: string;
+    fieldRef: string;
+    tableName: string;
+    operator: string;
+    values?: unknown[];
+    settings?: unknown;
+    required: boolean;
+};
+
 export type ListExploresFn = () => Promise<Explore[]>;
+
+// Project-level parameter definitions (the project_parameters table);
+// model-level definitions live on the explores themselves.
+export type GetProjectParameterDefinitionsFn =
+    () => Promise<ParameterDefinitions>;
 
 export type FindExploresFn = (args: {
     fieldSearchSize: number;
@@ -53,6 +111,7 @@ export type FindExploresFn = (args: {
         aiHints?: string[];
         searchRank?: number;
         joinedTables?: string[] | null;
+        requiredFilters?: AiAgentRequiredFilterMetadata[];
     }>;
     topMatchingFields?: Array<{
         name: string;
@@ -66,23 +125,206 @@ export type FindExploresFn = (args: {
     }>;
 }>;
 
+// Project-wide verified-chart usage per field, keyed `table_field::fieldType`.
+// Used to rank verified/governed fields first in grep discovery.
+export type GetVerifiedFieldUsageFn = () => Promise<Map<string, number>>;
+
+export type ListCustomChartTypesFn = () => Promise<CustomChartTypeLibrary>;
+
+export type FindCustomChartTypesFn = (
+    args: { query: string } | { slug: string },
+) => Promise<CustomChartType[]>;
+
+// Resolves a project-scoped custom chart type slug to the data it takes to
+// validate and persist an answer rendered through it. Null when the slug does
+// not resolve to a schema-bearing custom chart type in this project.
+export type ResolveCustomChartTypeFn = (slug: string) => Promise<{
+    dataAppVizUuid: string;
+    name: string;
+    dataAppVizVersion: number;
+    schema: DataAppVizSchema;
+} | null>;
+
+export type FindFieldResult = {
+    fields: CatalogField[];
+    pagination: Pagination | undefined;
+};
+
 export type FindFieldFn = (
     args: KnexPaginateArgs & {
         table: ToolFindFieldsArgs['table'];
         fieldSearchQuery: ToolFindFieldsArgs['fieldSearchQueries'][number];
         explore: Explore;
     },
-) => Promise<{
-    fields: CatalogField[];
+) => Promise<FindFieldResult>;
+
+export type FindFieldsSearchQuerySuccess = FindFieldResult & {
+    status: 'success';
+    searchQuery: string;
+};
+
+export type FindFieldsSearchQueryError = {
+    status: 'error';
+    searchQuery: string;
+    error: string;
+};
+
+export type FindFieldsSearchQueryResult =
+    | FindFieldsSearchQuerySuccess
+    | FindFieldsSearchQueryError;
+
+export type FindFieldsFn = (
+    args: KnexPaginateArgs & {
+        table: ToolFindFieldsArgs['table'];
+        fieldSearchQueries: ToolFindFieldsArgs['fieldSearchQueries'];
+        explore: Explore;
+    },
+) => Promise<FindFieldsSearchQueryResult[]>;
+
+export type SearchSemanticLayerFn = (args: {
+    searchQuery: string | null;
+    type: 'metric' | 'dimension' | null;
+    page: number;
+    pageSize: number;
+}) => Promise<{
+    fields: Array<{
+        name: string;
+        label: string;
+        tableName: string;
+        fieldType: string;
+        description?: string;
+        chartUsage?: number;
+        searchRank?: number;
+    }>;
     pagination: Pagination | undefined;
 }>;
 
+export type AnalyzeFieldImpactFn = (args: {
+    fieldId: string;
+}) => Promise<FieldImpactReport>;
+
+export type SyncDbtProjectResult = {
+    status: 'success' | 'in_progress' | 'error';
+    jobUuid: string;
+    message: string;
+};
+
+export type SyncDbtProjectFn = (args: {
+    reason: string | null;
+}) => Promise<SyncDbtProjectResult>;
+
 export type GetExploreFn = (args: { table: string }) => Promise<Explore>;
+
+export type FindContentSpaceBreadcrumb = {
+    uuid: string;
+    name: string;
+    slug: string;
+};
+
+export type FindContentSpaceMetadata = {
+    uuid: string;
+    name: string;
+    slug: string;
+    breadcrumbs: FindContentSpaceBreadcrumb[];
+};
+
+export type FindContentChartResult = AllChartsSearchResult & {
+    contentType: 'chart';
+    space: FindContentSpaceMetadata;
+};
+
+export type FindContentDashboardResult = DashboardSearchResult & {
+    contentType: 'dashboard';
+    space: FindContentSpaceMetadata;
+};
+
+export type FindContentSpaceResult = {
+    contentType: 'space';
+    uuid: string;
+    name: string;
+    slug: string;
+    search_rank: number;
+    chartCount: number;
+    dashboardCount: number;
+    childSpaceCount: number;
+    appCount: number;
+    directAccess: boolean;
+    canEdit: boolean;
+    space: FindContentSpaceMetadata;
+    verification: null;
+};
+
+export type FindContentDataAppResult = DataAppSearchResult & {
+    contentType: 'data_app';
+    space: FindContentSpaceMetadata | null;
+    verification: null;
+};
+
+export type FindContentResult =
+    | FindContentChartResult
+    | FindContentDashboardResult
+    | FindContentSpaceResult
+    | FindContentDataAppResult
+    | {
+          contentType: 'document';
+          uuid: string;
+          name: string;
+          slug: string;
+          href: string;
+          description: string | null;
+          search_rank: number;
+          space: FindContentSpaceMetadata | null;
+          verification: null;
+      };
 
 export type FindContentFn = (args: {
     searchQuery: ToolFindContentArgs['searchQueries'][number];
+    spaceSlug: ToolFindContentArgs['spaceSlug'];
+    verifiedOnly: boolean;
 }) => Promise<{
-    content: (AllChartsSearchResult | DashboardSearchResult)[];
+    content: FindContentResult[];
+}>;
+
+export type ListContentFn = (args: {
+    spaceSlug: string | null;
+    page: NonNullable<ToolListContentArgs['page']>;
+}) => Promise<{
+    spaceSlug: string | null;
+    items: Array<
+        | {
+              contentType: 'document';
+              uuid: string;
+              name: string;
+              slug: string;
+              href: string;
+          }
+        | {
+              contentType: 'chart' | 'dashboard' | 'data_app';
+              name: string;
+              slug: string;
+              href: string;
+          }
+        | {
+              contentType: 'space';
+              name: string;
+              slug: string;
+              href: string;
+              chartCount: number;
+              dashboardCount: number;
+              childSpaceCount: number;
+              appCount: number;
+              directAccess: boolean;
+              canEdit: boolean;
+          }
+    >;
+    pagination:
+        | {
+              page: number;
+              pageSize: number;
+              totalResults: number;
+              totalPageCount: number;
+          }
+        | undefined;
 }>;
 
 export type GetDashboardChartsFn = (args: {
@@ -91,7 +333,7 @@ export type GetDashboardChartsFn = (args: {
     pageSize: number;
 }) => Promise<{
     dashboardName: string;
-    charts: DashboardSearchResult['charts'];
+    charts: DashboardChartSummary[];
     pagination: {
         page: number;
         pageSize: number;
@@ -100,10 +342,96 @@ export type GetDashboardChartsFn = (args: {
     };
 }>;
 
-export type ReadContentFn = (args: {
-    slug: string;
-    type: 'dashboard' | 'chart';
-}) => Promise<
+export type DocumentContentResult = {
+    type: 'document';
+    content: McpDocumentRead;
+    uuid: string;
+    href: string;
+    versionUuid: string;
+};
+
+export type ReadContentFn = (
+    args:
+        | { slug: string; type: ReadContentType }
+        | { type: 'document'; slug: string; chartId: string | null },
+) => Promise<
+    | DocumentContentResult
+    | {
+          type: 'dashboard';
+          content: DashboardAsCode;
+          href: string;
+      }
+    | {
+          type: 'chart';
+          content: ChartAsCode;
+          href: string;
+      }
+    | {
+          type: 'sql_chart';
+          content: SqlChartAsCode;
+          href: string;
+      }
+    | {
+          type: 'data_app';
+          content: DataAppRead;
+          href: string;
+      }
+>;
+
+export type ResolveUrlFn = (args: {
+    url: string;
+}) => Promise<{ isShareLink: true; url: string } | { isShareLink: false }>;
+
+export type EditContentFn = (
+    args:
+        | {
+              slug: string;
+              type: 'dashboard' | 'chart';
+              patch: unknown;
+          }
+        | {
+              slug: string;
+              type: 'sql_chart';
+              patch: unknown;
+              // Runs only when the patch changes the SQL, before saving.
+              approveSql: ApproveSqlFn;
+          }
+        | { slug: string; type: 'document'; documentEdit: McpDocumentEdit },
+) => Promise<
+    | DocumentContentResult
+    | {
+          type: 'dashboard';
+          content: DashboardAsCode;
+          uuid: string;
+          href: string;
+          versionUuids: {
+              before: string | null;
+              after: string | null;
+          };
+      }
+    | {
+          type: 'chart';
+          content: ChartAsCode;
+          uuid: string;
+          href: string;
+          versionUuids: {
+              before: string | null;
+              after: string | null;
+          };
+      }
+    | {
+          type: 'sql_chart';
+          content: SqlChartAsCode;
+          uuid: string;
+          href: string;
+          versionUuids: {
+              before: string | null;
+              after: string | null;
+          };
+      }
+>;
+
+type CreateContentArgs =
     | {
           type: 'dashboard';
           content: DashboardAsCode;
@@ -112,39 +440,145 @@ export type ReadContentFn = (args: {
           type: 'chart';
           content: ChartAsCode;
       }
->;
+    | {
+          type: 'sql_chart';
+          content: SqlChartAsCode;
+      };
 
-export type EditContentFn = (args: {
-    slug: string;
-    type: 'dashboard' | 'chart';
-    patch: unknown;
-}) => Promise<
+type CreateSqlChartArgs = {
+    type: 'sql_chart';
+    content: SqlChartAsCode;
+    // Runs after validation and permission checks, before anything is saved.
+    approveSql: ApproveSqlFn;
+};
+
+export type CreateContentFn = (
+    args:
+        | Exclude<CreateContentArgs, { type: 'sql_chart' }>
+        | CreateSqlChartArgs
+        | { type: 'document'; content: McpDocumentAsCode },
+) => Promise<
+    | DocumentContentResult
     | {
           type: 'dashboard';
           content: DashboardAsCode;
+          uuid: string;
+          href: string;
       }
     | {
           type: 'chart';
           content: ChartAsCode;
+          uuid: string;
+          href: string;
+      }
+    | {
+          type: 'sql_chart';
+          content: SqlChartAsCode;
+          uuid: string;
+          href: string;
       }
 >;
 
-export type UpdateProgressFn = (progress: string) => Promise<void>;
+export type ValidateContentFn = (args: CreateContentArgs) => void;
+
+export type CreateScheduledDeliveryFn = (args: {
+    resourceType: 'chart' | 'dashboard';
+    resourceUuidOrSlug: string;
+    scheduler: CreateSchedulerAndTargetsWithoutIds;
+    aiAugmentationPrompt: string | null;
+}) => Promise<{
+    scheduler: SchedulerAndTargets;
+    resourceUuid: string;
+    href: string;
+    aiAugmentationAttached: boolean;
+    warnings: string[];
+}>;
+
+export type UpdateUserNameFn = (args: {
+    firstName: string;
+    lastName: string;
+}) => Promise<void>;
+
+export type UpdateProgressFn = (
+    progress: string,
+    // The tool the progress belongs to. Web step-progress rendering uses this
+    // to scope an inline progress row to the active tool, so a concurrently
+    // running tool's message can't surface under another tool's header. Slack
+    // ignores it (single pinned message). Omitted by tools that don't need
+    // attribution.
+    toolName?: string,
+    progressId?: string,
+    progressStatus?: 'in_progress' | 'complete' | 'error',
+) => Promise<void>;
 
 export type GetPromptFn = () => Promise<SlackPrompt | AiWebAppPrompt>;
 
 export type RunAsyncQueryFn = (
     metricQuery: AiMetricQueryWithFilters,
     additionalMetrics?: AdditionalMetric[],
+    parameters?: ParametersValuesMap,
+    abortSignal?: AbortSignal,
+    reuseQueryUuid?: string,
 ) => Promise<{
+    queryUuid: string;
     rows: Record<string, AnyType>[];
     cacheMetadata: CacheMetadata;
     fields: ItemsMap;
+    executionStats: WarehouseExecutionStats | null;
 }>;
 
-export type GetSavedChartFn = (chartUuid: string) => Promise<SavedChart>;
+export type RunSavedChartQueryFn = (args: {
+    chartUuid: string;
+    dashboardSlug: string | null;
+    limit: number | null;
+    onQueryPrepared?: (
+        execution: Pick<
+            ApiExecuteAsyncMetricQueryResults,
+            'metricQuery' | 'usedParametersValues' | 'resolvedTimezone'
+        >,
+    ) => void;
+}) => Promise<{
+    queryUuid: string;
+    execution: Pick<
+        ApiExecuteAsyncMetricQueryResults,
+        'metricQuery' | 'usedParametersValues' | 'resolvedTimezone'
+    >;
+    rows: Record<string, AnyType>[];
+    cacheMetadata: CacheMetadata;
+    fields: ItemsMap;
+    executionStats: WarehouseExecutionStats | null;
+}>;
 
-export type SendFileFn = (args: PostSlackFile) => Promise<void>;
+export type GetSavedChartFn = (chartUuidOrSlug: string) => Promise<SavedChart>;
+
+export type SqlChartSummary = {
+    uuid: string;
+    slug: string;
+    name: string;
+    sql: string;
+};
+
+/** A saved SQL chart the agent may view; checks view and agent space access, like readContent. */
+export type GetSqlChartFn = (slug: string) => Promise<SqlChartSummary>;
+
+/** Runs a saved SQL chart, on its own or as a dashboard tile with the dashboard's filters. */
+export type RunSqlChartQueryFn = (args: {
+    chartSlug: string;
+    dashboardSlug: string | null;
+    limit: number;
+}) => Promise<SqlQueryRows & { sqlChart: SqlChartSummary }>;
+
+export type SendFileFn = (args: PostSlackFile) => Promise<string | undefined>;
+
+export type DeferSlackVisualizationFn = (
+    input: import('../../../database/entities/aiSlackArtifactDeliveries').SlackArtifactRenderInput,
+) => Promise<boolean>;
+
+// Renders a custom chart type artifact version to a PNG buffer via the
+// headless browser, as the requesting user.
+export type ExportCustomChartTypeImageFn = (
+    artifact: AiArtifact,
+) => Promise<Buffer>;
 
 export type SendSlackBlocksFn = (args: {
     channelId: string;
@@ -175,6 +609,28 @@ export type StoreToolCallFn = (data: {
     parentToolCallId: string | null;
 }) => Promise<void>;
 
+// Records a finished call to a connected external MCP server for the admin
+// MCP activity log. Observability only: never throws into the turn.
+export type RecordMcpToolCallFn = (data: {
+    toolCallId: string;
+    toolName: string;
+    toolArgs: object;
+    mcpServerUuid: string;
+    status: 'success' | 'error';
+    errorMessage: string | null;
+    durationMs: number;
+}) => Promise<void>;
+
+// Persists tool-call attempts the AI SDK rejected before execution
+// (schema-invalid args, unparsable JSON) — debugging aid, not shown in UI.
+export type StoreToolCallErrorFn = (data: {
+    promptUuid: string;
+    toolCallId: string;
+    toolName: string;
+    errorMessage: string;
+    rawArgs: string | null;
+}) => Promise<void>;
+
 export type StoreToolResultsFn = (
     data: Array<{
         promptUuid: string;
@@ -193,11 +649,27 @@ export type StoreReasoningFn = (
     }>,
 ) => Promise<void>;
 
+export type StoreLoadoutFn = (
+    promptUuid: string,
+    loadout: AiAgentPromptLoadout,
+) => Promise<void>;
+
+export type IsPromptInterruptedFn = (promptUuid: string) => Promise<boolean>;
+
+export type ConsumePromptSteersFn = (args: {
+    promptUuid: string;
+    stepNumber: number;
+}) => Promise<AiPromptSteer[]>;
+
 export type TrackEventFn = (
     event:
         | AiAgentResponseStreamed
+        | AiAgentStepCompletedEvent
         | AiAgentToolCallEvent
-        | AiAgentFindContentCoverageEvent,
+        | AiAgentToolCallCompletedEvent
+        | AiAgentToolCallFailedEvent
+        | AiAgentFindContentCoverageEvent
+        | AiAgentSqlApprovalDecidedEvent,
 ) => void;
 
 export type SearchFieldValuesFn = (args: {
@@ -205,7 +677,10 @@ export type SearchFieldValuesFn = (args: {
     fieldId: string;
     query: string;
     filters?: Filters;
-}) => Promise<string[]>;
+}) => Promise<
+    | Array<string | number | boolean>
+    | { results: Array<string | number | boolean>; note: string }
+>;
 
 export type CreateOrUpdateArtifactFn = (data: {
     threadUuid: string;
@@ -216,35 +691,106 @@ export type CreateOrUpdateArtifactFn = (data: {
     vizConfig: Record<string, unknown>;
 }) => Promise<AiArtifact>;
 
+export type ListThreadComposerQueryNodesFn = (
+    threadUuid: string,
+) => Promise<ThreadComposerQueryNode[]>;
+
+/** Null when the node never ran as the terminal of a query. */
+export type GetThreadComposerNodeColumnsFn = (args: {
+    threadUuid: string;
+    nodeId: string;
+}) => Promise<ComposerNodeColumn[] | null>;
+
+/** Throws on a different definition under a registered node id. */
+export type RegisterThreadComposerQueryNodesFn = (args: {
+    threadUuid: string;
+    nodes: ThreadComposerQueryNode[];
+    /** Columns by node id; a node without an entry keeps the columns it has. */
+    nodeColumns: Record<string, ComposerNodeColumn[]>;
+}) => Promise<void>;
+
+type RecordedPromptDecisionField =
+    | 'operation'
+    | 'outcome'
+    | 'intent'
+    | 'applied'
+    | 'answers'
+    | 'thresholds'
+    | 'latency_ms'
+    | 'jev_service_ms';
+
+/** Records a fast decision for the current prompt; failures are logged, never thrown. */
+export type RecordPromptDecisionFn = (
+    decision: Pick<DbAiPromptTurnDecision, RecordedPromptDecisionField>,
+) => Promise<void>;
+
 export type CheckUserPermissionFn = (args: {
     userId: string;
     organizationId: string;
     permission: string;
 }) => Promise<boolean>;
 
-export type CreateChangeFn = (
-    params: Pick<
-        CreateChangeParams,
-        'type' | 'entityName' | 'entityType' | 'entityTableName' | 'payload'
-    >,
-) => Promise<string>;
-
-export type GetExploreCompilerFn = () => Promise<ExploreCompiler>;
-
-export type RunSqlJobFn = (args: { sql: string; limit: number }) => Promise<{
+export type SqlQueryRows = {
+    queryUuid: string;
     rows: Record<string, AnyType>[];
     columns: string[];
     rowCount: number;
+    executionStats: WarehouseExecutionStats | null;
+};
+
+export type RunSqlJobFn = (args: {
+    sql: string;
+    limit: number;
+}) => Promise<SqlQueryRows>;
+
+/**
+ * Per-node lifecycle event emitted while a composer pipeline executes, so the
+ * UI can show each node's status live. Best-effort: emission failures must
+ * never affect query execution.
+ */
+export type ComposerNodeStatusUpdate = {
+    nodeId: string;
+    /** Null when the pipeline failed before this node was submitted. */
+    queryUuid: string | null;
+    status: 'running' | 'success' | 'error';
+    errorMessage: string | null;
+};
+
+/**
+ * Submits a composer query (multi-source pipeline) and waits for the terminal
+ * node's results. Submissions carry the pinned nodeId → queryUuid mapping for
+ * every node; the terminal snapshot is the first page of the terminal node's
+ * results, capped at that node's limit. `onNodeStatus` receives per-node
+ * lifecycle transitions (running on submission, then success/error) while the
+ * pipeline executes.
+ */
+export type RunComposerQueriesFn = (args: {
+    queries: SourceQuery[];
+    terminalNodeId: string;
+    onNodeStatus?: (update: ComposerNodeStatusUpdate) => void;
+}) => Promise<{
+    submissions: SourceQuerySubmission[];
+    terminal: {
+        queryUuid: string;
+        columns: ResultColumns;
+        /** First COMPOSER_QUERY_PREVIEW_ROW_LIMIT rows; rowCount is the full count. */
+        rows: Record<string, AnyType>[];
+        rowCount: number;
+    };
 }>;
 
-export type ListWarehouseTablesFn = () => Promise<WarehouseTablesCatalog>;
+export type ListWarehouseTablesFn = (
+    context?: QueryExecutionContext,
+) => Promise<WarehouseTablesCatalog>;
 
 export type DescribeWarehouseTableFn = (args: {
     table: string;
     schema?: string;
+    database?: string;
 }) => Promise<{
     columns: Array<{ name: string; type: string }>;
     resolvedSchema: string | null;
+    resolvedDatabase: string | null;
 }>;
 
 export type ListKnowledgeDocumentsFn = () => Promise<AiAgentDocumentSummary[]>;
@@ -253,17 +799,214 @@ export type GetKnowledgeDocumentContentFn = (args: {
     documentUuid: string;
 }) => Promise<AiAgentDocumentContent>;
 
+export type ReadPinnedThreadFn = (args: { threadUuid: string }) => Promise<
+    {
+        role: 'user' | 'assistant';
+        message: string;
+        createdAt: string;
+    }[]
+>;
+
+/**
+ * Run one read-only shell command over the documents the user attached to
+ * this thread, mounted at `/attachments/<file name>`. The filesystem is built
+ * from the server-resolved thread, never from a model-chosen id.
+ */
+export type ReadAttachmentsFn = (args: { command: string }) => Promise<string>;
+
 export type WaitForSqlApprovalFn = (
     toolCallId: string,
     timeoutMs?: number,
 ) => Promise<'approved' | 'rejected' | 'timeout'>;
 
-export type RecordSqlApprovalFn = (
-    toolCallId: string,
-    decision: 'approved' | 'rejected',
-    decidedByUserUuid: string | null,
+/** Records an automatic approval; human decisions are recorded by the service. */
+export type RecordSqlApprovalFn = (args: {
+    toolCallId: string;
+    toolName: SqlApprovalToolName;
+    decidedByUserUuid: string | null;
+    source: SqlAutoApprovalSource;
+}) => Promise<boolean>;
+
+export type IsThreadSqlAutoApprovedFn = (
+    threadUuid: string,
 ) => Promise<boolean>;
+
+/** The SQL approval decisions recorded for a prompt's tool calls. */
+export type ListSqlApprovalDecisionsFn = (
+    promptUuid: string,
+) => Promise<SqlApprovalDecisionOnCall[]>;
 
 export type LoadAgentSkillFn = (
     name: string,
+    options: { arguments: string | null },
 ) => Promise<AiAgentSkill | undefined>;
+
+export type EditDbtProjectFn = (args: {
+    prompt: string;
+    prUrl: string | null;
+    /** Open a new PR instead of continuing the thread's existing one. */
+    startNewPullRequest: boolean | null;
+    progressId?: string;
+}) => Promise<{
+    aiWritebackRunUuid: string;
+}>;
+
+// Starts a personal data app build; the worker patches the tool result
+// (keyed by toolCallId) when the build ends.
+export type GenerateDataAppFn = (args: {
+    /** Fixes the app's name and slug at creation; never changes after. */
+    name: string;
+    prompt: string;
+    template: DataAppBuildTemplate | null;
+    dashboardSlug: string | null;
+    chartSlugs: string[] | null;
+    themeSlug: string | null;
+    /** Connections to link before the build. */
+    externalConnectionSlugs: string[] | null;
+    /** Agent tool call the build outcome is patched onto; null over MCP. */
+    toolCallId: string | null;
+}) => Promise<DataAppBuildStarted>;
+
+export type DataAppBuildStarted = {
+    appUuid: string;
+    slug: string;
+    version: number;
+    /** Non-blocking issues, e.g. a connection the brief names that the app does not link. */
+    warnings: string[];
+};
+
+export type DataAppConnectionSummary = {
+    slug: string;
+    name: string;
+    authType: ExternalConnectionAuthType;
+    origin: string;
+    instructions: string | null;
+    linkedAliases: string[];
+};
+
+// Connections the caller may link; with appSlug, also that app's aliases.
+export type ListDataAppConnectionsFn = (args: {
+    appSlug: string | null;
+}) => Promise<DataAppConnectionSummary[]>;
+
+export type DataAppThemeSummary = {
+    slug: string;
+    name: string;
+    isDefault: boolean;
+    description: string | null;
+};
+
+// Themes of the agent's organization, for matching a theme named in prose.
+export type ListDataAppThemesFn = () => Promise<DataAppThemeSummary[]>;
+
+// Starts a build that appends a version to an existing data app; the worker
+// patches the tool result (keyed by toolCallId) when the build ends.
+export type IterateDataAppFn = (args: {
+    appSlug: string;
+    prompt: string;
+    dashboardSlug: string | null;
+    chartSlugs: string[] | null;
+    themeSlug: string | null;
+    /** Connections to link before the build. */
+    externalConnectionSlugs: string[] | null;
+    /** Agent tool call the build outcome is patched onto; null over MCP. */
+    toolCallId: string | null;
+}) => Promise<DataAppBuildStarted>;
+
+// Reports on a build an external agent started; MCP-only, since the AI agent
+// gets its outcome patched onto the tool result instead of polling.
+export type GetDataAppBuildStatusFn = (args: {
+    appSlug: string;
+    version?: number;
+}) => Promise<DataAppBuildStatusSource>;
+
+// Applies a structured project-context entry to lightdash.project_context.yml
+// via the deterministic GitHub-API merge (no sandbox) and opens/updates a PR.
+export type EditProjectContextFn = (
+    entry: AiAgentJudgeProjectContextEntry,
+) => Promise<{ prUrl: string; prAction: 'opened' | 'updated' }>;
+
+/**
+ * Run one read-only shell command (ls/cat/find/grep/head/wc) against a repo
+ * virtual filesystem and return combined stdout. With no `target` this reads the
+ * project's dbt repo (subPath-scoped, as before); with an `"owner/repo"` target
+ * it reads that whole repository on its default branch.
+ */
+export type ExploreRepoFn = (args: {
+    command: string;
+    target?: string | null;
+}) => Promise<string>;
+
+/**
+ * List every repository the org's GitHub App installation can read, so the agent
+ * can pick one to inspect with {@link ExploreRepoFn}.
+ */
+export type DiscoverReposFn = () => Promise<
+    {
+        owner: string;
+        repo: string;
+        defaultBranch: string;
+        private: boolean;
+    }[]
+>;
+
+/**
+ * List the pull requests (workstreams) the current chat thread has opened with
+ * {@link EditDbtProjectFn}, so the agent can route a follow-up to the right one or
+ * decide to open a new one. Optionally scoped to a single `owner/repo`.
+ */
+export type ListWorkstreamsFn = (args: {
+    repoTarget: string | null;
+}) => Promise<
+    {
+        repository: string;
+        provider: string;
+        prUrl: string;
+        prNumber: number;
+        summary: string | null;
+    }[]
+>;
+
+/**
+ * Close (without merging) a pull request the chat thread opened with
+ * {@link EditDbtProjectFn}. Thin wrapper over the same write-back close path the chat
+ * PR card's "Close PR" button uses; the underlying service enforces
+ * `manage:SourceCode` and that the URL targets this project's own repo.
+ */
+export type ClosePullRequestFn = (args: { prUrl: string }) => Promise<void>;
+
+export type GetPullRequestDiffFn = (args: {
+    prUrl: string;
+}) => Promise<string | null>;
+
+export type ListProjectsFn = () => Promise<
+    {
+        projectUuid: string;
+        name: string;
+        type: ProjectType;
+        isActive: boolean;
+    }[]
+>;
+
+// Safe, non-sensitive snapshot of the active project's dbt + warehouse setup.
+// Deliberately excludes any credentials (tokens, keys, installation ids) and
+// dbt environment variables, which can hold secrets.
+export type GetProjectInfoFn = () => Promise<{
+    projectName: string;
+    projectType: ProjectType;
+    dbtConnectionType: DbtProjectType;
+    dbtVersion: string;
+    warehouseType: WarehouseTypes | null;
+    connections: {
+        name: string;
+        warehouseConnectionUuid: string | null;
+        warehouseType: WarehouseTypes;
+        isOriginal: boolean;
+    }[];
+    git: {
+        repository: string;
+        branch: string;
+        projectSubPath: string;
+        hostDomain: string | null;
+    } | null;
+}>;

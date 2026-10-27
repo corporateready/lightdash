@@ -41,6 +41,33 @@ export type Organization = {
      */
     defaultProjectUuid?: string;
     createdAt?: Date;
+
+    /**
+     * Effective value of the org's "allow screenshots and attachments in data
+     * app builds" switch (the org setting capped by the instance env). Returned
+     * to every org member on the authenticated `GET /org` response so the
+     * builder can hide the capture affordances for non-admins too; the backend
+     * enforces it regardless. Absent on older servers — treat as `true`.
+     */
+    dataAppCapturesEnabled?: boolean;
+
+    /**
+     * Postgres wire protocol connection details for the semantic layer, only
+     * populated on the authenticated `GET /org` response (not the public health
+     * endpoint). `enabled` reflects whether the instance exposes a pgwire port
+     * and is returned to every org member; `host`/`port` are the infra endpoint
+     * clients connect to and are only populated for org admins (null otherwise).
+     */
+    pgWire?: {
+        enabled: boolean;
+        /** Whether the server requires TLS (clients must use sslmode=require
+         * or stricter). False only on instances that explicitly opted out.
+         * Optional for API backwards compatibility — the server always
+         * returns it; treat absence as true. */
+        tlsRequired?: boolean;
+        host: string | null;
+        port: number | null;
+    };
 };
 
 export type CreateOrganization = Pick<Organization, 'name'>;
@@ -63,6 +90,7 @@ export type OrganizationProject = {
      * @format uuid
      */
     projectUuid: string;
+    slug?: string;
     name: string;
     type: ProjectType;
     createdByUserUuid: string | null;
@@ -71,6 +99,7 @@ export type OrganizationProject = {
     upstreamProjectUuid: string | null;
     warehouseType?: WarehouseTypes;
     expiresAt: Date | null;
+    provisioningSource?: string | null;
 };
 
 /**
@@ -84,6 +113,7 @@ export type ApiOrganizationProjects = {
 export type OnbordingRecord = {
     ranQueryAt: Date | null;
     shownSuccessAt: Date | null;
+    playgroundProjectDeletedAt?: Date | null;
 };
 
 export type OnboardingStatus = {

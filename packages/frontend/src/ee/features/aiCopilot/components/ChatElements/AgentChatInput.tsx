@@ -1,42 +1,235 @@
+import { subject } from '@casl/ability';
 import {
+    AI_THREAD_FILE_PICKER_EXTENSIONS,
+    ContentType,
     FeatureFlags,
+    getExternalSourceDisplayName,
+    isSpaceRestrictedAgent,
+    isTabularThreadFileName,
     type AgentSuggestion,
+    type AiPromptContextInput,
+    type AiPromptContextItem,
+    type AiPromptContextItemInput,
     type AiModelOption,
+    type ExternalSource,
 } from '@lightdash/common';
 import {
     ActionIcon,
-    Anchor,
     Box,
-    Button,
-    Divider,
+    FileButton,
     Group,
+    Menu,
     Paper,
-    Switch,
+    Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
-import { RichTextEditor } from '@mantine/tiptap';
-import { IconArrowUp, IconBrain, IconTerminal2 } from '@tabler/icons-react';
+} from '@mantine/core';
+import {
+    IconArrowUp,
+    IconAlertTriangle,
+    IconCheck,
+    IconFileText,
+    IconFolderSearch,
+    IconPaperclip,
+    IconPlayerStop,
+    IconPlus,
+    IconTelescope,
+    IconTerminal2,
+} from '@tabler/icons-react';
 import Mention from '@tiptap/extension-mention';
-import Placeholder from '@tiptap/extension-placeholder';
-import { useEditor, type Editor } from '@tiptap/react';
-import StarterKit from '@tiptap/starter-kit';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type AnyExtension, type Editor } from '@tiptap/react';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from 'react';
 import { useNavigate } from 'react-router';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import { ModelSelector } from '../../../../../components/common/ModelSelector/ModelSelector';
+import {
+    ModelSelector,
+    type AgentDefaultOption,
+} from '../../../../../components/common/ModelSelector/ModelSelector';
+import {
+    ComposerSubmitButton,
+    PromptComposer,
+} from '../../../../../components/common/PromptComposer';
+import { useAiAccessGate } from '../../../../../features/aiAccess/useAiAccessGate';
+import { useCanCreateDataApp } from '../../../../../features/apps/hooks/useCanCreateDataApp';
+import { useOrganizationDesigns } from '../../../../../features/organizationDesigns/hooks/useOrganizationDesigns';
 import useUser from '../../../../../hooks/user/useUser';
 import { useServerFeatureFlag } from '../../../../../hooks/useServerOrClientFeatureFlag';
+import useApp from '../../../../../providers/App/useApp';
+import { useLightdashApi } from '../../../../../providers/LightdashApi/useLightdashApi';
 import useTracking from '../../../../../providers/Tracking/useTracking';
 import { EventName } from '../../../../../types/Events';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
+import { useUiStrings } from '../../../../providers/Embed/useUiStrings';
+import { subscribeToDeepResearchComposerPrompt } from '../../deepResearch/deepResearchRegistry';
+import {
+    canShowDeepResearchNudge,
+    dismissDeepResearchNudgeForSession,
+    isDeepResearchDraft,
+    markDeepResearchNudgeShown,
+} from '../../deepResearch/draftNudge';
+import { type StartDeepResearchArgs } from '../../deepResearch/types';
+import { useAgentMaxWidth } from '../../hooks/useAgentMaxWidth';
 import { useAgentSuggestions } from '../../hooks/useAgentSuggestions';
+import { useAgentSkills } from '../../hooks/useAiAgentSkills';
+import { useCsvSourceAttachment } from '../../hooks/useCsvSourceAttachment';
+import { useHasActiveDeepResearchRun } from '../../hooks/useDeepResearch';
+import { useDeepResearchComposer } from '../../hooks/useDeepResearchComposer';
+import { useFileDropTarget } from '../../hooks/useFileDropTarget';
+import {
+    useCreateAiAgentThreadMessageSteerMutation,
+    useInterruptAiAgentThreadMessageMutation,
+    useProjectAiAgent,
+} from '../../hooks/useProjectAiAgents';
+import {
+    useThreadFileAttachment,
+    type ThreadFileAttachment,
+} from '../../hooks/useThreadFileAttachment';
+import {
+    clearThreadElementReferences,
+    removeThreadElementReference,
+    selectThreadElementReferences,
+    type ThreadElementReference,
+} from '../../store/aiAgentThreadElementRefsSlice';
+import { isAiAgentThreadStreamActive } from '../../store/aiAgentThreadStreamSlice';
+import {
+    selectPreviewForThreads,
+    setElementPickerEnabled,
+} from '../../store/aiArtifactSlice';
+import {
+    useAiAgentStoreDispatch,
+    useAiAgentStoreSelector,
+} from '../../store/hooks';
+import { useAiAgentThreadStreamQuery } from '../../streaming/useAiAgentThreadStreamQuery';
+import { AgentSelector } from '../AgentSelector';
+import { type Agent } from '../AgentSelector/AgentSelectorUtils';
 import styles from './AgentChatInput.module.css';
 import { AgentSuggestionChips } from './AgentSuggestionChips';
+import { AiAccessGate } from './AiAccessGate';
+import {
+    ComposerThemeButton,
+    ComposerThemeMenuEntry,
+} from './ComposerThemeControl';
+import {
+    CLOSED_CONTENT_MENTION_MENU,
+    contentMentionMenuOwnsEnter,
+    createContentMentionExtension,
+    extractContentMentionContext,
+    isContentMentionSuggestionActive,
+    type ContentMentionMenuState,
+    type ContentMentionSuggestionItem,
+} from './contentMentions';
+import { isDataAppDraft, type ComposerTheme } from './dataAppThemeComposer';
+import {
+    PromptAttachments,
+    type ExternalSourceAttachment,
+} from './PromptAttachments';
+import {
+    createSkillMentionExtension,
+    extractSkillMentionContext,
+    isSkillMentionSuggestionActive,
+    toSkillMentionItems,
+} from './skillMentions';
 import { getAgentSuggestionModes } from './suggestionModes';
 
-const MAX_RECOMMENDED_THREAD_MESSAGE_COUNT = 15;
-
 const SUGGESTION_CHIP_MENTION_NAME = 'suggestionChip';
+
+type SubmitContext = {
+    context?: AiPromptContextInput;
+    optimisticContext?: AiPromptContextItem[];
+};
+
+const mergeSubmitContexts = (...contexts: SubmitContext[]): SubmitContext => ({
+    context: contexts.flatMap((item) => item.context ?? []),
+    optimisticContext: contexts.flatMap((item) => item.optimisticContext ?? []),
+});
+
+/** Context the composer submits with a prompt; keys are omitted when empty. */
+const buildSubmitContext = ({
+    mentionContext,
+    externalSources,
+    threadFiles,
+    elementReferences,
+    theme,
+}: {
+    mentionContext: SubmitContext;
+    externalSources: ExternalSourceAttachment[];
+    threadFiles: ThreadFileAttachment[];
+    elementReferences: ThreadElementReference[];
+    theme: ComposerTheme | null;
+}): SubmitContext => {
+    const context: AiPromptContextItemInput[] = [
+        ...(mentionContext.context ?? []),
+        ...externalSources.map(({ sourceUuid }) => ({
+            type: 'external_source' as const,
+            sourceUuid,
+        })),
+        ...threadFiles.map(({ fileUuid }) => ({
+            type: 'thread_file' as const,
+            fileUuid,
+        })),
+        ...elementReferences.map(({ appUuid, version, tag, text, loc }) => ({
+            type: 'data_app_element' as const,
+            appUuid,
+            version,
+            tag,
+            text,
+            loc,
+        })),
+        ...(theme
+            ? [{ type: 'design' as const, designUuid: theme.designUuid }]
+            : []),
+    ];
+    const optimisticContext: AiPromptContextItem[] = [
+        ...(mentionContext.optimisticContext ?? []),
+        ...externalSources,
+        ...threadFiles,
+        ...elementReferences.map(
+            ({
+                appUuid,
+                appSlug,
+                appDisplayName,
+                version,
+                tag,
+                text,
+                loc,
+            }) => ({
+                type: 'data_app_element' as const,
+                appUuid,
+                version,
+                tag,
+                text,
+                loc,
+                appSlug,
+                displayName: appDisplayName,
+            }),
+        ),
+        ...(theme
+            ? [
+                  {
+                      type: 'design' as const,
+                      designUuid: theme.designUuid,
+                      designSlug: theme.slug,
+                      displayName: theme.name,
+                  },
+              ]
+            : []),
+    ];
+    return {
+        ...(context.length > 0 ? { context } : {}),
+        ...(optimisticContext.length > 0 ? { optimisticContext } : {}),
+    };
+};
+const ACTIVE_DEEP_RESEARCH_DISABLED_REASON =
+    'Only one deep research run can be active in a thread at a time.';
+
+type AgentComposerMode = 'ask' | 'deep_research';
 
 const SuggestionChipMention = Mention.extend({
     name: SUGGESTION_CHIP_MENTION_NAME,
@@ -58,32 +251,50 @@ const SuggestionChipMention = Mention.extend({
     },
 });
 
-type SubmitArgs = {
+type SubmitArgs = SubmitContext & {
     message: string;
     toolHints: string[];
 };
 
 interface AgentChatInputProps {
     onSubmit: (args: SubmitArgs) => void;
+    onStartDeepResearch?: (args: StartDeepResearchArgs) => Promise<void>;
     loading?: boolean;
     disabled?: boolean;
     disabledReason?: string;
     placeholder?: string;
     messageCount?: number;
+    accessCalloutVariant?: 'card' | 'inline';
     projectUuid?: string;
     agentUuid?: string;
     threadUuid?: string;
     latestAssistantMessageUuid?: string;
+    agents?: Agent[];
+    selectedAgent?: Agent | 'auto';
     models?: AiModelOption[];
     selectedModelId?: string | null;
     onModelChange?: (modelId: string) => void;
     extendedThinking?: boolean;
     onExtendedThinkingChange?: (enabled: boolean) => void;
+    agentDefault?: AgentDefaultOption;
     sqlMode?: boolean;
     onSqlModeChange?: (enabled: boolean) => void;
     defaultValue?: string;
     onValueChange?: (value: string) => void;
     fullWidth?: boolean;
+    clearOnSubmit?: boolean;
+    showSuggestions?: boolean;
+    contentMentionPriorityItems?: ContentMentionSuggestionItem[];
+    // Reveals the deep research and agent controls on first focus instead of
+    // showing them always.
+    revealControlsOnFocus?: boolean;
+    // Shrinks padding/min-heights for a more compact composer.
+    dense?: boolean;
+    // Rendered below the input, right-aligned like the disabled-reason banner.
+    footerNotice?: ReactNode;
+    // Thread model shown in the status row under the inline composer.
+    threadModelName?: string | null;
+    threadModelWarning?: string | null;
 }
 
 const extractToolHints = (editor: Editor | null): string[] => {
@@ -100,30 +311,167 @@ const extractToolHints = (editor: Editor | null): string[] => {
     return hints;
 };
 
+/**
+ * Walkthrough action for create:AiDeepResearch: switching the composer to
+ * deep research, the control that starts a run. Nothing is submitted; the
+ * tour then opens the seeded thread and its finished report.
+ */
+const deepResearchTourAction = {
+    'data-tour-scope': 'create:AiDeepResearch',
+    'data-tour-step': '2',
+    'data-tour-route': '/projects/:projectUuid/ai-agents/:agentUuid',
+    'data-tour-label': 'Turn on Deep research',
+    'data-tour-title': 'Run deep research and read its report',
+    'data-tour-interactive': 'true',
+    'data-tour-via':
+        '[data-tour-nav="ask-ai"] >> [data-tour-anchor="composer-options"]',
+    'data-tour-then':
+        '[data-tour-anchor="agent-thread"][data-tour-value="Why returns rose in the spring"] >> [data-tour-anchor="research-report-open"]',
+    'data-tour-docs': 'agents/deep-research.mdx#how-it-works:p2:1',
+};
+
 export const AgentChatInput = ({
     onSubmit,
+    onStartDeepResearch,
     loading = false,
-    disabled = false,
+    disabled: disabledProp = false,
     disabledReason,
     placeholder = 'Ask anything',
     messageCount = 0,
+    accessCalloutVariant,
     projectUuid,
     agentUuid,
     threadUuid,
     latestAssistantMessageUuid,
+    agents,
+    selectedAgent,
     models,
     selectedModelId,
     onModelChange,
     extendedThinking = false,
     onExtendedThinkingChange,
+    agentDefault,
     sqlMode = false,
     onSqlModeChange,
     defaultValue,
     onValueChange,
     fullWidth = false,
+    clearOnSubmit = true,
+    showSuggestions = true,
+    contentMentionPriorityItems = [],
+    revealControlsOnFocus = false,
+    dense = false,
+    footerNotice,
+    threadModelName,
+    threadModelWarning = null,
 }: AgentChatInputProps) => {
+    const lightdashApi = useLightdashApi();
+    const accessGate = useAiAccessGate(projectUuid);
+    const accessRefused = accessGate.disabled;
+    const disabled = disabledProp || accessRefused;
     const user = useUser(true);
+    const app = useApp();
+    const isEmbedded = useIsEmbedded();
+    const isPhoneLayout = useAgentMaxWidth(512, {
+        getInitialValueInEffect: false,
+    });
+    const isCompactLayout = useAgentMaxWidth(768, {
+        getInitialValueInEffect: false,
+    });
     const [value, setValueState] = useState(defaultValue ?? '');
+    const [externalSourceAttachments, setExternalSourceAttachments] = useState<
+        ExternalSourceAttachment[]
+    >([]);
+    // Picked in the thread's data app preview panel.
+    const storeDispatch = useAiAgentStoreDispatch();
+    const elementReferences = useAiAgentStoreSelector(
+        selectThreadElementReferences(threadUuid),
+    );
+    const disableElementPicker = useCallback(() => {
+        if (threadUuid) {
+            storeDispatch(
+                setElementPickerEnabled({ threadUuid, enabled: false }),
+            );
+        }
+    }, [storeDispatch, threadUuid]);
+    const clearElementReferences = useCallback(() => {
+        if (threadUuid) {
+            storeDispatch(clearThreadElementReferences({ threadUuid }));
+        }
+    }, [storeDispatch, threadUuid]);
+    const resetCsvFileInputRef = useRef<() => void>(null);
+    const { data: externalSourcesFlag } = useServerFeatureFlag(
+        FeatureFlags.ExternalSources,
+    );
+    const { data: multiSourceQueryFlag } = useServerFeatureFlag(
+        FeatureFlags.MultiSourceQuery,
+    );
+    const { data: composeSqlRunnerFlag } = useServerFeatureFlag(
+        FeatureFlags.ComposeSqlRunner,
+    );
+    const handleExternalSourceReady = useCallback((source: ExternalSource) => {
+        setExternalSourceAttachments((attachments) => [
+            ...attachments.filter(
+                (attachment) => attachment.sourceUuid !== source.sourceUuid,
+            ),
+            {
+                type: 'external_source',
+                sourceUuid: source.sourceUuid,
+                displayName: getExternalSourceDisplayName(source),
+                sourceType: source.type,
+                tables: source.tables.map((table) => ({
+                    tableUuid: table.tableUuid,
+                    tableName: table.name,
+                    displayName: table.label,
+                })),
+            },
+        ]);
+    }, []);
+    const {
+        attachFiles: attachCsvFiles,
+        discardSource: discardCsvSource,
+        isPreparing: isPreparingCsv,
+        pendingFiles: pendingCsvFiles,
+        retainSources: retainCsvSources,
+    } = useCsvSourceAttachment({
+        projectUuid,
+        onReady: handleExternalSourceReady,
+    });
+    const [threadFileAttachments, setThreadFileAttachments] = useState<
+        ThreadFileAttachment[]
+    >([]);
+    const handleThreadFileReady = useCallback(
+        (attachment: ThreadFileAttachment) => {
+            setThreadFileAttachments((attachments) => [
+                ...attachments.filter(
+                    ({ fileUuid }) => fileUuid !== attachment.fileUuid,
+                ),
+                attachment,
+            ]);
+        },
+        [],
+    );
+    const {
+        attachFiles: attachThreadFiles,
+        discardFile: discardThreadFile,
+        isUploading: isUploadingThreadFile,
+        pendingFiles: pendingThreadFiles,
+        retainFiles: retainThreadFiles,
+    } = useThreadFileAttachment({ onReady: handleThreadFileReady });
+    const isPreparingAttachments = isPreparingCsv || isUploadingThreadFile;
+    const resetDocumentFileInputRef = useRef<() => void>(null);
+    const [hasClickedInput, setHasClickedInput] = useState(
+        !revealControlsOnFocus,
+    );
+    const handleInputCardMouseDown = useCallback(() => {
+        if (revealControlsOnFocus) setHasClickedInput(true);
+    }, [revealControlsOnFocus]);
+    const [composerMode, setComposerMode] = useState<AgentComposerMode>('ask');
+    // 'idle' → watching the draft; 'shown' → pulsing; 'done' → over for this
+    // composer instance.
+    const [nudgeState, setNudgeState] = useState<'idle' | 'shown' | 'done'>(
+        'idle',
+    );
     const navigate = useNavigate();
     const onSubmitRef = useRef(onSubmit);
     onSubmitRef.current = onSubmit;
@@ -135,11 +483,74 @@ export const AgentChatInput = ({
     loadingRef.current = loading;
     const disabledRef = useRef(disabled);
     disabledRef.current = disabled;
+    const clearOnSubmitRef = useRef(clearOnSubmit);
+    clearOnSubmitRef.current = clearOnSubmit;
+    const projectUuidRef = useRef(projectUuid);
+    projectUuidRef.current = projectUuid;
+    // Skills come with the agent, so the / menu needs no skill scope. Embeds
+    // cannot list or invoke skills yet.
+    const skillsEnabled = !isEmbedded;
+    const skillsEnabledRef = useRef(skillsEnabled);
+    skillsEnabledRef.current = skillsEnabled;
+    const uiStrings = useUiStrings();
+    const uiStringsRef = useRef(uiStrings);
+    uiStringsRef.current = uiStrings;
+    const agentSkillsQuery = useAgentSkills(
+        projectUuid,
+        agentUuid,
+        skillsEnabled,
+    );
+    const skillMentionItems = useMemo(
+        () => toSkillMentionItems(agentSkillsQuery.data),
+        [agentSkillsQuery.data],
+    );
+    const skillMentionItemsRef = useRef(skillMentionItems);
+    skillMentionItemsRef.current = skillMentionItems;
+    const skillMentionMenuRef = useRef<ContentMentionMenuState>(
+        CLOSED_CONTENT_MENTION_MENU,
+    );
+    const contentMentionPriorityItemsRef = useRef(contentMentionPriorityItems);
+    contentMentionPriorityItemsRef.current = contentMentionPriorityItems;
+    // A space-restricted agent cannot read personal data apps, so @ hides them.
+    const { data: agent } = useProjectAiAgent(projectUuid, agentUuid);
+    const hidePersonalDataAppsRef = useRef(false);
+    hidePersonalDataAppsRef.current =
+        agent !== undefined && isSpaceRestrictedAgent(agent);
+    // Theme for the next data app build; per prompt, so it resets on submit.
+    const [selectedTheme, setSelectedTheme] = useState<ComposerTheme | null>(
+        null,
+    );
+    // Sticky while this composer is mounted; other composers are unaffected.
+    const [themeControlSurfaced, setThemeControlSurfaced] = useState(false);
+    const { data: dataAppsFlag } = useServerFeatureFlag(
+        FeatureFlags.EnableDataApps,
+    );
+    const canCreateDataApp = useCanCreateDataApp(projectUuid);
+    const canPickTheme = Boolean(
+        dataAppsFlag?.enabled && agent?.enableContentTools && canCreateDataApp,
+    );
+    const { data: themes = [] } = useOrganizationDesigns({
+        enabled: canPickTheme,
+    });
+    const showThemeControl = canPickTheme && !disabled && themes.length > 0;
+    const canManageThemes = Boolean(
+        app.user.data?.ability.can('manage', 'OrganizationDesign'),
+    );
+    // What the @-mention dropdown is doing, sourced from the suggestion render
+    // lifecycle — the plugin's own `active` flag alone can't tell an open
+    // menu from a dismissed or empty one.
+    const contentMentionMenuRef = useRef<ContentMentionMenuState>(
+        CLOSED_CONTENT_MENTION_MENU,
+    );
 
     // Hide the chip strip while the user is scrolled away from the input.
     // Reappears as they scroll back toward the bottom of the thread — chips
     // are noise when reading history.
     const [chipsNearBottom, setChipsNearBottom] = useState(true);
+    const [hasRequestedInterrupt, setHasRequestedInterrupt] = useState(false);
+    const threadStream = useAiAgentThreadStreamQuery(threadUuid ?? '');
+    const interruptMutation = useInterruptAiAgentThreadMessageMutation();
+    const steerMutation = useCreateAiAgentThreadMessageSteerMutation();
     useEffect(() => {
         const el = rootRef.current;
         if (!el) return undefined;
@@ -186,23 +597,39 @@ export const AgentChatInput = ({
 
     const showModelSelector =
         models && models.length > 1 && onModelChange !== undefined;
-    const isMinimalMode = !showModelSelector;
-
-    const suggestionsFlag = useServerFeatureFlag(
-        FeatureFlags.AiAgentSuggestions,
+    const showAgentSelector = !!(
+        agents &&
+        selectedAgent &&
+        projectUuid &&
+        agents.length > 0
     );
+    const showModelSelectorControl = Boolean(
+        (showModelSelector || onExtendedThinkingChange) &&
+        models &&
+        onModelChange,
+    );
+    const isMinimalMode = !showModelSelector && !showAgentSelector;
+
+    const selectThreadPreview = useMemo(
+        () => selectPreviewForThreads(threadUuid ? [threadUuid] : []),
+        [threadUuid],
+    );
+    const isArtifactPanelOpen =
+        useAiAgentStoreSelector(selectThreadPreview) !== null;
 
     const { emptyStateMode, postResponseMode } = getAgentSuggestionModes({
-        disabled,
+        disabled: disabledProp,
+        isArtifactPanelOpen,
         isMinimalMode,
         loading,
         messageCount,
         latestAssistantMessageUuid,
-        suggestionsEnabled: suggestionsFlag.data?.enabled === true,
+        suggestionsEnabled: showSuggestions,
         threadUuid,
     });
 
     const suggestionsQuery = useAgentSuggestions({
+        surface: postResponseMode ? 'followup' : 'ask',
         projectUuid,
         agentUuid,
         enableSqlMode: sqlMode,
@@ -213,17 +640,11 @@ export const AgentChatInput = ({
         enabled: emptyStateMode || postResponseMode,
     });
 
-    const editor = useEditor({
-        extensions: [
-            StarterKit.configure({
-                heading: false,
-                bulletList: false,
-                orderedList: false,
-                blockquote: false,
-                codeBlock: false,
-                horizontalRule: false,
-            }),
-            Placeholder.configure({ placeholder }),
+    const [editor, setEditor] = useState<Editor | null>(null);
+    editorRef.current = editor;
+
+    const composerExtensions = useMemo<AnyExtension[]>(
+        () => [
             SuggestionChipMention.configure({
                 renderText: ({ node }) =>
                     typeof node.attrs.label === 'string'
@@ -237,48 +658,64 @@ export const AgentChatInput = ({
                         : '',
                 ],
             }),
+            createContentMentionExtension(lightdashApi, {
+                getProjectUuid: () => projectUuidRef.current,
+                getPriorityItems: () => contentMentionPriorityItemsRef.current,
+                getHidePersonalDataApps: () => hidePersonalDataAppsRef.current,
+                onMenuStateChange: (state) => {
+                    contentMentionMenuRef.current = state;
+                },
+            }),
+            createSkillMentionExtension({
+                getItems: () => skillMentionItemsRef.current,
+                getEnabled: () => skillsEnabledRef.current,
+                strings: (key) => uiStringsRef.current(key),
+                onMenuStateChange: (state) => {
+                    skillMentionMenuRef.current = state;
+                },
+            }),
         ],
-        editable: !disabled,
-        autofocus: true,
-        content: defaultValue ?? '',
-        onUpdate: ({ editor: ed }) => {
-            const text = ed.getText();
-            setValueState(text);
-            onValueChangeRef.current?.(text);
-        },
-        editorProps: {
-            handleKeyDown: (_, event) => {
-                if (
-                    event.key === 'Enter' &&
-                    !event.shiftKey &&
-                    !event.isComposing
-                ) {
-                    if (loadingRef.current || disabledRef.current) {
-                        return true;
-                    }
-                    const ed = editorRef.current;
-                    if (!ed) return false;
-                    const text = ed.getText().trim();
-                    if (!text) return true;
-                    event.preventDefault();
-                    onSubmitRef.current({
-                        message: text,
-                        toolHints: extractToolHints(ed),
-                    });
-                    ed.commands.clearContent();
-                    setValueState('');
-                    return true;
-                }
-                return false;
-            },
-        },
-    });
-    editorRef.current = editor;
+        [lightdashApi],
+    );
+
+    // An @-mention dropdown with something to select owns Enter — it selects
+    // rather than submits.
+    const shouldBlockSubmit = useCallback(
+        (ed: Editor | null) =>
+            contentMentionMenuOwnsEnter(
+                contentMentionMenuRef.current,
+                isContentMentionSuggestionActive(ed),
+            ) ||
+            contentMentionMenuOwnsEnter(
+                skillMentionMenuRef.current,
+                isSkillMentionSuggestionActive(ed),
+            ),
+        [],
+    );
+
+    const handleComposerValueChange = useCallback((text: string) => {
+        setValueState(text);
+        onValueChangeRef.current?.(text);
+    }, []);
 
     useEffect(() => {
-        if (!editor) return;
-        editor.setEditable(!disabled);
-    }, [editor, disabled]);
+        if (!editor || !threadUuid) return undefined;
+        return subscribeToDeepResearchComposerPrompt((detail) => {
+            if (detail.threadUuid !== threadUuid) return;
+            editor.commands.setContent(detail.prompt);
+            editor.commands.focus('end');
+        });
+    }, [editor, threadUuid]);
+
+    const isAgentActive = threadStream
+        ? isAiAgentThreadStreamActive(threadStream.connection)
+        : false;
+
+    useEffect(() => {
+        if (hasRequestedInterrupt && !isAgentActive) {
+            setHasRequestedInterrupt(false);
+        }
+    }, [hasRequestedInterrupt, isAgentActive]);
 
     const handleChipClick = useCallback(
         (chip: AgentSuggestion, index: number) => {
@@ -299,6 +736,7 @@ export const AgentChatInput = ({
                             chip.kind === 'prompt' ? chip.tool : undefined,
                         chipIndex: index,
                         mode: emptyStateMode ? 'empty-state' : 'post-response',
+                        placement: 'agent_chat',
                     },
                 });
             };
@@ -328,13 +766,38 @@ export const AgentChatInput = ({
                 return;
             }
 
-            if (loadingRef.current || disabledRef.current) return;
+            if (
+                loadingRef.current ||
+                disabledRef.current ||
+                isPreparingAttachments
+            )
+                return;
+            retainCsvSources(
+                externalSourceAttachments.map(({ sourceUuid }) => sourceUuid),
+            );
+            retainThreadFiles(
+                threadFileAttachments.map(({ fileUuid }) => fileUuid),
+            );
             onSubmitRef.current({
                 message: chip.label,
                 toolHints: [chip.tool],
+                ...buildSubmitContext({
+                    mentionContext: {},
+                    externalSources: externalSourceAttachments,
+                    threadFiles: threadFileAttachments,
+                    elementReferences,
+                    theme: selectedTheme,
+                }),
             });
-            editor?.commands.clearContent();
-            setValueState('');
+            disableElementPicker();
+            if (clearOnSubmitRef.current) {
+                editor?.commands.clearContent();
+                setValueState('');
+                setExternalSourceAttachments([]);
+                setThreadFileAttachments([]);
+                clearElementReferences();
+                setSelectedTheme(null);
+            }
             trackClick();
         },
         [
@@ -347,6 +810,15 @@ export const AgentChatInput = ({
             track,
             emptyStateMode,
             navigate,
+            externalSourceAttachments,
+            threadFileAttachments,
+            elementReferences,
+            clearElementReferences,
+            disableElementPicker,
+            isPreparingAttachments,
+            retainCsvSources,
+            retainThreadFiles,
+            selectedTheme,
         ],
     );
 
@@ -359,58 +831,782 @@ export const AgentChatInput = ({
                     projectId: projectUuid,
                     agentId: agentUuid,
                     chipCount,
+                    placement: 'agent_chat',
                 },
             });
         },
         [track, projectUuid, agentUuid],
     );
 
-    const { data: contextCompactionFlag } = useServerFeatureFlag(
-        FeatureFlags.AiContextCompaction,
+    const hasValue = value.trim().length > 0;
+    const showDisabledBanner = disabled && disabledReason;
+    const isThreadInput = Boolean(threadUuid);
+    const canStartDeepResearch = Boolean(onStartDeepResearch && !isEmbedded);
+    const hasActiveDeepResearchRun = useHasActiveDeepResearchRun({
+        projectUuid,
+        threadUuid,
+    });
+    const { isStarting: isStartingDeepResearch, startDeepResearch } =
+        useDeepResearchComposer({
+            canStart:
+                canStartDeepResearch &&
+                !disabled &&
+                !loading &&
+                !hasActiveDeepResearchRun,
+            onStart: onStartDeepResearch,
+        });
+    const showSqlModeControl = Boolean(onSqlModeChange && !disabled);
+    const showStatusRow = threadModelName !== undefined && !disabled;
+    const activeMessageUuid = isAgentActive
+        ? threadStream?.messageUuid
+        : undefined;
+    const canInterrupt = Boolean(
+        projectUuid &&
+        agentUuid &&
+        threadUuid &&
+        isAgentActive &&
+        activeMessageUuid,
+    );
+    const canSteer = canInterrupt && !disabled && !hasRequestedInterrupt;
+    const canAttachExternalSource = Boolean(
+        projectUuid &&
+        externalSourcesFlag?.enabled &&
+        app.health.data?.externalSources.engineAvailable &&
+        multiSourceQueryFlag?.enabled &&
+        composeSqlRunnerFlag?.enabled &&
+        // Hidden only when the agent is known to have composer queries off.
+        agent?.enableComposerQueries !== false &&
+        !isEmbedded &&
+        app.user.data?.ability.can(
+            'manage',
+            subject('ExternalSource', {
+                organizationUuid: app.user.data.organizationUuid,
+                projectUuid,
+            }),
+        ) &&
+        app.user.data?.ability.can(
+            'manage',
+            subject('Explore', {
+                organizationUuid: app.user.data.organizationUuid,
+                projectUuid,
+            }),
+        ),
+    );
+    const canAttachThreadFile = Boolean(projectUuid && !isEmbedded);
+    const showAttachControl = Boolean(
+        (canAttachExternalSource || canAttachThreadFile) &&
+        !disabled &&
+        !canSteer,
+    );
+    const canUseAttachControl = showAttachControl && composerMode === 'ask';
+    // Dropped files take the same routes as the menu: CSV/TSV go to the
+    // external-source flow when it is available, everything else (and CSV when
+    // it is not) is attached as a text document.
+    const handleDroppedFiles = useCallback(
+        (files: File[]) => {
+            const csvFiles = canAttachExternalSource
+                ? files.filter((file) => isTabularThreadFileName(file.name))
+                : [];
+            const documentFiles = files.filter(
+                (file) => !csvFiles.includes(file),
+            );
+            if (csvFiles.length > 0) void attachCsvFiles(csvFiles);
+            if (documentFiles.length > 0) void attachThreadFiles(documentFiles);
+        },
+        [attachCsvFiles, attachThreadFiles, canAttachExternalSource],
+    );
+    const { isDraggingFiles, dropTargetProps } = useFileDropTarget({
+        enabled: canUseAttachControl,
+        onDropFiles: handleDroppedFiles,
+    });
+    const renderDropOverlay = (variant: 'card' | 'inline') =>
+        isDraggingFiles ? (
+            <Box className={styles.dropOverlay} data-variant={variant}>
+                <Stack align="center" gap={6}>
+                    <MantineIcon
+                        icon={IconFolderSearch}
+                        size={28}
+                        color="dimmed"
+                    />
+                    <Text size="sm" fw={500} c="dimmed">
+                        Drop files to analyze them
+                    </Text>
+                </Stack>
+            </Box>
+        ) : null;
+    const showDeepResearchInComposerMenu = canStartDeepResearch && !disabled;
+    const showComposerActionsMenu = Boolean(
+        showSqlModeControl ||
+        showAttachControl ||
+        showDeepResearchInComposerMenu ||
+        showThemeControl,
     );
 
-    const hasValue = value.trim().length > 0;
-    const showWarningBanner =
-        messageCount > MAX_RECOMMENDED_THREAD_MESSAGE_COUNT &&
-        !contextCompactionFlag?.enabled;
-    const showDisabledBanner = disabled && disabledReason;
+    const handleStartDeepResearch = async () => {
+        const ed = editorRef.current;
+        const question = ed?.getText().trim() ?? '';
+        if (!question) {
+            return;
+        }
+        if (disabled || loading) {
+            return;
+        }
+
+        const started = await startDeepResearch({ question });
+        if (started && clearOnSubmitRef.current) {
+            ed?.commands.clearContent();
+            setValueState('');
+        }
+        if (started) {
+            disableElementPicker();
+            setComposerMode('ask');
+        }
+    };
 
     const handleSubmit = () => {
         const ed = editorRef.current;
         if (!ed) return;
         const text = ed.getText().trim();
-        if (!text || disabled || loading) return;
+        if (!text || disabled || isPreparingAttachments) return;
+        if (composerMode === 'deep_research' && canStartDeepResearch) {
+            void handleStartDeepResearch();
+            return;
+        }
+        if (canSteer) {
+            if (steerMutation.isLoading) return;
+            void handleSteer(text);
+            return;
+        }
+        if (loading) return;
+        // Sending an investigative draft in plain chat while the nudge is up
+        // is an implicit "no thanks" — stop nudging for the whole session.
+        if (nudgeState === 'shown') {
+            dismissDeepResearchNudgeForSession();
+            setNudgeState('done');
+        }
+        retainCsvSources(
+            externalSourceAttachments.map(({ sourceUuid }) => sourceUuid),
+        );
+        retainThreadFiles(
+            threadFileAttachments.map(({ fileUuid }) => fileUuid),
+        );
         onSubmitRef.current({
             message: text,
             toolHints: extractToolHints(ed),
+            ...buildSubmitContext({
+                mentionContext: mergeSubmitContexts(
+                    extractContentMentionContext(ed),
+                    extractSkillMentionContext(ed, text),
+                ),
+                externalSources: externalSourceAttachments,
+                threadFiles: threadFileAttachments,
+                elementReferences,
+                theme: selectedTheme,
+            }),
         });
-        ed.commands.clearContent();
+        disableElementPicker();
+        if (clearOnSubmitRef.current) {
+            ed.commands.clearContent();
+            setValueState('');
+            setExternalSourceAttachments([]);
+            setThreadFileAttachments([]);
+            clearElementReferences();
+            setSelectedTheme(null);
+        }
+    };
+
+    const handleSteer = async (message: string) => {
+        if (!projectUuid || !agentUuid || !threadUuid || !activeMessageUuid) {
+            return;
+        }
+
+        await steerMutation.mutateAsync({
+            projectUuid,
+            agentUuid,
+            threadUuid,
+            messageUuid: activeMessageUuid,
+            message,
+        });
+        disableElementPicker();
+        editorRef.current?.commands.clearContent();
         setValueState('');
     };
+
+    const handleInterrupt = async () => {
+        if (!projectUuid || !agentUuid || !threadUuid || !activeMessageUuid) {
+            return;
+        }
+
+        await interruptMutation.mutateAsync({
+            projectUuid,
+            agentUuid,
+            threadUuid,
+            messageUuid: activeMessageUuid,
+        });
+        setHasRequestedInterrupt(true);
+    };
+
+    useEffect(() => {
+        if (!canStartDeepResearch || hasActiveDeepResearchRun) {
+            setComposerMode('ask');
+        }
+    }, [canStartDeepResearch, hasActiveDeepResearchRun]);
+
+    // Pulse once per scope (thread or new-thread composer) when the draft
+    // first reads as investigative; a session-wide dismissal (set when the
+    // user sends such a draft without enabling Deep Research) silences it
+    // everywhere.
+    const nudgeScope = threadUuid ?? 'new-thread';
+    useEffect(() => {
+        if (nudgeState !== 'idle') return;
+        if (!canStartDeepResearch || hasActiveDeepResearchRun || disabled) {
+            return;
+        }
+        if (!isDeepResearchDraft(value)) return;
+        if (!canShowDeepResearchNudge(nudgeScope)) {
+            setNudgeState('done');
+            return;
+        }
+        markDeepResearchNudgeShown(nudgeScope);
+        setNudgeState('shown');
+    }, [
+        nudgeState,
+        value,
+        canStartDeepResearch,
+        hasActiveDeepResearchRun,
+        disabled,
+        nudgeScope,
+    ]);
+    const showDeepResearchNudge =
+        nudgeState === 'shown' && isDeepResearchDraft(value);
+
+    // Surface the theme control once the draft reads as a data app request
+    // (trigger words, pinned/mentioned app, element ref).
+    const hasPinnedDataApp =
+        elementReferences.length > 0 ||
+        contentMentionPriorityItems.some(
+            (item) =>
+                item.group === 'current' &&
+                item.contentType === ContentType.DATA_APP,
+        );
+    useEffect(() => {
+        if (themeControlSurfaced || !showThemeControl) return;
+        const mentionsDataApp =
+            editorRef.current !== null &&
+            (extractContentMentionContext(editorRef.current).context?.some(
+                (item) => item.type === 'data_app',
+            ) ??
+                false);
+        if (isDataAppDraft(value) || hasPinnedDataApp || mentionsDataApp) {
+            setThemeControlSurfaced(true);
+        }
+    }, [value, hasPinnedDataApp, showThemeControl, themeControlSurfaced]);
+    // The compact composer only shows the button once a theme is picked.
+    const showThemeButton =
+        showThemeControl &&
+        (selectedTheme !== null || (themeControlSurfaced && !isMinimalMode));
 
     const chipRow = useMemo(() => {
         if (!emptyStateMode && !postResponseMode) return null;
         if (suggestionsQuery.isError) return null;
         const chips = suggestionsQuery.data?.chips ?? [];
-        if (!suggestionsQuery.isLoading && chips.length === 0) return null;
+        if (chips.length === 0) return null;
         return (
             <AgentSuggestionChips
                 chips={chips}
-                isLoading={suggestionsQuery.isLoading}
-                loadingVariant={postResponseMode ? 'follow-up' : 'skeleton'}
+                disabled={accessRefused}
                 onChipClick={handleChipClick}
                 onImpression={handleImpression}
+                align={isThreadInput ? 'left' : 'center'}
+                showPromptAffordance={isThreadInput}
+                maxVisible={isPhoneLayout ? 2 : undefined}
             />
         );
     }, [
+        accessRefused,
         emptyStateMode,
         postResponseMode,
         suggestionsQuery.isError,
-        suggestionsQuery.isLoading,
         suggestionsQuery.data,
         handleChipClick,
         handleImpression,
+        isThreadInput,
+        isPhoneLayout,
     ]);
+    const shouldReserveEmptyStateSuggestions =
+        !isThreadInput &&
+        emptyStateMode &&
+        !chipRow &&
+        !suggestionsQuery.isError &&
+        (suggestionsQuery.isLoading || suggestionsQuery.isFetching);
+
+    const renderChipRow = (extraClassName = '', reserve = false) =>
+        (chipRow || reserve) && (
+            <Box
+                className={`${styles.chipReveal} ${extraClassName} ${
+                    chipsNearBottom ? '' : styles.chipHidden
+                } ${!chipRow ? styles.chipReserved : ''}`}
+                aria-hidden={!chipsNearBottom || !chipRow}
+            >
+                {chipRow ?? <Box className={styles.chipTrayReserve} />}
+            </Box>
+        );
+
+    const renderComposerActionsMenu = () => {
+        if (!showComposerActionsMenu) {
+            return null;
+        }
+
+        const deepResearchMenuItem = (
+            <Menu.Item
+                aria-label={
+                    hasActiveDeepResearchRun
+                        ? `Deep research unavailable. ${ACTIVE_DEEP_RESEARCH_DISABLED_REASON}`
+                        : composerMode === 'deep_research'
+                          ? 'Disable deep research'
+                          : 'Enable deep research'
+                }
+                disabled={hasActiveDeepResearchRun}
+                closeMenuOnClick={false}
+                {...(composerMode === 'deep_research'
+                    ? {}
+                    : deepResearchTourAction)}
+                onClick={() =>
+                    setComposerMode(
+                        composerMode === 'deep_research'
+                            ? 'ask'
+                            : 'deep_research',
+                    )
+                }
+                leftSection={
+                    <MantineIcon
+                        icon={IconTelescope}
+                        size={14}
+                        color={
+                            composerMode === 'deep_research'
+                                ? 'indigo.5'
+                                : 'ldGray.6'
+                        }
+                    />
+                }
+                rightSection={
+                    composerMode === 'deep_research' ? (
+                        <MantineIcon
+                            icon={IconCheck}
+                            size={14}
+                            color="indigo.5"
+                        />
+                    ) : null
+                }
+            >
+                <Text component="span" size="sm">
+                    Deep research
+                </Text>
+                {hasActiveDeepResearchRun && (
+                    <Text component="span" display="block" size="xs" c="dimmed">
+                        {ACTIVE_DEEP_RESEARCH_DISABLED_REASON}
+                    </Text>
+                )}
+            </Menu.Item>
+        );
+
+        // keepMounted: the file inputs live inside the dropdown. If it
+        // unmounted on item click, the native picker's result would land on a
+        // detached input and never reach onChange.
+        return (
+            <Menu position="bottom-start" width={220} keepMounted>
+                <Menu.Target>
+                    <ActionIcon
+                        size={30}
+                        radius="xl"
+                        aria-label="Composer options"
+                        // Anchor for scope walkthroughs (data-tour-via)
+                        data-tour-anchor="composer-options"
+                        data-tour-hint="Open the composer options"
+                        className={
+                            showDeepResearchNudge &&
+                            !hasActiveDeepResearchRun &&
+                            composerMode !== 'deep_research'
+                                ? styles.deepResearchNudge
+                                : undefined
+                        }
+                    >
+                        <MantineIcon icon={IconPlus} size={16} color="dimmed" />
+                    </ActionIcon>
+                </Menu.Target>
+                <Menu.Dropdown>
+                    {showAttachControl && (
+                        <>
+                            {canAttachExternalSource && (
+                                <FileButton
+                                    accept=".csv,.tsv,text/csv,text/tab-separated-values"
+                                    multiple
+                                    resetRef={resetCsvFileInputRef}
+                                    onChange={(files) => {
+                                        resetCsvFileInputRef.current?.();
+                                        if (files.length > 0) {
+                                            void attachCsvFiles(files);
+                                        }
+                                    }}
+                                >
+                                    {(fileButtonProps) => (
+                                        <Menu.Item
+                                            {...fileButtonProps}
+                                            aria-label={
+                                                canUseAttachControl
+                                                    ? 'Attach a CSV'
+                                                    : 'Attach a CSV unavailable in deep research'
+                                            }
+                                            disabled={
+                                                isPreparingCsv ||
+                                                !canUseAttachControl
+                                            }
+                                            leftSection={
+                                                <MantineIcon
+                                                    icon={IconPaperclip}
+                                                    size={14}
+                                                />
+                                            }
+                                        >
+                                            Attach a CSV
+                                        </Menu.Item>
+                                    )}
+                                </FileButton>
+                            )}
+                            {canAttachThreadFile && (
+                                <FileButton
+                                    accept={AI_THREAD_FILE_PICKER_EXTENSIONS.filter(
+                                        (ext) =>
+                                            ext !== '.csv' && ext !== '.tsv',
+                                    ).join(',')}
+                                    multiple
+                                    resetRef={resetDocumentFileInputRef}
+                                    onChange={(files) => {
+                                        resetDocumentFileInputRef.current?.();
+                                        if (files.length > 0) {
+                                            void attachThreadFiles(files);
+                                        }
+                                    }}
+                                >
+                                    {(fileButtonProps) => (
+                                        <Menu.Item
+                                            {...fileButtonProps}
+                                            aria-label={
+                                                canUseAttachControl
+                                                    ? 'Attach a document'
+                                                    : 'Attach a document unavailable in deep research'
+                                            }
+                                            disabled={
+                                                isUploadingThreadFile ||
+                                                !canUseAttachControl
+                                            }
+                                            leftSection={
+                                                <MantineIcon
+                                                    icon={IconFileText}
+                                                    size={14}
+                                                />
+                                            }
+                                        >
+                                            Attach a document
+                                        </Menu.Item>
+                                    )}
+                                </FileButton>
+                            )}
+                            {(showSqlModeControl ||
+                                showDeepResearchInComposerMenu ||
+                                showThemeControl) && (
+                                <Menu.Divider role="separator" mx="sm" />
+                            )}
+                        </>
+                    )}
+                    {showSqlModeControl && (
+                        <Menu.Item
+                            aria-label={
+                                sqlMode
+                                    ? 'Disable SQL Runner'
+                                    : 'Enable SQL Runner'
+                            }
+                            closeMenuOnClick={false}
+                            onClick={() => onSqlModeChange?.(!sqlMode)}
+                            leftSection={
+                                <MantineIcon
+                                    icon={IconTerminal2}
+                                    size={14}
+                                    color={sqlMode ? 'indigo.5' : 'ldGray.6'}
+                                />
+                            }
+                            rightSection={
+                                sqlMode ? (
+                                    <MantineIcon
+                                        icon={IconCheck}
+                                        size={14}
+                                        color="indigo.5"
+                                    />
+                                ) : null
+                            }
+                        >
+                            SQL Runner
+                        </Menu.Item>
+                    )}
+                    {showDeepResearchInComposerMenu && deepResearchMenuItem}
+                    {showThemeControl && (
+                        <>
+                            {(showSqlModeControl ||
+                                showDeepResearchInComposerMenu) && (
+                                <Menu.Divider role="separator" mx="sm" />
+                            )}
+                            <ComposerThemeMenuEntry
+                                themes={themes}
+                                value={selectedTheme}
+                                onChange={setSelectedTheme}
+                                canManageThemes={canManageThemes}
+                            />
+                        </>
+                    )}
+                </Menu.Dropdown>
+            </Menu>
+        );
+    };
+
+    // Status bar under the thread composer: attach and SQL Runner stay
+    // switchable mid-thread; the model is fixed so it is only a label.
+    const renderStatusRow = () => {
+        if (!showStatusRow) return null;
+        return (
+            <Group
+                className={styles.statusBar}
+                justify="space-between"
+                align="center"
+                gap="sm"
+                wrap="nowrap"
+            >
+                <Group gap="sm" align="center" wrap="nowrap">
+                    {canAttachThreadFile && showAttachControl && (
+                        <FileButton
+                            accept={AI_THREAD_FILE_PICKER_EXTENSIONS.filter(
+                                (ext) => ext !== '.csv' && ext !== '.tsv',
+                            ).join(',')}
+                            multiple
+                            resetRef={resetDocumentFileInputRef}
+                            onChange={(files) => {
+                                resetDocumentFileInputRef.current?.();
+                                if (files.length > 0) {
+                                    void attachThreadFiles(files);
+                                }
+                            }}
+                        >
+                            {(fileButtonProps) => (
+                                <Tooltip
+                                    label="Attach a document"
+                                    position="top"
+                                    openDelay={300}
+                                >
+                                    <ActionIcon
+                                        {...fileButtonProps}
+                                        size="xs"
+                                        variant="transparent"
+                                        aria-label={
+                                            canUseAttachControl
+                                                ? 'Attach a document'
+                                                : 'Attach a document unavailable in deep research'
+                                        }
+                                        disabled={
+                                            isUploadingThreadFile ||
+                                            !canUseAttachControl
+                                        }
+                                    >
+                                        <MantineIcon
+                                            icon={IconPaperclip}
+                                            size={14}
+                                            color="dimmed"
+                                        />
+                                    </ActionIcon>
+                                </Tooltip>
+                            )}
+                        </FileButton>
+                    )}
+                    {sqlMode && (
+                        <Group gap={4} wrap="nowrap">
+                            <MantineIcon
+                                icon={IconTerminal2}
+                                size={14}
+                                color="dimmed"
+                            />
+                            <Text size="xs" c="dimmed">
+                                Can run SQL
+                            </Text>
+                        </Group>
+                    )}
+                    {composerMode === 'deep_research' && (
+                        <Group gap={4} wrap="nowrap">
+                            <MantineIcon
+                                icon={IconTelescope}
+                                size={14}
+                                color="dimmed"
+                            />
+                            <Text size="xs" c="dimmed">
+                                Deep research
+                            </Text>
+                        </Group>
+                    )}
+                    {footerNotice}
+                </Group>
+                {threadModelName && (
+                    <Group gap={4} wrap="nowrap">
+                        {threadModelName && threadModelWarning && (
+                            <Tooltip
+                                label={threadModelWarning}
+                                multiline
+                                w={240}
+                                position="top"
+                            >
+                                <Group gap={4} wrap="nowrap">
+                                    <MantineIcon
+                                        icon={IconAlertTriangle}
+                                        size={14}
+                                        color="yellow.7"
+                                        aria-label={threadModelWarning}
+                                    />
+                                    <Text size="xs" c="dimmed">
+                                        {threadModelName}
+                                    </Text>
+                                </Group>
+                            </Tooltip>
+                        )}
+                        {threadModelName && !threadModelWarning && (
+                            <Text size="xs" c="dimmed">
+                                {threadModelName}
+                            </Text>
+                        )}
+                    </Group>
+                )}
+            </Group>
+        );
+    };
+
+    const renderThemeButton = () =>
+        showThemeButton ? (
+            <ComposerThemeButton
+                themes={themes}
+                value={selectedTheme}
+                onChange={setSelectedTheme}
+                canManageThemes={canManageThemes}
+            />
+        ) : null;
+
+    const renderedAttachments =
+        externalSourceAttachments.length > 0 ||
+        pendingCsvFiles.length > 0 ||
+        threadFileAttachments.length > 0 ||
+        pendingThreadFiles.length > 0 ||
+        elementReferences.length > 0 ? (
+            <PromptAttachments
+                externalSources={externalSourceAttachments}
+                pendingCsvFiles={pendingCsvFiles}
+                threadFiles={threadFileAttachments}
+                pendingThreadFiles={pendingThreadFiles}
+                elementRefs={elementReferences}
+                onRemoveExternalSource={(sourceUuid) => {
+                    setExternalSourceAttachments((attachments) =>
+                        attachments.filter(
+                            (attachment) =>
+                                attachment.sourceUuid !== sourceUuid,
+                        ),
+                    );
+                    void discardCsvSource(sourceUuid);
+                }}
+                onRemoveThreadFile={(fileUuid) => {
+                    setThreadFileAttachments((attachments) =>
+                        attachments.filter(
+                            (attachment) => attachment.fileUuid !== fileUuid,
+                        ),
+                    );
+                    void discardThreadFile(fileUuid);
+                }}
+                onRemoveElementRef={(reference) => {
+                    if (!threadUuid) return;
+                    storeDispatch(
+                        removeThreadElementReference({
+                            threadUuid,
+                            reference,
+                        }),
+                    );
+                }}
+            />
+        ) : undefined;
+
+    const renderComposerAction = (size: 'sm' | 'lg') => {
+        if (canSteer && hasValue) {
+            return (
+                <ComposerSubmitButton
+                    icon={IconArrowUp}
+                    label="Send guidance"
+                    size={size}
+                    disabled={steerMutation.isLoading}
+                    loading={steerMutation.isLoading}
+                    onClick={handleSubmit}
+                />
+            );
+        }
+        if (canInterrupt) {
+            return (
+                <ComposerSubmitButton
+                    icon={IconPlayerStop}
+                    label="Stop agent"
+                    destructive
+                    size={size}
+                    disabled={hasRequestedInterrupt}
+                    loading={
+                        interruptMutation.isLoading || hasRequestedInterrupt
+                    }
+                    onClick={() => void handleInterrupt()}
+                />
+            );
+        }
+        const isDeepResearch = composerMode === 'deep_research';
+        return (
+            <ComposerSubmitButton
+                icon={IconArrowUp}
+                label={isDeepResearch ? 'Start research' : 'Send message'}
+                size={size}
+                // Walkthrough marker for create:AiAgentThread: sending the
+                // first message opens a thread. The learner picks one of the
+                // agent's suggested questions on the way, so nothing is typed.
+                // See scripts/scope-tours/generate.ts.
+                data-tour-scope="create:AiAgentThread"
+                data-tour-step="2"
+                data-tour-route="/projects/:projectUuid/ai-agents/:agentUuid"
+                data-tour-label="Send your question"
+                data-tour-title="Ask an AI agent"
+                data-tour-interactive="true"
+                data-tour-via='[data-tour-nav="ask-ai"] >> [data-tour-anchor="ai-suggestion"]'
+                data-tour-docs="agents.mdx#intro:2"
+                disabled={
+                    disabled ||
+                    !hasValue ||
+                    loading ||
+                    isPreparingAttachments ||
+                    (isDeepResearch && isStartingDeepResearch)
+                }
+                loading={isDeepResearch ? isStartingDeepResearch : loading}
+                onClick={handleSubmit}
+            />
+        );
+    };
+
+    const composerCommonProps = {
+        placeholder,
+        defaultValue,
+        autoFocus: true,
+        disabled,
+        submitDisabled:
+            disabled || isPreparingAttachments || (loading && !canSteer),
+        extensions: composerExtensions,
+        onEditorReady: setEditor,
+        onValueChange: handleComposerValueChange,
+        shouldBlockSubmit,
+        onSubmit: handleSubmit,
+    };
 
     if (isMinimalMode) {
         return (
@@ -419,117 +1615,58 @@ export const AgentChatInput = ({
                     fullWidth ? styles.minimalContainerFullWidth : ''
                 }`}
                 ref={rootRef}
+                data-layout="minimal"
             >
-                {showWarningBanner && (
-                    <Paper className={styles.warningBanner}>
-                        <Text size="xs" c="ldGray.7" ta="center">
-                            Agent performance degrades if a thread is too long.
-                            Please start a{' '}
-                            <Anchor
-                                size="xs"
-                                href="#"
-                                onClick={(e) => {
-                                    e.preventDefault();
-                                    if (projectUuid && agentUuid) {
-                                        void navigate(
-                                            `/projects/${projectUuid}/ai-agents/${agentUuid}/threads`,
-                                        );
-                                    }
-                                }}
-                            >
-                                new thread
-                            </Anchor>
-                        </Text>
-                    </Paper>
-                )}
-
-                {chipRow && (
-                    <Box
-                        className={`${styles.chipReveal} ${
-                            chipsNearBottom ? '' : styles.chipHidden
-                        }`}
-                        aria-hidden={!chipsNearBottom}
-                    >
-                        {chipRow}
-                    </Box>
-                )}
-
-                <Box
-                    className={`${styles.minimalInputWrapper} ${
-                        sqlMode ? styles.sqlModeActive : ''
-                    }`}
-                    pos="relative"
+                <AiAccessGate
+                    projectUuid={projectUuid}
+                    refusal={accessGate.refusal}
+                    isLoading={accessGate.isLoading}
+                    isError={accessGate.isError}
+                    refetch={accessGate.refetch}
+                    variant={
+                        accessCalloutVariant ??
+                        (messageCount === 0 ? 'card' : 'inline')
+                    }
                 >
-                    <RichTextEditor
-                        editor={editor}
-                        classNames={{
-                            root: styles.editorRoot,
-                            content: styles.minimalEditorContent,
-                        }}
-                    >
-                        <RichTextEditor.Content />
-                    </RichTextEditor>
+                    {isThreadInput && renderChipRow(styles.threadChipFlow)}
 
-                    <ActionIcon
-                        right={12}
-                        bottom={10}
-                        variant="filled"
-                        size="md"
-                        className={styles.minimalSubmitButton}
-                        disabled={disabled || !hasValue}
-                        loading={loading}
-                        onClick={handleSubmit}
-                        aria-label="Send message"
-                    >
-                        <MantineIcon
-                            icon={IconArrowUp}
-                            color="ldGray.0"
-                            size={18}
-                            stroke={2}
-                        />
-                    </ActionIcon>
-                </Box>
+                    <Box className={styles.threadInputStack}>
+                        <Box className={styles.dropTarget} {...dropTargetProps}>
+                            <PromptComposer
+                                {...composerCommonProps}
+                                variant="inline"
+                                attachments={renderedAttachments}
+                                toolbarLeft={
+                                    <Group gap={4} align="center" wrap="nowrap">
+                                        {renderComposerActionsMenu()}
+                                        {renderThemeButton()}
+                                    </Group>
+                                }
+                                toolbarRight={
+                                    <Group gap={4} align="center" wrap="nowrap">
+                                        {renderComposerAction('sm')}
+                                    </Group>
+                                }
+                            />
+                            {renderDropOverlay('inline')}
+                        </Box>
+                        {renderStatusRow()}
+                    </Box>
 
-                {onSqlModeChange && !disabled && (
-                    <Group justify="flex-end" px="xs" pt="xs">
-                        <Tooltip
-                            multiline
-                            w={260}
-                            withArrow
-                            position="top"
-                            label="Let the agent reach for raw SQL when the question can't be answered from the semantic layer alone. Each query still asks for your approval before running."
-                        >
-                            <Group gap={6} align="center" wrap="nowrap">
-                                <MantineIcon
-                                    icon={IconTerminal2}
-                                    size={14}
-                                    color={sqlMode ? 'indigo.5' : 'ldGray.6'}
-                                />
-                                <Text
-                                    size="xs"
-                                    c={sqlMode ? 'indigo.5' : 'dimmed'}
-                                    fw={500}
-                                >
-                                    SQL mode
-                                </Text>
-                                <Switch
-                                    size="xs"
-                                    color="indigo"
-                                    checked={sqlMode}
-                                    onChange={(e) =>
-                                        onSqlModeChange(e.currentTarget.checked)
-                                    }
-                                    aria-label="Toggle SQL mode"
-                                />
-                            </Group>
-                        </Tooltip>
-                    </Group>
-                )}
-
+                    {!isThreadInput &&
+                        renderChipRow(
+                            styles.chipTray,
+                            shouldReserveEmptyStateSuggestions,
+                        )}
+                </AiAccessGate>
                 {showDisabledBanner && (
                     <Text size="xs" c="dimmed" ta="right" mt="xs" px="sm">
                         {disabledReason}
                     </Text>
+                )}
+
+                {!showStatusRow && !disabled && footerNotice && (
+                    <Box className={styles.footerNotice}>{footerNotice}</Box>
                 )}
             </Box>
         );
@@ -539,147 +1676,116 @@ export const AgentChatInput = ({
         <Box
             ref={rootRef}
             className={`${styles.container} ${
-                showWarningBanner ? styles.warningBannerVisible : ''
-            } ${showDisabledBanner ? styles.disabledBannerVisible : ''}`}
+                showDisabledBanner ? styles.disabledBannerVisible : ''
+            }`}
+            data-dense={dense}
+            data-layout="card"
         >
-            {chipRow && (
-                <Box
-                    className={`${styles.chipReveal} ${
-                        chipsNearBottom ? '' : styles.chipHidden
-                    }`}
-                    aria-hidden={!chipsNearBottom}
-                >
-                    {chipRow}
-                </Box>
-            )}
-
-            <Box
-                className={`${styles.inputCard} ${
-                    sqlMode ? styles.sqlModeActive : ''
-                }`}
+            <AiAccessGate
+                projectUuid={projectUuid}
+                refusal={accessGate.refusal}
+                isLoading={accessGate.isLoading}
+                isError={accessGate.isError}
+                refetch={accessGate.refetch}
+                variant={
+                    accessCalloutVariant ??
+                    (messageCount === 0 ? 'card' : 'inline')
+                }
             >
-                <RichTextEditor
-                    editor={editor}
-                    classNames={{
-                        root: styles.editorRoot,
-                        content: styles.editorContent,
-                    }}
-                >
-                    <RichTextEditor.Content />
-                </RichTextEditor>
+                {isThreadInput && renderChipRow(styles.threadChipFlow)}
 
-                <hr className={styles.divider} />
-
-                <Box className={styles.toolbar}>
-                    <Box className={styles.toolbarActions}>
-                        {showModelSelector && (
-                            <ModelSelector
-                                models={models}
-                                value={selectedModelId ?? null}
-                                onChange={onModelChange}
-                            />
-                        )}
-
-                        {onExtendedThinkingChange && (
-                            <Group>
-                                <Divider orientation="vertical" />
-                                <Button
-                                    variant="subtle"
-                                    size="compact-sm"
-                                    leftSection={
-                                        <MantineIcon
-                                            icon={IconBrain}
-                                            color={
-                                                extendedThinking
-                                                    ? 'indigo.5'
-                                                    : 'ldGray.7'
-                                            }
-                                        />
-                                    }
-                                    className={
-                                        styles.thinkingButton +
-                                        ' ' +
-                                        (extendedThinking
-                                            ? styles.thinkingButtonOn
-                                            : '')
-                                    }
-                                    onClick={() =>
-                                        onExtendedThinkingChange(
-                                            !extendedThinking,
-                                        )
-                                    }
-                                >
-                                    Thinking
-                                </Button>
+                <Box className={styles.dropTarget} {...dropTargetProps}>
+                    <PromptComposer
+                        {...composerCommonProps}
+                        variant="card"
+                        size={dense ? 'sm' : 'lg'}
+                        resizeHandle={isThreadInput ? 'top' : 'bottom'}
+                        className={styles.agentComposer}
+                        onMouseDown={handleInputCardMouseDown}
+                        attachments={renderedAttachments}
+                        toolbarLeft={
+                            <Group gap="xs" align="center" wrap="nowrap">
+                                {renderComposerActionsMenu()}
+                                {renderThemeButton()}
                             </Group>
-                        )}
-                    </Box>
+                        }
+                        toolbarRight={
+                            <Group gap="xs" align="center" wrap="nowrap">
+                                <Box
+                                    className={styles.toolbarSelectors}
+                                    data-compact={isCompactLayout}
+                                >
+                                    {showAgentSelector && (
+                                        <Box
+                                            className={styles.controlsReveal}
+                                            data-visible={hasClickedInput}
+                                        >
+                                            <Group
+                                                gap="xs"
+                                                align="center"
+                                                wrap="nowrap"
+                                            >
+                                                <AgentSelector
+                                                    projectUuid={projectUuid!}
+                                                    agents={agents!}
+                                                    selectedAgent={
+                                                        selectedAgent!
+                                                    }
+                                                    compact
+                                                />
+                                            </Group>
+                                        </Box>
+                                    )}
 
-                    <Group gap="md" align="center" wrap="nowrap">
-                        {onSqlModeChange && !disabled && (
-                            <Tooltip
-                                multiline
-                                w={260}
-                                withArrow
-                                position="top"
-                                label="Let the agent reach for raw SQL when the question can't be answered from the semantic layer alone. Each query still asks for your approval before running."
-                            >
-                                <Group gap={6} align="center" wrap="nowrap">
-                                    <MantineIcon
-                                        icon={IconTerminal2}
-                                        size={14}
-                                        color={
-                                            sqlMode ? 'indigo.5' : 'ldGray.6'
-                                        }
-                                    />
-                                    <Text
-                                        size="xs"
-                                        c={sqlMode ? 'indigo.5' : 'dimmed'}
-                                        fw={500}
-                                    >
-                                        SQL mode
-                                    </Text>
-                                    <Switch
-                                        size="xs"
-                                        color="indigo"
-                                        checked={sqlMode}
-                                        onChange={(e) =>
-                                            onSqlModeChange(
-                                                e.currentTarget.checked,
-                                            )
-                                        }
-                                        aria-label="Toggle SQL mode"
-                                    />
-                                </Group>
-                            </Tooltip>
-                        )}
+                                    {showModelSelectorControl &&
+                                        models &&
+                                        onModelChange && (
+                                            <Box className={styles.modelGroup}>
+                                                <ModelSelector
+                                                    disabled={accessRefused}
+                                                    models={models}
+                                                    value={
+                                                        selectedModelId ?? null
+                                                    }
+                                                    onChange={onModelChange}
+                                                    variant="subtle"
+                                                    color="gray"
+                                                    size="xs"
+                                                    reasoningEnabled={
+                                                        extendedThinking
+                                                    }
+                                                    onReasoningChange={
+                                                        onExtendedThinkingChange
+                                                    }
+                                                    agentDefault={agentDefault}
+                                                />
+                                            </Box>
+                                        )}
+                                </Box>
 
-                        <ActionIcon
-                            variant="filled"
-                            size="lg"
-                            className={styles.submitButton}
-                            disabled={disabled || !hasValue}
-                            loading={loading}
-                            onClick={handleSubmit}
-                            aria-label="Send message"
-                        >
-                            <MantineIcon
-                                icon={IconArrowUp}
-                                color="ldGray.0"
-                                size={20}
-                                stroke={2}
-                            />
-                        </ActionIcon>
-                    </Group>
+                                {renderComposerAction('lg')}
+                            </Group>
+                        }
+                    />
+                    {renderDropOverlay('card')}
                 </Box>
-            </Box>
 
+                {!isThreadInput &&
+                    renderChipRow(
+                        styles.chipTray,
+                        shouldReserveEmptyStateSuggestions,
+                    )}
+            </AiAccessGate>
             {showDisabledBanner && (
                 <Paper className={styles.disabledBanner} px="md" py="xs">
                     <Text size="xs" c="dimmed" ta="right">
                         {disabledReason}
                     </Text>
                 </Paper>
+            )}
+
+            {!disabled && footerNotice && (
+                <Box className={styles.footerNotice}>{footerNotice}</Box>
             )}
         </Box>
     );

@@ -21,20 +21,21 @@ import {
     type CatalogField,
 } from '@lightdash/common';
 import {
-    ActionIcon,
-    Badge,
+    TextInput,
     Box,
-    Button,
     Center,
     Divider,
     Group,
-    Popover,
-    SegmentedControl,
     Stack,
-    Text,
-    TextInput,
-    Tooltip,
     type GroupProps,
+    Text,
+    Button,
+    ActionIcon,
+    SegmentedControl,
+    Badge,
+    Popover,
+    Tooltip,
+    VisuallyHidden,
 } from '@mantine/core';
 import {
     IconEye,
@@ -49,8 +50,12 @@ import isEqual from 'lodash/isEqual';
 import { memo, useCallback, useMemo, useState, type FC } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import { useDebounce } from 'react-use';
-import { type MRT_TableInstance } from '../../../../components/common/ContentTable';
+import {
+    getColumnHeaderLabel,
+    type ContentTableInstance,
+} from '../../../../components/common/ContentTable';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import useEmbed from '../../../../ee/providers/Embed/useEmbed';
 import useTracking from '../../../../providers/Tracking/useTracking';
 import { TotalMetricsDot } from '../../../../svgs/metricsCatalog';
 import { EventName } from '../../../../types/Events';
@@ -67,8 +72,9 @@ import {
     setColumnOrder,
     setColumnVisibility,
 } from '../../store/metricsCatalogSlice';
-import { MetricCatalogView } from '../../types';
+import { MetricCatalogView, type MetricsCatalogFilter } from '../../types';
 import CategoriesFilter from './CategoriesFilter';
+import classes from './MetricsTableTopToolbar.module.css';
 import OwnersFilter from './OwnersFilter';
 import TableFilter from './TableFilter';
 type MetricsTableTopToolbarProps = GroupProps & {
@@ -87,7 +93,8 @@ type MetricsTableTopToolbarProps = GroupProps & {
     totalResults: number;
     showCategoriesFilter?: boolean;
     metricCatalogView: MetricCatalogView;
-    table: MRT_TableInstance<CatalogField>;
+    table: ContentTableInstance<CatalogField>;
+    hiddenFilters: MetricsCatalogFilter[];
 };
 
 const SortableColumn: FC<{
@@ -105,10 +112,15 @@ const SortableColumn: FC<{
     };
 
     return (
-        <Group ref={setNodeRef} style={style} position="apart" h={28}>
-            <Group spacing={4}>
+        <Group
+            ref={setNodeRef}
+            style={style}
+            justify="space-between"
+            h={28}
+            className={classes.columnRow}
+        >
+            <Group gap={4}>
                 <Tooltip
-                    variant="xs"
                     disabled={!column.frozen}
                     label={`The ${column.name} column is pinned for usability`}
                     position="top"
@@ -119,26 +131,26 @@ const SortableColumn: FC<{
                             color="ldGray.5"
                             {...attributes}
                             {...listeners}
+                            aria-label={`Reorder ${column.name} column`}
                             disabled={column.frozen}
                         >
                             <MantineIcon icon={IconGripVertical} />
                         </ActionIcon>
                     </Box>
                 </Tooltip>
-                <Text
-                    variant="subtle"
-                    fz={13}
-                    radius="md"
-                    fw={500}
-                    color="ldDark.9"
-                >
+                <Text fz="sm" fw={500} c="ldDark.9">
                     {column.name}
                 </Text>
             </Group>
             <ActionIcon
+                data-tour-anchor="catalog-column-toggle"
+                data-tour-hint="Toggle the {value} column"
+                data-tour-value={column.name}
+                aria-label={`Toggle ${column.name} column`}
+                aria-pressed={column.visible}
                 size="xs"
                 color="ldGray.5"
-                sx={{
+                style={{
                     visibility: column.frozen ? 'hidden' : 'visible',
                 }}
                 onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
@@ -168,9 +180,13 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
         showCategoriesFilter,
         metricCatalogView,
         table,
+        hiddenFilters,
         ...props
     }) => {
         const [search, setSearch] = useState(_search);
+        const showCategories =
+            showCategoriesFilter && !hiddenFilters.includes('categories');
+        const { embedToken } = useEmbed();
 
         useDebounce(
             () => {
@@ -333,16 +349,21 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
 
         return (
             <Group {...props}>
-                <Group spacing="xs">
+                <Group gap="xs">
                     {/* Search input */}
                     <TextInput
+                        data-tour-anchor="metrics-search"
+                        data-tour-hint="Find Total completed order amount"
+                        data-tour-input="true"
+                        data-tour-suggest="Total completed order amount"
+                        data-tour-docs="explore/metrics-catalog/build-saved-trees.mdx#creating-a-saved-tree:li2"
                         size="xs"
-                        radius="md"
+                        classNames={{ input: classes.searchInput }}
                         styles={(theme) => ({
                             input: {
                                 height: 32,
                                 width: 309,
-                                padding: `${theme.spacing.xs} ${theme.spacing.sm}`,
+                                paddingBlock: theme.spacing.xs,
                                 textOverflow: 'ellipsis',
                                 fontSize: theme.fontSizes.sm,
                                 fontWeight: 400,
@@ -350,30 +371,28 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                     ? theme.colors.ldGray[8]
                                     : theme.colors.ldGray[5],
                                 boxShadow: theme.shadows.subtle,
-                                border: `1px solid ${theme.colors.ldGray[3]}`,
-                                '&:hover': {
-                                    border: `1px solid ${theme.colors.ldGray[4]}`,
-                                },
-                                '&:focus': {
-                                    border: `1px solid ${theme.colors.blue[5]}`,
-                                },
                             },
                         })}
                         type="search"
                         variant="default"
                         placeholder="Search by name or description"
                         value={search ?? ''}
-                        icon={
+                        leftSection={
                             <MantineIcon
                                 size="md"
-                                color="ldGray.6"
+                                color="dimmed"
                                 icon={IconSearch}
                             />
                         }
                         onChange={(e) => setSearch(e.target.value)}
+                        rightSectionPointerEvents="all"
                         rightSection={
                             search && (
                                 <ActionIcon
+                                    aria-label="Clear search"
+                                    onMouseDown={(event) =>
+                                        event.preventDefault()
+                                    }
                                     onClick={clearSearch}
                                     variant="transparent"
                                     size="xs"
@@ -386,18 +405,18 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                     />
 
                     {/* Categories filter */}
-                    {showCategoriesFilter && (
+                    {showCategories && (
                         <Divider
                             orientation="vertical"
                             w={1}
                             h={20}
-                            sx={{
+                            color="ldGray.3"
+                            style={{
                                 alignSelf: 'center',
-                                borderColor: 'ldGray.3',
                             }}
                         />
                     )}
-                    {showCategoriesFilter && (
+                    {showCategories && (
                         <CategoriesFilter
                             selectedCategories={selectedCategories}
                             setSelectedCategories={setSelectedCategories}
@@ -407,55 +426,103 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                     )}
 
                     {/* TODO :: permissions for table filter */}
-                    <TableFilter
-                        selectedTables={selectedTables}
-                        setSelectedTables={setSelectedTables}
-                    />
+                    {!hiddenFilters.includes('tables') && (
+                        <TableFilter
+                            selectedTables={selectedTables}
+                            setSelectedTables={setSelectedTables}
+                        />
+                    )}
 
-                    <OwnersFilter
-                        selectedOwners={selectedOwners}
-                        setSelectedOwners={setSelectedOwners}
-                    />
+                    {!hiddenFilters.includes('owners') && (
+                        <OwnersFilter
+                            selectedOwners={selectedOwners}
+                            setSelectedOwners={setSelectedOwners}
+                        />
+                    )}
                 </Group>
-                <Group spacing="xs">
+                <Group gap="xs">
                     <Badge
                         bg="ldGray.1"
                         c="ldGray.8"
                         radius={6}
                         py="sm"
                         px="xs"
-                        tt="none"
                         h={32}
                     >
-                        <Group spacing={6}>
+                        <Group gap={6}>
                             <TotalMetricsDot />
                             <Text fz="sm" fw={500}>
                                 {totalResults} metrics
                             </Text>
                         </Group>
                     </Badge>
-                    <Popover shadow="subtle" withArrow>
+                    <Popover
+                        withArrow
+                        floatingStrategy="fixed"
+                        middlewares={{
+                            shift: { crossAxis: true, padding: 12 },
+                        }}
+                    >
                         <Popover.Target>
                             <Tooltip
-                                withinPortal
-                                variant="xs"
-                                multiline
                                 maw={150}
                                 label="Manage column visibility"
                                 position="top"
                             >
                                 <ActionIcon
                                     variant="transparent"
+                                    aria-label="Manage column visibility"
+                                    className={classes.columnTrigger}
                                     size="xs"
                                     color="ldGray.5"
+                                    display={embedToken ? 'none' : undefined}
+                                    data-tour-anchor="catalog-columns"
+                                    data-tour-hint="Manage column visibility"
+                                    data-tour-scope="view:SpotlightTableConfig"
+                                    data-tour-step="2"
+                                    data-tour-route="/projects/:projectUuid/metrics"
+                                    data-tour-label="Open Manage column visibility"
+                                    data-tour-docs="explore/metrics-catalog.mdx#view-catalog-column-configuration:1-2"
+                                    data-tour-title="View catalog column settings"
+                                    data-tour-interactive="true"
+                                    data-tour-via='[data-tour-nav="metrics"]'
                                 >
                                     <MantineIcon icon={IconEye} />
                                 </ActionIcon>
                             </Tooltip>
                         </Popover.Target>
-                        <Popover.Dropdown p="sm" miw={270}>
-                            <Stack spacing="sm">
-                                <Stack spacing={2}>
+                        <Popover.Dropdown
+                            p="sm"
+                            miw={270}
+                            maw="calc(100vw - 24px)"
+                            mah="calc(100dvh - 24px)"
+                            className={classes.columnDropdown}
+                            data-tour-scope="view:SpotlightTableConfig"
+                            data-tour-step="1"
+                            data-tour-route="/projects/:projectUuid/metrics"
+                            data-tour-label="Read the column configuration"
+                            data-tour-docs="explore/metrics-catalog.mdx#view-catalog-column-configuration:1-2"
+                            data-tour-return="none"
+                            data-tour-resultdocs="explore/metrics-catalog.mdx#view-catalog-column-configuration:p2:1-3"
+                        >
+                            <Stack gap="sm">
+                                <Stack
+                                    gap={2}
+                                    data-tour-scope="manage:SpotlightTableConfig"
+                                    data-tour-step="1"
+                                    data-tour-route="/projects/:projectUuid/metrics"
+                                    data-tour-label="Inspect the saved column settings"
+                                    data-tour-busy='[data-tour-anchor="catalog-save-pending"]'
+                                    data-tour-docs="explore/metrics-catalog.mdx#save-catalog-column-configuration:1"
+                                    data-tour-return="none"
+                                    data-tour-resultdocs="explore/metrics-catalog.mdx#save-catalog-column-configuration:1"
+                                    data-tour-anchor={
+                                        isCreatingSpotlightConfig ||
+                                        hasConfigChanges
+                                            ? 'catalog-save-pending'
+                                            : undefined
+                                    }
+                                >
                                     <DndContext
                                         sensors={sensors}
                                         collisionDetection={closestCenter}
@@ -475,9 +542,9 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                                     <SortableColumn
                                                         key={column.id}
                                                         column={{
-                                                            name: column
-                                                                .columnDef
-                                                                .header as string,
+                                                            name: getColumnHeaderLabel(
+                                                                column,
+                                                            ),
                                                             uuid: column.id,
                                                             visible:
                                                                 column.getIsVisible(),
@@ -498,13 +565,11 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                 </Stack>
 
                                 <Divider color="ldGray.1" />
-                                <Group position="apart" mt={4}>
+                                <Group justify="space-between" mt={4}>
                                     {canManageSpotlight ? (
                                         <>
                                             <Tooltip
                                                 position="bottom"
-                                                variant="xs"
-                                                withinPortal
                                                 label={
                                                     hasConfigChanges
                                                         ? 'Discard unsaved changes'
@@ -514,10 +579,9 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                                 <Button
                                                     size="xs"
                                                     variant="default"
-                                                    radius="md"
                                                     h={28}
                                                     onClick={handleReset}
-                                                    sx={(theme) => ({
+                                                    style={(theme) => ({
                                                         border: `1px solid ${theme.colors.ldGray[2]}`,
                                                         boxShadow:
                                                             theme.shadows
@@ -537,8 +601,15 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                             <Button
                                                 size="xs"
                                                 h={28}
-                                                variant="darkPrimary"
                                                 onClick={handleSave}
+                                                data-tour-scope="manage:SpotlightTableConfig"
+                                                data-tour-step="2"
+                                                data-tour-route="/projects/:projectUuid/metrics"
+                                                data-tour-label="Save for everyone"
+                                                data-tour-docs="explore/metrics-catalog.mdx#save-catalog-column-configuration:2"
+                                                data-tour-title="Save catalog column settings"
+                                                data-tour-interactive="true"
+                                                data-tour-via='[data-tour-nav="metrics"] >> [data-tour-anchor="catalog-columns"] >> [data-tour-anchor="catalog-column-toggle"][data-tour-value="Description"]'
                                                 loading={
                                                     isCreatingSpotlightConfig
                                                 }
@@ -549,19 +620,16 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                     ) : (
                                         <Tooltip
                                             position="bottom"
-                                            variant="xs"
-                                            withinPortal
                                             label={'Discard unsaved changes'}
                                         >
                                             <Button
                                                 fullWidth
                                                 size="xs"
                                                 h={28}
-                                                radius="md"
                                                 variant="default"
                                                 onClick={handleReset}
                                                 disabled={!hasConfigChanges}
-                                                sx={(theme) => ({
+                                                style={(theme) => ({
                                                     border: `1px solid ${theme.colors.ldGray[2]}`,
                                                     boxShadow:
                                                         theme.shadows.subtle,
@@ -579,16 +647,19 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                         orientation="vertical"
                         w={1}
                         h={20}
-                        sx={{
+                        color="#DEE2E6"
+                        display={embedToken ? 'none' : undefined}
+                        style={{
                             alignSelf: 'center',
-                            borderColor: '#DEE2E6',
                         }}
                     />
                     <SegmentedControl
+                        classNames={{ label: classes.viewLabel }}
                         size="xs"
                         value={metricCatalogView}
                         styles={(theme) => ({
                             root: {
+                                display: embedToken ? 'none' : undefined,
                                 borderRadius: theme.radius.md,
                                 gap: theme.spacing.two,
                                 padding: theme.spacing.xxs,
@@ -604,12 +675,13 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                             {
                                 label: (
                                     <Tooltip
-                                        withinPortal
-                                        variant="xs"
                                         label="List view"
                                         position="bottom-end"
                                     >
                                         <Center>
+                                            <VisuallyHidden>
+                                                List view
+                                            </VisuallyHidden>
                                             <MantineIcon
                                                 icon={IconList}
                                                 size="md"
@@ -622,12 +694,25 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                             {
                                 label: (
                                     <Tooltip
-                                        withinPortal
-                                        variant="xs"
                                         label="Canvas"
                                         position="bottom-end"
                                     >
-                                        <Center>
+                                        <Center
+                                            data-tour-scope="view:MetricsTree"
+                                            data-tour-step="2"
+                                            data-tour-title="View a saved metrics tree"
+                                            data-tour-label="Open Canvas"
+                                            data-tour-route="/projects/:projectUuid/metrics"
+                                            data-tour-interactive="true"
+                                            data-tour-via='[data-tour-nav="metrics"]'
+                                            data-tour-then='[data-tour-anchor="saved-tree"][data-tour-value="Completed orders"]'
+                                            data-tour-anchor="metrics-canvas"
+                                            data-tour-hint="Open Canvas"
+                                            data-tour-docs="explore/metrics-catalog/build-saved-trees.mdx#intro:p3:1"
+                                        >
+                                            <VisuallyHidden>
+                                                Canvas
+                                            </VisuallyHidden>
                                             <MantineIcon
                                                 icon={IconSitemap}
                                                 size="md"
@@ -644,10 +729,7 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                             switch (view) {
                                 case MetricCatalogView.LIST:
                                     void navigate({
-                                        pathname: location.pathname.replace(
-                                            /\/canvas/,
-                                            '',
-                                        ),
+                                        pathname: `/projects/${projectUuid}/metrics`,
                                         search: location.search,
                                     });
                                     break;
@@ -661,7 +743,7 @@ export const MetricsTableTopToolbar: FC<MetricsTableTopToolbarProps> = memo(
                                         },
                                     });
                                     void navigate({
-                                        pathname: `${location.pathname}/canvas`,
+                                        pathname: `/projects/${projectUuid}/metrics/canvas`,
                                         search: location.search,
                                     });
                                     break;

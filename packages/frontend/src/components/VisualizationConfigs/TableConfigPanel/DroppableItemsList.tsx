@@ -3,11 +3,14 @@ import {
     Droppable,
     type DraggableStateSnapshot,
 } from '@hello-pangea/dnd';
-import { Group, Stack, Text } from '@mantine-8/core';
+import { Group, Stack, Text } from '@mantine/core';
 import React, { type FC } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../../../providers/PortalTarget/usePortalTarget';
 import { GrabIcon } from '../common/GrabIcon';
-import ColumnConfiguration from './ColumnConfiguration';
+import ColumnConfiguration, {
+    type ColumnConfigurationProps,
+} from './ColumnConfiguration';
 
 type DraggablePortalHandlerProps = {
     snapshot: DraggableStateSnapshot;
@@ -16,7 +19,8 @@ type DraggablePortalHandlerProps = {
 const DraggablePortalHandler: FC<
     React.PropsWithChildren<DraggablePortalHandlerProps>
 > = ({ children, snapshot }) => {
-    if (snapshot.isDragging) return createPortal(children, document.body);
+    const portalTarget = usePortalTarget();
+    if (snapshot.isDragging) return createPortal(children, portalTarget);
     return <>{children}</>;
 };
 
@@ -26,7 +30,10 @@ type DroppableItemsListProps = {
     isDragging: boolean;
     disableReorder: boolean;
     placeholder?: string;
-    allowHidePivotDimension?: boolean;
+    draggableItemIds?: string[];
+    getColumnConfigurationProps?: (
+        itemId: string,
+    ) => Omit<ColumnConfigurationProps, 'fieldId'>;
 };
 
 const DroppableItemsList: FC<DroppableItemsListProps> = ({
@@ -35,7 +42,8 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
     isDragging,
     disableReorder,
     placeholder,
-    allowHidePivotDimension = false,
+    draggableItemIds,
+    getColumnConfigurationProps,
 }) => {
     const hasItems = itemIds.length > 0;
     return (
@@ -63,7 +71,7 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                         }
                     >
                         {!isDragging && !hasItems ? (
-                            <Text size="xs" c="ldGray.6" m="xs" ta="center">
+                            <Text size="xs" c="dimmed" m="xs" ta="center">
                                 {placeholder}
                             </Text>
                         ) : null}
@@ -72,6 +80,10 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                                 key={itemId}
                                 draggableId={itemId}
                                 index={index}
+                                isDragDisabled={
+                                    draggableItemIds !== undefined &&
+                                    !draggableItemIds.includes(itemId)
+                                }
                             >
                                 {(
                                     {
@@ -97,17 +109,22 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                                                 ...draggableProps.style,
                                             }}
                                         >
-                                            <GrabIcon
-                                                dragHandleProps={
-                                                    dragHandleProps
-                                                }
-                                            />
+                                            {draggableItemIds === undefined ||
+                                            draggableItemIds.includes(
+                                                itemId,
+                                            ) ? (
+                                                <GrabIcon
+                                                    dragHandleProps={
+                                                        dragHandleProps
+                                                    }
+                                                />
+                                            ) : null}
 
                                             <ColumnConfiguration
                                                 fieldId={itemId}
-                                                allowHidePivotDimension={
-                                                    allowHidePivotDimension
-                                                }
+                                                {...getColumnConfigurationProps?.(
+                                                    itemId,
+                                                )}
                                             />
                                         </Group>
                                     </DraggablePortalHandler>

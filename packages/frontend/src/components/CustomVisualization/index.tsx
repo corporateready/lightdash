@@ -1,4 +1,4 @@
-import { Anchor, Text, useMantineColorScheme } from '@mantine-8/core';
+import { Anchor, Text, useMantineColorScheme } from '@mantine/core';
 import { IconGraphOff } from '@tabler/icons-react';
 import {
     lazy,
@@ -14,7 +14,11 @@ import { type CustomVisualizationConfigAndData } from '../../hooks/useCustomVisu
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
 import { isCustomVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationConfig,
+    useVisualizationInputs,
+    useVisualizationLayout,
+} from '../LightdashVisualization/useVisualizationContext';
 import { vegaStyleConfig } from './vegaConfig';
 
 const VegaEmbed = lazy(async () => {
@@ -36,13 +40,9 @@ const CustomVisualization: FC<Props> = ({
     const { colorScheme } = useMantineColorScheme();
     const isDarkMode = colorScheme === 'dark';
 
-    const {
-        isLoading,
-        visualizationConfig,
-        resultsData,
-        containerWidth,
-        containerHeight,
-    } = useVisualizationContext();
+    const { containerWidth, containerHeight } = useVisualizationLayout();
+    const { isLoading, resultsData } = useVisualizationInputs();
+    const visualizationConfig = useVisualizationConfig();
 
     const hasSignaledScreenshotReady = useRef(false);
 
@@ -72,6 +72,24 @@ const CustomVisualization: FC<Props> = ({
         // Load all the rows
         resultsData?.setFetchAll(true);
     }, [resultsData]);
+
+    // A tile that settles into a rendered empty state (no spec or zero rows)
+    // has finished loading, so it must still report screenshot-ready —
+    // otherwise dashboard exports wait for a Vega embed that will never
+    // happen and time out. Charts that do render signal via onEmbed/onError.
+    useEffect(() => {
+        if (hasSignaledScreenshotReady.current) return;
+        if (!onScreenshotReady && !onScreenshotError) return;
+        if (isLoading || !isCustomVisualizationConfig(visualizationConfig))
+            return;
+
+        const { validConfig, series } =
+            visualizationConfig.chartConfig as CustomVisualizationConfigAndData;
+        if (!validConfig.spec || !series || series.length === 0) {
+            onScreenshotReady?.();
+            hasSignaledScreenshotReady.current = true;
+        }
+    }, [isLoading, visualizationConfig, onScreenshotReady, onScreenshotError]);
 
     if (!isCustomVisualizationConfig(visualizationConfig)) return null;
     const spec = visualizationConfig.chartConfig.validConfig.spec;
@@ -174,6 +192,11 @@ const CustomVisualization: FC<Props> = ({
                     }}
                     options={{
                         actions: false,
+                        // Use Vega's AST expression interpreter instead of
+                        // compiling expressions with `Function()`, so custom
+                        // visualizations render under a strict CSP (no
+                        // 'unsafe-eval'). See issue #21276.
+                        ast: true,
                     }}
                     onEmbed={handleVegaEmbed}
                     onError={handleVegaError}

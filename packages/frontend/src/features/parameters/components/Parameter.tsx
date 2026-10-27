@@ -1,25 +1,31 @@
 import {
+    DEFAULT_UI_STRINGS,
     formatDate,
+    getAllowedParameterValue,
     parseDate,
+    resolveParameterDefault,
     TimeFrames,
     type LightdashProjectParameter,
     type ParametersValuesMap,
     type ParameterValue,
+    type UiStringResolver,
 } from '@lightdash/common';
 import {
     ActionIcon,
     Box,
     Button,
+    Group,
     Popover,
     Text,
     Tooltip,
-} from '@mantine-8/core';
-import { useId } from '@mantine-8/hooks';
+} from '@mantine/core';
+import { useId } from '@mantine/hooks';
 import { IconGripVertical, IconX } from '@tabler/icons-react';
 import { useCallback, useMemo, type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
 import styles from './Parameter.module.css';
 import { ParameterInput } from './ParameterInput';
+import { ShadowedReservedNameWarning } from './ShadowedReservedNameWarning';
 
 type Props = {
     paramKey: string;
@@ -34,12 +40,16 @@ type Props = {
     isRequired?: boolean;
     isEditMode?: boolean;
     isDraggable?: boolean;
+    triggerClassName?: string;
+    dropdownClassName?: string;
+    shadowedReservedNames?: string[];
+    getUiString?: UiStringResolver;
 };
 
 const Parameter: FC<Props> = ({
     paramKey,
     parameter,
-    value,
+    value: rawValue,
     parameterValues,
     openPopoverId,
     onPopoverOpen,
@@ -48,16 +58,32 @@ const Parameter: FC<Props> = ({
     projectUuid,
     isRequired = false,
     isDraggable = false,
+    triggerClassName,
+    dropdownClassName,
+    shadowedReservedNames = [],
+    getUiString,
 }) => {
     const popoverId = useId();
+
+    // A value outside the parameter's fixed options is treated as unset
+    const value = useMemo(
+        () =>
+            rawValue == null
+                ? null
+                : getAllowedParameterValue(parameter, rawValue),
+        [parameter, rawValue],
+    );
     const isPopoverOpen = openPopoverId === popoverId;
 
     const displayLabel = parameter.label || paramKey;
+    const isLabel = getUiString
+        ? getUiString('parameters.is')
+        : DEFAULT_UI_STRINGS['parameters.is'];
 
     const displayValue = useMemo(() => {
         if (value === null || value === undefined || value === '') {
-            if (parameter.default !== undefined) {
-                const defaultVal = parameter.default;
+            const defaultVal = resolveParameterDefault(parameter);
+            if (defaultVal !== undefined) {
                 if (
                     parameter.type === 'date' &&
                     typeof defaultVal === 'string'
@@ -89,6 +115,7 @@ const Parameter: FC<Props> = ({
 
     const hasValue = value !== null && value !== undefined && value !== '';
     const hasUnsetRequiredParameter = isRequired && !hasValue;
+    const hasShadowedReservedName = shadowedReservedNames.includes(paramKey);
 
     const handleClose = useCallback(() => {
         if (isPopoverOpen) onPopoverClose();
@@ -110,24 +137,22 @@ const Parameter: FC<Props> = ({
     return (
         <Popover
             position="bottom-start"
+            width={400}
             opened={isPopoverOpen}
             onClose={handleClose}
             onDismiss={handleClose}
             transitionProps={{ transition: 'pop-top-left' }}
             withArrow
-            shadow="md"
             offset={1}
             arrowOffset={14}
-            withinPortal
+            classNames={{ dropdown: dropdownClassName }}
         >
             <Popover.Target>
                 <Tooltip
                     label={parameter.description}
                     disabled={!parameter.description || isPopoverOpen}
                     position="top"
-                    withinPortal
                     maw={350}
-                    multiline
                 >
                     <Button
                         pos="relative"
@@ -137,6 +162,7 @@ const Parameter: FC<Props> = ({
                         }
                         classNames={{
                             label: styles.label,
+                            root: triggerClassName,
                         }}
                         className={
                             hasUnsetRequiredParameter
@@ -153,17 +179,31 @@ const Parameter: FC<Props> = ({
                             )
                         }
                         rightSection={
-                            hasValue && (
-                                <ActionIcon
-                                    onClick={handleClear}
-                                    size="xs"
-                                    color="dark"
-                                    radius="xl"
-                                    variant="subtle"
-                                >
-                                    <MantineIcon size="sm" icon={IconX} />
-                                </ActionIcon>
-                            )
+                            <Group gap={4} wrap="nowrap">
+                                {hasShadowedReservedName && (
+                                    <ShadowedReservedNameWarning
+                                        paramKey={paramKey}
+                                    />
+                                )}
+                                {hasValue && (
+                                    <ActionIcon
+                                        aria-label={
+                                            getUiString
+                                                ? getUiString(
+                                                      'parameters.clear',
+                                                  )
+                                                : DEFAULT_UI_STRINGS[
+                                                      'parameters.clear'
+                                                  ]
+                                        }
+                                        onClick={handleClear}
+                                        size="xs"
+                                        radius="xl"
+                                    >
+                                        <MantineIcon size="sm" icon={IconX} />
+                                    </ActionIcon>
+                                )}
+                            </Group>
                         }
                         onClick={handleToggle}
                     >
@@ -174,28 +214,25 @@ const Parameter: FC<Props> = ({
                             }}
                         >
                             <Text fz="xs" truncate>
-                                <Text span fw={600} fz="inherit">
+                                <Text span fw={600}>
                                     {displayLabel}
                                 </Text>
-                                <Text span c="gray.6" fz="inherit">
-                                    {' '}
-                                    is{' '}
+                                <Text span c="gray.6">
+                                    {` ${isLabel} `}
                                 </Text>
-                                <Text span fz="inherit">
-                                    {displayValue}
-                                </Text>
+                                <Text span>{displayValue}</Text>
                             </Text>
                         </Box>
                     </Button>
                 </Tooltip>
             </Popover.Target>
-            <Popover.Dropdown p="sm" miw={200}>
+            <Popover.Dropdown p="sm" maw="calc(100vw - 32px)">
                 <ParameterInput
                     paramKey={paramKey}
                     parameter={parameter}
                     value={value}
                     onParameterChange={onParameterChange}
-                    size="sm"
+                    size="xs"
                     projectUuid={projectUuid}
                     parameterValues={parameterValues}
                 />

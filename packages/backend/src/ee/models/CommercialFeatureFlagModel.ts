@@ -14,7 +14,21 @@ export class CommercialFeatureFlagModel extends FeatureFlagModel {
             // Add new commercial handlers
             [CommercialFeatureFlags.AiCopilot]:
                 this.getAiCopilotFlag.bind(this),
+            [CommercialFeatureFlags.HomepageBuilder]:
+                this.getHomepageBuilderFlag.bind(this),
         };
+    }
+
+    // Default-off; enabled per-org via DB-backed overrides.
+    private async getHomepageBuilderFlag({
+        featureFlagId,
+        user,
+    }: FeatureFlagLogicArgs) {
+        if (!user) {
+            return { id: featureFlagId, enabled: false };
+        }
+        const dbResult = await this.tryGetFromDatabase({ user, featureFlagId });
+        return dbResult ?? { id: featureFlagId, enabled: false };
     }
 
     private async getAiCopilotFlag({
@@ -31,10 +45,10 @@ export class CommercialFeatureFlagModel extends FeatureFlagModel {
             return { id: featureFlagId, enabled: copilotConfigEnabled };
         }
 
+        // The endpoint allows anonymous callers, so fail closed like the
+        // other commercial flags instead of erroring.
         if (!user) {
-            throw new Error(
-                'User is required to check if AI copilot is enabled',
-            );
+            return { id: featureFlagId, enabled: false };
         }
 
         const dbResult = await this.tryGetFromDatabase({ user, featureFlagId });

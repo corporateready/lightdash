@@ -1,6 +1,10 @@
 import { LightdashError, LightdashUser } from '@lightdash/common';
 import fetch from 'node-fetch';
 import { Config, getConfig } from '../config';
+import {
+    refuseAgentConnection,
+    requireInvocationContext,
+} from '../credentials';
 import { getInstallMethod } from '../env';
 import GlobalState from '../globalState';
 import { lightdashApi } from '../handlers/dbt/apiClient';
@@ -26,6 +30,7 @@ const detectCI = (): CIInfo => {
 };
 
 const identifyUser = async (): Promise<Config['user']> => {
+    refuseAgentConnection();
     const config = await getConfig();
     if (config.context?.serverUrl && config.context.apiKey) {
         try {
@@ -280,6 +285,22 @@ type CliLogin = BaseTrack & {
     };
 };
 
+export type ProjectContentAsCodeCounts = {
+    chartsNum?: number;
+    dashboardsNum?: number;
+    spacesNum?: number;
+    virtualViewsNum?: number;
+    agentsNum?: number;
+    skillsNum?: number;
+    appsNum?: number;
+    chartTypesNum?: number;
+    alertsNum?: number;
+    scheduledDeliveriesNum?: number;
+    googleSheetsNum?: number;
+    externalConnectionsNum?: number;
+    documentsNum?: number;
+};
+
 type CliContentAsCode = BaseTrack &
     (
         | {
@@ -296,10 +317,8 @@ type CliContentAsCode = BaseTrack &
                   userId?: string;
                   organizationId?: string;
                   projectId: string;
-                  chartsNum?: number;
-                  dashboardsNum?: number;
                   timeToCompleted: number; // in seconds
-              };
+              } & ProjectContentAsCodeCounts;
           }
         | {
               event: 'download.error' | 'upload.error';
@@ -308,6 +327,45 @@ type CliContentAsCode = BaseTrack &
                   organizationId?: string;
                   projectId: string;
                   type?: 'charts' | 'dashboards'; // Error uploading specific charts or dashboards, this error is not blocking
+                  error: string;
+              };
+          }
+        | {
+              event: 'download.started' | 'upload.started';
+              properties: {
+                  userId?: string;
+                  organizationId: string;
+                  scope: 'organization';
+              };
+          }
+        | {
+              event: 'download.completed';
+              properties: {
+                  userId?: string;
+                  organizationId: string;
+                  scope: 'organization';
+                  customRolesNum: number;
+                  timeToCompleted: number;
+              };
+          }
+        | {
+              event: 'upload.completed';
+              properties: {
+                  userId?: string;
+                  organizationId: string;
+                  scope: 'organization';
+                  customRolesCreated: number;
+                  customRolesUpdated: number;
+                  customRolesUnchanged: number;
+                  timeToCompleted: number;
+              };
+          }
+        | {
+              event: 'download.error' | 'upload.error';
+              properties: {
+                  userId?: string;
+                  organizationId: string;
+                  scope: 'organization';
                   error: string;
               };
           }
@@ -331,6 +389,10 @@ type CliValidateStarted = BaseTrack & {
         projectId: string;
         isPreview: boolean;
         validationTargets: string[];
+        validateWarehouseColumns: boolean;
+        includedSpacesCount: number;
+        excludedSpacesCount: number;
+        severity: 'error' | 'warning';
     };
 };
 /** `success` indicates whether 0 validation errors were found, not whether the process ran without crashing (crashes fire `validate.error` instead). */
@@ -341,12 +403,18 @@ type CliValidateCompleted = BaseTrack & {
         projectId: string;
         isPreview: boolean;
         validationTargets: string[];
+        validateWarehouseColumns: boolean;
+        includedSpacesCount: number;
+        excludedSpacesCount: number;
         durationMs: number;
         success: boolean;
         totalErrors: number;
+        totalWarnings: number;
         tableErrors: number;
         chartErrors: number;
         dashboardErrors: number;
+        appErrors: number;
+        severity: 'error' | 'warning';
     };
 };
 type CliValidateError = BaseTrack & {
@@ -419,6 +487,7 @@ type CliRenameCompleted = BaseTrack & {
         chartsUpdated: number;
         dashboardsUpdated: number;
         durationMs: number;
+        validationStatus: 'skipped' | 'passed' | 'failed';
     };
 };
 type CliRenameError = BaseTrack & {
@@ -438,6 +507,22 @@ type CliCommandExecuted = BaseTrack & {
         success: boolean;
     };
 };
+
+type CliConnectSnowflake = BaseTrack &
+    (
+        | {
+              event: 'connect_snowflake.started';
+              properties: Record<string, never>;
+          }
+        | {
+              event: 'connect_snowflake.completed';
+              properties: { method: 'key_pair' | 'pat' };
+          }
+        | {
+              event: 'connect_snowflake.error';
+              properties: { error: string; errorCategory: string };
+          }
+    );
 
 type Track =
     | CliGenerateStarted
@@ -478,7 +563,8 @@ type Track =
     | CliLintError
     | CliRenameCompleted
     | CliRenameError
-    | CliCommandExecuted;
+    | CliCommandExecuted
+    | CliConnectSnowflake;
 
 const ERROR_NAME_TO_CATEGORY: Record<string, string> = {
     ForbiddenError: 'forbidden',
@@ -518,6 +604,7 @@ export class LightdashAnalytics {
     static async track(payload: Track): Promise<void> {
         try {
             const user = await identifyUser();
+            requireInvocationContext();
             const ci = detectCI();
             const lightdashContext = {
                 app: {
@@ -553,6 +640,7 @@ export class LightdashAnalytics {
     static async identify(traits: Record<string, unknown>): Promise<void> {
         try {
             const user = await identifyUser();
+            requireInvocationContext();
             const body = {
                 anonymousId: user?.anonymousUuid,
                 userId: user?.userUuid,
@@ -575,5 +663,3 @@ export class LightdashAnalytics {
         }
     }
 }
-
-export const analytics: LightdashAnalytics = new LightdashAnalytics();

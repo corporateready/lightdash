@@ -1,9 +1,6 @@
-.themeToggle svg {
+.themeToggleIcon {
     font-size: 16px;
     stroke-width: 2;
-}
-
-.themeToggleIcon {
     --theme-toggle__classic--duration: 750ms;
 }
 

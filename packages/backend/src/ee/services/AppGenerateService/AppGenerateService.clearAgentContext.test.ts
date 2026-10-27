@@ -1,0 +1,217 @@
+import { ForbiddenError, ProjectType } from '@lightdash/common';
+import { buildAppThumbnailClientMock } from '../../clients/AppThumbnailClient.mock';
+import { AppGenerateService } from './AppGenerateService';
+
+vi.mock('e2b', () => ({
+    Sandbox: class {},
+    CommandExitError: class extends Error {},
+    ALL_TRAFFIC: '*',
+}));
+vi.mock('ai', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('ai')>()),
+    generateText: vi.fn(),
+}));
+
+const PROJECT_UUID = 'proj-uuid-1';
+const APP_UUID = 'app-uuid-1';
+const USER_UUID = 'user-uuid-1';
+const ORG_UUID = 'org-uuid-1';
+
+const makeUser = () =>
+    ({ userUuid: USER_UUID, organizationUuid: ORG_UUID }) as never;
+
+function buildService(
+    opts: { canManage?: boolean; sandboxId?: string | null } = {},
+) {
+    const sandboxManager = { destroy: vi.fn().mockResolvedValue(undefined) };
+    const appModel = {
+        getApp: vi.fn().mockResolvedValue({
+            app_id: APP_UUID,
+            project_uuid: PROJECT_UUID,
+            organization_uuid: ORG_UUID,
+            space_uuid: null,
+            created_by_user_uuid: USER_UUID,
+            sandbox_id: opts.sandboxId ?? null,
+            template: 'data_app',
+            registry_slug: null,
+        }),
+        getLatestVersion: vi
+            .fn()
+            .mockResolvedValue({ version: 4, status: 'ready' }),
+        createThread: vi.fn().mockResolvedValue({
+            app_thread_uuid: 'thread-2',
+            thread_number: 2,
+        }),
+        clearSandboxUuidIfCurrent: vi.fn().mockResolvedValue(undefined),
+    };
+    const analytics = { track: vi.fn() };
+
+    const service = new AppGenerateService({
+        agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
+        aiCreditService: { assertAiCreditsAvailable: async () => undefined },
+        lightdashConfig: {
+            appRuntime: {
+                dependencyRegistryHosts: ['registry.npmjs.org'],
+                dataAppCodingAgent: 'claude',
+            },
+        } as never,
+        analytics: analytics as never,
+        analyticsModel: {} as never,
+        catalogModel: {} as never,
+        userModel: {} as never,
+        appModel: appModel as never,
+        featureFlagModel: {
+            get: vi.fn().mockResolvedValue({ enabled: true }),
+        } as never,
+        organizationDesignModel: {} as never,
+        pinnedListModel: {} as never,
+        projectModel: {
+            getSummary: vi.fn().mockResolvedValue({
+                organizationUuid: ORG_UUID,
+                projectUuid: PROJECT_UUID,
+                type: ProjectType.DEFAULT,
+                createdByUserUuid: USER_UUID,
+            }),
+        } as never,
+        projectParametersModel: {} as never,
+        spaceModel: {} as never,
+        savedChartModel: {} as never,
+        schedulerClient: {} as never,
+        savedChartService: {} as never,
+        spacePermissionService: {
+            resolveAccess: vi.fn().mockResolvedValue({
+                organizationUuid: ORG_UUID,
+                projectUuid: PROJECT_UUID,
+                inheritsFromOrgOrProject: false,
+                access: [],
+                admins: [],
+                directOnly: false,
+            }),
+        } as never,
+        coderService: {} as never,
+        documentService: {} as never,
+        dashboardService: {} as never,
+        projectService: {} as never,
+        promoteService: {} as never,
+        externalConnectionModel: {} as never,
+        sandboxRegistryModel: {} as never,
+        orgAiCopilotConfigResolver: {} as never,
+        sandboxManager: sandboxManager as never,
+        appRuntimeS3: null,
+        appThumbnailClient: buildAppThumbnailClientMock(),
+        chartRegistryClient: {} as never,
+        contentVerificationModel: {} as never,
+    });
+
+    const canManage = opts.canManage ?? true;
+    vi.spyOn(
+        service as unknown as { createAuditedAbility: () => unknown },
+        'createAuditedAbility',
+    ).mockReturnValue({
+        can: () => canManage,
+        cannot: () => !canManage,
+        rules: [],
+    });
+
+    vi.spyOn(
+        service as unknown as { getAppVersions: () => unknown },
+        'getAppVersions',
+    ).mockResolvedValue({ versions: [] } as never);
+
+    return { service, appModel, sandboxManager, analytics };
+}
+
+describe('clearAgentContext', () => {
+    it('destroys the sandbox and clears its reference so the next prompt starts cold', async () => {
+        const { service, appModel, sandboxManager, analytics } = buildService({
+            sandboxId: 'sandbox-1',
+        });
+
+        await service.clearAgentContext(makeUser(), PROJECT_UUID, APP_UUID);
+
+        expect(appModel.createThread).toHaveBeenCalledTimes(1);
+        expect(sandboxManager.destroy).toHaveBeenCalledWith({
+            sandboxUuid: 'sandbox-1',
+        });
+        expect(appModel.clearSandboxUuidIfCurrent).toHaveBeenCalledWith(
+            APP_UUID,
+            'sandbox-1',
+        );
+        expect(analytics.track).toHaveBeenCalledWith(
+            expect.objectContaining({
+                event: 'data_app.thread.cleared',
+                properties: expect.objectContaining({
+                    sandboxDestroyed: true,
+                }),
+            }),
+        );
+    });
+
+    it('still clears the reference when the provider destroy fails', async () => {
+        const { service, appModel, sandboxManager, analytics } = buildService({
+            sandboxId: 'sandbox-1',
+        });
+        sandboxManager.destroy.mockRejectedValue(new Error('provider down'));
+
+        await service.clearAgentContext(makeUser(), PROJECT_UUID, APP_UUID);
+
+        expect(appModel.clearSandboxUuidIfCurrent).toHaveBeenCalledWith(
+            APP_UUID,
+            'sandbox-1',
+        );
+        expect(analytics.track).toHaveBeenCalledWith(
+            expect.objectContaining({
+                properties: expect.objectContaining({
+                    sandboxDestroyed: false,
+                }),
+            }),
+        );
+    });
+
+    it('skips sandbox work when the app has none', async () => {
+        const { service, appModel, sandboxManager, analytics } = buildService();
+
+        await service.clearAgentContext(makeUser(), PROJECT_UUID, APP_UUID);
+
+        expect(sandboxManager.destroy).not.toHaveBeenCalled();
+        expect(appModel.clearSandboxUuidIfCurrent).not.toHaveBeenCalled();
+        expect(analytics.track).toHaveBeenCalledWith(
+            expect.objectContaining({
+                properties: expect.objectContaining({
+                    sandboxDestroyed: null,
+                }),
+            }),
+        );
+    });
+
+    it('refuses while a version is building and leaves thread and sandbox alone', async () => {
+        const { service, appModel, sandboxManager } = buildService({
+            sandboxId: 'sandbox-1',
+        });
+        appModel.getLatestVersion.mockResolvedValue({
+            version: 4,
+            status: 'generating',
+        });
+
+        await expect(
+            service.clearAgentContext(makeUser(), PROJECT_UUID, APP_UUID),
+        ).rejects.toThrow('A version is already building for this app');
+        expect(appModel.createThread).not.toHaveBeenCalled();
+        expect(sandboxManager.destroy).not.toHaveBeenCalled();
+    });
+
+    it('rejects a user without manage permission', async () => {
+        const { service, appModel } = buildService({ canManage: false });
+
+        const result = service.clearAgentContext(
+            makeUser(),
+            PROJECT_UUID,
+            APP_UUID,
+        );
+        await expect(result).rejects.toThrow(ForbiddenError);
+        await expect(result).rejects.toThrow(
+            'Insufficient permissions to modify data apps',
+        );
+        expect(appModel.createThread).not.toHaveBeenCalled();
+    });
+});

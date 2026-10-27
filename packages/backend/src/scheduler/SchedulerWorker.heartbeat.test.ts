@@ -1,10 +1,19 @@
 import { ALL_TASK_NAMES } from '@lightdash/common';
+import { run as runGraphileWorker, type Runner } from 'graphile-worker';
 import { type LightdashConfig } from '../config/parseConfig';
 import {
     SchedulerWorker,
     type SchedulerWorkerArguments,
 } from './SchedulerWorker';
 import { SchedulerWorkerHealth } from './SchedulerWorkerHealth';
+
+vi.mock('graphile-worker', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('graphile-worker')>();
+    return {
+        ...actual,
+        run: vi.fn(),
+    };
+});
 
 class TestableSchedulerWorker extends SchedulerWorker {
     public exposeTaskList() {
@@ -28,6 +37,12 @@ const makeConfig = (): LightdashConfig =>
             concurrency: 1,
             pollInterval: 1000,
             jobTimeout: 60_000,
+            quiesce: {
+                pollInterval: 2_000,
+                gracePeriod: 180_000,
+                resumeJitter: 60_000,
+                resumeRampPeriod: 180_000,
+            },
             queryHistory: {
                 cleanup: {
                     enabled: false,
@@ -43,11 +58,11 @@ const makeConfig = (): LightdashConfig =>
     }) as unknown as LightdashConfig;
 
 const makeWorkerArgs = (
-    withPgClient: jest.Mock,
+    withPgClient: import('vitest').Mock,
     workerHealth?: SchedulerWorkerHealth,
 ): SchedulerWorkerArguments => {
     const graphileUtils = Promise.resolve({
-        addJob: jest.fn(),
+        addJob: vi.fn(),
         withPgClient,
     });
     return {
@@ -67,7 +82,7 @@ describe('SchedulerWorker — task list no longer carries heartbeat plumbing', (
         // graphile-routed heartbeat path.
         const health = new SchedulerWorkerHealth('pod-abc-123');
         const worker = new TestableSchedulerWorker(
-            makeWorkerArgs(jest.fn(), health),
+            makeWorkerArgs(vi.fn(), health),
         );
 
         const taskNames = Object.keys(worker.exposeTaskList());
@@ -82,7 +97,7 @@ describe('SchedulerWorker — task list no longer carries heartbeat plumbing', (
 
     it('does not register any heartbeat tasks when workerHealth is omitted', () => {
         const worker = new TestableSchedulerWorker(
-            makeWorkerArgs(jest.fn(), undefined),
+            makeWorkerArgs(vi.fn(), undefined),
         );
 
         const taskNames = Object.keys(worker.exposeTaskList());
@@ -94,14 +109,19 @@ describe('SchedulerWorker — task list no longer carries heartbeat plumbing', (
 });
 
 describe('SchedulerWorker — pingPgOnce', () => {
-    it('runs SELECT 1 through withPgClient and marks pg reachable on success', async () => {
+    it('sends the jobs:insert NOTIFY heartbeat through withPgClient and marks pg reachable on success', async () => {
+        // The NOTIFY doubles as a pool liveness probe: it makes this process's
+        // own LISTEN client nudge the worker pool, so a terminated pool
+        // surfaces "nudge called after worker terminated" via
+        // pool:listen:error and trips the poolDead latch — even on an idle
+        // instance where nothing else generates NOTIFYs.
         const health = new SchedulerWorkerHealth('pod-xyz');
-        const markPgReachableSpy = jest.spyOn(health, 'markPgReachable');
+        const markPgReachableSpy = vi.spyOn(health, 'markPgReachable');
 
         const pgClient = {
-            query: jest.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] }),
+            query: vi.fn().mockResolvedValue({ rows: [{ pg_notify: '' }] }),
         };
-        const withPgClient = jest
+        const withPgClient = vi
             .fn()
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             .mockImplementation(async (fn: any) => fn(pgClient));
@@ -113,15 +133,17 @@ describe('SchedulerWorker — pingPgOnce', () => {
         await worker.pingPgOnceExposed(health);
 
         expect(withPgClient).toHaveBeenCalledTimes(1);
-        expect(pgClient.query).toHaveBeenCalledWith('SELECT 1');
+        expect(pgClient.query).toHaveBeenCalledWith(
+            `SELECT pg_notify('jobs:insert', '')`,
+        );
         expect(markPgReachableSpy).toHaveBeenCalledTimes(1);
     });
 
     it('does NOT mark pg reachable when the query rejects', async () => {
         const health = new SchedulerWorkerHealth('pod-down');
-        const markPgReachableSpy = jest.spyOn(health, 'markPgReachable');
+        const markPgReachableSpy = vi.spyOn(health, 'markPgReachable');
 
-        const withPgClient = jest
+        const withPgClient = vi
             .fn()
             .mockRejectedValue(new Error('connection refused'));
 
@@ -138,12 +160,12 @@ describe('SchedulerWorker — pingPgOnce', () => {
     it('continues running after a failure (no exception escapes the ping)', async () => {
         const health = new SchedulerWorkerHealth('pod-flapping');
         const pgClient = {
-            query: jest
+            query: vi
                 .fn()
                 .mockRejectedValueOnce(new Error('pg blip'))
                 .mockResolvedValueOnce({ rows: [] }),
         };
-        const withPgClient = jest
+        const withPgClient = vi
             .fn()
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             .mockImplementation(async (fn: any) => fn(pgClient));
@@ -157,16 +179,24 @@ describe('SchedulerWorker — pingPgOnce', () => {
         expect(pgClient.query).toHaveBeenCalledTimes(2);
     });
 
-    it('does not hang when withPgClient never resolves (wedged backend)', async () => {
-        jest.useFakeTimers();
+    it('destroys the borrowed client when its query exceeds the timeout', async () => {
+        vi.useFakeTimers();
         try {
             const health = new SchedulerWorkerHealth('pod-wedged');
-            const markPgReachableSpy = jest.spyOn(health, 'markPgReachable');
-            const withPgClient = jest.fn().mockImplementation(
-                () =>
-                    new Promise(() => {
-                        // intentionally pending forever
-                    }),
+            const markPgReachableSpy = vi.spyOn(health, 'markPgReachable');
+            const pgClient = {
+                query: vi.fn(
+                    () =>
+                        new Promise<never>((resolve) => {
+                            void resolve;
+                        }),
+                ),
+                release: vi.fn(),
+            };
+            const withPgClient = vi.fn(
+                async (
+                    callback: (client: typeof pgClient) => Promise<unknown>,
+                ) => callback(pgClient),
             );
 
             const worker = new TestableSchedulerWorker(
@@ -175,15 +205,131 @@ describe('SchedulerWorker — pingPgOnce', () => {
 
             const ping = worker.pingPgOnceExposed(health);
 
-            // Advance past the 5s ping timeout.
-            await jest.advanceTimersByTimeAsync(6_000);
+            await vi.advanceTimersByTimeAsync(6_000);
 
             await expect(ping).resolves.toBeUndefined();
             expect(withPgClient).toHaveBeenCalledTimes(1);
-            // Timeout path must NOT mark reachable — that's the whole point.
+            expect(pgClient.query).toHaveBeenCalledWith(
+                `SELECT pg_notify('jobs:insert', '')`,
+            );
+            expect(pgClient.release).toHaveBeenCalledWith(true);
             expect(markPgReachableSpy).not.toHaveBeenCalled();
         } finally {
-            jest.useRealTimers();
+            vi.useRealTimers();
         }
+    });
+
+    it('destroys a client borrowed after the timeout without querying it', async () => {
+        vi.useFakeTimers();
+        try {
+            const health = new SchedulerWorkerHealth('pod-delayed-borrow');
+            const markPgReachableSpy = vi.spyOn(health, 'markPgReachable');
+            const pgClient = {
+                query: vi.fn(),
+                release: vi.fn(),
+            };
+            let completeBorrow!: () => void;
+            const borrow = new Promise<void>((resolve) => {
+                completeBorrow = resolve;
+            });
+            const withPgClient = vi.fn(
+                async (
+                    callback: (client: typeof pgClient) => Promise<unknown>,
+                ) => {
+                    await borrow;
+                    return callback(pgClient);
+                },
+            );
+            const worker = new TestableSchedulerWorker(
+                makeWorkerArgs(withPgClient, health),
+            );
+
+            const ping = worker.pingPgOnceExposed(health);
+
+            await vi.advanceTimersByTimeAsync(6_000);
+            await expect(ping).resolves.toBeUndefined();
+
+            completeBorrow();
+            await vi.runAllTimersAsync();
+
+            expect(pgClient.query).not.toHaveBeenCalled();
+            expect(pgClient.release).toHaveBeenCalledWith(true);
+            expect(markPgReachableSpy).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
+describe('SchedulerWorker — runner promise settlement', () => {
+    const makeFakeRunner = () => {
+        let settle!: () => void;
+        const promise = new Promise<void>((resolve) => {
+            settle = resolve;
+        });
+        const runner = {
+            promise,
+            stop: vi.fn(async () => {
+                settle();
+            }),
+            addJob: vi.fn(),
+        } as unknown as Runner;
+        return { runner, settle };
+    };
+
+    const flushSettlement = async () => {
+        // The .finally continuation registered in run() executes on the
+        // microtask queue after the runner promise settles.
+        await new Promise((resolve) => {
+            setImmediate(resolve);
+        });
+    };
+
+    beforeEach(() => {
+        vi.mocked(runGraphileWorker).mockReset();
+    });
+
+    it('latches poolDead when the runner promise settles outside a graceful stop', async () => {
+        // graphile-worker 0.13 gives up permanently after e.g. 10 consecutive
+        // failed job acquisitions (Postgres restart). When its promise
+        // settles without stop() having been called, the pool is dead.
+        const health = new SchedulerWorkerHealth('pod-crash');
+        const markPoolDeadSpy = vi.spyOn(health, 'markPoolDead');
+        const { runner, settle } = makeFakeRunner();
+        vi.mocked(runGraphileWorker).mockResolvedValue(runner);
+
+        const worker = new TestableSchedulerWorker(
+            makeWorkerArgs(vi.fn().mockResolvedValue({ rows: [] }), health),
+        );
+        await worker.run();
+        expect(worker.isRunning).toBe(true);
+
+        settle();
+        await flushSettlement();
+
+        expect(worker.isRunning).toBe(false);
+        expect(markPoolDeadSpy).toHaveBeenCalledWith(
+            'graphile runner stopped unexpectedly',
+        );
+        expect(health.isHealthy(Date.now() + 1).ok).toBe(false);
+    });
+
+    it('does not latch poolDead when stop() settles the promise gracefully', async () => {
+        const health = new SchedulerWorkerHealth('pod-graceful');
+        const markPoolDeadSpy = vi.spyOn(health, 'markPoolDead');
+        const { runner } = makeFakeRunner();
+        vi.mocked(runGraphileWorker).mockResolvedValue(runner);
+
+        const worker = new TestableSchedulerWorker(
+            makeWorkerArgs(vi.fn().mockResolvedValue({ rows: [] }), health),
+        );
+        await worker.run();
+
+        await worker.stop();
+        await flushSettlement();
+
+        expect(worker.isRunning).toBe(false);
+        expect(runner.stop).toHaveBeenCalledTimes(1);
+        expect(markPoolDeadSpy).not.toHaveBeenCalled();
     });
 });

@@ -3,43 +3,61 @@ import {
     InlineErrorType,
     isSummaryExploreError,
     type SummaryExplore,
+    ExploreType,
 } from '@lightdash/common';
 import {
     Anchor,
     Box,
     Highlight,
+    Group,
     HoverCard,
     NavLink,
     Paper,
     Stack,
-    Text,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useToggle } from '@mantine/hooks';
-import {
-    IconAlertTriangle,
-    IconInfoCircle,
-    IconTable,
-} from '@tabler/icons-react';
+import { IconAlertTriangle, IconInfoCircle } from '@tabler/icons-react';
 import React from 'react';
+import useIsEmbedded from '../../../ee/providers/Embed/useIsEmbedded';
+import { getExploreIcon } from '../../../features/externalSources/utils/exploreIcons';
+import ConnectionBadge from '../../common/ConnectionBadge';
 import MantineIcon from '../../common/MantineIcon';
 import { TableItemDetailPreview } from '../ExploreTree/TableTree/ItemDetailPreview';
 import WarningsHoverCardContent from '../WarningsHoverCardContent';
+
+/**
+ * Walkthrough result for create:VirtualView: the new table in the explore
+ * list, where the docs say it appears.
+ */
+const virtualViewTourProps = {
+    'data-tour-scope': 'create:VirtualView',
+    'data-tour-step': '1',
+    'data-tour-route': '/projects/:projectUuid/tables',
+    'data-tour-label': 'The virtual view is a table now',
+    'data-tour-docs': 'semantic-layer/virtual-views.mdx#intro:1',
+    'data-tour-return': 'none',
+    'data-tour-resultdocs':
+        'semantic-layer/virtual-views.mdx#create-a-virtual-view:p2:1-2',
+};
 
 const getPreAggregateSource = (explore: SummaryExplore) =>
     'preAggregateSource' in explore ? explore.preAggregateSource : undefined;
 
 type ExploreNavLinkProps = {
     explore: SummaryExplore;
+    connectionName: string | null;
     query?: string;
     onClick: () => void;
 };
 
 const ExploreNavLink: React.FC<ExploreNavLinkProps> = ({
     explore,
+    connectionName,
     query,
     onClick,
 }: ExploreNavLinkProps) => {
     const [isHover, toggleHover] = useToggle();
+    const isEmbedded = useIsEmbedded();
 
     const isError = isSummaryExploreError(explore);
     const warnings =
@@ -73,18 +91,27 @@ const ExploreNavLink: React.FC<ExploreNavLinkProps> = ({
     // Determine rightSection
     let rightSection;
     if (isError) {
-        rightSection = showNoDimensionsIcon ? (
-            <Anchor
-                role="button"
-                href="https://docs.lightdash.com/guides/how-to-create-dimensions"
-                target="_blank"
-                rel="noreferrer"
-            >
-                <MantineIcon icon={IconInfoCircle} color="ldGray.7" size="lg" />
-            </Anchor>
-        ) : (
-            <MantineIcon icon={IconAlertTriangle} size="lg" color="yellow.9" />
-        );
+        rightSection =
+            showNoDimensionsIcon && !isEmbedded ? (
+                <Anchor
+                    role="button"
+                    href="https://docs.lightdash.com/guides/how-to-create-dimensions"
+                    target="_blank"
+                    rel="noreferrer"
+                >
+                    <MantineIcon
+                        icon={IconInfoCircle}
+                        color="ldGray.7"
+                        size="lg"
+                    />
+                </Anchor>
+            ) : (
+                <MantineIcon
+                    icon={IconAlertTriangle}
+                    size="lg"
+                    color="yellow.9"
+                />
+            );
     } else if (hasWarnings) {
         rightSection = (
             <MantineIcon icon={IconAlertTriangle} size="lg" color="yellow.9" />
@@ -93,18 +120,20 @@ const ExploreNavLink: React.FC<ExploreNavLinkProps> = ({
 
     const navLink = (
         <NavLink
+            // Anchor for scope walkthroughs (data-tour-via): a table to open
+            data-tour-anchor="explore-table"
+            data-tour-hint="Open a table"
+            data-tour-hint-named="Open {value}"
+            data-tour-value={displayLabel}
+            {...(explore.type === ExploreType.VIRTUAL
+                ? virtualViewTourProps
+                : {})}
             role="listitem"
             disabled={isError}
             leftSection={
-                <Paper
-                    radius="sm"
-                    bg="ldGray.0"
-                    p={0}
-                    shadow="none"
-                    withBorder={false}
-                >
+                <Paper radius="sm" bg="ldGray.0" p={0} withBorder={false}>
                     <MantineIcon
-                        icon={IconTable}
+                        icon={getExploreIcon(explore)}
                         size="md"
                         color="ldGray.7"
                         stroke={1.5}
@@ -118,20 +147,19 @@ const ExploreNavLink: React.FC<ExploreNavLinkProps> = ({
                 isError ? (
                     <Stack gap={2}>
                         <Highlight
-                            component={Text}
-                            highlight={query ?? ''}
                             truncate
-                            fz="inherit"
+                            fz="sm"
+                            fw={500}
+                            highlight={query ?? ''}
                         >
                             {displayLabel}
                         </Highlight>
                         {showUnderlyingName && (
                             <Highlight
-                                component={Text}
-                                highlight={query ?? ''}
                                 truncate
                                 fz="xs"
                                 c="ldGray.7"
+                                highlight={query ?? ''}
                             >
                                 {explore.name}
                             </Highlight>
@@ -146,23 +174,24 @@ const ExploreNavLink: React.FC<ExploreNavLinkProps> = ({
                         offset={0}
                     >
                         <Stack gap={2}>
-                            <Highlight
-                                component={Text}
-                                highlight={query ?? ''}
-                                truncate
-                                fz="sm"
-                                fw={500}
-                                c="ldDark.8"
-                            >
-                                {displayLabel}
-                            </Highlight>
+                            <Group gap="xs" wrap="nowrap">
+                                <Highlight
+                                    truncate
+                                    fz="sm"
+                                    fw={500}
+                                    c="ldDark.8"
+                                    highlight={query ?? ''}
+                                >
+                                    {displayLabel}
+                                </Highlight>
+                                <ConnectionBadge name={connectionName} />
+                            </Group>
                             {showUnderlyingName && (
                                 <Highlight
-                                    component={Text}
-                                    highlight={query ?? ''}
                                     truncate
                                     fz="xs"
                                     c="ldGray.7"
+                                    highlight={query ?? ''}
                                 >
                                     {explore.name}
                                 </Highlight>
@@ -180,13 +209,7 @@ const ExploreNavLink: React.FC<ExploreNavLinkProps> = ({
     }
 
     return (
-        <HoverCard
-            withinPortal
-            position="right"
-            withArrow
-            radius="md"
-            shadow="sm"
-        >
+        <HoverCard position="right" withArrow>
             <HoverCard.Target>
                 <Box>{navLink}</Box>
             </HoverCard.Target>

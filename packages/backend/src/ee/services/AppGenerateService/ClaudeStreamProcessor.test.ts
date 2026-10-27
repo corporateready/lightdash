@@ -1,0 +1,401 @@
+import {
+    addClaudeGenerationAttempt,
+    addClaudeUsage,
+    ClaudeStreamProcessor,
+    ZERO_CLAUDE_GENERATION_TELEMETRY,
+    ZERO_CLAUDE_USAGE,
+    type ClaudeGenerationUsage,
+} from './ClaudeStreamProcessor';
+
+// Lines are only consumed once a newline arrives, so every fixture ends in \n.
+const line = (obj: unknown) => `${JSON.stringify(obj)}\n`;
+
+const resultLine = (overrides: Record<string, unknown> = {}) =>
+    line({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        duration_ms: 380_000,
+        duration_api_ms: 350_000,
+        num_turns: 42,
+        result: 'Done building the dashboard.',
+        total_cost_usd: 1.23,
+        usage: {
+            input_tokens: 1_000,
+            output_tokens: 5_000,
+            cache_creation_input_tokens: 2_000,
+            cache_read_input_tokens: 40_000,
+            cache_creation: {
+                ephemeral_1h_input_tokens: 1_800,
+                ephemeral_5m_input_tokens: 200,
+            },
+        },
+        ...overrides,
+    });
+
+describe('ClaudeStreamProcessor result parsing', () => {
+    test('emits a result event with text and captures full usage', () => {
+        const processor = new ClaudeStreamProcessor();
+        const events = processor.feedChunk(resultLine());
+
+        expect(events).toEqual([
+            {
+                kind: 'result',
+                text: 'Done building the dashboard.',
+                structuredOutput: null,
+            },
+        ]);
+        expect(processor.lastUsage).toEqual({
+            inputTokens: 1_000,
+            outputTokens: 5_000,
+            cacheCreationInputTokens: 2_000,
+            cacheCreation1hInputTokens: 1_800,
+            cacheCreation5mInputTokens: 200,
+            cacheReadInputTokens: 40_000,
+            numTurns: 42,
+            durationApiMs: 350_000,
+            costUsd: 1.23,
+        });
+    });
+
+    test('captures the per-model split from modelUsage under the concrete model ids', () => {
+        const processor = new ClaudeStreamProcessor();
+        processor.feedChunk(
+            resultLine({
+                modelUsage: {
+                    'claude-opus-4-8': {
+                        inputTokens: 900,
+                        outputTokens: 4_500,
+                        cacheReadInputTokens: 39_000,
+                        cacheCreationInputTokens: 1_800,
+                        webSearchRequests: 0,
+                        costUSD: 1.2,
+                        contextWindow: 1_000_000,
+                    },
+                    'claude-haiku-4-5-20251001': {
+                        inputTokens: 100,
+                        outputTokens: 500,
+                        cacheReadInputTokens: 1_000,
+                        cacheCreationInputTokens: 200,
+                    },
+                },
+            }),
+        );
+
+        expect(processor.lastUsage?.modelUsage).toEqual({
+            'claude-opus-4-8': {
+                inputTokens: 900,
+                outputTokens: 4_500,
+                cacheReadInputTokens: 39_000,
+                cacheCreationInputTokens: 1_800,
+            },
+            'claude-haiku-4-5-20251001': {
+                inputTokens: 100,
+                outputTokens: 500,
+                cacheReadInputTokens: 1_000,
+                cacheCreationInputTokens: 200,
+            },
+        });
+        // The run-level totals are unchanged by the split.
+        expect(processor.lastUsage?.inputTokens).toBe(1_000);
+        expect(processor.lastUsage?.outputTokens).toBe(5_000);
+    });
+
+    test('leaves modelUsage absent when the CLI does not report it', () => {
+        const processor = new ClaudeStreamProcessor();
+        processor.feedChunk(resultLine());
+
+        expect(processor.lastUsage).not.toHaveProperty('modelUsage');
+    });
+
+    test('leaves modelUsage absent when it is reported but empty', () => {
+        const processor = new ClaudeStreamProcessor();
+        processor.feedChunk(resultLine({ modelUsage: {} }));
+
+        expect(processor.lastUsage).not.toHaveProperty('modelUsage');
+    });
+
+    test('defaults missing numeric fields to 0 and absent text to empty string', () => {
+        const processor = new ClaudeStreamProcessor();
+        const events = processor.feedChunk(
+            line({ type: 'result', subtype: 'success' }),
+        );
+
+        expect(events).toEqual([
+            { kind: 'result', text: '', structuredOutput: null },
+        ]);
+        expect(processor.lastUsage).toEqual(ZERO_CLAUDE_USAGE);
+    });
+
+    test('captures structured_output when the run used --json-schema', () => {
+        const processor = new ClaudeStreamProcessor();
+        const schema = {
+            fields: [
+                {
+                    name: 'category',
+                    label: 'Category',
+                    type: 'dimension',
+                    required: true,
+                },
+            ],
+            configOptions: [],
+        };
+        const events = processor.feedChunk(
+            resultLine({ structured_output: schema }),
+        );
+
+        expect(events).toEqual([
+            {
+                kind: 'result',
+                text: 'Done building the dashboard.',
+                structuredOutput: schema,
+            },
+        ]);
+    });
+
+    test('ignores non-JSON and non-result lines, leaving usage null', () => {
+        const processor = new ClaudeStreamProcessor();
+        expect(processor.feedChunk('not json\n')).toEqual([]);
+        expect(processor.feedChunk(line({ type: 'system' }))).toEqual([]);
+        expect(processor.lastUsage).toBeNull();
+    });
+
+    test('still counts tool_use calls from assistant events', () => {
+        const processor = new ClaudeStreamProcessor();
+        const events = processor.feedChunk(
+            line({
+                type: 'assistant',
+                message: {
+                    content: [
+                        {
+                            type: 'tool_use',
+                            name: 'Write',
+                            input: { file_path: '/app/src/App.tsx' },
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(events).toEqual([
+            {
+                kind: 'tool_use',
+                index: 1,
+                description: 'Write /app/src/App.tsx',
+            },
+        ]);
+        expect(processor.totalToolCalls).toBe(1);
+    });
+});
+
+describe('ClaudeStreamProcessor turn timeline', () => {
+    const messageStart = () =>
+        line({ type: 'stream_event', event: { type: 'message_start' } });
+
+    test('measures time-to-first-token and per-turn durations with an injected clock', () => {
+        const clock = { t: 0 };
+        // createdAt = 0
+        const processor = new ClaudeStreamProcessor(() => clock.t);
+
+        clock.t = 100;
+        processor.feedChunk(messageStart()); // turn 1 starts at 100 → ttft 100
+        clock.t = 250;
+        processor.feedChunk(messageStart()); // turn 2 starts → turn 1 = 150ms
+        clock.t = 400;
+        processor.feedChunk(resultLine()); // result → turn 2 = 150ms
+
+        expect(processor.timeToFirstTokenMs).toBe(100);
+        expect(processor.turnDurationsMs).toEqual([150, 150]);
+    });
+
+    test('reports null ttft and no turns when the model never started', () => {
+        const processor = new ClaudeStreamProcessor(() => 0);
+        processor.feedChunk(line({ type: 'system', subtype: 'init' }));
+
+        expect(processor.timeToFirstTokenMs).toBeNull();
+        expect(processor.turnDurationsMs).toEqual([]);
+    });
+});
+
+describe('addClaudeUsage', () => {
+    test('sums the per-model split across runs and keeps models only one side saw', () => {
+        const a: ClaudeGenerationUsage = {
+            ...ZERO_CLAUDE_USAGE,
+            inputTokens: 10,
+            modelUsage: {
+                'claude-opus-4-8': {
+                    inputTokens: 10,
+                    outputTokens: 20,
+                    cacheReadInputTokens: 30,
+                    cacheCreationInputTokens: 40,
+                },
+            },
+        };
+        const b: ClaudeGenerationUsage = {
+            ...ZERO_CLAUDE_USAGE,
+            inputTokens: 1,
+            modelUsage: {
+                'claude-opus-4-8': {
+                    inputTokens: 1,
+                    outputTokens: 2,
+                    cacheReadInputTokens: 3,
+                    cacheCreationInputTokens: 4,
+                },
+                'claude-haiku-4-5-20251001': {
+                    inputTokens: 5,
+                    outputTokens: 6,
+                    cacheReadInputTokens: 7,
+                    cacheCreationInputTokens: 8,
+                },
+            },
+        };
+
+        expect(addClaudeUsage(a, b).modelUsage).toEqual({
+            'claude-opus-4-8': {
+                inputTokens: 11,
+                outputTokens: 22,
+                cacheReadInputTokens: 33,
+                cacheCreationInputTokens: 44,
+            },
+            'claude-haiku-4-5-20251001': {
+                inputTokens: 5,
+                outputTokens: 6,
+                cacheReadInputTokens: 7,
+                cacheCreationInputTokens: 8,
+            },
+        });
+        // A side without a split contributes nothing and does not add the key.
+        expect(
+            addClaudeUsage(ZERO_CLAUDE_USAGE, ZERO_CLAUDE_USAGE),
+        ).not.toHaveProperty('modelUsage');
+        expect(addClaudeUsage(a, null).modelUsage).toEqual(a.modelUsage);
+    });
+
+    const usage = (n: number): ClaudeGenerationUsage => ({
+        inputTokens: n,
+        outputTokens: n,
+        cacheReadInputTokens: n,
+        cacheCreationInputTokens: n,
+        cacheCreation1hInputTokens: n,
+        cacheCreation5mInputTokens: n,
+        numTurns: n,
+        durationApiMs: n,
+        costUsd: n,
+    });
+
+    test('sums two usage records field-by-field', () => {
+        expect(addClaudeUsage(usage(1), usage(2))).toEqual(usage(3));
+    });
+
+    test('treats null as all-zero', () => {
+        expect(addClaudeUsage(usage(5), null)).toEqual(usage(5));
+        expect(addClaudeUsage(ZERO_CLAUDE_USAGE, null)).toEqual(
+            ZERO_CLAUDE_USAGE,
+        );
+    });
+});
+
+describe('addClaudeGenerationAttempt', () => {
+    const usage = (n: number): ClaudeGenerationUsage => ({
+        inputTokens: n,
+        outputTokens: n,
+        cacheReadInputTokens: n,
+        cacheCreationInputTokens: n,
+        cacheCreation1hInputTokens: n,
+        cacheCreation5mInputTokens: n,
+        numTurns: n,
+        durationApiMs: n,
+        costUsd: n,
+    });
+
+    test('aggregates usage, tools, turns, and attempts across CLI retries', () => {
+        const first = addClaudeGenerationAttempt(
+            ZERO_CLAUDE_GENERATION_TELEMETRY,
+            {
+                usage: usage(1),
+                toolCallCount: 2,
+                timeToFirstTokenMs: null,
+                turnDurationsMs: [100],
+            },
+            0,
+        );
+        const second = addClaudeGenerationAttempt(
+            first,
+            {
+                usage: usage(2),
+                toolCallCount: 3,
+                timeToFirstTokenMs: 50,
+                turnDurationsMs: [200, 300],
+            },
+            1_000,
+        );
+
+        expect(second).toEqual({
+            usage: usage(3),
+            toolCallCount: 5,
+            timeToFirstTokenMs: 1_050,
+            turnDurationsMs: [100, 200, 300],
+            attemptCount: 2,
+        });
+    });
+
+    test('keeps the first observed token latency across later attempts', () => {
+        const first = addClaudeGenerationAttempt(
+            ZERO_CLAUDE_GENERATION_TELEMETRY,
+            {
+                usage: null,
+                toolCallCount: 0,
+                timeToFirstTokenMs: 75,
+                turnDurationsMs: [],
+            },
+            0,
+        );
+        const second = addClaudeGenerationAttempt(
+            first,
+            {
+                usage: null,
+                toolCallCount: 0,
+                timeToFirstTokenMs: 25,
+                turnDurationsMs: [],
+            },
+            500,
+        );
+
+        expect(second.timeToFirstTokenMs).toBe(75);
+    });
+});
+
+describe('ClaudeStreamProcessor session start', () => {
+    test('surfaces the session id from the init event and from nothing else', () => {
+        const processor = new ClaudeStreamProcessor();
+        const events = processor.feedChunk(
+            line({
+                type: 'system',
+                subtype: 'hook_started',
+                hook_name: 'SessionStart:startup',
+                session_id: 'f228a01a-fef5-4872-a344-1d875e934fcf',
+            }) +
+                line({
+                    type: 'system',
+                    subtype: 'init',
+                    cwd: '/app',
+                    session_id: 'f228a01a-fef5-4872-a344-1d875e934fcf',
+                    claude_code_version: '2.1.272',
+                    tools: ['Read', 'Write'],
+                }) +
+                resultLine({
+                    session_id: 'f228a01a-fef5-4872-a344-1d875e934fcf',
+                }),
+        );
+
+        expect(events.map((event) => event.kind)).toEqual([
+            'session_started',
+            'result',
+        ]);
+        expect(events[0]).toEqual({
+            kind: 'session_started',
+            sessionId: 'f228a01a-fef5-4872-a344-1d875e934fcf',
+            cliVersion: '2.1.272',
+        });
+    });
+});

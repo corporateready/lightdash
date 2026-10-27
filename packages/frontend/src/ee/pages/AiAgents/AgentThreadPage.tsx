@@ -1,18 +1,48 @@
-import { Center, Loader } from '@mantine-8/core';
-import { useOutletContext, useParams } from 'react-router';
+import { subject } from '@casl/ability';
+import { Box, Center, Flex, Loader } from '@mantine/core';
+import { useCallback, useEffect, useMemo } from 'react';
+import { useOutletContext, useParams, useSearchParams } from 'react-router';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import useApp from '../../../providers/App/useApp';
+import { ReviewVerificationPanel } from '../../features/aiCopilot/components/Admin/ReviewVerificationPanel';
 import { AgentChatDisplay } from '../../features/aiCopilot/components/ChatElements/AgentChatDisplay';
 import { AgentChatInput } from '../../features/aiCopilot/components/ChatElements/AgentChatInput';
+import {
+    contextItemsToContentMentionSuggestions,
+    mergeAiPromptContextInput,
+    mergeAiPromptContextItems,
+    mergeContentMentionSuggestionItems,
+} from '../../features/aiCopilot/components/ChatElements/contentMentions';
+import { ThreadWorkstreamsPanel } from '../../features/aiCopilot/components/ChatElements/ThreadWorkstreamsPanel';
+import { ThreadRetentionNotice } from '../../features/aiCopilot/components/ThreadRetentionNotice';
+import { findRetryableDeepResearchRun } from '../../features/aiCopilot/deepResearch/deepResearchRegistry';
+import { runDeepResearchAgain } from '../../features/aiCopilot/deepResearch/runAgain';
+import {
+    type DeepResearchRunRegistration,
+    type StartDeepResearchArgs,
+} from '../../features/aiCopilot/deepResearch/types';
+import { useEmitEmbedAiAgentThreadChange } from '../../features/aiCopilot/hooks/embedAiAgentThreadChange';
+import {
+    useAiAgentReviewItemByPreviewThread,
+    useUpdateAiAgentReviewItemStatus,
+} from '../../features/aiCopilot/hooks/useAiAgentAdmin';
 import { useAiAgentPermission } from '../../features/aiCopilot/hooks/useAiAgentPermission';
 import { useAiAgentSqlModeAvailable } from '../../features/aiCopilot/hooks/useAiAgentSqlModeAvailable';
 import { useAiAgentThreadArtifact } from '../../features/aiCopilot/hooks/useAiAgentThreadArtifact';
-import { useModelOptions } from '../../features/aiCopilot/hooks/useModelOptions';
+import {
+    useStartDeepResearchMutation,
+    useTrackDeepResearchFollowUp,
+} from '../../features/aiCopilot/hooks/useDeepResearch';
+import { useDeepResearchAccess } from '../../features/aiCopilot/hooks/useDeepResearchAccess';
 import { usePendingThreadRefetch } from '../../features/aiCopilot/hooks/usePendingThreadRefetch';
+import { usePinnedContext } from '../../features/aiCopilot/hooks/usePinnedContext';
 import {
     useProjectAiAgent as useAiAgent,
     useAiAgentThread,
+    useAiAgentThreadWorkstreams,
     useCreateAgentThreadMessageMutation,
 } from '../../features/aiCopilot/hooks/useProjectAiAgents';
+import { useThreadModel } from '../../features/aiCopilot/hooks/useThreadModel';
 import {
     selectThreadSqlMode,
     setThreadSqlMode,
@@ -21,10 +51,17 @@ import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
 } from '../../features/aiCopilot/store/hooks';
+import { type AiAgentToolResult } from '../../features/aiCopilot/types';
+import { getDashboardNavigationUrlFromContentToolResult } from '../../features/aiCopilot/utils/contentToolResultNavigation';
+import useIsEmbedded from '../../providers/Embed/useIsEmbedded';
 import { type AgentContext } from './AgentPage';
 
 const AiAgentThreadPage = ({ debug }: { debug?: boolean }) => {
-    const { agentUuid, threadUuid, projectUuid, promptUuid } = useParams();
+    const { agentUuid, threadUuid, promptUuid } = useParams();
+    const projectUuid = useProjectUuid();
+    const [searchParams] = useSearchParams();
+    const isEmbed = useIsEmbedded();
+    const emitEmbedAiAgentThreadChange = useEmitEmbedAiAgentThreadChange();
     const { user } = useApp();
 
     const {
@@ -32,6 +69,32 @@ const AiAgentThreadPage = ({ debug }: { debug?: boolean }) => {
         isLoading: isLoadingThread,
         refetch,
     } = useAiAgentThread(projectUuid!, agentUuid, threadUuid);
+
+    useEffect(() => {
+        if (!isEmbed || !projectUuid || !agentUuid || !threadUuid || !thread) {
+            return;
+        }
+
+        emitEmbedAiAgentThreadChange({
+            projectUuid,
+            agentUuid,
+            threadUuid,
+        });
+    }, [
+        agentUuid,
+        emitEmbedAiAgentThreadChange,
+        isEmbed,
+        projectUuid,
+        thread,
+        threadUuid,
+    ]);
+
+    // Pull requests the coding agent has opened in this thread (its workstreams).
+    const { data: workstreams } = useAiAgentThreadWorkstreams(
+        projectUuid!,
+        agentUuid,
+        threadUuid,
+    );
 
     // Handle artifact selection based on thread changes
     useAiAgentThreadArtifact({
@@ -44,12 +107,54 @@ const AiAgentThreadPage = ({ debug }: { debug?: boolean }) => {
     const isThreadFromCurrentUser = thread?.user.uuid === user?.data?.userUuid;
 
     const agentQuery = useAiAgent(projectUuid!, agentUuid!);
-    const { agent } = useOutletContext<AgentContext>();
+    const { agent, navigateFromAgentChat } = useOutletContext<AgentContext>();
 
     const canManage = useAiAgentPermission({
         action: 'manage',
         projectUuid,
     });
+
+    const handleToolResult = useCallback(
+        (toolResult: AiAgentToolResult) => {
+            if (!projectUuid) return;
+
+            const dashboardUrl = getDashboardNavigationUrlFromContentToolResult(
+                projectUuid,
+                toolResult,
+            );
+            if (!dashboardUrl || isEmbed) return;
+
+            navigateFromAgentChat(dashboardUrl, {
+                threadUuid,
+                title: thread?.title || thread?.firstMessage?.message,
+            });
+        },
+        [
+            navigateFromAgentChat,
+            isEmbed,
+            projectUuid,
+            thread?.firstMessage?.message,
+            thread?.title,
+            threadUuid,
+        ],
+    );
+
+    const handleDashboardLinkClick = useCallback(
+        (dashboardUrl: string) => {
+            if (isEmbed) return;
+            navigateFromAgentChat(dashboardUrl, {
+                threadUuid,
+                title: thread?.title || thread?.firstMessage?.message,
+            });
+        },
+        [
+            isEmbed,
+            navigateFromAgentChat,
+            thread?.firstMessage?.message,
+            thread?.title,
+            threadUuid,
+        ],
+    );
 
     const {
         mutateAsync: createAgentThreadMessage,
@@ -58,39 +163,50 @@ const AiAgentThreadPage = ({ debug }: { debug?: boolean }) => {
         projectUuid!,
         agentUuid,
         threadUuid,
+        {
+            onToolResult: handleToolResult,
+        },
     );
 
-    const { isStreaming, isPending } = usePendingThreadRefetch(
+    const { isStreaming, isThreadPending } = usePendingThreadRefetch(
         thread,
         threadUuid!,
         refetch,
     );
+    const isOrgAdmin =
+        user.data?.ability.can(
+            'manage',
+            subject('Organization', {
+                organizationUuid: user.data?.organizationUuid,
+            }),
+        ) ?? false;
+    const { data: reviewItem } = useAiAgentReviewItemByPreviewThread(
+        threadUuid,
+        { enabled: isOrgAdmin },
+    );
+    const updateReviewItemStatus = useUpdateAiAgentReviewItemStatus();
 
     const sqlModeAvailable = useAiAgentSqlModeAvailable(projectUuid);
+    const canStartDeepResearch = useDeepResearchAccess(projectUuid);
+    const startDeepResearch = useStartDeepResearchMutation({
+        projectUuid: projectUuid!,
+        agentUuid: agentUuid!,
+        threadUuid: threadUuid!,
+    });
+    const trackDeepResearchFollowUp = useTrackDeepResearchFollowUp({
+        projectUuid: projectUuid!,
+        threadUuid: threadUuid!,
+    });
     const sqlMode = useAiAgentStoreSelector(
-        selectThreadSqlMode(threadUuid ?? ''),
+        selectThreadSqlMode(threadUuid ?? '', agent.enableSqlMode),
     );
     const dispatch = useAiAgentStoreDispatch();
 
-    const firstAssistantMessage = thread?.messages?.find(
-        (m) => m.role === 'assistant',
-    );
-    const threadModelConfig = firstAssistantMessage?.modelConfig ?? null;
-
-    const { data: availableModels } = useModelOptions({
+    const threadModel = useThreadModel({
         projectUuid,
         agentUuid,
-        options: { enabled: !!threadModelConfig },
+        messages: thread?.messages,
     });
-
-    const isThreadModelUnavailable =
-        !!threadModelConfig &&
-        !!availableModels &&
-        !availableModels.some(
-            (m) =>
-                m.provider === threadModelConfig.modelProvider &&
-                m.name === threadModelConfig.modelName,
-        );
 
     const disabledReasons: { when: boolean; message: string }[] = [
         {
@@ -99,30 +215,166 @@ const AiAgentThreadPage = ({ debug }: { debug?: boolean }) => {
                 'This thread is read-only. To continue the conversation, reply in Slack.',
         },
         {
-            when: !!thread && !isThreadFromCurrentUser,
+            when: !isEmbed && !!thread && !isThreadFromCurrentUser,
             message: 'This thread is read-only. It belongs to another user.',
-        },
-        {
-            when: isThreadModelUnavailable,
-            message: `The model used in this thread (${threadModelConfig?.modelProvider} ${threadModelConfig?.modelName}) is no longer available. Start a new thread to continue.`,
         },
     ];
     const activeDisabledReason = disabledReasons.find((r) => r.when);
     const inputDisabled = !!activeDisabledReason;
     const inputDisabledReason = activeDisabledReason?.message;
+    const threadMentionItems = useMemo(
+        () =>
+            contextItemsToContentMentionSuggestions(
+                thread?.messages.flatMap((message) =>
+                    message.role === 'user' ? message.context : [],
+                ) ?? [],
+                'thread',
+            ),
+        [thread?.messages],
+    );
+
+    const boundDashboardUuid =
+        thread?.binding?.type === 'dashboard'
+            ? thread.binding.dashboardUuid
+            : null;
+    // Expand the thread's bound or pinned dashboard into tiles, mentionable by tile name.
+    const pinnedDashboardUuid = useMemo(() => {
+        if (boundDashboardUuid) return boundDashboardUuid;
+        for (const message of thread?.messages ?? []) {
+            if (message.role !== 'user') continue;
+            for (const item of message.context ?? []) {
+                if (item.type === 'dashboard') return item.dashboardUuid;
+            }
+        }
+        return null;
+    }, [boundDashboardUuid, thread?.messages]);
+
+    const { contentMentionItems: pinnedDashboardTileItems } = usePinnedContext({
+        projectUuid,
+        dashboardUuidOrSlug: pinnedDashboardUuid,
+    });
+    const pageDashboardUuid = searchParams.get('dashboardUuid');
+    // A bound thread never pins a different dashboard from the page.
+    const dashboardUuid =
+        boundDashboardUuid && pageDashboardUuid !== boundDashboardUuid
+            ? null
+            : pageDashboardUuid;
+    const dataAppUuid = searchParams.get('dataAppUuid');
+    const documentUuid = searchParams.get('documentUuid');
+    const {
+        contextInput: pageContextInput,
+        previewItems: pagePreviewItems,
+        contentMentionItems: pageContentMentionItems,
+    } = usePinnedContext({
+        projectUuid,
+        dashboardUuidOrSlug: dashboardUuid,
+        dataAppUuidOrSlug: dataAppUuid,
+        documentUuid,
+    });
+
+    const contentMentionItems = useMemo(
+        () =>
+            mergeContentMentionSuggestionItems(
+                threadMentionItems,
+                pinnedDashboardTileItems,
+                pageContentMentionItems,
+            ),
+        [threadMentionItems, pinnedDashboardTileItems, pageContentMentionItems],
+    );
 
     const handleSubmit = ({
         message,
         toolHints,
+        context,
+        optimisticContext,
     }: {
         message: string;
         toolHints: string[];
+        context?: Parameters<typeof createAgentThreadMessage>[0]['context'];
+        optimisticContext?: Parameters<
+            typeof createAgentThreadMessage
+        >[0]['optimisticContext'];
     }) => {
         void createAgentThreadMessage({
             prompt: message,
-            modelConfig: threadModelConfig ?? undefined,
+            context: mergeAiPromptContextInput(pageContextInput, context),
+            optimisticContext: mergeAiPromptContextItems(
+                pagePreviewItems,
+                optimisticContext,
+            ),
             enableSqlMode: sqlModeAvailable && sqlMode,
             toolHints,
+        }).then(trackDeepResearchFollowUp);
+    };
+    const handleStartDeepResearch = async ({
+        question,
+    }: StartDeepResearchArgs) => {
+        if (!canStartDeepResearch) {
+            return;
+        }
+        const retryableRun = findRetryableDeepResearchRun({
+            projectUuid: projectUuid!,
+            agentUuid: agentUuid!,
+            threadUuid: threadUuid!,
+            userUuid: user?.data?.userUuid,
+            question,
+        });
+        const promptUuid =
+            retryableRun?.promptUuid ??
+            (
+                await createAgentThreadMessage({
+                    prompt: question,
+                    context: pageContextInput,
+                    optimisticContext: pagePreviewItems,
+                    skipAgentResponse: true,
+                })
+            ).uuid;
+        await startDeepResearch.mutateAsync({
+            question,
+            promptUuid,
+        });
+    };
+    const handleRunDeepResearchAgain = async (
+        registration: DeepResearchRunRegistration,
+    ) => {
+        if (!canStartDeepResearch) {
+            return;
+        }
+
+        return runDeepResearchAgain({
+            registration,
+            createPrompt: (question) =>
+                createAgentThreadMessage({
+                    prompt: question,
+                    context: pageContextInput,
+                    optimisticContext: pagePreviewItems,
+                    skipAgentResponse: true,
+                }),
+            startRun: startDeepResearch.mutateAsync,
+        });
+    };
+    const isBusy = Boolean(
+        isCreatingMessage ||
+        isStreaming ||
+        isThreadPending ||
+        startDeepResearch.isLoading,
+    );
+    const retryPrompt = reviewItem?.remediation?.retryPrompt ?? null;
+    const handleRetryOriginalQuestion = () => {
+        if (!retryPrompt) return;
+        handleSubmit({
+            message: retryPrompt,
+            toolHints: [],
+        });
+    };
+    const handleMarkFixed = () => {
+        if (!reviewItem || reviewItem.status === 'resolved') return;
+        updateReviewItemStatus.mutate({
+            fingerprint: reviewItem.fingerprint,
+            body: {
+                status: 'resolved',
+                dismissedReason: null,
+            },
         });
     };
 
@@ -135,45 +387,97 @@ const AiAgentThreadPage = ({ debug }: { debug?: boolean }) => {
     }
 
     return (
-        <AgentChatDisplay
-            thread={thread}
-            agentName={agentQuery.data?.name ?? 'AI'}
-            enableAutoScroll={true}
-            promptUuid={promptUuid}
-            debug={debug}
-            projectUuid={projectUuid}
-            agentUuid={agentUuid}
-            showAddToEvalsButton={canManage}
-        >
-            <AgentChatInput
-                disabled={inputDisabled}
-                disabledReason={inputDisabledReason}
-                loading={isCreatingMessage || isStreaming || isPending}
-                onSubmit={handleSubmit}
-                placeholder={`Ask ${agent.name} anything about your data...`}
-                messageCount={thread.messages?.length || 0}
-                projectUuid={projectUuid}
-                agentUuid={agentUuid}
-                threadUuid={threadUuid}
-                latestAssistantMessageUuid={
-                    [...(thread.messages ?? [])]
-                        .reverse()
-                        .find((m) => m.role === 'assistant')?.uuid
-                }
-                sqlMode={sqlModeAvailable ? sqlMode : undefined}
-                onSqlModeChange={
-                    sqlModeAvailable && threadUuid
-                        ? (enabled) =>
-                              dispatch(
-                                  setThreadSqlMode({
-                                      threadUuid,
-                                      enabled,
-                                  }),
-                              )
-                        : undefined
-                }
-            />
-        </AgentChatDisplay>
+        <Flex h="100%" gap={0} wrap="nowrap" align="stretch">
+            <Box flex={1} miw={0} h="100%">
+                <AgentChatDisplay
+                    thread={thread}
+                    agentName={agentQuery.data?.name ?? 'AI'}
+                    enableAutoScroll
+                    promptUuid={promptUuid}
+                    debug={debug}
+                    projectUuid={projectUuid}
+                    agentUuid={agentUuid}
+                    showAddToEvalsButton={canManage}
+                    onDashboardLinkClick={handleDashboardLinkClick}
+                    onChoiceSelect={
+                        inputDisabled || isBusy
+                            ? undefined
+                            : (choice) =>
+                                  handleSubmit({
+                                      message: choice,
+                                      toolHints: [],
+                                  })
+                    }
+                    canRetryDeepResearch={
+                        canStartDeepResearch && !inputDisabled && !isBusy
+                    }
+                    onRunDeepResearchAgain={(registration) => {
+                        void handleRunDeepResearchAgain(registration).catch(
+                            () => undefined,
+                        );
+                    }}
+                >
+                    {workstreams && workstreams.length > 0 && (
+                        <ThreadWorkstreamsPanel workstreams={workstreams} />
+                    )}
+                    <AgentChatInput
+                        disabled={inputDisabled}
+                        disabledReason={inputDisabledReason}
+                        footerNotice={
+                            <ThreadRetentionNotice
+                                agentThreadRetentionHours={
+                                    agent.threadRetentionHours ?? null
+                                }
+                            />
+                        }
+                        loading={isBusy}
+                        onSubmit={handleSubmit}
+                        onStartDeepResearch={
+                            canStartDeepResearch
+                                ? handleStartDeepResearch
+                                : undefined
+                        }
+                        placeholder={`Ask ${agent.name} anything about your data...`}
+                        messageCount={thread.messages?.length || 0}
+                        projectUuid={projectUuid}
+                        agentUuid={agentUuid}
+                        threadUuid={threadUuid}
+                        threadModelName={threadModel?.name ?? null}
+                        threadModelWarning={
+                            threadModel?.deprecationWarning ?? null
+                        }
+                        contentMentionPriorityItems={contentMentionItems}
+                        latestAssistantMessageUuid={
+                            [...(thread.messages ?? [])]
+                                .reverse()
+                                .find((m) => m.role === 'assistant')?.uuid
+                        }
+                        sqlMode={sqlModeAvailable ? sqlMode : undefined}
+                        onSqlModeChange={
+                            sqlModeAvailable && threadUuid
+                                ? (enabled) =>
+                                      dispatch(
+                                          setThreadSqlMode({
+                                              threadUuid,
+                                              enabled,
+                                          }),
+                                      )
+                                : undefined
+                        }
+                    />
+                </AgentChatDisplay>
+            </Box>
+            {reviewItem && (
+                <ReviewVerificationPanel
+                    reviewItem={reviewItem}
+                    canRetry={!!retryPrompt && !inputDisabled}
+                    isBusy={isBusy}
+                    isResolving={updateReviewItemStatus.isLoading}
+                    onRetry={handleRetryOriginalQuestion}
+                    onMarkDone={handleMarkFixed}
+                />
+            )}
+        </Flex>
     );
 };
 

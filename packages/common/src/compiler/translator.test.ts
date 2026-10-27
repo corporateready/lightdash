@@ -1,21 +1,51 @@
-import { SupportedDbtAdapter, type DbtModelNode } from '../types/dbt';
-import { InlineErrorType, type Explore } from '../types/explore';
-import { DimensionType, FieldType, MetricType } from '../types/field';
+import {
+    SupportedDbtAdapter,
+    type DbtModelLightdashConfig,
+    type DbtModelNode,
+    type RESERVED_MODEL_META_KEYS,
+} from '../types/dbt';
+import {
+    getExploreSplitCandidates,
+    InlineErrorType,
+    isExploreError,
+    JoinRelationship,
+    type Explore,
+    type ExploreError,
+} from '../types/explore';
+import {
+    DimensionType,
+    FieldType,
+    MetricType,
+    NumberSeparator,
+} from '../types/field';
 import { DEFAULT_SPOTLIGHT_CONFIG } from '../types/lightdashProjectConfig';
 import { TimeFrames } from '../types/timeFrames';
+import {
+    getCatalogMissingEntries,
+    setCatalogMissingEntries,
+    setCatalogNestedColumnShape,
+    setCatalogNestedColumnsUnavailable,
+    WAREHOUSE_TIMESTAMP_DOMAINS_KEY,
+    type WarehouseCatalog,
+} from '../types/warehouse';
+import {
+    getBigqueryUnnestSql,
+    getDatabricksUnnestSql,
+} from '../utils/warehouse';
+import { ExploreCompiler } from './exploreCompiler';
 import { warehouseClientMock } from './exploreCompiler.mock';
+import { getExploreParameterDefinitions } from './parameters';
 import {
     attachTypesToModels,
     convertExplores,
     convertTable,
+    getMissingCatalogEntries,
+    haveMissingCatalogEntriesChanged,
+    iterateExplores,
+    type AttachTypesDiagnostics,
 } from './translator';
 import {
-    DBT_METRIC,
-    DBT_METRIC_DERIVED,
-    DBT_METRIC_WITH_CUSTOM_SQL,
-    DBT_METRIC_WITH_FILTER,
-    DBT_METRIC_WITH_SQL_FIELD,
-    DBT_V9_METRIC,
+    expectedModelWithTimestampDomain,
     expectedModelWithType,
     LIGHTDASH_TABLE_SQL_WHERE,
     LIGHTDASH_TABLE_WITH_ADDITIONAL_DIMENSIONS,
@@ -24,8 +54,6 @@ import {
     LIGHTDASH_TABLE_WITH_AI_HINT_FROM_CONFIG,
     LIGHTDASH_TABLE_WITH_COMPOSITE_PRIMARY_KEY,
     LIGHTDASH_TABLE_WITH_CUSTOM_TIME_INTERVAL_DIMENSIONS,
-    LIGHTDASH_TABLE_WITH_DBT_METRICS,
-    LIGHTDASH_TABLE_WITH_DBT_V9_METRICS,
     LIGHTDASH_TABLE_WITH_DEFAULT_SHOW_UNDERLYING_VALUES,
     LIGHTDASH_TABLE_WITH_DEFAULT_TIME_INTERVAL_DIMENSIONS_BIGQUERY,
     LIGHTDASH_TABLE_WITH_DEFAULT_TIME_INTERVAL_DIMENSIONS_SNOWFLAKE,
@@ -48,6 +76,7 @@ import {
     MODEL_WITH_AI_HINT,
     MODEL_WITH_AI_HINT_ARRAY,
     MODEL_WITH_AI_HINT_IN_CONFIG,
+    MODEL_WITH_ANNOTATED_ADDITIONAL_DIMENSIONS,
     MODEL_WITH_COMPOSITE_PRIMARY_KEY,
     MODEL_WITH_CUSTOM_GRANULARITY,
     MODEL_WITH_CUSTOM_GRANULARITY_AND_REQUIRED_ATTRIBUTES,
@@ -74,12 +103,22 @@ import {
     MODEL_WITH_SINGLE_PRIMARY_KEY,
     MODEL_WITH_SQL_FILTER,
     MODEL_WITH_SQL_WHERE,
+    MODEL_WITH_SQLLESS_ADDITIONAL_DIMENSION,
+    MODEL_WITH_TIMESTAMP_DOMAIN,
+    MODEL_WITH_TIMESTAMP_DOMAIN_ADDITIONAL_DIMENSION,
+    MODEL_WITH_TIMESTAMP_DOMAIN_CUSTOM_SQL,
+    MODEL_WITH_TIMESTAMP_DOMAIN_CUSTOM_SQL_ANNOTATED,
+    MODEL_WITH_TIMESTAMP_DOMAIN_YAML_OVERRIDE,
+    MODEL_WITH_UNKNOWN_TIMESTAMP_DOMAIN,
     MODEL_WITH_WRONG_METRIC,
     MODEL_WITH_WRONG_METRICS,
     SPOTLIGHT_CONFIG_WITH_CATEGORIES_AND_HIDE,
     warehouseSchema,
+    warehouseSchemaWithAllUpperCaseKeys,
+    warehouseSchemaWithEmptyStringDatabase,
     warehouseSchemaWithMissingColumn,
     warehouseSchemaWithMissingTable,
+    warehouseSchemaWithTimestampDomain,
     warehouseSchemaWithUpperCaseColumn,
 } from './translator.mock';
 
@@ -125,6 +164,33 @@ describe('attachTypesToModels', () => {
             'Column "myColumnName" from model "myTable" does not exist.\n "myTable.myColumnName" was not found in your target warehouse at myDatabase.mySchema.myTable. Try rerunning dbt to update your warehouse.',
         );
     });
+    it('should match an empty-string database key (ClickHouse table_catalog)', async () => {
+        const emptyDbModel = { ...model, database: '' };
+        expect(() =>
+            attachTypesToModels(
+                [emptyDbModel],
+                warehouseSchemaWithEmptyStringDatabase,
+                true,
+            ),
+        ).not.toThrow();
+        expect(
+            attachTypesToModels(
+                [emptyDbModel],
+                warehouseSchemaWithEmptyStringDatabase,
+                false,
+            )[0].columns.myColumnName.data_type,
+        ).toEqual(DimensionType.STRING);
+    });
+    it('should match uppercase catalog keys at every level when case-insensitive (Snowflake)', async () => {
+        expect(
+            attachTypesToModels(
+                [model],
+                warehouseSchemaWithAllUpperCaseKeys,
+                true,
+                false,
+            )[0],
+        ).toEqual(expectedModelWithType);
+    });
     it('should throw an error when column has wrong case', async () => {
         expect(() =>
             attachTypesToModels(
@@ -145,6 +211,315 @@ describe('attachTypesToModels', () => {
                 false,
             )[0],
         ).toEqual(expectedModelWithType);
+    });
+    it('should keep the first catalog entry when two fold to the same name', async () => {
+        // Neither key matches exactly, so both can only be reached case-insensitively.
+        const collidingCatalog: WarehouseCatalog = {
+            myDatabase: {
+                mySchema: {
+                    MYTABLE: { myColumnName: DimensionType.NUMBER },
+                    MyTable: { myColumnName: DimensionType.STRING },
+                },
+            },
+        };
+        expect(
+            attachTypesToModels([model], collidingCatalog, true, false)[0]
+                .columns.myColumnName.data_type,
+        ).toEqual(DimensionType.NUMBER);
+    });
+    it('should prefer an exact match over a case-insensitive one', async () => {
+        const collidingCatalog: WarehouseCatalog = {
+            myDatabase: {
+                mySchema: {
+                    MYTABLE: { myColumnName: DimensionType.NUMBER },
+                    myTable: { myColumnName: DimensionType.STRING },
+                },
+            },
+        };
+        expect(
+            attachTypesToModels([model], collidingCatalog, true, false)[0]
+                .columns.myColumnName.data_type,
+        ).toEqual(DimensionType.STRING);
+    });
+    it('should not treat the timestamp-domain sidecar as a database', async () => {
+        const catalogWithSidecar = {
+            ...warehouseSchema,
+            [WAREHOUSE_TIMESTAMP_DOMAINS_KEY]: {
+                myDatabase: {
+                    mySchema: { myTable: { myColumnName: 'utc' } },
+                },
+            },
+        } as unknown as WarehouseCatalog;
+        const diagnostics: AttachTypesDiagnostics[] = [];
+        expect(() =>
+            attachTypesToModels([model], catalogWithSidecar, true, true, (d) =>
+                diagnostics.push(d),
+            ),
+        ).not.toThrow();
+        expect(diagnostics[0].catalogTableCount).toEqual(1);
+    });
+    it('should count an exact table with a case-insensitive column as case-insensitive', async () => {
+        // The table key matches exactly and only the column needs folding. This is the
+        // combination that a table-level-only classification gets wrong.
+        const diagnostics: AttachTypesDiagnostics[] = [];
+        attachTypesToModels(
+            [model],
+            warehouseSchemaWithUpperCaseColumn,
+            true,
+            false,
+            (d) => diagnostics.push(d),
+        );
+        expect(diagnostics[0].caseInsensitiveLookups).toEqual(1);
+        expect(diagnostics[0].exactLookups).toEqual(0);
+    });
+    it('should count a case-insensitive table as case-insensitive', async () => {
+        const diagnostics: AttachTypesDiagnostics[] = [];
+        attachTypesToModels(
+            [model],
+            warehouseSchemaWithAllUpperCaseKeys,
+            true,
+            false,
+            (d) => diagnostics.push(d),
+        );
+        expect(diagnostics[0].caseInsensitiveLookups).toEqual(1);
+        expect(diagnostics[0].exactLookups).toEqual(0);
+    });
+    it('should report diagnostics for the phase', async () => {
+        const diagnostics: AttachTypesDiagnostics[] = [];
+        attachTypesToModels([model], warehouseSchema, false, true, (d) =>
+            diagnostics.push(d),
+        );
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0].modelCount).toEqual(1);
+        expect(diagnostics[0].columnCount).toEqual(
+            Object.keys(model.columns).length,
+        );
+        expect(diagnostics[0].catalogTableCount).toEqual(1);
+        expect(diagnostics[0].exactLookups).toEqual(1);
+        expect(diagnostics[0].caseInsensitiveLookups).toEqual(0);
+        expect(diagnostics[0].schemaPairs).toEqual([
+            { databaseSchema: 'myDatabase.mySchema', models: 1 },
+        ]);
+    });
+});
+
+describe('timestamp domain', () => {
+    const customGranularities = {
+        slt_week: {
+            label: 'SLT Week',
+            sql: "DATE_TRUNC('week', ${COLUMN})",
+            type: DimensionType.TIMESTAMP,
+        },
+    } as const;
+
+    it('should attach timestamp_domain as a sibling of data_type', () => {
+        expect(
+            attachTypesToModels(
+                [model],
+                warehouseSchemaWithTimestampDomain,
+                false,
+            )[0],
+        ).toEqual(expectedModelWithTimestampDomain);
+    });
+
+    it('should not attach timestamp_domain for legacy catalog entries', () => {
+        expect(
+            attachTypesToModels([model], warehouseSchema, false)[0].columns
+                .myColumnName,
+        ).not.toHaveProperty('timestamp_domain');
+    });
+
+    it('should stamp timestampDomain on standard intervals but not custom granularities', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_TIMESTAMP_DOMAIN,
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined,
+            undefined,
+            customGranularities,
+        );
+
+        expect(result.dimensions.user_created.timestampDomain).toEqual('naive');
+        expect(result.dimensions.user_created_raw.timestampDomain).toEqual(
+            'naive',
+        );
+        expect(result.dimensions.user_created_day.timestampDomain).toEqual(
+            'naive',
+        );
+        expect(result.dimensions.user_created_slt_week).not.toHaveProperty(
+            'timestampDomain',
+        );
+    });
+
+    it('should prefer the YAML timestamp_domain over the catalog', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_TIMESTAMP_DOMAIN_YAML_OVERRIDE,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created.timestampDomain).toEqual('aware');
+        expect(result.dimensions.user_created_day.timestampDomain).toEqual(
+            'aware',
+        );
+    });
+
+    it('should leave timestampDomain absent when unknown', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_UNKNOWN_TIMESTAMP_DOMAIN,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created).not.toHaveProperty(
+            'timestampDomain',
+        );
+        expect(result.dimensions.user_created_day).not.toHaveProperty(
+            'timestampDomain',
+        );
+    });
+
+    it('should not stamp the catalog domain on a custom SQL dimension', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_TIMESTAMP_DOMAIN_CUSTOM_SQL,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created).not.toHaveProperty(
+            'timestampDomain',
+        );
+        expect(result.dimensions.user_created_day).not.toHaveProperty(
+            'timestampDomain',
+        );
+    });
+
+    it('should honour the YAML timestamp_domain on a custom SQL dimension', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_TIMESTAMP_DOMAIN_CUSTOM_SQL_ANNOTATED,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created.timestampDomain).toEqual('naive');
+        expect(result.dimensions.user_created_day.timestampDomain).toEqual(
+            'naive',
+        );
+    });
+
+    it('should not stamp the catalog domain on additional dimensions', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_TIMESTAMP_DOMAIN_ADDITIONAL_DIMENSION,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created.timestampDomain).toEqual('naive');
+        expect(result.dimensions.user_created_shifted).not.toHaveProperty(
+            'timestampDomain',
+        );
+    });
+
+    it('should not stamp the catalog domain on a sql-less additional dimension', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_SQLLESS_ADDITIONAL_DIMENSION,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created.timestampDomain).toEqual('naive');
+        expect(result.dimensions.user_created_copy).not.toHaveProperty(
+            'timestampDomain',
+        );
+    });
+
+    it('should carry an additional dimension timestamp_domain to its interval children and not leak the base annotation', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_ANNOTATED_ADDITIONAL_DIMENSIONS,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        // Base column YAML annotation applies to itself and its children
+        expect(result.dimensions.user_created.timestampDomain).toEqual('naive');
+        expect(result.dimensions.user_created_day.timestampDomain).toEqual(
+            'naive',
+        );
+        // Annotated additional dim: its own domain reaches its children
+        expect(result.dimensions.user_created_aware.timestampDomain).toEqual(
+            'aware',
+        );
+        expect(
+            result.dimensions.user_created_aware_day.timestampDomain,
+        ).toEqual('aware');
+        // Unannotated additional dim: neither the base annotation nor the
+        // catalog leaks onto it or its children
+        expect(result.dimensions.user_created_plain).not.toHaveProperty(
+            'timestampDomain',
+        );
+        expect(result.dimensions.user_created_plain_day).not.toHaveProperty(
+            'timestampDomain',
+        );
+    });
+
+    it('should apply the Snowflake timestamp conversion once on additional dimension interval children', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.SNOWFLAKE,
+            MODEL_WITH_ANNOTATED_ADDITIONAL_DIMENSIONS,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.user_created_plain.sql).toEqual(
+            "TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ${TABLE}.user_created_other))",
+        );
+        expect(result.dimensions.user_created_plain_day.sql).toEqual(
+            "DATE_TRUNC('DAY', TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ${TABLE}.user_created_other)))",
+        );
+        expect(result.dimensions.user_created_aware_day.sql).toEqual(
+            "DATE_TRUNC('DAY', TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ${TABLE}.user_created_utc)))",
+        );
+        // Regular column children are derived from the raw column meta
+        expect(result.dimensions.user_created_day.sql).toEqual(
+            "DATE_TRUNC('DAY', TO_TIMESTAMP_NTZ(CONVERT_TIMEZONE('UTC', ${TABLE}.user_created)))",
+        );
+    });
+
+    it('should not wrap additional dimension interval children when timestamp conversion is disabled', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.SNOWFLAKE,
+            MODEL_WITH_ANNOTATED_ADDITIONAL_DIMENSIONS,
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined,
+            true,
+        );
+
+        expect(result.dimensions.user_created_plain.sql).toEqual(
+            '${TABLE}.user_created_other',
+        );
+        expect(result.dimensions.user_created_plain_day).toMatchObject({
+            sql: "DATE_TRUNC('DAY', ${TABLE}.user_created_other)",
+            timeIntervalBaseDimensionName: 'user_created_plain',
+        });
+    });
+
+    it('should leave additional dimension interval children unchanged on adapters without a timestamp wrap', () => {
+        const postgres = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            MODEL_WITH_ANNOTATED_ADDITIONAL_DIMENSIONS,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+        expect(postgres.dimensions.user_created_plain_day.sql).toEqual(
+            "DATE_TRUNC('DAY', ${TABLE}.user_created_other)",
+        );
+
+        const bigquery = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            MODEL_WITH_ANNOTATED_ADDITIONAL_DIMENSIONS,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+        expect(bigquery.dimensions.user_created_plain_day.sql).toEqual(
+            'TIMESTAMP_TRUNC(${TABLE}.user_created_other, DAY)',
+        );
     });
 });
 
@@ -184,7 +559,6 @@ describe('additional dimensions with hidden base dimension', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_HIDDEN_BASE_AND_VISIBLE_ADDITIONAL,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
 
@@ -252,7 +626,6 @@ describe('additional dimensions in dbt 1.10+ (config.meta structure)', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_CONFIG_META_ADDITIONAL_DIMENSIONS,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
 
@@ -288,6 +661,45 @@ describe('additional dimensions in dbt 1.10+ (config.meta structure)', () => {
             'Order Date (PT)',
         );
     });
+
+    it('should parse the number separator from dbt meta onto dimensions and metrics', () => {
+        const modelWithSeparators: DbtModelNode & {
+            relation_name: string;
+        } = {
+            ...model,
+            columns: {
+                revenue: {
+                    name: 'revenue',
+                    data_type: DimensionType.NUMBER,
+                    meta: {
+                        dimension: {
+                            type: DimensionType.NUMBER,
+                            separator: NumberSeparator.PERIOD_COMMA,
+                        },
+                        metrics: {
+                            total_revenue: {
+                                type: MetricType.SUM,
+                                separator: NumberSeparator.SPACE_PERIOD,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        const result = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            modelWithSeparators,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(result.dimensions.revenue.separator).toBe(
+            NumberSeparator.PERIOD_COMMA,
+        );
+        expect(result.metrics.total_revenue.separator).toBe(
+            NumberSeparator.SPACE_PERIOD,
+        );
+    });
 });
 
 describe('convert tables from dbt models', () => {
@@ -296,42 +708,15 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_NO_METRICS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITHOUT_AUTO_METRICS);
-    });
-    it('should convert dbt model with dbt metrics', () => {
-        expect(
-            convertTable(
-                SupportedDbtAdapter.BIGQUERY,
-                MODEL_WITH_NO_METRICS,
-                [
-                    DBT_METRIC,
-                    DBT_METRIC_WITH_SQL_FIELD,
-                    DBT_METRIC_WITH_CUSTOM_SQL,
-                    DBT_METRIC_WITH_FILTER,
-                    DBT_METRIC_DERIVED,
-                ],
-                DEFAULT_SPOTLIGHT_CONFIG,
-            ),
-        ).toStrictEqual(LIGHTDASH_TABLE_WITH_DBT_METRICS);
-        // dbt 1.5 metrics
-        expect(
-            convertTable(
-                SupportedDbtAdapter.BIGQUERY,
-                MODEL_WITH_NO_METRICS,
-                [DBT_V9_METRIC],
-                DEFAULT_SPOTLIGHT_CONFIG,
-            ),
-        ).toStrictEqual(LIGHTDASH_TABLE_WITH_DBT_V9_METRICS);
     });
     it('should convert dbt model with metrics in meta', () => {
         expect(
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_METRIC,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_METRICS);
@@ -340,7 +725,6 @@ describe('convert tables from dbt models', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_METRIC_DRIVERS,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
 
@@ -357,7 +741,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_DEFAULT_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(
@@ -369,7 +752,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_NO_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(
@@ -381,7 +763,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.SNOWFLAKE,
                 MODEL_WITH_DEFAULT_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(
@@ -393,7 +774,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.SNOWFLAKE,
                 MODEL_WITH_NO_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(
@@ -405,7 +785,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_OFF_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_OFF_TIME_INTERVAL_DIMENSIONS);
@@ -415,7 +794,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_OFF_BOOLEAN_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_OFF_TIME_INTERVAL_DIMENSIONS);
@@ -425,7 +803,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_CUSTOM_TIME_INTERVAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_CUSTOM_TIME_INTERVAL_DIMENSIONS);
@@ -434,7 +811,6 @@ describe('convert tables from dbt models', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_WRONG_METRIC,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.warnings).toBeDefined();
@@ -453,7 +829,6 @@ describe('convert tables from dbt models', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_WRONG_METRICS,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.warnings).toBeDefined();
@@ -476,7 +851,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_GROUP_LABEL,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_GROUP_LABEL);
@@ -488,7 +862,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_SQL_WHERE,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_SQL_WHERE);
@@ -499,7 +872,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_SQL_FILTER,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_SQL_WHERE);
@@ -510,10 +882,185 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.POSTGRES,
                 MODEL_WITH_ADDITIONAL_DIMENSIONS,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_ADDITIONAL_DIMENSIONS);
+    });
+
+    it('should convert dimension filter autocomplete config', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    values: [
+                                        {
+                                            value: 'active',
+                                            label: 'Active customer',
+                                        },
+                                        { value: 'trial' },
+                                    ],
+                                    fetch_from_warehouse: false,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.dimensions.user_id.filterAutocomplete).toEqual({
+            values: [
+                { value: 'active', label: 'Active customer' },
+                { value: 'trial' },
+            ],
+            fetchFromWarehouse: false,
+        });
+    });
+
+    it('should convert dimension filter autocomplete label_dimension', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    label_dimension: 'user_name',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.dimensions.user_id.filterAutocomplete).toEqual({
+            fetchFromWarehouse: true,
+            labelDimension: 'user_name',
+        });
+    });
+
+    it('should convert dimension filter autocomplete options_from_dimension', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    options_from_dimension: {
+                                        model: 'users',
+                                        dimension: 'user_id',
+                                        label_dimension: 'user_name',
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.dimensions.user_id.filterAutocomplete).toEqual({
+            fetchFromWarehouse: true,
+            optionsFromDimension: {
+                model: 'users',
+                dimension: 'user_id',
+                labelDimension: 'user_name',
+            },
+        });
+    });
+
+    it('should warn when options_from_dimension is combined with fetch_from_warehouse false', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    fetch_from_warehouse: false,
+                                    values: [{ value: 'active' }],
+                                    options_from_dimension: {
+                                        model: 'users',
+                                        dimension: 'user_id',
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.warnings).toEqual([
+            {
+                type: InlineErrorType.FIELD_ERROR,
+                message:
+                    'Dimension "user_id" in dbt model "myTable" sets both "options_from_dimension" and "fetch_from_warehouse: false". Curated values are used and "options_from_dimension" is ignored.',
+            },
+        ]);
+    });
+
+    it('should warn and keep the first duplicate dimension filter autocomplete value', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    values: [
+                                        {
+                                            value: 'active',
+                                            label: 'Active customer',
+                                        },
+                                        {
+                                            value: 'active',
+                                            label: 'Duplicate active',
+                                        },
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.dimensions.user_id.filterAutocomplete?.values).toEqual([
+            { value: 'active', label: 'Active customer' },
+        ]);
+        expect(table.warnings).toEqual([
+            {
+                type: InlineErrorType.FIELD_ERROR,
+                message:
+                    'Duplicate filter autocomplete values found for dimension "user_id" in dbt model "myTable": active. Keeping the first value and ignoring duplicates.',
+            },
+        ]);
     });
 
     it('should convert dbt model with groups meta block', async () => {
@@ -521,7 +1068,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_GROUPS_BLOCK,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_GROUP_BLOCK);
@@ -532,7 +1078,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_SINGLE_PRIMARY_KEY,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_SINGLE_PRIMARY_KEY);
@@ -543,7 +1088,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_COMPOSITE_PRIMARY_KEY,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_COMPOSITE_PRIMARY_KEY);
@@ -554,7 +1098,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_DIMENSION_AI_HINT,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_DIMENSION_AI_HINT);
@@ -565,7 +1108,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_METRIC_AI_HINT,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_METRIC_AI_HINT);
@@ -576,7 +1118,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_MODEL_METRIC_AI_HINT,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_MODEL_METRIC_AI_HINT);
@@ -587,7 +1128,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_AI_HINT,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_AI_HINT);
@@ -598,7 +1138,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_AI_HINT_IN_CONFIG,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_AI_HINT_FROM_CONFIG);
@@ -609,7 +1148,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_AI_HINT_ARRAY,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_AI_HINT_ARRAY);
@@ -620,7 +1158,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_DIMENSION_AI_HINT_ARRAY,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_DIMENSION_AI_HINT_ARRAY);
@@ -631,7 +1168,6 @@ describe('convert tables from dbt models', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_METRIC_AI_HINT_ARRAY,
-                [],
                 DEFAULT_SPOTLIGHT_CONFIG,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_METRIC_AI_HINT_ARRAY);
@@ -652,7 +1188,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toBeTruthy();
@@ -672,7 +1207,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -695,7 +1229,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -716,7 +1249,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -738,7 +1270,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(`Set "my_set" in model "myTable" cannot be empty`);
@@ -759,7 +1290,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -787,7 +1317,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toBeTruthy();
@@ -816,7 +1345,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -841,7 +1369,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toBeTruthy();
@@ -877,7 +1404,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toBeTruthy();
@@ -904,7 +1430,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toBeTruthy();
@@ -930,7 +1455,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -958,7 +1482,6 @@ describe('convert tables from dbt models', () => {
                             },
                         },
                     },
-                    [],
                     DEFAULT_SPOTLIGHT_CONFIG,
                 ),
             ).toThrowError(
@@ -973,7 +1496,6 @@ describe('dbt source paths', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_NO_METRICS,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.dbtPackageName).toBeUndefined();
@@ -990,7 +1512,6 @@ describe('dbt source paths', () => {
                 patch_path: 'jaffle_shop://models/orders.yml',
                 path: 'orders.sql',
             },
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.dbtPackageName).toBe('jaffle_shop');
@@ -1005,7 +1526,6 @@ describe('dbt source paths', () => {
                 ...MODEL_WITH_NO_METRICS,
                 patch_path: 'pkg://schema.yml',
             },
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(ymlOnly.ymlPath).toBe('schema.yml');
@@ -1015,7 +1535,6 @@ describe('dbt source paths', () => {
         const sqlOnly = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             { ...MODEL_WITH_NO_METRICS, path: 'foo.sql' },
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(sqlOnly.sqlPath).toBe('foo.sql');
@@ -1030,7 +1549,6 @@ describe('spotlight config', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_NO_CATEGORIES,
-                [DBT_METRIC],
                 SPOTLIGHT_CONFIG_WITH_CATEGORIES_AND_HIDE.spotlight,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_NO_CATEGORIES);
@@ -1041,7 +1559,6 @@ describe('spotlight config', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_MODEL_LEVEL_CATEGORIES,
-                [DBT_METRIC],
                 SPOTLIGHT_CONFIG_WITH_CATEGORIES_AND_HIDE.spotlight,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_MODEL_LEVEL_CATEGORIES);
@@ -1052,7 +1569,6 @@ describe('spotlight config', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_METRIC_LEVEL_CATEGORIES,
-                [DBT_METRIC],
                 SPOTLIGHT_CONFIG_WITH_CATEGORIES_AND_HIDE.spotlight,
             ),
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_METRIC_LEVEL_CATEGORIES);
@@ -1063,12 +1579,576 @@ describe('spotlight config', () => {
             convertTable(
                 SupportedDbtAdapter.BIGQUERY,
                 MODEL_WITH_METRIC_LEVEL_CATEGORIES,
-                [DBT_METRIC],
                 DEFAULT_SPOTLIGHT_CONFIG, // no categories defined
             ),
         ).toThrowError(
             `Invalid spotlight categories found in metric 'user_count': category_1, category_2. Categories must be defined in project config.`,
         );
+    });
+});
+
+describe('merged manifest model qualification', () => {
+    const buildMergedModel = ({
+        sourceName,
+        packageName,
+        name,
+        joins = [],
+    }: {
+        sourceName: string;
+        packageName: string;
+        name: string;
+        joins?: DbtModelNode['meta']['joins'];
+    }): DbtModelNode => ({
+        ...model,
+        unique_id: `model.${packageName}.${name}`,
+        package_name: packageName,
+        name,
+        alias: name,
+        relation_name: `${sourceName}.${name}`,
+        lightdash_source_name: sourceName,
+        columns: {
+            id: {
+                name: 'id',
+                data_type: DimensionType.NUMBER,
+                meta: {},
+            },
+        },
+        meta: { joins },
+    });
+
+    it.each([false, true])(
+        'defers names and keeps a local qualified-looking join target when present: %s',
+        async (localTargetExists) => {
+            const models = [
+                buildMergedModel({
+                    sourceName: 'analytics',
+                    packageName: 'pkg_a',
+                    name: 'orders',
+                }),
+                buildMergedModel({
+                    sourceName: 'finance',
+                    packageName: 'pkg_b',
+                    name: 'orders',
+                }),
+                ...(localTargetExists
+                    ? [
+                          buildMergedModel({
+                              sourceName: 'analytics',
+                              packageName: 'pkg_a',
+                              name: 'finance__orders',
+                          }),
+                      ]
+                    : []),
+                buildMergedModel({
+                    sourceName: 'analytics',
+                    packageName: 'pkg_a',
+                    name: 'customers',
+                    joins: [
+                        {
+                            join: 'finance__orders',
+                            sql_on: '${customers.id} = ${finance__orders.id}',
+                        },
+                    ],
+                }),
+            ];
+            const explores = await convertExplores(
+                models,
+                false,
+                SupportedDbtAdapter.POSTGRES,
+                warehouseClientMock,
+                { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+                { deferExploreNaming: true },
+            );
+            expect(explores).toHaveLength(localTargetExists ? 4 : 3);
+            expect(explores.some(isExploreError)).toBe(false);
+            expect(new Set(explores.map((explore) => explore.name)).size).toBe(
+                localTargetExists ? 4 : 3,
+            );
+            const customers = explores.find(
+                (explore) =>
+                    explore.dbtModelIdentity?.modelName === 'customers',
+            ) as Explore;
+            expect(customers.label).toBe('Customers');
+            expect(customers.tables.finance__orders.dbtPackageName).toBe(
+                localTargetExists ? 'pkg_a' : 'pkg_b',
+            );
+            expect(customers.tables.finance__orders.canonicalName).toMatch(
+                /^__model_/,
+            );
+        },
+    );
+
+    it('qualifies every side of a cross-source collision and leaves other explores bare', async () => {
+        const explores = await convertExplores(
+            [
+                buildMergedModel({
+                    sourceName: 'analytics',
+                    packageName: 'pkg_a',
+                    name: 'orders',
+                }),
+                buildMergedModel({
+                    sourceName: 'finance',
+                    packageName: 'pkg_b',
+                    name: 'orders',
+                }),
+                buildMergedModel({
+                    sourceName: 'analytics',
+                    packageName: 'pkg_a',
+                    name: 'customers',
+                }),
+            ],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+        expect(explores.map(({ name }) => name).sort()).toEqual([
+            'analytics__orders',
+            'customers',
+            'finance__orders',
+        ]);
+    });
+
+    it('resolves a bare join and sql_on reference to the colliding model from the same source', async () => {
+        const explores = await convertExplores(
+            [
+                buildMergedModel({
+                    sourceName: 'analytics',
+                    packageName: 'pkg_a',
+                    name: 'customers',
+                    joins: [
+                        {
+                            join: 'orders',
+                            sql_on: '${customers.id} = ${orders.id}',
+                        },
+                    ],
+                }),
+                buildMergedModel({
+                    sourceName: 'analytics',
+                    packageName: 'pkg_a',
+                    name: 'orders',
+                }),
+                buildMergedModel({
+                    sourceName: 'finance',
+                    packageName: 'pkg_b',
+                    name: 'orders',
+                }),
+            ],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+        const customers = explores.find(
+            (explore) => explore.name === 'customers',
+        ) as Explore;
+        expect(customers.joinedTables).toHaveLength(1);
+        expect(customers.tables.orders.sqlTable).toBe('analytics.orders');
+        expect(customers.joinedTables[0].compiledSqlOn).toBe(
+            '("customers".id) = ("orders".id)',
+        );
+    });
+
+    it('keeps qualified join parameters scoped to the authored alias', async () => {
+        const subscriptionsModel = buildMergedModel({
+            sourceName: 'finance',
+            packageName: 'finance',
+            name: 'subscriptions',
+            joins: [
+                {
+                    join: 'customers',
+                    sql_on: '${subscriptions.id} = ${customers.id}',
+                },
+            ],
+        });
+        subscriptionsModel.meta.metrics = {
+            customer_metric: {
+                type: MetricType.NUMBER,
+                sql: '${ld.parameters.customers.customer_name}',
+            },
+        };
+
+        const financeCustomersModel = buildMergedModel({
+            sourceName: 'finance',
+            packageName: 'finance',
+            name: 'customers',
+        });
+        financeCustomersModel.meta.parameters = {
+            customer_name: {
+                label: 'Customer name',
+                default: 'Alice',
+            },
+        };
+
+        const explores = await convertExplores(
+            [
+                subscriptionsModel,
+                financeCustomersModel,
+                buildMergedModel({
+                    sourceName: 'marketing',
+                    packageName: 'marketing',
+                    name: 'customers',
+                }),
+            ],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            { allowPartialCompilation: true },
+        );
+
+        const subscriptions = explores.find(
+            (explore) => explore.name === 'subscriptions',
+        ) as Explore;
+
+        expect(
+            subscriptions.tables.subscriptions.metrics.customer_metric
+                .parameterReferences,
+        ).toEqual(['customers.customer_name']);
+        expect(subscriptions.warnings ?? []).toEqual([]);
+        expect(getExploreParameterDefinitions(subscriptions)).toHaveProperty(
+            'customers.customer_name',
+        );
+        expect(
+            getExploreParameterDefinitions(subscriptions),
+        ).not.toHaveProperty('finance__customers.customer_name');
+    });
+
+    it('qualifies versioned models without treating their versions as collisions', async () => {
+        const models = ['analytics', 'finance'].flatMap((sourceName) =>
+            [1, 2].map((version) => ({
+                ...buildMergedModel({
+                    sourceName,
+                    packageName: sourceName,
+                    name: 'orders',
+                }),
+                unique_id: `model.${sourceName}.orders.v${version}`,
+                version,
+                latest_version: 2,
+                alias: `orders_v${version}`,
+                relation_name: `${sourceName}.orders_v${version}`,
+            })),
+        );
+        const explores = await convertExplores(
+            models,
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+        expect(explores.every((explore) => !isExploreError(explore))).toBe(
+            true,
+        );
+        expect(explores.map(({ name }) => name)).toEqual([
+            'analytics__orders',
+            'analytics__orders',
+            'finance__orders',
+            'finance__orders',
+        ]);
+        const analytics = explores.find(
+            (explore) => explore.name === 'analytics__orders',
+        ) as Explore;
+        expect(analytics.tables.analytics__orders.sqlTable).toBe(
+            'analytics.orders_v2',
+        );
+    });
+
+    it.each([null, 1, 2])(
+        'keeps single-source version naming with selection %s',
+        async (selectedVersion) => {
+            const models = [1, 2]
+                .filter(
+                    (version) =>
+                        selectedVersion === null || version === selectedVersion,
+                )
+                .map((version) => ({
+                    ...buildMergedModel({
+                        sourceName: 'analytics',
+                        packageName: 'pkg_a',
+                        name: 'orders',
+                    }),
+                    lightdash_source_name: undefined,
+                    unique_id: `model.pkg_a.orders.v${version}`,
+                    version,
+                    latest_version: 2,
+                    alias: `orders_v${version}`,
+                    relation_name: `analytics.orders_v${version}`,
+                }));
+            const explores = await convertExplores(
+                models,
+                false,
+                SupportedDbtAdapter.POSTGRES,
+                warehouseClientMock,
+                { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            );
+
+            expect(explores.map(({ name }) => name)).toEqual(
+                models.map(() => 'orders'),
+            );
+            for (const explore of explores as Explore[]) {
+                expect(explore.tables.orders.sqlTable).toBe(
+                    `analytics.orders_v${selectedVersion ?? 2}`,
+                );
+            }
+        },
+    );
+
+    it('rejects a qualified name that collides with a genuine model name', async () => {
+        await expect(
+            convertExplores(
+                [
+                    buildMergedModel({
+                        sourceName: 'analytics',
+                        packageName: 'pkg_a',
+                        name: 'orders',
+                    }),
+                    buildMergedModel({
+                        sourceName: 'finance',
+                        packageName: 'pkg_b',
+                        name: 'orders',
+                    }),
+                    buildMergedModel({
+                        sourceName: 'warehouse',
+                        packageName: 'pkg_c',
+                        name: 'analytics__orders',
+                    }),
+                ],
+                false,
+                SupportedDbtAdapter.POSTGRES,
+                warehouseClientMock,
+                { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            ),
+        ).rejects.toThrow(
+            'Merged dbt model name "analytics__orders" is ambiguous after qualification: model "orders" from source "analytics" (model.pkg_a.orders) and model "analytics__orders" from source "warehouse" (model.pkg_c.analytics__orders). Rename the source or model before deploying.',
+        );
+    });
+});
+
+describe('dbt Mesh model qualification', () => {
+    const buildMeshModel = ({
+        packageName,
+        name,
+        columnName = 'id',
+        joins = [],
+    }: {
+        packageName: string;
+        name: string;
+        columnName?: string;
+        joins?: DbtModelNode['meta']['joins'];
+    }): DbtModelNode => ({
+        ...model,
+        unique_id: `model.${packageName}.${name}`,
+        package_name: packageName,
+        name,
+        alias: name,
+        relation_name: `${packageName}.${name}`,
+        columns: {
+            [columnName]: {
+                name: columnName,
+                data_type: DimensionType.NUMBER,
+                meta: {},
+            },
+        },
+        meta: { joins },
+    });
+
+    it('qualifies cross-package models and keeps bare joins package-local', async () => {
+        const explores = await convertExplores(
+            [
+                buildMeshModel({
+                    packageName: 'marketing__core',
+                    name: 'customers',
+                    joins: [
+                        {
+                            join: 'orders',
+                            sql_on: '${customers.id} = ${orders.marketing_id}',
+                        },
+                    ],
+                }),
+                buildMeshModel({
+                    packageName: 'marketing__core',
+                    name: 'orders',
+                    columnName: 'marketing_id',
+                }),
+                buildMeshModel({
+                    packageName: 'finance',
+                    name: 'orders',
+                    columnName: 'finance_id',
+                }),
+            ],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+        expect(explores.map(({ name }) => name).sort()).toEqual([
+            'customers',
+            'finance__orders',
+            'marketing__core__orders',
+        ]);
+
+        const marketingOrders = explores.find(
+            (explore) => explore.name === 'marketing__core__orders',
+        ) as Explore;
+        expect(
+            Object.keys(
+                marketingOrders.tables.marketing__core__orders.dimensions,
+            ),
+        ).toContain('marketing_id');
+        expect(
+            Object.keys(
+                marketingOrders.tables.marketing__core__orders.dimensions,
+            ),
+        ).not.toContain('finance_id');
+
+        expect(getExploreSplitCandidates('orders', explores)).toEqual([
+            'finance__orders',
+            'marketing__core__orders',
+        ]);
+
+        type SplitSource = Parameters<
+            typeof getExploreSplitCandidates
+        >[1][number];
+        expectTypeOf<Explore>().toExtend<SplitSource>();
+        expectTypeOf<ExploreError>().toExtend<SplitSource>();
+        expectTypeOf<Record<string, never>>().not.toExtend<SplitSource>();
+        expect(
+            getExploreSplitCandidates('orders', [
+                { name: 'finance__orders', errors: null },
+            ]),
+        ).toEqual([]);
+
+        const customers = explores.find(
+            (explore) => explore.name === 'customers',
+        ) as Explore;
+        expect(customers.tables.orders.sqlTable).toBe('marketing__core.orders');
+        expect(customers.tables.orders.canonicalName).toBe(
+            'marketing__core__orders',
+        );
+        expect(customers.joinedTables[0].compiledSqlOn).toBe(
+            '("customers".id) = ("orders".marketing_id)',
+        );
+    });
+
+    it('rejects a package-qualified name that still collides', async () => {
+        await expect(
+            convertExplores(
+                [
+                    buildMeshModel({
+                        packageName: 'analytics',
+                        name: 'orders',
+                    }),
+                    buildMeshModel({
+                        packageName: 'finance',
+                        name: 'orders',
+                    }),
+                    buildMeshModel({
+                        packageName: 'warehouse',
+                        name: 'analytics__orders',
+                    }),
+                ],
+                false,
+                SupportedDbtAdapter.POSTGRES,
+                warehouseClientMock,
+                { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            ),
+        ).rejects.toThrow(
+            'dbt Mesh model name "analytics__orders" is ambiguous after qualification: model "orders" from package "analytics" (model.analytics.orders) and model "analytics__orders" from package "warehouse" (model.warehouse.analytics__orders). Rename the package or model before deploying.',
+        );
+    });
+});
+
+describe('custom model metadata', () => {
+    it('reserves every recognised model config key', () => {
+        expectTypeOf<(typeof RESERVED_MODEL_META_KEYS)[number]>().toEqualTypeOf<
+            keyof DbtModelLightdashConfig
+        >();
+    });
+
+    it.each([
+        {},
+        {
+            label: 'Orders',
+            ai_hint: 'Use for orders',
+            sql_filter: '1 = 1',
+            sql_where: '1 = 1',
+            case_sensitive: false,
+            hidden: false,
+            metrics: {},
+            required_filters: [],
+        },
+        { nested: { tier: 2 }, list: [1, 'two'], absent: null },
+    ])(
+        'omits customMeta when meta contains no custom scalars (%j)',
+        async (meta) => {
+            const explores = await convertExplores(
+                [{ ...model, meta: { ...meta, explores: { curated: {} } } }],
+                false,
+                SupportedDbtAdapter.POSTGRES,
+                warehouseClientMock,
+                { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            );
+
+            expect(explores).toHaveLength(2);
+            explores.forEach((explore) => {
+                expect(explore).not.toHaveProperty('errors');
+                expect(explore).not.toHaveProperty('customMeta');
+            });
+        },
+    );
+
+    it('inherits merged scalar metadata on base and curated explores', async () => {
+        const modelMeta = {
+            model_tier: 1,
+            domain: 'finance',
+            certified: false,
+            zero: 0,
+            empty: '',
+        };
+        const configMeta = {
+            model_tier: 2,
+            nested: { tier: 3 },
+            list: ['a'],
+            absent: null,
+        };
+        const explores = await convertExplores(
+            [
+                {
+                    ...model,
+                    meta: { ...modelMeta, label: 'Base model' },
+                    config: {
+                        ...model.config,
+                        meta: {
+                            ...configMeta,
+                            explores: { curated: { label: 'Curated' } },
+                        },
+                    },
+                },
+            ],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+        expect(explores.map((explore) => explore.name)).toEqual([
+            model.name,
+            'curated',
+        ]);
+        explores.forEach((explore) => {
+            expect(explore).not.toHaveProperty('errors');
+            expect(explore).toHaveProperty('customMeta', {
+                model_tier: 2,
+                domain: 'finance',
+                certified: false,
+                zero: 0,
+                empty: '',
+            });
+        });
     });
 });
 
@@ -1140,7 +2220,6 @@ describe('explore-scoped additional dimensions', () => {
             [MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1185,7 +2264,6 @@ describe('explore-scoped additional dimensions', () => {
             [MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1207,6 +2285,154 @@ describe('explore-scoped additional dimensions', () => {
         // But should have the regular dimensions
         expect(baseTable.dimensions).toHaveProperty('order_id');
         expect(baseTable.dimensions).toHaveProperty('amount');
+    });
+
+    it('should override model tags for additional explores', async () => {
+        const modelWithExploreTags: DbtModelNode = {
+            ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS,
+            config: {
+                ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS.config,
+                tags: ['model_tag'],
+            },
+            meta: {
+                explores: {
+                    tagged_orders: {
+                        tags: 'additional_explore_tag',
+                    },
+                    inherited_orders: {},
+                    untagged_orders: {
+                        tags: [],
+                    },
+                },
+            },
+        };
+
+        const explores = await convertExplores(
+            [modelWithExploreTags],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+            },
+        );
+
+        expect(
+            explores.find((explore) => explore.name === 'test_model')?.tags,
+        ).toEqual(['model_tag']);
+        expect(
+            explores.find((explore) => explore.name === 'tagged_orders')?.tags,
+        ).toEqual(['additional_explore_tag']);
+        expect(
+            explores.find((explore) => explore.name === 'inherited_orders')
+                ?.tags,
+        ).toEqual(['model_tag']);
+        expect(
+            explores.find((explore) => explore.name === 'untagged_orders')
+                ?.tags,
+        ).toEqual([]);
+    });
+
+    it('should keep additional explore tags when the model defines metrics', async () => {
+        const modelWithMetricsAndExploreTags: DbtModelNode = {
+            ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS,
+            config: {
+                ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS.config,
+                tags: ['internal'],
+                meta: {
+                    metrics: {
+                        row_count: {
+                            type: MetricType.COUNT,
+                            sql: '${TABLE}.order_id',
+                        },
+                    },
+                    explores: {
+                        curated: {
+                            label: 'Curated',
+                            tags: ['ai'],
+                        },
+                    },
+                },
+            },
+            meta: {},
+        };
+
+        const explores = await convertExplores(
+            [modelWithMetricsAndExploreTags],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+            },
+        );
+
+        expect(
+            explores.find((explore) => explore.name === 'test_model')?.tags,
+        ).toEqual(['internal']);
+        expect(
+            explores.find((explore) => explore.name === 'curated')?.tags,
+        ).toEqual(['ai']);
+    });
+
+    it('should not create a base explore when the model is hidden', async () => {
+        const hiddenModel: DbtModelNode = {
+            ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS,
+            config: {
+                ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS.config,
+                meta: {
+                    hidden: true,
+                    explores: {
+                        curated: {
+                            label: 'Curated',
+                            tags: ['ai'],
+                        },
+                    },
+                },
+            },
+            meta: {},
+        };
+
+        const explores = await convertExplores(
+            [hiddenModel],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+            },
+        );
+
+        expect(explores.map((explore) => explore.name)).toEqual(['curated']);
+        // The hidden model is still the base table of the curated explore
+        const curated = explores[0] as Explore;
+        expect(curated.baseTable).toEqual('test_model');
+        expect(Object.keys(curated.tables.test_model.dimensions)).toEqual(
+            expect.arrayContaining(['order_id', 'amount']),
+        );
+    });
+
+    it('should create no explores when a hidden model has no additional explores', async () => {
+        const hiddenModel: DbtModelNode = {
+            ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS,
+            config: {
+                ...MODEL_WITH_EXPLORE_SCOPED_DIMENSIONS.config,
+                meta: { hidden: true },
+            },
+            meta: {},
+        };
+
+        const explores = await convertExplores(
+            [hiddenModel],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+            },
+        );
+
+        expect(explores).toEqual([]);
     });
 
     const MODEL_WITH_DATE_EXPLORE_DIMENSION: DbtModelNode = {
@@ -1237,7 +2463,6 @@ describe('explore-scoped additional dimensions', () => {
             [MODEL_WITH_DATE_EXPLORE_DIMENSION],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1286,7 +2511,6 @@ describe('explore-scoped additional dimensions', () => {
             [modelWithExploreSqlFilter],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1313,7 +2537,6 @@ describe('explore-scoped additional dimensions', () => {
         const table = convertTable(
             SupportedDbtAdapter.POSTGRES,
             MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
 
@@ -1329,7 +2552,79 @@ describe('explore-scoped additional dimensions', () => {
 
         // Verify the metric with explicit show_underlying_values overrides the default
         expect(table.metrics.average_revenue.showUnderlyingValues).toEqual([
-            'custom_field',
+            'user_name',
+        ]);
+    });
+
+    it('should expand set refs in default_show_underlying_values on the table', () => {
+        const modelWithSets = {
+            ...MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES,
+            meta: {
+                ...MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES.meta,
+                sets: { user_fields: { fields: ['user_id', 'user_name'] } },
+                default_show_underlying_values: ['user_fields*', 'revenue'],
+            },
+        };
+
+        const table = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            modelWithSets,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.defaultShowUnderlyingValues).toEqual([
+            'user_id',
+            'user_name',
+            'revenue',
+        ]);
+        expect(table.warnings).toBeUndefined();
+    });
+
+    it('should warn and drop an unknown field ref in default_show_underlying_values', () => {
+        const modelWithUnknownField = {
+            ...MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES,
+            meta: {
+                ...MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES.meta,
+                default_show_underlying_values: ['user_id', 'user_namee'],
+            },
+        };
+
+        const table = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            modelWithUnknownField,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.defaultShowUnderlyingValues).toEqual(['user_id']);
+        expect(table.warnings).toEqual([
+            {
+                type: InlineErrorType.SHOW_UNDERLYING_VALUES_ERROR,
+                message: expect.stringContaining('user_namee'),
+            },
+        ]);
+    });
+
+    it('should warn and drop an unknown set ref in default_show_underlying_values', () => {
+        const modelWithUnknownSet = {
+            ...MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES,
+            meta: {
+                ...MODEL_WITH_DEFAULT_SHOW_UNDERLYING_VALUES.meta,
+                default_show_underlying_values: ['nonexistent_set*', 'user_id'],
+            },
+        };
+
+        const table = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            modelWithUnknownSet,
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.defaultShowUnderlyingValues).toEqual(['user_id']);
+        expect(table.warnings).toEqual([
+            {
+                type: InlineErrorType.SHOW_UNDERLYING_VALUES_ERROR,
+                message: expect.stringContaining('nonexistent_set'),
+            },
         ]);
     });
 });
@@ -1402,7 +2697,6 @@ describe('required/default filters on hidden dimensions', () => {
             [modelWithExploreScopedFilters],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1436,6 +2730,116 @@ describe('required/default filters on hidden dimensions', () => {
     });
 });
 
+describe('model filters with a map value', () => {
+    const MAP_VALUED_FILTER = { status: { equals: 'completed' } };
+
+    const createOrdersModel = (
+        meta: Record<string, unknown>,
+    ): DbtModelNode => ({
+        ...model,
+        name: 'orders',
+        alias: 'orders',
+        relation_name: 'orders',
+        columns: {
+            status: {
+                name: 'status',
+                data_type: DimensionType.STRING,
+                meta: { dimension: { type: DimensionType.STRING } },
+            },
+            region: {
+                name: 'region',
+                data_type: DimensionType.STRING,
+                meta: { dimension: { type: DimensionType.STRING } },
+            },
+        },
+        meta: meta as DbtModelNode['meta'],
+    });
+
+    const compile = (
+        dbtModel: DbtModelNode,
+        allowPartialCompilation: boolean,
+    ) =>
+        convertExplores(
+            [dbtModel],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            { allowPartialCompilation },
+        );
+
+    it('drops the filter with a warning under partial compilation', async () => {
+        const explores = await compile(
+            createOrdersModel({
+                required_filters: [{ region: 'emea' }],
+                default_filters: [MAP_VALUED_FILTER],
+            }),
+            true,
+        );
+
+        const explore = explores.find((e) => e.name === 'orders') as Explore;
+        expect(isExploreError(explore)).toBe(false);
+        expect(
+            explore.tables.orders.requiredFilters?.map((filter) => ({
+                fieldRef: filter.target.fieldRef,
+                values: filter.values,
+            })),
+        ).toEqual([{ fieldRef: 'region', values: ['emea'] }]);
+        expect(explore.warnings).toEqual([
+            {
+                type: InlineErrorType.MODEL_FILTER_ERROR,
+                message:
+                    'Filter "status" in model "orders" was ignored: it must be a single value or a list of values, not a map',
+            },
+        ]);
+    });
+
+    it('fails the explore without partial compilation', async () => {
+        const explores = await compile(
+            createOrdersModel({ required_filters: [MAP_VALUED_FILTER] }),
+            false,
+        );
+
+        const explore = explores.find((e) => e.name === 'orders');
+        expect(explore && isExploreError(explore)).toBe(true);
+        expect((explore as ExploreError).errors).toEqual([
+            {
+                type: InlineErrorType.METADATA_PARSE_ERROR,
+                message:
+                    'Filter "status" must be a single value or a list of values, not a map',
+            },
+        ]);
+    });
+
+    it('drops an explore-level filter and names that explore in the warning', async () => {
+        const explores = await compile(
+            createOrdersModel({
+                explores: {
+                    orders_curated: { default_filters: [MAP_VALUED_FILTER] },
+                },
+            }),
+            true,
+        );
+
+        const baseExplore = explores.find(
+            (e) => e.name === 'orders',
+        ) as Explore;
+        const curated = explores.find(
+            (e) => e.name === 'orders_curated',
+        ) as Explore;
+        expect(baseExplore.warnings).toBeUndefined();
+        expect(isExploreError(curated)).toBe(false);
+        expect(curated.tables.orders.requiredFilters).toEqual([]);
+        expect(curated.warnings).toEqual([
+            {
+                type: InlineErrorType.MODEL_FILTER_ERROR,
+                message:
+                    'Filter "status" in explore "orders_curated" was ignored: it must be a single value or a list of values, not a map',
+            },
+        ]);
+    });
+});
+
 describe('custom granularities', () => {
     const customGranularities = {
         slt_week: {
@@ -1448,7 +2852,6 @@ describe('custom granularities', () => {
         const result = convertTable(
             SupportedDbtAdapter.POSTGRES,
             MODEL_WITH_CUSTOM_GRANULARITY,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
             undefined,
             undefined,
@@ -1476,7 +2879,6 @@ describe('custom granularities', () => {
         const result = convertTable(
             SupportedDbtAdapter.POSTGRES,
             MODEL_WITH_CUSTOM_GRANULARITY,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
             undefined,
             undefined,
@@ -1493,7 +2895,6 @@ describe('custom granularities', () => {
         const result = convertTable(
             SupportedDbtAdapter.POSTGRES,
             MODEL_WITH_CUSTOM_GRANULARITY_AND_REQUIRED_ATTRIBUTES,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
             undefined,
             undefined,
@@ -1502,7 +2903,9 @@ describe('custom granularities', () => {
 
         expect(
             result.dimensions.created_at_slt_week.requiredAttributes,
-        ).toEqual({ department: 'finance' });
+        ).toEqual({
+            department: 'finance',
+        });
 
         // Standard interval should also have it
         expect(result.dimensions.created_at_day.requiredAttributes).toEqual({
@@ -1515,7 +2918,6 @@ describe('custom granularities', () => {
         const result = convertTable(
             SupportedDbtAdapter.POSTGRES,
             MODEL_WITH_CUSTOM_GRANULARITY,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
             undefined,
             undefined,
@@ -1533,7 +2935,6 @@ describe('custom granularities', () => {
             [MODEL_WITH_CUSTOM_GRANULARITY],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1564,7 +2965,6 @@ describe('custom granularities', () => {
             [MODEL_WITH_CUSTOM_GRANULARITY],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1604,7 +3004,6 @@ describe('custom granularities', () => {
             [modelWithMixedGranularities],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1631,7 +3030,6 @@ describe('duplicate metric/dimension names', () => {
             [MODEL_WITH_DUPLICATE_METRIC_DIMENSION_NAME],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1659,7 +3057,6 @@ describe('duplicate metric/dimension names', () => {
             [MODEL_WITH_DUPLICATE_METRIC_DIMENSION_NAME],
             false,
             SupportedDbtAdapter.POSTGRES,
-            [],
             warehouseClientMock,
             {
                 spotlight: DEFAULT_SPOTLIGHT_CONFIG,
@@ -1697,7 +3094,6 @@ describe('duplicate metric/dimension names', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             modelWithMixedMetrics,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.dimensions).toHaveProperty('user_id');
@@ -1733,7 +3129,6 @@ describe('duplicate metric/dimension names', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             modelWithSetAndDuplicate,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.warnings).toHaveLength(1);
@@ -1749,7 +3144,6 @@ describe('duplicate metric/dimension names', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_WRONG_METRIC,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.warnings).toHaveLength(1);
@@ -1762,7 +3156,6 @@ describe('duplicate metric/dimension names', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             MODEL_WITH_WRONG_METRICS,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         const duplicateWarnings = result.warnings!.filter(
@@ -1801,7 +3194,6 @@ describe('convert_timezone dimension override', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             buildModel(false),
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(result.dimensions.created_at.skipTimezoneConversion).toBe(true);
@@ -1834,7 +3226,6 @@ describe('convert_timezone dimension override', () => {
         const result = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             modelWithCustom,
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
             undefined,
             undefined,
@@ -1855,7 +3246,6 @@ describe('convert_timezone dimension override', () => {
         const result = convertTable(
             SupportedDbtAdapter.SNOWFLAKE,
             buildModel(false),
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
             undefined,
             true,
@@ -1876,7 +3266,6 @@ describe('convert_timezone dimension override', () => {
         const undef = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             buildModel(undefined),
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(
@@ -1886,11 +3275,1507 @@ describe('convert_timezone dimension override', () => {
         const truthy = convertTable(
             SupportedDbtAdapter.BIGQUERY,
             buildModel(true),
-            [],
             DEFAULT_SPOTLIGHT_CONFIG,
         );
         expect(
             truthy.dimensions.created_at.skipTimezoneConversion,
         ).toBeUndefined();
+    });
+});
+
+describe('project default additional_time_intervals', () => {
+    const TIMESTAMP_MODEL: DbtModelNode & { relation_name: string } = {
+        ...model,
+        columns: {
+            created_at: {
+                name: 'created_at',
+                data_type: DimensionType.TIMESTAMP,
+                meta: { dimension: { type: DimensionType.TIMESTAMP } },
+            },
+        },
+    };
+
+    it('appends a standard grain (HOUR) to a timestamp column with no explicit time_intervals', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            TIMESTAMP_MODEL,
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined, // startOfWeek
+            undefined, // disableTimestampConversion
+            undefined, // customGranularities
+            undefined, // allowPartialCompilation
+            { date: [], timestamp: [TimeFrames.HOUR] }, // additionalTimeIntervals
+        );
+        expect(result.dimensions).toHaveProperty('created_at_hour');
+        expect(result.dimensions).toHaveProperty('created_at_day');
+    });
+
+    it('appends a custom granularity to a timestamp column', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            TIMESTAMP_MODEL,
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined,
+            undefined,
+            { fiscal_week: { label: 'Fiscal Week', sql: '${COLUMN}' } },
+            undefined,
+            { date: [], timestamp: ['fiscal_week'] },
+        );
+        expect(result.dimensions).toHaveProperty('created_at_fiscal_week');
+    });
+
+    it('does NOT add the project default to a column with explicit time_intervals', () => {
+        const EXPLICIT_MODEL: DbtModelNode & { relation_name: string } = {
+            ...model,
+            columns: {
+                created_at: {
+                    name: 'created_at',
+                    data_type: DimensionType.TIMESTAMP,
+                    meta: {
+                        dimension: {
+                            type: DimensionType.TIMESTAMP,
+                            time_intervals: [TimeFrames.DAY],
+                        },
+                    },
+                },
+            },
+        };
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            EXPLICIT_MODEL,
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { date: [], timestamp: [TimeFrames.HOUR] },
+        );
+        expect(result.dimensions).toHaveProperty('created_at_day');
+        expect(result.dimensions).not.toHaveProperty('created_at_hour');
+    });
+
+    it('flows from convertExplores via lightdashProjectConfig.defaults', async () => {
+        const explores = await convertExplores(
+            [TIMESTAMP_MODEL],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+                defaults: {
+                    additional_time_intervals: {
+                        timestamp: [TimeFrames.HOUR],
+                    },
+                },
+            },
+        );
+        const explore = explores[0];
+        expect('errors' in explore).toBe(false);
+        if (!('errors' in explore)) {
+            const table = explore.tables[explore.baseTable];
+            expect(table.dimensions).toHaveProperty('created_at_hour');
+        }
+    });
+});
+
+describe('granularity_labels overrides', () => {
+    const TS_MODEL: DbtModelNode & { relation_name: string } = {
+        ...model,
+        columns: {
+            created: {
+                name: 'created',
+                data_type: DimensionType.TIMESTAMP,
+                meta: { dimension: { type: DimensionType.TIMESTAMP } },
+            },
+        },
+    };
+
+    it('bakes the override verbatim into the week dimension label + timeIntervalLabel', async () => {
+        const explores = await convertExplores(
+            [TS_MODEL],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+                defaults: {
+                    granularity_labels: { week: 'Week starting Monday' },
+                },
+            },
+        );
+        const explore = explores[0];
+        expect('errors' in explore).toBe(false);
+        if (!('errors' in explore)) {
+            const dims = explore.tables[explore.baseTable].dimensions;
+            // Override is verbatim (not lowercased) in the compound label
+            expect(dims.created_week.label).toContain('Week starting Monday');
+            expect(dims.created_week.timeIntervalLabel).toBe(
+                'Week starting Monday',
+            );
+            // Non-overridden grain keeps default lowercased behaviour + no timeIntervalLabel
+            expect(dims.created_month.label).toContain('month');
+            expect(dims.created_month.timeIntervalLabel).toBeUndefined();
+            // The map is attached to the explore
+            expect(explore.granularityLabels).toEqual({
+                [TimeFrames.WEEK]: 'Week starting Monday',
+            });
+        }
+    });
+
+    it('is unchanged when no granularity_labels are configured', async () => {
+        const explores = await convertExplores(
+            [TS_MODEL],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores[0];
+        if (!('errors' in explore)) {
+            const dims = explore.tables[explore.baseTable].dimensions;
+            expect(dims.created_week.label).toContain('week');
+            expect(dims.created_week.timeIntervalLabel).toBeUndefined();
+            expect(explore.granularityLabels).toBeUndefined();
+        }
+    });
+});
+
+describe('iterateExplores', () => {
+    const buildStreamingModel = (
+        name: string,
+        meta: DbtModelNode['meta'] = {},
+    ): DbtModelNode => ({
+        ...model,
+        unique_id: `model.pkg.${name}`,
+        name,
+        alias: name,
+        relation_name: `analytics.${name}`,
+        meta,
+    });
+
+    const iterate = (models: DbtModelNode[]) =>
+        iterateExplores(
+            models,
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('pauses compilation until the next explore is consumed', async () => {
+        const compileExplore = vi.mocked(
+            vi.spyOn(ExploreCompiler.prototype, 'compileExplore'),
+        );
+        const iterator = iterate([
+            buildStreamingModel('first'),
+            buildStreamingModel('second'),
+        ]);
+
+        expect(compileExplore).not.toHaveBeenCalled();
+
+        await iterator.next();
+
+        expect(compileExplore).toHaveBeenCalledTimes(1);
+
+        await Promise.resolve();
+
+        expect(compileExplore).toHaveBeenCalledTimes(1);
+
+        await iterator.next();
+
+        expect(compileExplore).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not compile unconsumed models after cancellation', async () => {
+        const compileExplore = vi.mocked(
+            vi.spyOn(ExploreCompiler.prototype, 'compileExplore'),
+        );
+        const iterator = iterate([
+            buildStreamingModel('first'),
+            buildStreamingModel('second'),
+            buildStreamingModel('third'),
+        ]);
+
+        await iterator.next();
+        await iterator.return(undefined);
+
+        expect(compileExplore).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves joined, error, and extra explore output order and JSON', async () => {
+        const models = [
+            buildStreamingModel('orders', {
+                joins: [
+                    {
+                        join: 'customers',
+                        sql_on: '${orders.myColumnName} = ${customers.myColumnName}',
+                    },
+                ],
+                explores: {
+                    orders_extra: {},
+                },
+            }),
+            buildStreamingModel('customers'),
+            buildStreamingModel('broken', {
+                joins: [
+                    {
+                        join: 'missing',
+                        sql_on: '${broken.myColumnName} = ${missing.myColumnName}',
+                    },
+                ],
+            }),
+        ];
+
+        const expected = await convertExplores(
+            models,
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const actual: Awaited<ReturnType<typeof convertExplores>> = [];
+        for await (const explore of iterate(models)) {
+            actual.push(explore);
+        }
+
+        expect(actual.map(({ name }) => name)).toEqual([
+            'orders',
+            'orders_extra',
+            'customers',
+            'broken',
+        ]);
+        expect(actual[0]).toMatchObject({
+            name: 'orders',
+            tables: { customers: expect.anything() },
+        });
+        expect(actual[3]).toMatchObject({
+            name: 'broken',
+            errors: expect.any(Array),
+        });
+        expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+    });
+});
+
+describe('convertExplores at scale', () => {
+    const MODEL_COUNT = 3000;
+
+    const buildScaleModels = (
+        count: number,
+        withJoins: boolean,
+    ): DbtModelNode[] =>
+        Array.from({ length: count }, (_, index) => ({
+            ...model,
+            unique_id: `model.pkg.m_${index}`,
+            package_name: 'pkg',
+            name: `m_${index}`,
+            alias: `m_${index}`,
+            relation_name: `analytics.m_${index}`,
+            columns: {
+                id: { name: 'id', data_type: DimensionType.NUMBER, meta: {} },
+                amount: {
+                    name: 'amount',
+                    data_type: DimensionType.NUMBER,
+                    meta: {},
+                },
+            },
+            meta:
+                withJoins && index > 0
+                    ? {
+                          joins: [
+                              {
+                                  join: `m_${index - 1}`,
+                                  sql_on: `\${m_${index}.id} = \${m_${index - 1}.id}`,
+                              },
+                          ],
+                      }
+                    : {},
+        })) as DbtModelNode[];
+
+    // The build this replaced. Kept as the oracle for key identity and for
+    // insertion order, which JSON serialisation of an explore depends on.
+    const buildTableLookupBySpread = (
+        tables: { name: string }[],
+    ): Record<string, { name: string }> =>
+        tables.reduce(
+            (prev, table) => ({ ...prev, [table.name]: table }),
+            {} as Record<string, { name: string }>,
+        );
+
+    const buildTableLookupByMutation = (
+        tables: { name: string }[],
+    ): Record<string, { name: string }> => {
+        const lookup: Record<string, { name: string }> = {};
+        tables.forEach((table) => {
+            lookup[table.name] = table;
+        });
+        return lookup;
+    };
+
+    it('builds the table lookup with the keys and the order of the spread build', () => {
+        const tables = [
+            { name: 'orders', version: 1 },
+            { name: 'customers', version: 1 },
+            { name: 'orders', version: 2 },
+            { name: 'payments', version: 1 },
+        ];
+
+        const expected = buildTableLookupBySpread(tables);
+        const actual = buildTableLookupByMutation(tables);
+
+        expect(actual).toEqual(expected);
+        expect(Object.keys(actual)).toEqual(Object.keys(expected));
+        expect(actual.orders).toBe(tables[2]);
+    });
+
+    it.each([
+        ['without joins', false],
+        ['with joins', true],
+    ])(
+        `converts ${MODEL_COUNT} models %s in under 2 seconds`,
+        async (_label, withJoins) => {
+            const models = buildScaleModels(MODEL_COUNT, withJoins);
+
+            const startedAt = performance.now();
+            const explores = await convertExplores(
+                models,
+                false,
+                SupportedDbtAdapter.POSTGRES,
+                warehouseClientMock,
+                { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+            );
+            const durationMs = performance.now() - startedAt;
+
+            expect(explores).toHaveLength(MODEL_COUNT);
+            expect(explores.map(({ name }) => name)).toEqual(
+                models.map(({ name }) => name),
+            );
+            expect(durationMs).toBeLessThan(2000);
+        },
+        30000,
+    );
+
+    it('keeps every explore scoped to its base table and its joins', async () => {
+        const models = buildScaleModels(MODEL_COUNT, true);
+
+        const explores = await convertExplores(
+            models,
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+
+        const last = explores[explores.length - 1] as Explore;
+        expect(Object.keys(last.tables)).toEqual([
+            `m_${MODEL_COUNT - 1}`,
+            `m_${MODEL_COUNT - 2}`,
+        ]);
+
+        const first = explores[0] as Explore;
+        expect(Object.keys(first.tables)).toEqual(['m_0']);
+    });
+});
+
+describe('nested and repeated columns', () => {
+    const bigqueryClientMock = {
+        ...warehouseClientMock,
+        getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+        getFieldQuoteChar: () => '`',
+        getUnnestSql: getBigqueryUnnestSql,
+    };
+    const nestedColumn = (
+        name: string,
+        extra: Partial<DbtModelNode['columns'][string]> = {},
+    ) => ({ name, meta: {}, ...extra });
+    const gaSessions: DbtModelNode = {
+        ...model,
+        name: 'ga_sessions',
+        alias: 'ga_sessions',
+        unique_id: 'model.ga_sessions',
+        database: 'db',
+        schema: 'ds',
+        relation_name: '`db`.`ds`.`ga_sessions`',
+        meta: {},
+        columns: {
+            visitId: nestedColumn('visitId'),
+            'totals.pageviews': nestedColumn('totals.pageviews'),
+            hits: nestedColumn('hits', { description: 'One row per hit' }),
+            'customDimensions.index': nestedColumn('customDimensions.index'),
+            'customDimensions.value': nestedColumn('customDimensions.value'),
+            'hits.page.pagePath': nestedColumn('hits.page.pagePath'),
+            'hits.product.productSKU': nestedColumn('hits.product.productSKU'),
+            'hits.product.productRevenue': nestedColumn(
+                'hits.product.productRevenue',
+                {
+                    meta: {
+                        metrics: { total_revenue: { type: MetricType.SUM } },
+                    },
+                },
+            ),
+        },
+    };
+    const catalog: WarehouseCatalog = {
+        db: {
+            ds: {
+                ga_sessions: {
+                    visitId: DimensionType.NUMBER,
+                    totals: DimensionType.STRING,
+                    'totals.pageviews': DimensionType.NUMBER,
+                    customDimensions: DimensionType.STRING,
+                    'customDimensions.index': DimensionType.NUMBER,
+                    'customDimensions.value': DimensionType.STRING,
+                    hits: DimensionType.STRING,
+                    'hits.page': DimensionType.STRING,
+                    'hits.page.pagePath': DimensionType.STRING,
+                    'hits.product': DimensionType.STRING,
+                    'hits.product.productSKU': DimensionType.STRING,
+                    'hits.product.productRevenue': DimensionType.NUMBER,
+                    tags: DimensionType.STRING,
+                    'hits.page.keywords': DimensionType.STRING,
+                },
+            },
+        },
+    };
+    Object.entries({
+        totals: { repeated: false, record: true },
+        customDimensions: { repeated: true, record: true },
+        hits: { repeated: true, record: true },
+        'hits.page': { repeated: false, record: true },
+        'hits.product': { repeated: true, record: true },
+        tags: { repeated: true, record: false },
+        'hits.page.keywords': { repeated: true, record: false },
+    }).forEach(([path, shape]) =>
+        setCatalogNestedColumnShape(
+            catalog,
+            'db',
+            'ds',
+            'ga_sessions',
+            path,
+            shape,
+        ),
+    );
+    const typedModels = attachTypesToModels([gaSessions], catalog, true);
+
+    const compile = async (models: DbtModelNode[]) => {
+        const explores = await convertExplores(
+            models,
+            false,
+            SupportedDbtAdapter.BIGQUERY,
+            bigqueryClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'ga_sessions');
+        if (!explore || isExploreError(explore)) {
+            throw new Error(JSON.stringify(explore));
+        }
+        return explore;
+    };
+
+    it('attaches the shape and repeated ancestors from the catalog', () => {
+        const { columns } = typedModels[0];
+        expect(columns.hits.nested_shape).toEqual({
+            repeated: true,
+            record: true,
+        });
+        expect(columns.hits.repeated_ancestors).toBeUndefined();
+        expect(columns['totals.pageviews'].repeated_ancestors).toBeUndefined();
+        expect(columns['hits.page.pagePath'].repeated_ancestors).toEqual([
+            'hits',
+        ]);
+        expect(columns['hits.product.productSKU'].repeated_ancestors).toEqual([
+            'hits',
+            'hits.product',
+        ]);
+    });
+
+    it('unnests each repeated node into a virtual table joined on TRUE', async () => {
+        const explore = await compile(typedModels);
+        expect(Object.keys(explore.tables).sort()).toEqual([
+            'ga_sessions',
+            'ga_sessions__customDimensions',
+            'ga_sessions__hits',
+            'ga_sessions__hits__product',
+        ]);
+
+        const base = explore.tables.ga_sessions;
+        expect(Object.keys(base.dimensions).sort()).toEqual([
+            'totals.pageviews',
+            'visitId',
+        ]);
+        expect(base.dimensions['totals.pageviews'].compiledSql).toEqual(
+            '`ga_sessions`.totals.pageviews',
+        );
+
+        const hits = explore.tables.ga_sessions__hits;
+        expect(hits.nestedFrom).toEqual({
+            parentTable: 'ga_sessions',
+            columnPath: 'hits',
+            elementSql: '`ga_sessions__hits`',
+            offsetSql: '`ga_sessions__hits__offset`',
+            joinCondition: 'TRUE',
+        });
+        expect(hits.sqlTable).toEqual(
+            'UNNEST(`ga_sessions`.hits) AS `ga_sessions__hits` WITH OFFSET AS `ga_sessions__hits__offset`',
+        );
+        expect(hits.label).toEqual('Ga sessions: Hits');
+        expect(hits.description).toEqual('One row per hit');
+        expect(hits.primaryKey).toBeUndefined();
+        expect(Object.keys(hits.dimensions).sort()).toEqual([
+            'offset',
+            'page.pagePath',
+        ]);
+        expect(hits.dimensions['page.pagePath']).toMatchObject({
+            table: 'ga_sessions__hits',
+            type: DimensionType.STRING,
+            compiledSql: '`ga_sessions__hits`.page.pagePath',
+        });
+        expect(hits.dimensions.offset).toMatchObject({
+            type: DimensionType.NUMBER,
+            compiledSql: '`ga_sessions__hits__offset`',
+        });
+
+        const product = explore.tables.ga_sessions__hits__product;
+        expect(product.nestedFrom).toEqual({
+            parentTable: 'ga_sessions__hits',
+            columnPath: 'hits.product',
+            elementSql: '`ga_sessions__hits__product`',
+            offsetSql: '`ga_sessions__hits__product__offset`',
+            joinCondition: 'TRUE',
+        });
+        expect(product.sqlTable).toEqual(
+            'UNNEST(`ga_sessions__hits`.product) AS `ga_sessions__hits__product` WITH OFFSET AS `ga_sessions__hits__product__offset`',
+        );
+        expect(product.label).toEqual('Ga sessions: Hits: Product');
+        expect(product.metrics.total_revenue).toMatchObject({
+            table: 'ga_sessions__hits__product',
+            compiledSql: 'SUM(`ga_sessions__hits__product`.productRevenue)',
+        });
+
+        expect(
+            explore.joinedTables.map(
+                ({
+                    table,
+                    type,
+                    relationship,
+                    compiledSqlOn,
+                    tablesReferences,
+                }) => ({
+                    table,
+                    type,
+                    relationship,
+                    compiledSqlOn,
+                    tablesReferences,
+                }),
+            ),
+        ).toEqual([
+            {
+                table: 'ga_sessions__customDimensions',
+                type: 'left',
+                relationship: JoinRelationship.ONE_TO_MANY,
+                compiledSqlOn: 'TRUE',
+                tablesReferences: ['ga_sessions'],
+            },
+            {
+                table: 'ga_sessions__hits',
+                type: 'left',
+                relationship: JoinRelationship.ONE_TO_MANY,
+                compiledSqlOn: 'TRUE',
+                tablesReferences: ['ga_sessions'],
+            },
+            {
+                table: 'ga_sessions__hits__product',
+                type: 'left',
+                relationship: JoinRelationship.ONE_TO_MANY,
+                compiledSqlOn: 'TRUE',
+                tablesReferences: ['ga_sessions__hits'],
+            },
+        ]);
+    });
+
+    it("adds a joined model's virtual tables after its own join", async () => {
+        const orders: DbtModelNode = {
+            ...model,
+            name: 'orders',
+            alias: 'orders',
+            unique_id: 'model.orders',
+            database: 'db',
+            schema: 'ds',
+            relation_name: '`db`.`ds`.`orders`',
+            columns: { id: nestedColumn('id') },
+            meta: {
+                joins: [
+                    {
+                        join: 'ga_sessions',
+                        sql_on: '${orders.id} = ${ga_sessions.visitId}',
+                    },
+                ],
+            },
+        };
+        const explores = await convertExplores(
+            [orders, ...typedModels],
+            false,
+            SupportedDbtAdapter.BIGQUERY,
+            bigqueryClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'orders');
+        if (!explore || isExploreError(explore)) {
+            throw new Error(JSON.stringify(explore));
+        }
+        expect(explore.joinedTables.map(({ table }) => table)).toEqual([
+            'ga_sessions',
+            'ga_sessions__customDimensions',
+            'ga_sessions__hits',
+            'ga_sessions__hits__product',
+        ]);
+    });
+
+    it('instantiates virtual tables per join alias, referencing the alias in the UNNEST', async () => {
+        const orders: DbtModelNode = {
+            ...model,
+            name: 'orders',
+            alias: 'orders',
+            unique_id: 'model.orders',
+            database: 'db',
+            schema: 'ds',
+            relation_name: '`db`.`ds`.`orders`',
+            columns: { id: nestedColumn('id') },
+            meta: {
+                joins: [
+                    {
+                        join: 'ga_sessions',
+                        alias: 'first_session',
+                        sql_on: '${orders.id} = ${first_session.visitId}',
+                    },
+                    {
+                        join: 'ga_sessions',
+                        alias: 'second_session',
+                        label: 'Return visit',
+                        sql_on: '${orders.id} = ${second_session.visitId}',
+                    },
+                ],
+            },
+        };
+        const explores = await convertExplores(
+            [orders, ...typedModels],
+            false,
+            SupportedDbtAdapter.BIGQUERY,
+            bigqueryClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'orders');
+        if (!explore || isExploreError(explore)) {
+            throw new Error(JSON.stringify(explore));
+        }
+        expect(explore.joinedTables.map(({ table }) => table)).toEqual([
+            'first_session',
+            'first_session__customDimensions',
+            'first_session__hits',
+            'first_session__hits__product',
+            'second_session',
+            'second_session__customDimensions',
+            'second_session__hits',
+            'second_session__hits__product',
+        ]);
+        const firstHits = explore.tables.first_session__hits;
+        expect(firstHits.sqlTable).toEqual(
+            'UNNEST(`first_session`.hits) AS `first_session__hits` WITH OFFSET AS `first_session__hits__offset`',
+        );
+        expect(firstHits.nestedFrom).toEqual({
+            parentTable: 'first_session',
+            columnPath: 'hits',
+            elementSql: '`first_session__hits`',
+            offsetSql: '`first_session__hits__offset`',
+            joinCondition: 'TRUE',
+        });
+        expect(firstHits.dimensions['page.pagePath'].compiledSql).toEqual(
+            '`first_session__hits`.page.pagePath',
+        );
+        expect(
+            explore.joinedTables.find(
+                ({ table }) => table === 'first_session__hits__product',
+            )?.tablesReferences,
+        ).toEqual(['first_session__hits']);
+        const secondProduct = explore.tables.second_session__hits__product;
+        expect(secondProduct.sqlTable).toEqual(
+            'UNNEST(`second_session__hits`.product) AS `second_session__hits__product` WITH OFFSET AS `second_session__hits__product__offset`',
+        );
+        expect(secondProduct.label).toEqual('Return visit: Hits: Product');
+        expect(secondProduct.metrics.total_revenue.compiledSql).toEqual(
+            'SUM(`second_session__hits__product`.productRevenue)',
+        );
+        expect(explore.tables.ga_sessions__hits).toBeUndefined();
+    });
+
+    it('keeps additional dimensions and explicit-SQL metrics declared under a struct container', async () => {
+        const jobs: DbtModelNode = {
+            ...gaSessions,
+            columns: {
+                visitId: nestedColumn('visitId'),
+                totals: nestedColumn('totals', {
+                    meta: {
+                        dimension: { type: DimensionType.STRING, hidden: true },
+                        additional_dimensions: {
+                            pageviews_bucket: {
+                                type: DimensionType.STRING,
+                                sql: "CASE WHEN ${TABLE}.totals.pageviews > 5 THEN 'many' ELSE 'few' END",
+                            },
+                        },
+                        metrics: {
+                            sessions_with_visits: {
+                                type: MetricType.COUNT,
+                                sql: '${TABLE}.totals.visits',
+                            },
+                            container_count: { type: MetricType.COUNT },
+                        },
+                    },
+                }),
+            },
+        };
+        const explore = await compile(
+            attachTypesToModels([jobs], catalog, true),
+        );
+        const table = explore.tables.ga_sessions;
+        expect(Object.keys(table.dimensions).sort()).toEqual([
+            'pageviews_bucket',
+            'visitId',
+        ]);
+        expect(table.dimensions.pageviews_bucket.compiledSql).toEqual(
+            "CASE WHEN `ga_sessions`.totals.pageviews > 5 THEN 'many' ELSE 'few' END",
+        );
+        expect(Object.keys(table.metrics).sort()).toEqual([
+            'container_count',
+            'sessions_with_visits',
+        ]);
+        expect(table.metrics.sessions_with_visits.compiledSql).toEqual(
+            '`ga_sessions`.totals.visits',
+        );
+        expect(table.metrics.container_count.compiledSql).toEqual(
+            '`ga_sessions`.totals',
+        );
+    });
+
+    it('unnests an array of scalars into a virtual table with a value dimension', async () => {
+        const taggedSessions: DbtModelNode = {
+            ...gaSessions,
+            columns: {
+                visitId: nestedColumn('visitId'),
+                tags: nestedColumn('tags', {
+                    description: 'Session tags',
+                    meta: {
+                        dimension: { label: 'Tag list' },
+                        additional_dimensions: {
+                            tag_count: {
+                                type: DimensionType.NUMBER,
+                                sql: 'ARRAY_LENGTH(${TABLE}.tags)',
+                            },
+                        },
+                        metrics: {
+                            last_tag: { type: MetricType.MAX },
+                        },
+                    },
+                }),
+                'hits.page.keywords': nestedColumn('hits.page.keywords'),
+            },
+        };
+        const explore = await compile(
+            attachTypesToModels([taggedSessions], catalog, true),
+        );
+        expect(Object.keys(explore.tables).sort()).toEqual([
+            'ga_sessions',
+            'ga_sessions__hits',
+            'ga_sessions__hits__page__keywords',
+            'ga_sessions__tags',
+        ]);
+        expect(Object.keys(explore.tables.ga_sessions.dimensions)).toEqual([
+            'visitId',
+            'tag_count',
+        ]);
+        expect(
+            explore.tables.ga_sessions.dimensions.tag_count.compiledSql,
+        ).toEqual('ARRAY_LENGTH(`ga_sessions`.tags)');
+        expect(explore.tables.ga_sessions.metrics.last_tag).toBeUndefined();
+
+        const tags = explore.tables.ga_sessions__tags;
+        expect(tags.label).toEqual('Tag list');
+        expect(tags.description).toEqual('Session tags');
+        expect(tags.sqlTable).toEqual(
+            'UNNEST(`ga_sessions`.tags) AS `ga_sessions__tags` WITH OFFSET AS `ga_sessions__tags__offset`',
+        );
+        expect(Object.keys(tags.dimensions).sort()).toEqual([
+            'offset',
+            'value',
+        ]);
+        expect(Object.keys(tags.metrics)).toEqual(['last_tag']);
+        expect(tags.dimensions.value).toMatchObject({
+            type: DimensionType.STRING,
+            label: 'Value',
+            compiledSql: '`ga_sessions__tags`',
+        });
+        expect(tags.metrics.last_tag.compiledSql).toEqual(
+            'MAX(`ga_sessions__tags`)',
+        );
+
+        // An array below a struct inside a repeated record unnests from the
+        // repeated parent, with the struct path in the segment.
+        const keywords = explore.tables.ga_sessions__hits__page__keywords;
+        expect(keywords.nestedFrom).toEqual({
+            parentTable: 'ga_sessions__hits',
+            columnPath: 'hits.page.keywords',
+            elementSql: '`ga_sessions__hits__page__keywords`',
+            offsetSql: '`ga_sessions__hits__page__keywords__offset`',
+            joinCondition: 'TRUE',
+        });
+        expect(keywords.sqlTable).toEqual(
+            'UNNEST(`ga_sessions__hits`.page.keywords) AS `ga_sessions__hits__page__keywords` WITH OFFSET AS `ga_sessions__hits__page__keywords__offset`',
+        );
+        expect(keywords.label).toEqual('Ga sessions: Hits: Page: Keywords');
+        expect(keywords.dimensions.value.compiledSql).toEqual(
+            '`ga_sessions__hits__page__keywords`',
+        );
+        expect(
+            Object.keys(explore.tables.ga_sessions__hits.dimensions),
+        ).toEqual(['offset']);
+        expect(
+            explore.joinedTables.map(({ table, tablesReferences }) => [
+                table,
+                tablesReferences,
+            ]),
+        ).toEqual([
+            ['ga_sessions__hits', ['ga_sessions']],
+            ['ga_sessions__tags', ['ga_sessions']],
+            ['ga_sessions__hits__page__keywords', ['ga_sessions__hits']],
+        ]);
+    });
+
+    it('fails the model when a virtual table name collides with a model', async () => {
+        const collidingModel: DbtModelNode = {
+            ...model,
+            name: 'ga_sessions__hits',
+            alias: 'ga_sessions__hits',
+            unique_id: 'model.ga_sessions__hits',
+            columns: { id: nestedColumn('id') },
+            meta: {},
+        };
+        const explores = await convertExplores(
+            [collidingModel, ...typedModels],
+            false,
+            SupportedDbtAdapter.BIGQUERY,
+            bigqueryClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'ga_sessions');
+        expect(explore && isExploreError(explore)).toBe(true);
+        expect(JSON.stringify(explore)).toContain(
+            'already used by another table',
+        );
+    });
+});
+
+describe('nested and repeated columns on Databricks', () => {
+    const databricksClientMock = {
+        ...warehouseClientMock,
+        getAdapterType: () => SupportedDbtAdapter.DATABRICKS,
+        getFieldQuoteChar: () => '`',
+        getUnnestSql: getDatabricksUnnestSql,
+    };
+    const column = (
+        name: string,
+        extra: Partial<DbtModelNode['columns'][string]> = {},
+    ) => ({ name, meta: {}, ...extra });
+    const transactions: DbtModelNode = {
+        ...model,
+        name: 'transactions',
+        alias: 'transactions',
+        unique_id: 'model.transactions',
+        database: 'lightdash_staging',
+        schema: 'nested',
+        relation_name: '`lightdash_staging`.`nested`.`transactions`',
+        meta: { primary_key: 'order_id' },
+        columns: {
+            order_id: column('order_id'),
+            amount: column('amount', {
+                meta: { metrics: { total_amount: { type: MetricType.SUM } } },
+            }),
+            'customer.location': column('customer.location'),
+            product: column('product', { description: 'Line items' }),
+            'product.sku': column('product.sku'),
+            'product.price': column('product.price', {
+                meta: {
+                    additional_dimensions: {
+                        price_x2: {
+                            type: DimensionType.NUMBER,
+                            sql: '${TABLE}.price * 2',
+                        },
+                    },
+                    metrics: {
+                        total_price: { type: MetricType.SUM },
+                        total_price_x2: {
+                            type: MetricType.SUM,
+                            sql: '${TABLE}.price * 2',
+                        },
+                    },
+                },
+            }),
+            'product.attributes.colour': column('product.attributes.colour'),
+            'product.variants': column('product.variants'),
+            'product.variants.size': column('product.variants.size'),
+            'product.variants.stock': column('product.variants.stock', {
+                meta: { metrics: { total_stock: { type: MetricType.SUM } } },
+            }),
+            tags: column('tags', {
+                meta: { metrics: { last_tag: { type: MetricType.MAX } } },
+            }),
+            labels: column('labels'),
+        },
+    };
+    const catalog: WarehouseCatalog = {
+        lightdash_staging: {
+            nested: {
+                transactions: {
+                    order_id: DimensionType.STRING,
+                    amount: DimensionType.NUMBER,
+                    customer: DimensionType.STRING,
+                    'customer.id': DimensionType.STRING,
+                    'customer.location': DimensionType.STRING,
+                    product: DimensionType.STRING,
+                    'product.sku': DimensionType.STRING,
+                    'product.price': DimensionType.NUMBER,
+                    'product.attributes': DimensionType.STRING,
+                    'product.attributes.colour': DimensionType.STRING,
+                    'product.variants': DimensionType.STRING,
+                    'product.variants.size': DimensionType.STRING,
+                    'product.variants.stock': DimensionType.NUMBER,
+                    tags: DimensionType.STRING,
+                    labels: DimensionType.STRING,
+                },
+            },
+        },
+    };
+    Object.entries({
+        customer: { repeated: false, record: true },
+        product: { repeated: true, record: true },
+        'product.attributes': { repeated: false, record: true },
+        'product.variants': { repeated: true, record: true },
+        tags: { repeated: true, record: false },
+    }).forEach(([path, shape]) =>
+        setCatalogNestedColumnShape(
+            catalog,
+            'lightdash_staging',
+            'nested',
+            'transactions',
+            path,
+            shape,
+        ),
+    );
+    const typedModels = attachTypesToModels([transactions], catalog, true);
+
+    const compile = async () => {
+        const explores = await convertExplores(
+            typedModels,
+            false,
+            SupportedDbtAdapter.DATABRICKS,
+            databricksClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'transactions');
+        if (!explore || isExploreError(explore)) {
+            throw new Error(JSON.stringify(explore));
+        }
+        return explore;
+    };
+
+    it('explodes a repeated record laterally and addresses leaves through the element column', async () => {
+        const explore = await compile();
+        expect(Object.keys(explore.tables).sort()).toEqual([
+            'transactions',
+            'transactions__product',
+            'transactions__product__variants',
+            'transactions__tags',
+        ]);
+
+        const base = explore.tables.transactions;
+        expect(base.dimensions['customer.location'].compiledSql).toEqual(
+            '`transactions`.customer.location',
+        );
+        expect(base.dimensions.labels).toMatchObject({
+            type: DimensionType.STRING,
+            compiledSql: '`transactions`.labels',
+        });
+
+        const product = explore.tables.transactions__product;
+        expect(product.sqlTable).toEqual(
+            'LATERAL posexplode_outer(`transactions`.product) AS `transactions__product`(`transactions__product__offset`, col)',
+        );
+        expect(product.nestedFrom).toEqual({
+            parentTable: 'transactions',
+            columnPath: 'product',
+            elementSql: '`transactions__product`.col',
+            offsetSql: '`transactions__product__offset`',
+            joinCondition: null,
+        });
+        expect(product.description).toEqual('Line items');
+        expect(product.dimensions.sku.compiledSql).toEqual(
+            '`transactions__product`.col.sku',
+        );
+        expect(product.dimensions['attributes.colour'].compiledSql).toEqual(
+            '`transactions__product`.col.attributes.colour',
+        );
+        expect(product.dimensions.price_x2.compiledSql).toEqual(
+            '`transactions__product`.col.price * 2',
+        );
+        expect(product.dimensions.offset.compiledSql).toEqual(
+            '`transactions__product__offset`',
+        );
+        expect(product.metrics.total_price.compiledSql).toEqual(
+            'SUM(`transactions__product`.col.price)',
+        );
+        expect(product.metrics.total_price_x2.compiledSql).toEqual(
+            'SUM(`transactions__product`.col.price * 2)',
+        );
+    });
+
+    it('chains a repeated record inside a repeated record through the parent element', async () => {
+        const explore = await compile();
+        const variants = explore.tables.transactions__product__variants;
+        expect(variants.sqlTable).toEqual(
+            'LATERAL posexplode_outer(`transactions__product`.col.variants) AS `transactions__product__variants`(`transactions__product__variants__offset`, col)',
+        );
+        expect(variants.nestedFrom).toMatchObject({
+            parentTable: 'transactions__product',
+            columnPath: 'product.variants',
+            elementSql: '`transactions__product__variants`.col',
+        });
+        expect(variants.dimensions.size.compiledSql).toEqual(
+            '`transactions__product__variants`.col.size',
+        );
+        expect(variants.metrics.total_stock.compiledSql).toEqual(
+            'SUM(`transactions__product__variants`.col.stock)',
+        );
+    });
+
+    it('exposes an array of scalars as the element column', async () => {
+        const explore = await compile();
+        const tags = explore.tables.transactions__tags;
+        expect(tags.sqlTable).toEqual(
+            'LATERAL posexplode_outer(`transactions`.tags) AS `transactions__tags`(`transactions__tags__offset`, col)',
+        );
+        expect(tags.dimensions.value.compiledSql).toEqual(
+            '`transactions__tags`.col',
+        );
+        expect(tags.metrics.last_tag.compiledSql).toEqual(
+            'MAX(`transactions__tags`.col)',
+        );
+    });
+
+    it('keeps the joins one-to-many on TRUE for the inflation detector', async () => {
+        const explore = await compile();
+        expect(
+            explore.joinedTables.map(
+                ({
+                    table,
+                    type,
+                    relationship,
+                    compiledSqlOn,
+                    tablesReferences,
+                }) => ({
+                    table,
+                    type,
+                    relationship,
+                    compiledSqlOn,
+                    tablesReferences,
+                }),
+            ),
+        ).toEqual([
+            {
+                table: 'transactions__product',
+                type: 'left',
+                relationship: JoinRelationship.ONE_TO_MANY,
+                compiledSqlOn: 'TRUE',
+                tablesReferences: ['transactions'],
+            },
+            {
+                table: 'transactions__tags',
+                type: 'left',
+                relationship: JoinRelationship.ONE_TO_MANY,
+                compiledSqlOn: 'TRUE',
+                tablesReferences: ['transactions'],
+            },
+            {
+                table: 'transactions__product__variants',
+                type: 'left',
+                relationship: JoinRelationship.ONE_TO_MANY,
+                compiledSqlOn: 'TRUE',
+                tablesReferences: ['transactions__product'],
+            },
+        ]);
+    });
+
+    it('warns instead of unnesting when the warehouse would not describe the nested shape', async () => {
+        const flatCatalog: WarehouseCatalog = {
+            lightdash_staging: {
+                nested: {
+                    transactions: {
+                        order_id: DimensionType.STRING,
+                        amount: DimensionType.NUMBER,
+                        product: DimensionType.STRING,
+                        tags: DimensionType.STRING,
+                        labels: DimensionType.STRING,
+                    },
+                    orders: { id: DimensionType.NUMBER },
+                },
+            },
+        };
+        const reason =
+            'Databricks did not describe transactions as JSON (PARSE_SYNTAX_ERROR); nested columns need a SQL warehouse or Databricks Runtime 16.2 or newer.';
+        setCatalogNestedColumnsUnavailable(
+            flatCatalog,
+            'lightdash_staging',
+            'nested',
+            'transactions',
+            reason,
+        );
+        setCatalogNestedColumnsUnavailable(
+            flatCatalog,
+            'lightdash_staging',
+            'nested',
+            'orders',
+            reason,
+        );
+        const flatTransactions: DbtModelNode = {
+            ...transactions,
+            columns: {
+                order_id: column('order_id'),
+                amount: column('amount'),
+                product: column('product'),
+                'product.sku': column('product.sku', {
+                    meta: { dimension: { type: DimensionType.STRING } },
+                }),
+                tags: column('tags'),
+                labels: column('labels'),
+            },
+        };
+        const orders: DbtModelNode = {
+            ...transactions,
+            name: 'orders',
+            alias: 'orders',
+            unique_id: 'model.orders',
+            relation_name: '`lightdash_staging`.`nested`.`orders`',
+            meta: {},
+            columns: { id: column('id') },
+        };
+        const explores = await convertExplores(
+            attachTypesToModels([flatTransactions, orders], flatCatalog, false),
+            false,
+            SupportedDbtAdapter.DATABRICKS,
+            databricksClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'transactions');
+        if (!explore || isExploreError(explore)) {
+            throw new Error(JSON.stringify(explore));
+        }
+        expect(Object.keys(explore.tables)).toEqual(['transactions']);
+        expect(
+            explore.tables.transactions.dimensions['product.sku'].compiledSql,
+        ).toEqual('`transactions`.product.sku');
+        expect(explore.tables.transactions.warnings).toEqual([
+            {
+                type: InlineErrorType.WAREHOUSE_COLUMN_ERROR,
+                message: `Nested columns in model "transactions" compile as plain columns: ${reason}`,
+            },
+        ]);
+
+        // A flagged table without dotted columns has nothing to warn about.
+        const ordersExplore = explores.find((e) => e.name === 'orders');
+        if (!ordersExplore || isExploreError(ordersExplore)) {
+            throw new Error(JSON.stringify(ordersExplore));
+        }
+        expect(ordersExplore.tables.orders.warnings).toBeUndefined();
+    });
+
+    it('fails the model on a warehouse that cannot unnest', async () => {
+        const explores = await convertExplores(
+            typedModels,
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores.find((e) => e.name === 'transactions');
+        if (!explore || !isExploreError(explore)) {
+            throw new Error('expected the model to fail');
+        }
+        expect(explore.errors.map(({ message }) => message)).toEqual([
+            `Repeated column "product" in model "transactions" can't be unnested: postgres doesn't support unnesting repeated columns yet.`,
+        ]);
+    });
+});
+
+describe('metric user attributes', () => {
+    const modelWithGatedColumn: DbtModelNode & { relation_name: string } = {
+        ...model,
+        meta: {
+            metrics: {
+                open_model_metric: {
+                    type: MetricType.SUM,
+                    sql: '${TABLE}.salary',
+                },
+                gated_model_metric: {
+                    type: MetricType.SUM,
+                    sql: '${TABLE}.salary',
+                    required_attributes: { is_finance: 'true' },
+                    any_attributes: { team: ['hr', 'finance'] },
+                },
+            },
+        },
+        columns: {
+            salary: {
+                name: 'salary',
+                data_type: DimensionType.NUMBER,
+                meta: {
+                    dimension: {
+                        required_attributes: { is_admin: 'true' },
+                        any_attributes: { region: 'emea' },
+                    },
+                    metrics: {
+                        inherited_salary: { type: MetricType.SUM },
+                        overridden_salary: {
+                            type: MetricType.AVERAGE,
+                            required_attributes: { is_manager: 'true' },
+                        },
+                    },
+                },
+            },
+        },
+    };
+
+    const table = convertTable(
+        SupportedDbtAdapter.POSTGRES,
+        modelWithGatedColumn,
+        DEFAULT_SPOTLIGHT_CONFIG,
+    );
+
+    it('should leave a model-level metric without attributes ungated', () => {
+        expect(
+            table.metrics.open_model_metric.requiredAttributes,
+        ).toBeUndefined();
+        expect(table.metrics.open_model_metric.anyAttributes).toBeUndefined();
+    });
+
+    it('should read attributes set on a model-level metric', () => {
+        expect(table.metrics.gated_model_metric.requiredAttributes).toEqual({
+            is_finance: 'true',
+        });
+        expect(table.metrics.gated_model_metric.anyAttributes).toEqual({
+            team: ['hr', 'finance'],
+        });
+    });
+
+    it('should inherit the dimension attributes on a column-level metric', () => {
+        expect(table.metrics.inherited_salary.requiredAttributes).toEqual({
+            is_admin: 'true',
+        });
+        expect(table.metrics.inherited_salary.anyAttributes).toEqual({
+            region: 'emea',
+        });
+    });
+
+    it('should let a column-level metric override each attribute field', () => {
+        expect(table.metrics.overridden_salary.requiredAttributes).toEqual({
+            is_manager: 'true',
+        });
+        expect(table.metrics.overridden_salary.anyAttributes).toEqual({
+            region: 'emea',
+        });
+    });
+});
+
+describe('known missing catalog entries', () => {
+    const missingTable = {
+        database: model.database,
+        schema: model.schema,
+        table: model.name,
+        columns: null,
+    };
+    const missingColumn = { ...missingTable, columns: ['myColumnName'] };
+    const otherModel = (name: string, columns: string[] = ['id']) => ({
+        ...model,
+        name,
+        alias: name,
+        columns: Object.fromEntries(
+            columns.map((column) => [
+                column,
+                { ...model.columns.myColumnName, name: column },
+            ]),
+        ),
+    });
+
+    it('round-trips missing tables and columns through the catalog sidecar', () => {
+        const catalog: WarehouseCatalog = {};
+        setCatalogMissingEntries(catalog, [missingTable, missingColumn]);
+        expect(getCatalogMissingEntries(catalog)).toEqual([missingColumn]);
+        setCatalogMissingEntries(catalog, [
+            missingTable,
+            { ...missingColumn, table: 'other' },
+        ]);
+        expect(getCatalogMissingEntries(catalog)).toEqual([
+            missingTable,
+            { ...missingColumn, table: 'other' },
+        ]);
+        expect(JSON.parse(JSON.stringify(catalog))).toEqual(catalog);
+    });
+
+    it('does not count the sidecar as a catalog table', () => {
+        const catalog: WarehouseCatalog = structuredClone(warehouseSchema);
+        setCatalogMissingEntries(catalog, [
+            { ...missingTable, table: 'other' },
+        ]);
+        let diagnostics: AttachTypesDiagnostics | undefined;
+        attachTypesToModels([model], catalog, true, true, (d) => {
+            diagnostics = d;
+        });
+        expect(diagnostics?.catalogTableCount).toBe(1);
+    });
+
+    it('splits absent tables and columns into known and unknown missing', () => {
+        const catalog: WarehouseCatalog = structuredClone(
+            warehouseSchemaWithMissingColumn,
+        );
+        setCatalogMissingEntries(catalog, [
+            missingColumn,
+            { ...missingTable, table: 'gone' },
+        ]);
+        expect(
+            getMissingCatalogEntries(
+                catalog,
+                [
+                    model,
+                    otherModel('gone'),
+                    otherModel('gone'),
+                    otherModel('new'),
+                ],
+                true,
+            ),
+        ).toEqual({
+            knownMissing: [missingColumn, { ...missingTable, table: 'gone' }],
+            unknownMissing: [{ ...missingTable, table: 'new' }],
+        });
+    });
+
+    it('treats a missing column it has not recorded as unknown', () => {
+        const catalog: WarehouseCatalog = structuredClone(warehouseSchema);
+        setCatalogMissingEntries(catalog, [
+            { ...missingColumn, columns: ['old_column'] },
+        ]);
+        const withNewColumn = otherModel(model.name, [
+            'myColumnName',
+            'new_column',
+        ]);
+        expect(
+            getMissingCatalogEntries(catalog, [withNewColumn], true),
+        ).toEqual({
+            knownMissing: [],
+            unknownMissing: [{ ...missingColumn, columns: ['new_column'] }],
+        });
+    });
+
+    it('folds case when matching known missing entries case-insensitively', () => {
+        const catalog: WarehouseCatalog = {};
+        setCatalogMissingEntries(catalog, [
+            { database: 'DB', schema: 'SCH', table: 'GONE', columns: null },
+        ]);
+        const gone = { ...otherModel('gone'), database: 'db', schema: 'sch' };
+        expect(getMissingCatalogEntries(catalog, [gone], false)).toEqual({
+            knownMissing: [
+                { database: 'db', schema: 'sch', table: 'gone', columns: null },
+            ],
+            unknownMissing: [],
+        });
+        expect(
+            getMissingCatalogEntries(catalog, [gone], true).knownMissing,
+        ).toEqual([]);
+    });
+
+    it('does not throw for known missing tables and columns and leaves them untyped', () => {
+        expect(
+            attachTypesToModels(
+                [model],
+                warehouseSchemaWithMissingTable,
+                true,
+                true,
+                undefined,
+                [missingTable],
+            )[0],
+        ).toEqual(model);
+        expect(
+            attachTypesToModels(
+                [model],
+                warehouseSchemaWithMissingColumn,
+                true,
+                true,
+                undefined,
+                [missingColumn],
+            )[0],
+        ).toEqual(model);
+    });
+
+    it('still throws for a missing column that is not known', () => {
+        expect(() =>
+            attachTypesToModels(
+                [model],
+                warehouseSchemaWithMissingColumn,
+                true,
+                true,
+                undefined,
+                [{ ...missingColumn, columns: ['other'] }],
+            ),
+        ).toThrowError(/Column "myColumnName" from model "myTable"/);
+    });
+
+    it('reports a change when a known missing table or column appears', () => {
+        expect(
+            haveMissingCatalogEntriesChanged(
+                warehouseSchemaWithMissingTable,
+                [model],
+                [missingTable],
+                true,
+            ),
+        ).toBe(false);
+        expect(
+            haveMissingCatalogEntriesChanged(
+                warehouseSchemaWithMissingColumn,
+                [model],
+                [missingTable],
+                true,
+            ),
+        ).toBe(true);
+        expect(
+            haveMissingCatalogEntriesChanged(
+                warehouseSchemaWithMissingColumn,
+                [model],
+                [missingColumn],
+                true,
+            ),
+        ).toBe(false);
+        expect(
+            haveMissingCatalogEntriesChanged(
+                warehouseSchema,
+                [model],
+                [missingColumn],
+                true,
+            ),
+        ).toBe(true);
+    });
+
+    it('checks an aliased model against its alias table', () => {
+        const aliasedModel = { ...model, name: 'my_model', alias: 'myTable' };
+        expect(() =>
+            attachTypesToModels([aliasedModel], warehouseSchema, true),
+        ).not.toThrow();
     });
 });

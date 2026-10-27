@@ -12,6 +12,7 @@ import type { MetricQuery } from '../types/metricQuery';
 import {
     ChartType,
     type CartesianChartConfig,
+    type DataAppVizChart,
     type SavedChartDAO,
 } from '../types/savedCharts';
 import {
@@ -20,15 +21,269 @@ import {
     VizIndexType,
 } from '../visualizations/types';
 // Jest provides describe/it/expect globals
-import { derivePivotConfigurationFromChart } from './derivePivotConfigFromChart';
+import {
+    deriveDataAppVizPivotConfiguration,
+    derivePivotConfigurationFromChart,
+} from './derivePivotConfigFromChart';
 import {
     mockCartesianChartConfig,
     mockItems,
     mockMetricQuery,
     mockMetricQueryWithMultipleIndexColumns,
 } from './derivePivotConfigFromChart.mock';
+import { normalizeIndexColumns } from './utils';
 
 describe('derivePivotConfigurationFromChart', () => {
+    describe('data app visualizations', () => {
+        const dataAppVizConfig: DataAppVizChart = {
+            dataAppVizUuid: 'viz-uuid',
+            fieldMapping: {
+                category: 'payments_payment_method',
+                value: 'payments_total_revenue',
+                series: 'orders_status',
+            },
+        };
+        const savedChart: Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'> = {
+            chartConfig: {
+                type: ChartType.DATA_APP_VIZ,
+                config: dataAppVizConfig,
+            },
+            pivotConfig: { columns: ['orders_status'] },
+        };
+
+        it('delegates to the standalone data app pivot derivation', () => {
+            const expected = deriveDataAppVizPivotConfiguration(
+                dataAppVizConfig.fieldMapping,
+                savedChart.pivotConfig,
+                mockMetricQuery,
+                mockItems,
+            );
+
+            expect(
+                derivePivotConfigurationFromChart(
+                    savedChart,
+                    mockMetricQuery,
+                    mockItems,
+                ),
+            ).toEqual(expected);
+        });
+
+        it('derives mapped series, value, and index columns', () => {
+            expect(
+                deriveDataAppVizPivotConfiguration(
+                    dataAppVizConfig.fieldMapping,
+                    savedChart.pivotConfig,
+                    mockMetricQuery,
+                    mockItems,
+                ),
+            ).toEqual({
+                indexColumn: [
+                    {
+                        reference: 'payments_payment_method',
+                        type: VizIndexType.CATEGORY,
+                    },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'payments_total_revenue',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                groupByColumns: [{ reference: 'orders_status' }],
+                sortBy: [
+                    {
+                        reference: 'payments_payment_method',
+                        direction: SortByDirection.ASC,
+                    },
+                ],
+            });
+        });
+
+        it('recognizes field ids inside multi-field mappings', () => {
+            expect(
+                deriveDataAppVizPivotConfiguration(
+                    {
+                        category: 'payments_payment_method',
+                        value: ['payments_total_revenue'],
+                        series: ['orders_status'],
+                    },
+                    savedChart.pivotConfig,
+                    mockMetricQuery,
+                    mockItems,
+                ),
+            ).toMatchObject({
+                groupByColumns: [{ reference: 'orders_status' }],
+                valuesColumns: [
+                    {
+                        reference: 'payments_total_revenue',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+            });
+        });
+
+        it('stays unpivoted without persisted series columns', () => {
+            expect(
+                deriveDataAppVizPivotConfiguration(
+                    dataAppVizConfig.fieldMapping,
+                    undefined,
+                    mockMetricQuery,
+                    mockItems,
+                ),
+            ).toBeUndefined();
+        });
+
+        it('ignores a stale pivot column that is no longer mapped', () => {
+            expect(
+                deriveDataAppVizPivotConfiguration(
+                    {
+                        category: 'payments_payment_method',
+                        value: 'payments_total_revenue',
+                    },
+                    savedChart.pivotConfig,
+                    mockMetricQuery,
+                    mockItems,
+                ),
+            ).toBeUndefined();
+        });
+
+        it('uses a mapped table calculation as a value column', () => {
+            const tableCalculation: TableCalculation = {
+                name: 'revenue_per_order',
+                displayName: 'Revenue per order',
+                sql: '${payments_total_revenue} / ${orders_count}',
+            };
+            const chartConfig = {
+                dataAppVizUuid: 'viz-uuid',
+                fieldMapping: {
+                    category: 'payments_payment_method',
+                    value: tableCalculation.name,
+                    series: 'orders_status',
+                },
+            };
+
+            expect(
+                deriveDataAppVizPivotConfiguration(
+                    chartConfig.fieldMapping,
+                    savedChart.pivotConfig,
+                    {
+                        ...mockMetricQuery,
+                        tableCalculations: [tableCalculation],
+                    },
+                    mockItems,
+                )?.valuesColumns,
+            ).toEqual([
+                {
+                    reference: tableCalculation.name,
+                    aggregation: VizAggregationOptions.ANY,
+                },
+            ]);
+        });
+
+        it('keeps sorted unbound measures out of the index and available for per-series sorting', () => {
+            const tableCalculation: TableCalculation = {
+                name: 'revenue_per_order',
+                displayName: 'Revenue per order',
+                type: TableCalculationType.NUMBER,
+                sql: '${payments_total_revenue} / ${orders_count}',
+            };
+            const items: ItemsMap = {
+                ...mockItems,
+                orders_order_date: {
+                    sql: '${TABLE}.order_date',
+                    name: 'order_date',
+                    type: DimensionType.DATE,
+                    label: 'Order date',
+                    table: 'orders',
+                    tableLabel: 'Orders',
+                    hidden: false,
+                    fieldType: FieldType.DIMENSION,
+                },
+                orders_count: {
+                    sql: 'COUNT(${TABLE}.order_id)',
+                    name: 'count',
+                    type: MetricType.COUNT,
+                    label: 'Order count',
+                    table: 'orders',
+                    tableLabel: 'Orders',
+                    hidden: false,
+                    fieldType: FieldType.METRIC,
+                },
+                [tableCalculation.name]: tableCalculation,
+            };
+            const seriesAnchor = [
+                { reference: 'orders_status', value: 'shipped' },
+            ];
+            const metricQuery: MetricQuery = {
+                ...mockMetricQuery,
+                dimensions: ['orders_order_date', 'orders_status'],
+                metrics: ['payments_total_revenue', 'orders_count'],
+                tableCalculations: [tableCalculation],
+                sorts: [
+                    {
+                        fieldId: tableCalculation.name,
+                        descending: true,
+                        pivotValues: seriesAnchor,
+                    },
+                    {
+                        fieldId: 'orders_count',
+                        descending: false,
+                        pivotValues: seriesAnchor,
+                    },
+                ],
+            };
+
+            expect(
+                deriveDataAppVizPivotConfiguration(
+                    {
+                        category: 'orders_order_date',
+                        value: 'payments_total_revenue',
+                        series: 'orders_status',
+                    },
+                    savedChart.pivotConfig,
+                    metricQuery,
+                    items,
+                ),
+            ).toEqual({
+                indexColumn: [
+                    {
+                        reference: 'orders_order_date',
+                        type: VizIndexType.TIME,
+                    },
+                ],
+                valuesColumns: [
+                    {
+                        reference: 'payments_total_revenue',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                groupByColumns: [{ reference: 'orders_status' }],
+                sortOnlyColumns: [
+                    {
+                        reference: tableCalculation.name,
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                    {
+                        reference: 'orders_count',
+                        aggregation: VizAggregationOptions.ANY,
+                    },
+                ],
+                sortBy: [
+                    {
+                        reference: tableCalculation.name,
+                        direction: SortByDirection.DESC,
+                        pivotValues: seriesAnchor,
+                    },
+                    {
+                        reference: 'orders_count',
+                        direction: SortByDirection.ASC,
+                        pivotValues: seriesAnchor,
+                    },
+                ],
+            });
+        });
+    });
+
     it('derives pivot configuration for Cartesian charts with pivot config', () => {
         const savedChart: Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'> = {
             chartConfig: mockCartesianChartConfig,
@@ -189,6 +444,36 @@ describe('derivePivotConfigurationFromChart', () => {
         );
 
         expect(result?.metricsAsRows).toBe(true);
+    });
+
+    it('keeps a pivot row metric as a query-time value column', () => {
+        const savedChart: Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'> = {
+            chartConfig: {
+                type: ChartType.TABLE,
+                config: {},
+            },
+            pivotConfig: {
+                columns: ['payments_payment_method'],
+                rows: ['orders_status', 'payments_total_revenue'],
+            },
+        };
+
+        const result = derivePivotConfigurationFromChart(
+            savedChart,
+            mockMetricQuery,
+            mockItems,
+        );
+
+        expect(result?.valuesColumns).toContainEqual({
+            reference: 'payments_total_revenue',
+            aggregation: VizAggregationOptions.ANY,
+        });
+        expect(result?.indexColumn).toEqual([
+            {
+                reference: 'orders_status',
+                type: VizIndexType.CATEGORY,
+            },
+        ]);
     });
 
     it('does not include metricsAsRows for Cartesian charts', () => {
@@ -1398,6 +1683,65 @@ describe('derivePivotConfigurationFromChart', () => {
             ).toBe(true);
         });
 
+        it('sets pivotColumnsOrder to the declared pivot-column order (visible + sort-only) so a hidden sort dim keeps its position (PROD-8159)', () => {
+            // Declared order: payment_method (outer, visible), status_priority
+            // (hidden sort helper), status (inner, visible). Hiding the helper
+            // must not change column order, so pivotColumnsOrder preserves the
+            // full declared sequence — the SQL builder then sorts the helper at
+            // its declared (middle) position instead of hoisting it to the front.
+            const chartConfig = {
+                type: ChartType.TABLE,
+                config: {
+                    columns: { orders_status_priority: { visible: false } },
+                    pivotDimensions: [
+                        'payments_payment_method',
+                        'orders_status_priority',
+                        'orders_status',
+                    ],
+                    showSubtotals: false,
+                },
+            } as const;
+
+            const savedChart: Pick<
+                SavedChartDAO,
+                'chartConfig' | 'pivotConfig'
+            > = {
+                chartConfig,
+                pivotConfig: {
+                    columns: [
+                        'payments_payment_method',
+                        'orders_status_priority',
+                        'orders_status',
+                    ],
+                },
+            };
+
+            const mq: MetricQuery = {
+                ...mockMetricQuery,
+                dimensions: [
+                    'payments_payment_method',
+                    'orders_status',
+                    'orders_status_priority',
+                ],
+                metrics: ['payments_total_revenue'],
+                sorts: [
+                    { fieldId: 'orders_status_priority', descending: false },
+                ],
+            };
+
+            const result = derivePivotConfigurationFromChart(
+                savedChart,
+                mq,
+                itemsWithPriority,
+            );
+
+            expect(result?.pivotColumnsOrder).toEqual([
+                { reference: 'payments_payment_method' },
+                { reference: 'orders_status_priority' },
+                { reference: 'orders_status' },
+            ]);
+        });
+
         it('routes a hidden pivot-column dim with no sort entry to passthroughDimensions (PROD-7873)', () => {
             // Hidden + not sorted used to drop the dim from the query entirely,
             // which broke richText / image templates on visible fields that
@@ -1527,11 +1871,10 @@ describe('derivePivotConfigurationFromChart', () => {
         });
     });
 
-    describe('sort-only dimensions for Table charts', () => {
-        it('puts a hidden helper dimension in sortOnlyColumns instead of indexColumn', () => {
-            // orders_status is hidden (visible: false) but used for sort order.
-            // payments_payment_method is the pivot dimension (groupByColumn).
-            // Result: orders_status must appear in sortOnlyColumns, NOT in indexColumn.
+    describe('hidden row dimensions for Table charts', () => {
+        it('keeps a sorted hidden dimension in indexColumn', () => {
+            // Hidden row dimensions must remain structural index columns so
+            // records that differ only by the hidden value stay separate.
             const chartConfig = {
                 type: ChartType.TABLE,
                 config: {
@@ -1568,27 +1911,14 @@ describe('derivePivotConfigurationFromChart', () => {
 
             expect(result).toBeDefined();
 
-            // orders_status must NOT appear in indexColumn
-            let indexRefs: string[];
-            if (Array.isArray(result?.indexColumn)) {
-                indexRefs = result!.indexColumn.map((c) => c.reference);
-            } else if (result?.indexColumn) {
-                indexRefs = [result.indexColumn.reference];
-            } else {
-                indexRefs = [];
-            }
-            expect(indexRefs).not.toContain('orders_status');
-
-            // orders_status MUST appear in sortOnlyColumns
-            expect(result?.sortOnlyColumns).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({ reference: 'orders_status' }),
-                ]),
+            const indexRefs = normalizeIndexColumns(result?.indexColumn).map(
+                (column) => column.reference,
             );
+            expect(indexRefs).toContain('orders_status');
+            expect(result?.sortOnlyColumns ?? []).toEqual([]);
         });
 
-        it('does not add a hidden dim to sortOnlyColumns when it is not in sorts', () => {
-            // If hidden but not in sorts, it should simply not appear anywhere.
+        it('keeps an unsorted hidden dimension in indexColumn', () => {
             const chartConfig = {
                 type: ChartType.TABLE,
                 config: {
@@ -1627,17 +1957,16 @@ describe('derivePivotConfigurationFromChart', () => {
             );
 
             expect(result).toBeDefined();
-            // sortOnlyColumns should be empty or undefined (no hidden sort dim)
+            const indexRefs = normalizeIndexColumns(result?.indexColumn).map(
+                (column) => column.reference,
+            );
+            expect(indexRefs).toContain('orders_status');
             expect(result?.sortOnlyColumns ?? []).toEqual([]);
         });
 
-        it('routes a hidden row dim with no sort entry to passthroughDimensions (PROD-7873)', () => {
-            // Hidden + not sorted row dim used to be dropped from the query
-            // entirely, breaking richText / image templates on visible fields
-            // that referenced the hidden field via `row.<table>.<field>.raw`.
-            // Now it routes through passthroughDimensions: removed from
-            // indexColumn rendering, but its values survive `group_by_query`
-            // SELECT/GROUP BY so they reach the result rows.
+        it('does not duplicate a hidden row dimension as a query passthrough', () => {
+            // The converter registers hidden index values as render-only
+            // passthrough columns after using them for SQL row identity.
             const chartConfig = {
                 type: ChartType.TABLE,
                 config: {
@@ -1673,30 +2002,12 @@ describe('derivePivotConfigurationFromChart', () => {
 
             expect(result).toBeDefined();
 
-            // orders_status must NOT appear in indexColumn (still hidden from
-            // rendered row labels).
-            let indexRefs: string[];
-            if (Array.isArray(result?.indexColumn)) {
-                indexRefs = result!.indexColumn.map((c) => c.reference);
-            } else if (result?.indexColumn) {
-                indexRefs = [result.indexColumn.reference];
-            } else {
-                indexRefs = [];
-            }
-            expect(indexRefs).not.toContain('orders_status');
-
-            // Not a sort target → not in sortOnlyColumns.
-            const sortOnlyRefs = (result?.sortOnlyColumns ?? []).map(
-                (c) => c.reference,
+            const indexRefs = normalizeIndexColumns(result?.indexColumn).map(
+                (column) => column.reference,
             );
-            expect(sortOnlyRefs).not.toContain('orders_status');
+            expect(indexRefs).toContain('orders_status');
             expect(result?.sortOnlyColumns ?? []).toEqual([]);
-
-            // passthroughDimensions carries the hidden row dim through SQL
-            // so cross-field templates can reference it.
-            expect(result?.passthroughDimensions).toEqual([
-                { reference: 'orders_status' },
-            ]);
+            expect(result?.passthroughDimensions).toBeUndefined();
         });
     });
 });

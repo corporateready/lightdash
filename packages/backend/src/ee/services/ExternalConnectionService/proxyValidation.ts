@@ -1,0 +1,422 @@
+import {
+    CUSTOM_HEADER_LIMITS,
+    EXTERNAL_CONNECTION_IDENTITY_HEADERS,
+    FORBIDDEN_CUSTOM_HEADER_NAMES,
+    ParameterError,
+} from '@lightdash/common';
+
+// Throwaway base used only to resolve a relative path through the WHATWG URL
+// parser for segment-collapse normalization — its `.pathname` is read and the
+// rest discarded. It is never fetched or resolved. `.invalid` is a reserved TLD
+// that can never resolve in DNS (RFC 6761), so it can never become a real host.
+const PATH_NORMALIZATION_BASE = 'https://lightdash.invalid';
+
+// Segment-aware prefix allowlist match: a path matches a prefix only when it
+// equals the prefix or continues past it on a `/` boundary, so `/v1/users`
+// does not allow `/v1/users-admin`.
+function pathMatchesAllowedPrefixes(
+    path: string,
+    allowedPathPrefixes: string[],
+): boolean {
+    return allowedPathPrefixes.some((prefix) => {
+        if (path === prefix) return true;
+        const boundary = prefix.endsWith('/') ? prefix : `${prefix}/`;
+        return path.startsWith(boundary);
+    });
+}
+
+// Reject anything that could escape the configured origin or smuggle a host.
+// The decoded path must be a plain, host-free, relative path that prefix-matches
+// one of the connection's allowlisted prefixes.
+export function normalizeAndValidatePath(
+    rawPath: string,
+    allowedPathPrefixes: string[],
+): string {
+    if (typeof rawPath !== 'string' || rawPath.length === 0) {
+        throw new ParameterError('path is required');
+    }
+
+    // Strip a query string if the caller jammed one onto the path — query
+    // params are supplied separately and serialized server-side.
+    const [pathOnly] = rawPath.split('?', 1);
+
+    // Control characters (incl. NUL, CR, LF, tab) are never legal in a path.
+    // eslint-disable-next-line no-control-regex
+    if (/[\x00-\x1f\x7f]/.test(pathOnly)) {
+        throw new ParameterError('path contains control characters');
+    }
+
+    // Backslashes are never legal and can be normalized to slashes by some
+    // HTTP stacks, enabling traversal/host smuggling. Reject outright.
+    if (pathOnly.includes('\\')) {
+        throw new ParameterError('path must not contain backslashes');
+    }
+
+    // Must be a relative path beginning with exactly one slash. A leading
+    // "//" is protocol-relative and resolves to an attacker host.
+    if (!pathOnly.startsWith('/') || pathOnly.startsWith('//')) {
+        throw new ParameterError(
+            'path must be a relative path starting with /',
+        );
+    }
+
+    // No scheme (absolute URL). Anything matching "scheme:" up front is rejected.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(pathOnly)) {
+        throw new ParameterError('path must not be an absolute URL');
+    }
+
+    // Decode percent-encoding so encoded traversal/host tricks are caught.
+    // A malformed encoding (decodeURIComponent throws) is itself rejected.
+    let decoded: string;
+    try {
+        decoded = decodeURIComponent(pathOnly);
+    } catch {
+        throw new ParameterError('path contains invalid percent-encoding');
+    }
+
+    // After decoding, re-run the host-smuggling checks on the decoded form.
+    if (
+        decoded.includes('\\') ||
+        decoded.startsWith('//') ||
+        /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(decoded)
+    ) {
+        throw new ParameterError('path resolves to a host or absolute URL');
+    }
+
+    // No userinfo/host markers. An '@' lets "/x@evil.com" be reinterpreted as
+    // userinfo when concatenated into a URL string.
+    if (decoded.includes('@')) {
+        throw new ParameterError('path must not contain @');
+    }
+
+    // Path traversal in either raw or decoded form.
+    const segments = decoded.split('/');
+    if (segments.some((s) => s === '..')) {
+        throw new ParameterError('path must not contain .. traversal');
+    }
+
+    // Prefix allowlist match against the decoded, host-free path.
+    if (!pathMatchesAllowedPrefixes(decoded, allowedPathPrefixes)) {
+        throw new ParameterError('path is not allowed by this connection');
+    }
+
+    // Backstop against encoded dot-segments. A double-encoded `%252e%252e`
+    // survives the single decode above as the inert string `%2e%2e` (no literal
+    // ".." for the check above to catch), but the WHATWG URL parser collapses
+    // `%2e%2e` to a ".." segment when buildOutboundUrl constructs the real URL —
+    // so `/v1/%252e%252e/admin` would be sent as `/admin`, outside the prefix.
+    // Re-validate the COLLAPSED path (the collapse is origin-independent) so
+    // the allowlist holds for what is actually requested. We still return the
+    // un-collapsed `decoded` so legitimate requests are forwarded unchanged.
+    let collapsedPath: string;
+    try {
+        collapsedPath = decodeURIComponent(
+            new URL(decoded, PATH_NORMALIZATION_BASE).pathname,
+        );
+    } catch {
+        throw new ParameterError('path could not be normalized');
+    }
+    if (!pathMatchesAllowedPrefixes(collapsedPath, allowedPathPrefixes)) {
+        throw new ParameterError('path is not allowed by this connection');
+    }
+
+    // Return the decoded path; buildOutboundUrl re-encodes via the URL API.
+    return decoded;
+}
+
+// Build the outbound URL entirely server-side. The host always comes from
+// `origin`; the validated, host-free `path` is appended; query params are
+// serialized with URLSearchParams. We never string-concat a user-supplied host.
+export function buildOutboundUrl(
+    origin: string,
+    validatedPath: string,
+    query: Record<string, string> | undefined,
+): string {
+    // Defense-in-depth: reject obviously hostile path shapes before parsing.
+    // These can escape the origin host or smuggle credentials during URL
+    // construction, even if they survived normalizeAndValidatePath.
+    if (validatedPath.includes('\\') || validatedPath.startsWith('//')) {
+        throw new ParameterError(
+            'Resolved URL host does not match the connection origin',
+        );
+    }
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(validatedPath)) {
+        throw new ParameterError(
+            'Resolved URL host does not match the connection origin',
+        );
+    }
+    if (validatedPath.includes('@')) {
+        throw new ParameterError(
+            'Resolved URL host does not match the connection origin',
+        );
+    }
+
+    const originUrl = new URL(origin);
+    const base = origin.endsWith('/') ? origin.slice(0, -1) : origin;
+    const url = new URL(`${base}${validatedPath}`);
+
+    // Final check: the constructed URL's host must still match the origin.
+    if (url.protocol !== originUrl.protocol || url.host !== originUrl.host) {
+        throw new ParameterError(
+            'Resolved URL host does not match the connection origin',
+        );
+    }
+
+    if (query) {
+        const params = new URLSearchParams();
+        for (const [key, value] of Object.entries(query)) {
+            params.append(key, value);
+        }
+        const qs = params.toString();
+        if (qs) {
+            url.search = qs;
+        }
+    }
+    return url.toString();
+}
+
+// Floor a Date to the start of its minute. The caller injects the Date so the
+// window is deterministic and unit-testable — we never call Date.now() in the
+// fetch path.
+export function computeMinuteWindow(now: Date): Date {
+    return new Date(Math.floor(now.getTime() / 60_000) * 60_000);
+}
+
+export function serializeRequestBody(body: unknown): {
+    json: string;
+    bytes: number;
+} {
+    let json: string;
+    try {
+        json = JSON.stringify(body ?? {});
+    } catch {
+        throw new ParameterError('Request body is not JSON-serializable');
+    }
+    // JSON.stringify can return undefined (e.g. a bare function); coerce.
+    if (json === undefined) {
+        json = '{}';
+    }
+    return { json, bytes: Buffer.byteLength(json, 'utf8') };
+}
+
+// Header names an api_key must never be injected under: they let stored config
+// control request routing/framing or overwrite the proxy's own security
+// headers (host pinning, content-type). The api_key header name is
+// admin-supplied config, and the proxy is where it becomes an outbound
+// request — so reject sensitive and hop-by-hop headers here, even though
+// write-time validation also runs.
+//
+// `authorization` is intentionally allowed: some APIs (e.g. Linear) expect the
+// key directly in the Authorization header rather than as `Bearer <token>`.
+// The proxy only sets its own Authorization header on the mutually-exclusive
+// `bearer_token` path, so an api_key injected here can never clobber it.
+const FORBIDDEN_API_KEY_HEADERS = new Set([
+    'host',
+    'cookie',
+    'content-length',
+    'content-type',
+    'connection',
+    'transfer-encoding',
+    'te',
+    'trailer',
+    'upgrade',
+    'keep-alive',
+    'expect',
+    'proxy-authorization',
+    'proxy-connection',
+    ...Object.values(EXTERNAL_CONNECTION_IDENTITY_HEADERS).map((name) =>
+        name.toLowerCase(),
+    ),
+]);
+
+// RFC 7230 token chars.
+const HTTP_HEADER_TOKEN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+export function assertSafeApiKeyHeaderName(name: string): void {
+    if (!HTTP_HEADER_TOKEN.test(name)) {
+        throw new ParameterError('api key header name is not a valid token');
+    }
+    if (FORBIDDEN_API_KEY_HEADERS.has(name.toLowerCase())) {
+        throw new ParameterError(`api key header "${name}" is not allowed`);
+    }
+}
+
+// The shared name blocklist (routing/framing + credential-shaped headers) —
+// see FORBIDDEN_CUSTOM_HEADER_NAMES in @lightdash/common for the rationale.
+const FORBIDDEN_CUSTOM_HEADERS = new Set<string>(FORBIDDEN_CUSTOM_HEADER_NAMES);
+
+// Printable ASCII + tab. No CR/LF or other control chars (header injection).
+// eslint-disable-next-line no-control-regex
+const HTTP_HEADER_VALUE = /^[\t\x20-\x7e]+$/;
+
+/**
+ * Validate a connection's custom request headers. Enforced at write time AND
+ * at send time in the proxy core, so a row that bypassed validation can never
+ * inject an unsafe header. A custom header may not collide with
+ * `apiKeyHeaderName` so the injected credential is never shadowed.
+ */
+export function validateCustomHeaders(
+    customHeaders: Record<string, string> | null | undefined,
+    apiKeyHeaderName: string | null,
+): void {
+    if (!customHeaders) return;
+    const entries = Object.entries(customHeaders);
+    if (entries.length > CUSTOM_HEADER_LIMITS.maxCount) {
+        throw new ParameterError(
+            `At most ${CUSTOM_HEADER_LIMITS.maxCount} custom headers are allowed`,
+        );
+    }
+    const seen = new Set<string>();
+    for (const [name, value] of entries) {
+        if (
+            !HTTP_HEADER_TOKEN.test(name) ||
+            name.length > CUSTOM_HEADER_LIMITS.maxNameChars
+        ) {
+            throw new ParameterError(
+                `Custom header name ${JSON.stringify(name)} is not a valid HTTP header name`,
+            );
+        }
+        if (FORBIDDEN_CUSTOM_HEADERS.has(name.toLowerCase())) {
+            throw new ParameterError(
+                `Custom header "${name}" is reserved by the proxy or used for credentials`,
+            );
+        }
+        if (
+            typeof value !== 'string' ||
+            value.length === 0 ||
+            value.length > CUSTOM_HEADER_LIMITS.maxValueChars ||
+            !HTTP_HEADER_VALUE.test(value)
+        ) {
+            throw new ParameterError(
+                `Custom header "${name}" has an invalid value`,
+            );
+        }
+        const lower = name.toLowerCase();
+        if (seen.has(lower)) {
+            throw new ParameterError(
+                `Duplicate custom header "${name}" (names are case-insensitive)`,
+            );
+        }
+        seen.add(lower);
+        if (apiKeyHeaderName && lower === apiKeyHeaderName.toLowerCase()) {
+            throw new ParameterError(
+                `Custom header "${name}" conflicts with the connection's api key header`,
+            );
+        }
+    }
+}
+
+/** Keep the public response-header contract intentionally small. External
+ * connection credentials are injected by Lightdash, so arbitrary upstream
+ * headers are not safe to expose to app code even though they arrived over an
+ * admin-approved connection. */
+const EXPOSED_RESPONSE_HEADER_NAMES = new Set([
+    'accept-ranges',
+    'cache-control',
+    'content-range',
+    'etag',
+    'expires',
+    'last-modified',
+    'link',
+    'ratelimit',
+    'retry-after',
+]);
+
+const EXPOSED_RESPONSE_HEADER_PREFIXES = [
+    'ratelimit-',
+    'x-ratelimit-',
+    'x-rate-limit-',
+] as const;
+
+/** Matches Node's default maximum inbound response-header size. Keep a local
+ * cap as well so the API contract does not depend on a process-wide Node flag. */
+export const EXTERNAL_RESPONSE_HEADER_MAX_BYTES = 16 * 1024;
+
+const shouldExposeResponseHeader = (name: string): boolean =>
+    EXPOSED_RESPONSE_HEADER_NAMES.has(name) ||
+    EXPOSED_RESPONSE_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix));
+
+/**
+ * Sanitize RFC 8288 Link targets before exposing them to app code. A
+ * query-authenticated upstream commonly builds pagination links from the
+ * request URL, which would otherwise reflect the injected API key. Same-origin
+ * absolute links become relative paths, which are also directly reusable with
+ * externalFetch.
+ */
+const sanitizeLinkHeader = (
+    value: string,
+    requestUrl: string,
+    queryApiKeyName: string | null,
+): string | null => {
+    const requestOrigin = new URL(requestUrl).origin;
+    let foundTarget = false;
+    let invalidTarget = false;
+
+    const sanitized = value.replace(/<([^<>]*)>/g, (_match, target: string) => {
+        foundTarget = true;
+        try {
+            const url = new URL(target, requestUrl);
+            if (url.username || url.password) {
+                invalidTarget = true;
+                return '';
+            }
+            if (queryApiKeyName) {
+                url.searchParams.delete(queryApiKeyName);
+            }
+            const safeTarget =
+                url.origin === requestOrigin
+                    ? `${url.pathname}${url.search}${url.hash}`
+                    : url.toString();
+            return `<${safeTarget}>`;
+        } catch {
+            invalidTarget = true;
+            return '';
+        }
+    });
+
+    return foundTarget && !invalidTarget ? sanitized : null;
+};
+
+/**
+ * Select the response metadata app code may consume. Header names are
+ * case-insensitive and returned lowercase. Malformed Link values are omitted;
+ * oversized exposed metadata rejects the response instead of silently losing
+ * a rate-limit or pagination header.
+ */
+export function filterExternalResponseHeaders(args: {
+    headers: Record<string, string>;
+    requestUrl: string;
+    queryApiKeyName: string | null;
+}): Record<string, string> {
+    const exposed = Object.create(null) as Record<string, string>;
+    let exposedBytes = 0;
+
+    for (const [name, rawValue] of Object.entries(args.headers)) {
+        const normalizedName = name.toLowerCase();
+        if (shouldExposeResponseHeader(normalizedName)) {
+            const value =
+                normalizedName === 'link'
+                    ? sanitizeLinkHeader(
+                          rawValue,
+                          args.requestUrl,
+                          args.queryApiKeyName,
+                      )
+                    : rawValue;
+
+            if (value !== null) {
+                exposedBytes += Buffer.byteLength(
+                    `${normalizedName}: ${value}\r\n`,
+                    'utf8',
+                );
+                if (exposedBytes > EXTERNAL_RESPONSE_HEADER_MAX_BYTES) {
+                    throw new ParameterError(
+                        `Upstream response headers exceed the maximum of ${EXTERNAL_RESPONSE_HEADER_MAX_BYTES} bytes`,
+                    );
+                }
+                exposed[normalizedName] = value;
+            }
+        }
+    }
+
+    return exposed;
+}

@@ -18,19 +18,32 @@ import {
     type UseMutationOptions,
 } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
 import useApp from '../providers/App/useApp';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import useToaster from './toaster/useToaster';
 
 export type ContentArgs = {
     projectUuids: string[];
     spaceUuids?: string[];
+    uuids?: string[];
     contentTypes?: ContentType[];
     pageSize?: number;
     page?: number;
     search?: string;
     sortBy?: ContentSortByColumns;
     sortDirection?: 'asc' | 'desc';
+    // Opt in to surfacing the caller's personal (space-less) data apps.
+    includePersonalDataApps?: boolean;
+    // Opt in to surfacing the caller's personal (space-less) Documents.
+    includePersonalDocuments?: boolean;
+    // 'exclude' hides data app vizs (reusable custom chart types); 'only'
+    // returns just them.
+    dataAppVizsFilter?: 'exclude' | 'only';
+    // Restrict to dashboards owned by these users (other content types are excluded)
+    ownerUserUuids?: string[];
+    // Only resources directly granted to the caller or their groups.
+    sharedWithMe?: boolean;
 };
 
 const contentTypeLabel = (contentType: ContentType): string =>
@@ -48,7 +61,7 @@ function createQueryString(params: Record<string, any>): string {
     }
     return query.toString();
 }
-const getContent = async (args: ContentArgs) => {
+const getContent = async (lightdashApi: LightdashApi, args: ContentArgs) => {
     const params = createQueryString(args);
     return lightdashApi<ApiContentResponse['results']>({
         version: 'v2',
@@ -65,10 +78,11 @@ export const useInfiniteContent = (
         ApiError
     > = {},
 ) => {
+    const lightdashApi = useLightdashApi();
     return useInfiniteQuery<ApiContentResponse['results'], ApiError>({
         queryKey: ['content', args],
         queryFn: async ({ pageParam }) => {
-            return getContent({
+            return getContent(lightdashApi, {
                 ...args,
                 page: pageParam ?? 1,
             });
@@ -85,13 +99,16 @@ export const useInfiniteContent = (
     });
 };
 
-const postContentAction = async ({
-    projectUuid,
-    body,
-}: {
-    projectUuid: string;
-    body: ApiContentActionBody;
-}) => {
+const postContentAction = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        body,
+    }: {
+        projectUuid: string;
+        body: ApiContentActionBody;
+    },
+) => {
     return lightdashApi<ApiSuccessEmpty>({
         version: 'v2',
         url: `/content/${projectUuid}/${body.action.type}`,
@@ -100,13 +117,16 @@ const postContentAction = async ({
     });
 };
 
-const postContentBulkAction = async ({
-    projectUuid,
-    body,
-}: {
-    projectUuid: string;
-    body: ApiContentBulkActionBody;
-}) => {
+const postContentBulkAction = async (
+    lightdashApi: LightdashApi,
+    {
+        projectUuid,
+        body,
+    }: {
+        projectUuid: string;
+        body: ApiContentBulkActionBody;
+    },
+) => {
     return lightdashApi<ApiSuccessEmpty>({
         version: 'v2',
         url: `/content/bulk-action/${projectUuid}/${body.action.type}`,
@@ -121,6 +141,9 @@ export const invalidateContent = async (
 ) => {
     await Promise.all([
         queryClient.invalidateQueries(['content']),
+        queryClient.invalidateQueries(['documents', projectUuid]),
+        queryClient.invalidateQueries(['document', projectUuid]),
+        queryClient.invalidateQueries(['document-chart-query', projectUuid]),
         queryClient.invalidateQueries(['dashboards']),
         queryClient.invalidateQueries(['most-popular-and-recently-updated']),
         queryClient.invalidateQueries(['pinned_items']),
@@ -140,6 +163,7 @@ export const useContentAction = (
         ApiContentActionBody
     >,
 ) => {
+    const lightdashApi = useLightdashApi();
     const { showToastSuccess, showToastApiError } = useToaster();
     const queryClient = useQueryClient();
     const navigate = useNavigate();
@@ -152,7 +176,7 @@ export const useContentAction = (
                 throw new Error('Project UUID is required');
             }
 
-            return postContentAction({
+            return postContentAction(lightdashApi, {
                 projectUuid,
                 body,
             });
@@ -214,7 +238,7 @@ export const useContentAction = (
         },
         onError: (error, variables, context) => {
             showToastApiError({
-                title: `Failed to move content`,
+                title: `Failed to ${variables.action.type} content`,
                 apiError: error.error,
             });
 
@@ -231,6 +255,7 @@ export const useContentBulkAction = (
         ApiContentBulkActionBody
     >,
 ) => {
+    const lightdashApi = useLightdashApi();
     const { showToastSuccess, showToastApiError } = useToaster();
     const queryClient = useQueryClient();
     const navigate = useNavigate();
@@ -242,7 +267,7 @@ export const useContentBulkAction = (
             if (!projectUuid) {
                 throw new Error('Project UUID is required');
             }
-            return postContentBulkAction({
+            return postContentBulkAction(lightdashApi, {
                 projectUuid,
                 body,
             });

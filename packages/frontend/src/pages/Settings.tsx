@@ -1,44 +1,27 @@
 import { subject } from '@casl/ability';
-import { CommercialFeatureFlags, FeatureFlags } from '@lightdash/common';
-import { Box, ScrollArea, Stack, Text, Title } from '@mantine-8/core';
+import { AGENT_IDENTITY_SETTINGS_PATH, ProjectType } from '@lightdash/common';
 import {
-    IconAppWindow,
-    IconApps,
-    IconBolt,
-    IconBrain,
-    IconBrowser,
-    IconBuildingSkyscraper,
-    IconCalendarStats,
-    IconChecklist,
-    IconClock,
-    IconDatabase,
-    IconDatabaseCog,
-    IconDatabaseExport,
-    IconFolders,
-    IconHistory,
-    IconIdBadge2,
-    IconKey,
-    IconLock,
-    IconBrush,
-    IconPalette,
-    IconPlug,
-    IconRefresh,
-    IconReportAnalytics,
-    IconShieldCheck,
-    IconTableOptions,
-    IconTrash,
-    IconUserCircle,
-    IconUserCode,
-    IconUserPlus,
-    IconUsers,
-    IconUserShield,
-    IconVariable,
+    Anchor,
+    ActionIcon,
+    Box,
+    Group,
+    ScrollArea,
+    Stack,
+    Text,
+    Title,
+    Tooltip,
+} from '@mantine/core';
+import { useDebouncedValue, useLocalStorage } from '@mantine/hooks';
+import {
+    IconLayoutSidebarLeftCollapse,
+    IconLayoutSidebarLeftExpand,
 } from '@tabler/icons-react';
-import { useMemo, type FC } from 'react';
+import { useMemo, useState, type FC } from 'react';
 import {
     matchPath,
     Navigate,
     useLocation,
+    useParams,
     useRoutes,
     type RouteObject,
 } from 'react-router';
@@ -46,155 +29,191 @@ import ErrorState from '../components/common/ErrorState';
 import MantineIcon from '../components/common/MantineIcon';
 import Page from '../components/common/Page/Page';
 import PageBreadcrumbs from '../components/common/PageBreadcrumbs';
-import RouterNavLink from '../components/common/RouterNavLink';
 import { SettingsGridCard } from '../components/common/Settings/SettingsCard';
+import { SettingsPage } from '../components/common/Settings/SettingsPage';
 import PageSpinner from '../components/PageSpinner';
+import ProjectSettings from '../components/Settings/ProjectSettings';
+import SettingsNavigation from '../components/Settings/SettingsNavigation';
+import SettingsSearchInput from '../components/Settings/SettingsSearchInput';
 import AccessTokensPanel from '../components/UserSettings/AccessTokensPanel';
 import AllowedDomainsPanel from '../components/UserSettings/AllowedDomainsPanel';
 import AppearanceSettingsPanel from '../components/UserSettings/AppearanceSettingsPanel';
 import DefaultProjectPanel from '../components/UserSettings/DefaultProjectPanel';
 import { DeleteOrganizationPanel } from '../components/UserSettings/DeleteOrganizationPanel';
+import EmailWhitelabelPanel from '../components/UserSettings/EmailWhitelabel/EmailWhitelabelPanel';
+import ExportingPanel from '../components/UserSettings/ExportingPanel';
 import GithubSettingsPanel from '../components/UserSettings/GithubSettingsPanel';
+import GithubUserSettingsPanel from '../components/UserSettings/GithubUserSettingsPanel';
 import GitlabSettingsPanel from '../components/UserSettings/GitlabSettingsPanel';
 import ImpersonationPanel from '../components/UserSettings/ImpersonationPanel';
+import InviteLinkExpirationPanel from '../components/UserSettings/InviteLinkExpirationPanel';
 import { LeaveOrganizationPanel } from '../components/UserSettings/LeaveOrganizationPanel';
+import LightdashAnalyticsPanel from '../components/UserSettings/LightdashAnalyticsPanel';
+import LimitsPanel from '../components/UserSettings/LimitsPanel';
+import { MyAgentConnectionsPanel } from '../components/UserSettings/MyAgentConnectionsPanel';
 import MyAppsPanel from '../components/UserSettings/MyAppsPanel';
 import { MyWarehouseConnectionsPanel } from '../components/UserSettings/MyWarehouseConnectionsPanel';
 import OAuthClientsPanel from '../components/UserSettings/OAuthClientsPanel';
 import OrganizationPanel from '../components/UserSettings/OrganizationPanel';
-import OrganizationSsoPanel from '../components/UserSettings/OrganizationSsoPanel';
-import { OrganizationWarehouseCredentialsPanel } from '../components/UserSettings/OrganizationWarehouseCredentialsPanel';
+import AccountLinkingPanel from '../components/UserSettings/OrganizationSso/AccountLinkingPanel';
+import AzureAdSsoPanel from '../components/UserSettings/OrganizationSso/AzureAdSsoPanel';
+import GenericOidcSsoPanel from '../components/UserSettings/OrganizationSso/GenericOidcSsoPanel';
+import GoogleSsoPanel from '../components/UserSettings/OrganizationSso/GoogleSsoPanel';
+import OktaSsoPanel from '../components/UserSettings/OrganizationSso/OktaSsoPanel';
+import OneLoginSsoPanel from '../components/UserSettings/OrganizationSso/OneLoginSsoPanel';
 import PasswordPanel from '../components/UserSettings/PasswordPanel';
 import ProfilePanel from '../components/UserSettings/ProfilePanel';
 import ProjectManagementPanel from '../components/UserSettings/ProjectManagementPanel';
 import UserScheduledDeliveriesPanel from '../components/UserSettings/ScheduledDeliveriesPanel';
 import SlackSettingsPanel from '../components/UserSettings/SlackSettingsPanel';
 import SocialLoginsPanel from '../components/UserSettings/SocialLoginsPanel';
+import SupportImpersonationPanel from '../components/UserSettings/SupportImpersonationPanel';
 import UserAttributesPanel from '../components/UserSettings/UserAttributesPanel';
 import UsersAndGroupsPanel from '../components/UserSettings/UsersAndGroupsPanel';
-import { useAiOrganizationSettings } from '../ee/features/aiCopilot/hooks/useAiOrganizationSettings';
+import VerifiedDomainsPanel from '../components/UserSettings/VerifiedDomains/VerifiedDomainsPanel';
+import { ReviewRemediationWorkspace } from '../ee/features/aiCopilot/components/Admin/ReviewRemediationWorkspace';
+import { AiAgentsSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiAgentsSettingsPage';
+import { AiDeepResearchSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiDeepResearchSettingsPage';
+import { AiEvalsSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiEvalsSettingsPage';
+import { AiGeneralSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiGeneralSettingsPage';
+import { AiMemoriesSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiMemoriesSettingsPage';
+import { AiReviewsSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiReviewsSettingsPage';
+import { AiSettingsProviders } from '../ee/features/aiCopilot/components/Admin/settings/AiSettingsProviders';
+import { AiThreadsSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/AiThreadsSettingsPage';
+import { McpActivitySettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/McpActivitySettingsPage';
+import { McpConnectSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/McpConnectSettingsPage';
+import { McpGeneralSettingsPage } from '../ee/features/aiCopilot/components/Admin/settings/McpGeneralSettingsPage';
+import { AiCreditsSettingsPage } from '../ee/features/aiCredits/AiCreditsSettingsPage';
 import ScimAccessTokensPanel from '../ee/features/scim/components/ScimAccessTokensPanel';
 import { ServiceAccountsPage } from '../ee/features/serviceAccounts';
 import { CustomRoleCreate } from '../ee/pages/customRoles/CustomRoleCreate';
+import { CustomRoleDuplicate } from '../ee/pages/customRoles/CustomRoleDuplicate';
 import { CustomRoleEdit } from '../ee/pages/customRoles/CustomRoleEdit';
 import { CustomRoles } from '../ee/pages/customRoles/CustomRoles';
+import Roadmap from '../ee/pages/Roadmap';
+import { AgentIdentitySettingsPage } from '../features/aiAccess/AgentIdentitySettingsPage';
+import { getAgentSettingsAccess } from '../features/aiAccess/agentSettingsAccess';
+import { DataAppAiAnalysisSettingsPage } from '../features/apps/analysis/settings/DataAppAiAnalysisSettingsPage';
+import { DataAppGeneralSettingsPage } from '../features/apps/settings/DataAppGeneralSettingsPage';
+import { getDataAppsSettingsLanding } from '../features/apps/settings/dataAppsSettingsLanding';
+import { DataAppActivitySettingsPage } from '../features/dataAppActivity/components/DataAppActivitySettingsPage';
 import DesignListPage from '../features/organizationDesigns/components/DesignListPage';
-import { useOrganization } from '../hooks/organization/useOrganization';
-import { useActiveProjectUuid } from '../hooks/useActiveProject';
-import { useProject } from '../hooks/useProject';
-import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
-import { Can } from '../providers/Ability';
-import useApp from '../providers/App/useApp';
+import { canAccessDeepResearchSettings } from '../hooks/settings/deepResearchSettingsAccess';
+import { filterSettingsNavigation } from '../hooks/settings/filterSettingsNavigation';
+import { useSettingsContext } from '../hooks/settings/useSettingsContext';
+import { useSettingsNavigation } from '../hooks/settings/useSettingsNavigation';
 import { TrackPage } from '../providers/Tracking/TrackingProvider';
-import useTracking from '../providers/Tracking/useTracking';
-import { EventName, PageName } from '../types/Events';
-import ProjectSettings from './ProjectSettings';
+import { PageName } from '../types/Events';
 import classes from './Settings.module.css';
 
+const SETTINGS_SIDEBAR_COLLAPSED_STORAGE_KEY = 'settings:sidebar-collapsed';
+
+const McpActivityRedirect = () => {
+    const location = useLocation();
+
+    return (
+        <Navigate
+            to={`/generalSettings/mcp/analytics${location.search}${location.hash}`}
+            replace
+        />
+    );
+};
+
+const AiReviewsToIssuesRedirect = ({
+    itemRoute = false,
+}: {
+    itemRoute?: boolean;
+}) => {
+    const { fingerprint } = useParams<{ fingerprint: string }>();
+    const location = useLocation();
+
+    const pathname =
+        itemRoute && fingerprint
+            ? `/generalSettings/ai/issues/${encodeURIComponent(fingerprint)}`
+            : '/generalSettings/ai/issues';
+
+    return (
+        <Navigate
+            to={`${pathname}${location.search}${location.hash}`}
+            replace
+        />
+    );
+};
+
 const Settings: FC = () => {
-    const { data: embeddingEnabled } = useServerFeatureFlag(
-        CommercialFeatureFlags.Embedding,
+    const context = useSettingsContext();
+    const sections = useSettingsNavigation(context);
+
+    const [isSidebarCollapsed, setIsSidebarCollapsed] =
+        useLocalStorage<boolean>({
+            key: SETTINGS_SIDEBAR_COLLAPSED_STORAGE_KEY,
+            defaultValue: false,
+            getInitialValueInEffect: false,
+        });
+    const [search, setSearch] = useState('');
+    const [debouncedSearch] = useDebouncedValue(search, 200);
+
+    const filteredSections = useMemo(
+        () => filterSettingsNavigation(sections, debouncedSearch),
+        [sections, debouncedSearch],
     );
 
-    const { data: isScimTokenManagementEnabled } = useServerFeatureFlag(
-        CommercialFeatureFlags.Scim,
-    );
-
-    const aiOrganizationSettingsQuery = useAiOrganizationSettings();
-    const isAiCopilotEnabledOrTrial =
-        aiOrganizationSettingsQuery.isSuccess &&
-        (aiOrganizationSettingsQuery.data.isCopilotEnabled ||
-            aiOrganizationSettingsQuery.data.isTrial);
-
-    const { data: serviceAccountsFlag } = useServerFeatureFlag(
-        CommercialFeatureFlags.ServiceAccounts,
-    );
-    const isServiceAccountFeatureFlagEnabled =
-        serviceAccountsFlag?.enabled ?? false;
+    const location = useLocation();
+    // Reset the search on navigation so each visit starts unfiltered; done
+    // during render rather than an effect, which would lag the route change.
+    const [prevPathname, setPrevPathname] = useState(location.pathname);
+    if (prevPathname !== location.pathname) {
+        setPrevPathname(location.pathname);
+        setSearch('');
+    }
 
     const {
-        health: {
-            data: health,
-            isInitialLoading: isHealthLoading,
-            error: healthError,
-        },
-        user: { data: user, isInitialLoading: isUserLoading, error: userError },
-    } = useApp();
-
-    const { data: isUserImpersonationEnabled } = useServerFeatureFlag(
-        FeatureFlags.UserImpersonation,
-    );
-
-    const showImpersonationPanel =
-        isUserImpersonationEnabled?.enabled &&
-        user?.ability?.can('update', 'Organization');
-
-    const { data: leaveOrganizationFlag } = useServerFeatureFlag(
-        FeatureFlags.LeaveOrganization,
-    );
-    const isLeaveOrganizationEnabled = leaveOrganizationFlag?.enabled === true;
-
-    const { data: customRolesFlag } = useServerFeatureFlag(
-        CommercialFeatureFlags.CustomRoles,
-    );
-    const isCustomRolesEnabled =
-        health?.isCustomRolesEnabled || customRolesFlag?.enabled;
-
-    const userGroupsFeatureFlagQuery = useServerFeatureFlag(
-        FeatureFlags.UserGroupsEnabled,
-    );
-
-    const { data: dataAppsFlag } = useServerFeatureFlag(
-        FeatureFlags.EnableDataApps,
-    );
-
-    const { data: ssoOrganizationSettingsFlag } = useServerFeatureFlag(
-        FeatureFlags.SsoOrganizationSettings,
-    );
-    const isSsoOrganizationSettingsEnabled =
-        ssoOrganizationSettingsFlag?.enabled ?? false;
-
-    const { track } = useTracking();
-    const {
-        data: organization,
-        isInitialLoading: isOrganizationLoading,
-        error: organizationError,
-    } = useOrganization();
-    const { activeProjectUuid, isLoading: isActiveProjectUuidLoading } =
-        useActiveProjectUuid();
-    const {
-        data: project,
-        isInitialLoading: isProjectLoading,
-        error: projectError,
-    } = useProject(activeProjectUuid);
-
-    const allowPasswordAuthentication =
-        !health?.auth.disablePasswordAuthentication;
-
-    const hasSocialLogin =
-        health?.auth.google.enabled ||
-        health?.auth.okta.enabled ||
-        health?.auth.oneLogin.enabled ||
-        health?.auth.azuread.enabled ||
-        health?.auth.oidc.enabled;
-
-    const isGroupManagementEnabled =
-        userGroupsFeatureFlagQuery.data?.enabled ?? false;
-
-    // This allows us to enable service accounts in the UI for on-premise installations
-    const isServiceAccountsEnabled =
-        health?.isServiceAccountEnabled || isServiceAccountFeatureFlagEnabled;
-
-    const { data: warehouseCredentialsFlag } = useServerFeatureFlag(
-        CommercialFeatureFlags.OrganizationWarehouseCredentials,
-    );
-    const isWarehouseCredentialsFeatureFlagEnabled =
-        warehouseCredentialsFlag?.enabled ?? false;
-
-    // This allows us to enable organization warehouse credentials in the UI for on-premise installations
-    const isWarehouseCredentialsEnabled =
-        (health?.isOrganizationWarehouseCredentialsEnabled ?? false) ||
-        isWarehouseCredentialsFeatureFlagEnabled;
+        user,
+        health,
+        organization,
+        project,
+        isScimTokenManagementEnabled,
+        dataAppsFlag,
+        dataAppAnalysisFlag,
+        dashboardAnalysisFlag,
+        externalSourcesFlag,
+        isDataAppsFlagLoading,
+        isChartStudioAvailable,
+        isAiCopilotEnabledOrTrial,
+        shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
+        isAiOrganizationSettingsLoading,
+        showImpersonationPanel,
+        isCustomRolesEnabled,
+        isProLimitsEnabled,
+        canAccessAnalyticsSettings,
+        isAnalyticsProjectFlagLoading,
+        isOrganizationRoadmapEnabled,
+        canAccessAiCredits,
+        isAiCreditsLoading,
+        isSsoOrganizationSettingsEnabled,
+        isEmailWhitelabelEnabled,
+        isServiceAccountsEnabled,
+        isAgentIdentityEnabled,
+        isAgentIdentityFlagLoading,
+        allowPasswordAuthentication,
+        showMyAgentConnections,
+        hasSocialLogin,
+        isMyAgentConnectionsLoading,
+        isHealthLoading,
+        healthError,
+        isUserLoading,
+        userError,
+        isOrganizationLoading,
+        organizationError,
+        isActiveProjectUuidLoading,
+        isProjectLoading,
+        projectError,
+        projectSettingsAccess,
+        isProjectSettingsAccessLoading,
+        projectSettingsAccessError,
+    } = context;
 
     const routes = useMemo<RouteObject[]>(() => {
         const allowedRoutes: RouteObject[] = [
@@ -205,26 +224,27 @@ const Settings: FC = () => {
             {
                 path: '/profile',
                 element: (
-                    <Stack gap="xl">
+                    <SettingsPage
+                        title="Profile"
+                        description="Manage your personal details and account preferences."
+                    >
                         <SettingsGridCard>
-                            <Title order={4}>Profile settings</Title>
+                            <Title order={5}>Profile details</Title>
                             <ProfilePanel />
                         </SettingsGridCard>
-                        {isLeaveOrganizationEnabled && (
-                            <SettingsGridCard>
-                                <Box>
-                                    <Title order={4}>Danger zone</Title>
-                                    <Text c="ldGray.6" fz="xs">
-                                        Leave the organization to remove
-                                        yourself from it (you cannot leave if
-                                        you are the only admin). This action is
-                                        not reversible.
-                                    </Text>
-                                </Box>
-                                <LeaveOrganizationPanel />
-                            </SettingsGridCard>
-                        )}
-                    </Stack>
+                        {health?.hasGithub && <GithubUserSettingsPanel />}
+                        <SettingsGridCard>
+                            <Box>
+                                <Title order={5}>Danger zone</Title>
+                                <Text c="dimmed" fz="xs">
+                                    Leave the organization to remove yourself
+                                    from it (you cannot leave if you are the
+                                    only admin). This action is not reversible.
+                                </Text>
+                            </Box>
+                            <LeaveOrganizationPanel />
+                        </SettingsGridCard>
+                    </SettingsPage>
                 ),
             },
             {
@@ -237,19 +257,22 @@ const Settings: FC = () => {
             allowedRoutes.push({
                 path: '/password',
                 element: (
-                    <Stack gap="xl">
+                    <SettingsPage
+                        title="Password"
+                        description="Update your password and manage the ways you sign in."
+                    >
                         <SettingsGridCard>
-                            <Title order={4}>Password settings</Title>
+                            <Title order={5}>Change password</Title>
                             <PasswordPanel />
                         </SettingsGridCard>
 
                         {hasSocialLogin && (
                             <SettingsGridCard>
-                                <Title order={4}>Social logins</Title>
+                                <Title order={5}>Social logins</Title>
                                 <SocialLoginsPanel />
                             </SettingsGridCard>
                         )}
-                    </Stack>
+                    </SettingsPage>
                 ),
             });
         }
@@ -261,32 +284,31 @@ const Settings: FC = () => {
                 </Stack>
             ),
         });
+        if (showMyAgentConnections) {
+            allowedRoutes.push({
+                path: '/myAgentConnections',
+                element: <MyAgentConnectionsPanel />,
+            });
+        }
         if (user?.ability.can('create', 'ScheduledDeliveries')) {
             // A user might not be able to create scheduled permissions on the org level but on a specific project
             // level. The check here makes sure that the user has the ability to create a scheduled delivery at least somewhere.
             // Since the service returns specifically the user's scheduled deliveries, this is completely intended behavior.
             allowedRoutes.push({
                 path: '/userScheduledDeliveries',
-                element: (
-                    <Stack gap="xl">
-                        <SettingsGridCard>
-                            <Title order={4}>My scheduled deliveries</Title>
-                        </SettingsGridCard>
-                        <UserScheduledDeliveriesPanel />
-                    </Stack>
-                ),
+                element: <UserScheduledDeliveriesPanel />,
             });
         }
         if (dataAppsFlag?.enabled && user?.ability.can('create', 'DataApp')) {
             allowedRoutes.push({
                 path: '/myApps',
                 element: (
-                    <Stack gap="xl">
-                        <SettingsGridCard>
-                            <Title order={4}>My apps</Title>
-                        </SettingsGridCard>
-                        <MyAppsPanel />
-                    </Stack>
+                    <MyAppsPanel
+                        key={String(project?.type === ProjectType.PREVIEW)}
+                        includePreviewAppsByDefault={
+                            project?.type === ProjectType.PREVIEW
+                        }
+                    />
                 ),
             });
         }
@@ -294,16 +316,19 @@ const Settings: FC = () => {
             allowedRoutes.push({
                 path: '/organization',
                 element: (
-                    <Stack gap="xl">
+                    <SettingsPage
+                        title="General"
+                        description="Manage organization-wide defaults, access, and account controls."
+                    >
                         <SettingsGridCard>
-                            <Title order={4}>General</Title>
+                            <Title order={5}>Organization details</Title>
                             <OrganizationPanel />
                         </SettingsGridCard>
 
                         <SettingsGridCard>
                             <div>
-                                <Title order={4}>Allowed email domains</Title>
-                                <Text c="ldGray.6" fz="xs">
+                                <Title order={5}>Allowed email domains</Title>
+                                <Text c="dimmed" fz="xs">
                                     Anyone with email addresses at these domains
                                     can automatically join the organization.
                                 </Text>
@@ -313,8 +338,8 @@ const Settings: FC = () => {
 
                         <SettingsGridCard>
                             <div>
-                                <Title order={4}>Default Project</Title>
-                                <Text c="ldGray.6" fz="xs">
+                                <Title order={5}>Default project</Title>
+                                <Text c="dimmed" fz="xs">
                                     This is the project users will see when they
                                     log in for the first time or from a new
                                     device. If a user does not have access, they
@@ -324,41 +349,128 @@ const Settings: FC = () => {
                             <DefaultProjectPanel />
                         </SettingsGridCard>
 
+                        {user.ability.can('manage', 'Organization') && (
+                            <SettingsGridCard>
+                                <div>
+                                    <Title order={5}>Invitations</Title>
+                                    <Text c="dimmed" fz="xs">
+                                        Control how long new user invitations
+                                        remain valid for your organization.
+                                    </Text>
+                                </div>
+                                <InviteLinkExpirationPanel />
+                            </SettingsGridCard>
+                        )}
+
                         {showImpersonationPanel && (
                             <SettingsGridCard>
-                                <Title order={4}>User impersonation</Title>
+                                <Title order={5}>User impersonation</Title>
                                 <ImpersonationPanel />
                             </SettingsGridCard>
                         )}
 
-                        {(isLeaveOrganizationEnabled ||
-                            user.ability?.can('delete', 'Organization')) && (
-                            <SettingsGridCard>
-                                <div>
-                                    <Title order={4}>Danger zone </Title>
-                                    <Text c="ldGray.6" fz="xs">
-                                        {isLeaveOrganizationEnabled &&
-                                            'Leave the organization to remove yourself from it (you cannot leave if you are the only admin). '}
-                                        {user.ability?.can(
-                                            'delete',
-                                            'Organization',
-                                        ) &&
-                                            'Deleting the organization removes the whole workspace and all its content, including users. '}
-                                        These actions are not reversible.
-                                    </Text>
-                                </div>
-                                <Stack gap="sm" align="flex-end">
-                                    {isLeaveOrganizationEnabled && (
-                                        <LeaveOrganizationPanel />
-                                    )}
+                        <SettingsGridCard>
+                            <Title order={5}>Lightdash support access</Title>
+                            <SupportImpersonationPanel />
+                        </SettingsGridCard>
+
+                        <SettingsGridCard>
+                            <Box>
+                                <Title order={5}>Danger zone</Title>
+                                <Text c="dimmed" fz="xs">
+                                    {
+                                        'Leave the organization to remove yourself from it (you cannot leave if you are the only admin). '
+                                    }
                                     {user.ability?.can(
                                         'delete',
                                         'Organization',
-                                    ) && <DeleteOrganizationPanel />}
-                                </Stack>
-                            </SettingsGridCard>
-                        )}
-                    </Stack>
+                                    ) &&
+                                        'Deleting the organization removes the whole workspace and all its content, including users. '}
+                                    These actions are not reversible.
+                                </Text>
+                            </Box>
+                            <Stack gap="sm" align="flex-end">
+                                <LeaveOrganizationPanel
+                                    showDeleteAction={false}
+                                />
+                                {user.ability?.can(
+                                    'delete',
+                                    'Organization',
+                                ) && <DeleteOrganizationPanel />}
+                            </Stack>
+                        </SettingsGridCard>
+                    </SettingsPage>
+                ),
+            });
+        }
+        if (user?.ability.can('manage', 'Organization')) {
+            allowedRoutes.push({
+                path: '/exporting',
+                element: (
+                    <SettingsPage
+                        title="Exporting"
+                        description="Control how exported files are shared outside Lightdash."
+                    >
+                        <SettingsGridCard>
+                            <div>
+                                <Title order={5}>Scheduled deliveries</Title>
+                                <Text c="dimmed" fz="xs">
+                                    Control how files exported from your
+                                    organization — starting with scheduled
+                                    deliveries — are shared.{' '}
+                                    <Anchor
+                                        inherit
+                                        href="https://docs.lightdash.com/guides/how-to-create-scheduled-deliveries"
+                                        target="_blank"
+                                        rel="noreferrer"
+                                    >
+                                        Learn more about scheduled deliveries
+                                    </Anchor>
+                                    .
+                                </Text>
+                            </div>
+                            <ExportingPanel />
+                        </SettingsGridCard>
+                    </SettingsPage>
+                ),
+            });
+        }
+        if (canAccessAnalyticsSettings) {
+            allowedRoutes.push({
+                path: '/lightdashAnalytics',
+                element: (
+                    <LightdashAnalyticsPanel
+                        activeProjectUuid={project?.projectUuid}
+                    />
+                ),
+            });
+        }
+        if (canAccessAiCredits) {
+            allowedRoutes.push({
+                path: '/aiCredits',
+                element: <AiCreditsSettingsPage />,
+            });
+        }
+        if (isProLimitsEnabled && user?.ability.can('manage', 'Organization')) {
+            allowedRoutes.push({
+                path: '/limits',
+                element: (
+                    <SettingsPage
+                        title="Limits"
+                        description="Set organization-wide query and export limits."
+                    >
+                        <SettingsGridCard>
+                            <div>
+                                <Title order={5}>Query and export limits</Title>
+                                <Text c="dimmed" fz="xs">
+                                    Limit how many rows a query can return and
+                                    how many cells a CSV or Excel export can
+                                    contain for your organization.
+                                </Text>
+                            </div>
+                            <LimitsPanel />
+                        </SettingsGridCard>
+                    </SettingsPage>
                 ),
             });
         }
@@ -390,19 +502,6 @@ const Settings: FC = () => {
             });
         }
         if (
-            user?.ability.can(
-                'manage',
-                subject('OrganizationWarehouseCredentials', {
-                    organizationUuid: organization?.organizationUuid,
-                }),
-            )
-        ) {
-            allowedRoutes.push({
-                path: '/warehouseCredentials',
-                element: <OrganizationWarehouseCredentialsPanel />,
-            });
-        }
-        if (
             organization &&
             !organization.needsProject &&
             user?.ability.can('view', 'Project')
@@ -417,19 +516,18 @@ const Settings: FC = () => {
             project &&
             organization &&
             !organization.needsProject &&
-            user?.ability.can(
-                'update',
-                subject('Project', {
-                    organizationUuid: organization.organizationUuid,
-                    projectUuid: project.projectUuid,
-                }),
-            )
+            projectSettingsAccess.type !== 'none'
         ) {
             allowedRoutes.push({
                 path: '/projectManagement/:projectUuid/*',
                 element: (
                     <TrackPage name={PageName.PROJECT_SETTINGS}>
-                        <ProjectSettings />
+                        <ProjectSettings
+                            externalSourcesEnabled={
+                                externalSourcesFlag?.enabled ?? false
+                            }
+                            projectSettingsAccess={projectSettingsAccess}
+                        />
                     </TrackPage>
                 ),
             });
@@ -442,21 +540,72 @@ const Settings: FC = () => {
         }
 
         if (
-            dataAppsFlag?.enabled &&
-            user?.ability.can('view', 'OrganizationDesign')
+            (dataAppsFlag?.enabled || isChartStudioAvailable) &&
+            user?.ability.can('manage', 'OrganizationDesign')
         ) {
             allowedRoutes.push({
-                path: '/themes',
+                path: '/dataApps/themes',
                 element: <DesignListPage />,
             });
+        }
+
+        // The AI-analysis page hosts the shared consent toggle; dashboard
+        // analysis shares it, so a dashboard-only rollout must still reach it.
+        {
+            const canManageOrganization =
+                user?.ability.can('manage', 'Organization') ?? false;
+            const canManageAiAnalysis =
+                canManageOrganization &&
+                ((dataAppsFlag?.enabled === true &&
+                    dataAppAnalysisFlag?.enabled === true) ||
+                    dashboardAnalysisFlag?.enabled === true);
+            if (canManageAiAnalysis) {
+                allowedRoutes.push({
+                    path: '/dataApps/aiAnalysis',
+                    element: <DataAppAiAnalysisSettingsPage />,
+                });
+            }
+        }
+
+        if (dataAppsFlag?.enabled) {
+            const canManageThemes =
+                user?.ability.can('manage', 'OrganizationDesign') ?? false;
+            const canManageOrganization =
+                user?.ability.can('manage', 'Organization') ?? false;
+
+            if (canManageOrganization) {
+                allowedRoutes.push({
+                    path: '/dataApps/general',
+                    element: <DataAppGeneralSettingsPage />,
+                });
+            }
+            if (canManageOrganization) {
+                allowedRoutes.push({
+                    path: '/dataApps/activity',
+                    element: <DataAppActivitySettingsPage />,
+                });
+            }
+            // Land on whichever sub-page the user can actually reach.
+            const dataAppsLanding = getDataAppsSettingsLanding({
+                canManageOrganization,
+                canManageThemes,
+            });
+            if (dataAppsLanding) {
+                allowedRoutes.push({
+                    path: '/dataApps',
+                    element: <Navigate to={dataAppsLanding} replace />,
+                });
+            }
         }
 
         if (user?.ability.can('manage', 'Organization')) {
             allowedRoutes.push({
                 path: '/integrations',
                 element: (
-                    <Stack>
-                        <Title order={4}>Integrations</Title>
+                    <SettingsPage
+                        title="Integrations"
+                        description="Connect Lightdash to the tools your organization uses."
+                    >
                         {!health?.hasSlack &&
                             !health?.hasGithub &&
                             !health?.hasGitlab &&
@@ -464,7 +613,7 @@ const Settings: FC = () => {
                         {health?.hasSlack && <SlackSettingsPanel />}
                         {health?.hasGithub && <GithubSettingsPanel />}
                         {health?.hasGitlab && <GitlabSettingsPanel />}
-                    </Stack>
+                    </SettingsPage>
                 ),
             });
         }
@@ -481,20 +630,41 @@ const Settings: FC = () => {
             isSsoOrganizationSettingsEnabled
         ) {
             allowedRoutes.push({
+                path: '/verifiedDomains',
+                element: <VerifiedDomainsPanel />,
+            });
+        }
+
+        if (
+            user?.ability.can('manage', 'Organization') &&
+            isEmailWhitelabelEnabled
+        ) {
+            allowedRoutes.push({
+                path: '/emailWhitelabel',
+                element: <EmailWhitelabelPanel />,
+            });
+        }
+
+        if (
+            user?.ability.can('manage', 'Organization') &&
+            isSsoOrganizationSettingsEnabled
+        ) {
+            allowedRoutes.push({
                 path: '/sso',
                 element: (
-                    <Stack gap="xl">
-                        <SettingsGridCard>
-                            <Stack gap="xs">
-                                <Title order={4}>Single Sign-On</Title>
-                                <Text c="ldGray.6" fz="xs">
-                                    Configure SSO providers for this
-                                    organization.
-                                </Text>
-                            </Stack>
-                            <OrganizationSsoPanel />
-                        </SettingsGridCard>
-                    </Stack>
+                    <SettingsPage
+                        title="Single Sign-On"
+                        description="Configure SSO providers and account linking. Users are routed to the matching provider based on their email domain."
+                    >
+                        <AzureAdSsoPanel />
+                        <OktaSsoPanel />
+                        <GenericOidcSsoPanel />
+                        <OneLoginSsoPanel />
+                        {/* Google has no per-org credentials; only show the
+                            toggle when Google is enabled instance-wide. */}
+                        {health?.auth.google.enabled && <GoogleSsoPanel />}
+                        <AccountLinkingPanel />
+                    </SettingsPage>
                 ),
             });
         }
@@ -521,6 +691,187 @@ const Settings: FC = () => {
         }
 
         if (
+            isOrganizationRoadmapEnabled &&
+            user?.ability.can(
+                'view',
+                subject('Roadmap', {
+                    organizationUuid: organization?.organizationUuid,
+                }),
+            )
+        ) {
+            allowedRoutes.push({
+                path: '/roadmap',
+                element: (
+                    <TrackPage name={PageName.ROADMAP}>
+                        <Roadmap />
+                    </TrackPage>
+                ),
+            });
+        }
+
+        if (
+            isAgentIdentityEnabled &&
+            user?.ability.can('manage', 'Organization')
+        ) {
+            allowedRoutes.push({
+                path: AGENT_IDENTITY_SETTINGS_PATH.replace(
+                    '/generalSettings',
+                    '',
+                ),
+                element: (
+                    <AgentIdentitySettingsPage
+                        access={getAgentSettingsAccess({
+                            agentIdentityEnabled: isAgentIdentityEnabled,
+                            canManageOrganization:
+                                user?.ability.can('manage', 'Organization') ??
+                                false,
+                            canManageOrgAiAgent,
+                            isAiAvailable: isAiCopilotEnabledOrTrial,
+                        })}
+                    />
+                ),
+            });
+        }
+
+        allowedRoutes.push(
+            {
+                path: '/mcp',
+                element: <Navigate to="/generalSettings/mcp/connect" replace />,
+            },
+            {
+                path: '/mcp/connect',
+                element: <McpConnectSettingsPage />,
+            },
+        );
+
+        if (isAiCopilotEnabledOrTrial && hasAnyAiAgentAccess) {
+            allowedRoutes.push({
+                path: '/ai',
+                element: (
+                    <Navigate
+                        to={
+                            canManageOrgAiAgent
+                                ? '/generalSettings/ai/general'
+                                : '/generalSettings/ai/threads'
+                        }
+                        replace
+                    />
+                ),
+            });
+            // General is org-wide config (router, org settings) — org admins only.
+            if (canManageOrgAiAgent) {
+                allowedRoutes.push({
+                    path: '/ai/general',
+                    element: <AiGeneralSettingsPage />,
+                });
+                if (
+                    canAccessDeepResearchSettings({
+                        isAiCopilotEnabledOrTrial,
+                        canManageOrgAiAgent,
+                        hasAnyAiAgentAccess,
+                    })
+                ) {
+                    allowedRoutes.push({
+                        path: '/ai/deep-research',
+                        element: <AiDeepResearchSettingsPage />,
+                    });
+                }
+            }
+            allowedRoutes.push({
+                path: '/ai/threads',
+                element: (
+                    <AiSettingsProviders>
+                        <AiThreadsSettingsPage />
+                    </AiSettingsProviders>
+                ),
+            });
+            allowedRoutes.push({
+                path: '/ai/agents',
+                element: (
+                    <AiSettingsProviders>
+                        <AiAgentsSettingsPage />
+                    </AiSettingsProviders>
+                ),
+            });
+            allowedRoutes.push({
+                path: '/ai/evals',
+                element: (
+                    <AiSettingsProviders>
+                        <AiEvalsSettingsPage />
+                    </AiSettingsProviders>
+                ),
+            });
+            allowedRoutes.push({
+                path: '/ai/mcp',
+                element: <McpActivityRedirect />,
+            });
+            if (canManageOrgAiAgent) {
+                allowedRoutes.push({
+                    path: '/mcp/general',
+                    element: (
+                        <McpGeneralSettingsPage
+                            showAgentsPageLink={
+                                getAgentSettingsAccess({
+                                    agentIdentityEnabled:
+                                        isAgentIdentityEnabled,
+                                    canManageOrganization:
+                                        user?.ability.can(
+                                            'manage',
+                                            'Organization',
+                                        ) ?? false,
+                                    canManageOrgAiAgent,
+                                    isAiAvailable: isAiCopilotEnabledOrTrial,
+                                }).mcpPage === 'link'
+                            }
+                        />
+                    ),
+                });
+            }
+            allowedRoutes.push({
+                path: '/mcp/analytics',
+                element: (
+                    <AiSettingsProviders>
+                        <McpActivitySettingsPage />
+                    </AiSettingsProviders>
+                ),
+            });
+            allowedRoutes.push({
+                path: '/ai/memories',
+                element: (
+                    <AiSettingsProviders>
+                        <AiMemoriesSettingsPage />
+                    </AiSettingsProviders>
+                ),
+            });
+            if (shouldShowAiAgentReviews) {
+                allowedRoutes.push({
+                    path: '/ai/issues',
+                    element: (
+                        <AiSettingsProviders>
+                            <AiReviewsSettingsPage />
+                        </AiSettingsProviders>
+                    ),
+                });
+                allowedRoutes.push({
+                    path: '/ai/issues/:fingerprint',
+                    element: (
+                        <AiSettingsProviders>
+                            <ReviewRemediationWorkspace />
+                        </AiSettingsProviders>
+                    ),
+                });
+                allowedRoutes.push({
+                    path: '/ai/reviews',
+                    element: <AiReviewsToIssuesRedirect />,
+                });
+                allowedRoutes.push({
+                    path: '/ai/reviews/:fingerprint',
+                    element: <AiReviewsToIssuesRedirect itemRoute />,
+                });
+            }
+        }
+
+        if (
             user?.ability.can('manage', 'Organization') &&
             isCustomRolesEnabled
         ) {
@@ -533,6 +884,10 @@ const Settings: FC = () => {
                 element: <CustomRoleCreate />,
             });
             allowedRoutes.push({
+                path: '/customRoles/duplicate',
+                element: <CustomRoleDuplicate />,
+            });
+            allowedRoutes.push({
                 path: '/customRoles/:roleId',
                 element: <CustomRoleEdit />,
             });
@@ -541,24 +896,39 @@ const Settings: FC = () => {
         return allowedRoutes;
     }, [
         allowPasswordAuthentication,
+        showMyAgentConnections,
         user?.ability,
         organization,
         project,
         isScimTokenManagementEnabled?.enabled,
         isServiceAccountsEnabled,
+        isAgentIdentityEnabled,
         isCustomRolesEnabled,
         hasSocialLogin,
         showImpersonationPanel,
         health?.hasSlack,
         health?.hasGithub,
         health?.hasGitlab,
+        health?.auth.google.enabled,
         dataAppsFlag?.enabled,
+        dataAppAnalysisFlag?.enabled,
+        dashboardAnalysisFlag?.enabled,
+        isChartStudioAvailable,
+        externalSourcesFlag?.enabled,
+        isProLimitsEnabled,
+        canAccessAnalyticsSettings,
+        isOrganizationRoadmapEnabled,
+        canAccessAiCredits,
         isSsoOrganizationSettingsEnabled,
-        isLeaveOrganizationEnabled,
+        isEmailWhitelabelEnabled,
+        isAiCopilotEnabledOrTrial,
+        shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
+        projectSettingsAccess,
     ]);
     const routeElements = useRoutes(routes);
 
-    const location = useLocation();
     const isFixedContent = useMemo(() => {
         return (
             !matchPath(
@@ -570,25 +940,7 @@ const Settings: FC = () => {
             ) &&
             !matchPath(
                 {
-                    path: '/generalSettings/projectManagement/:projectUuid/changesets',
-                },
-                location.pathname,
-            ) &&
-            !matchPath(
-                {
                     path: '/generalSettings/projectManagement/:projectUuid/scheduledDeliveries',
-                },
-                location.pathname,
-            ) &&
-            !matchPath(
-                {
-                    path: '/generalSettings/userScheduledDeliveries',
-                },
-                location.pathname,
-            ) &&
-            !matchPath(
-                {
-                    path: '/generalSettings/myApps',
                 },
                 location.pathname,
             ) &&
@@ -601,6 +953,12 @@ const Settings: FC = () => {
             !matchPath(
                 {
                     path: '/generalSettings/projectManagement/:projectUuid/recentlyDeleted',
+                },
+                location.pathname,
+            ) &&
+            !matchPath(
+                {
+                    path: '/generalSettings/projectManagement/:projectUuid/dataAppConnections',
                 },
                 location.pathname,
             ) &&
@@ -633,28 +991,142 @@ const Settings: FC = () => {
                     path: '/generalSettings/projectManagement/:projectUuid/validator',
                 },
                 location.pathname,
+            ) &&
+            !matchPath(
+                {
+                    path: '/generalSettings/projectManagement/:projectUuid/pullRequests',
+                },
+                location.pathname,
+            ) &&
+            !matchPath(
+                {
+                    path: '/generalSettings/projectManagement/:projectUuid/contentReview',
+                },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/threads' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/agents' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/evals' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/mcp/analytics' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/memories' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/reviews' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/reviews/:fingerprint' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/issues' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/issues/:fingerprint' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/roadmap' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/dataApps/activity' },
+                location.pathname,
             )
         );
     }, [location.pathname]);
 
+    // Wait for AI and MCP routes to register before the catch-all redirect on
+    // a hard refresh, without blocking unrelated settings pages.
+    const isAwaitingAiSettingsRoute =
+        isAiOrganizationSettingsLoading &&
+        Boolean(
+            matchPath('/generalSettings/ai/*', location.pathname) ||
+            matchPath('/generalSettings/mcp/general', location.pathname) ||
+            matchPath('/generalSettings/mcp/analytics', location.pathname),
+        );
+    const isAwaitingAgentIdentityRoute =
+        isAgentIdentityFlagLoading &&
+        Boolean(matchPath(AGENT_IDENTITY_SETTINGS_PATH, location.pathname));
+    const isAwaitingDataAppsRoute =
+        isDataAppsFlagLoading &&
+        Boolean(matchPath('/generalSettings/dataApps/*', location.pathname));
+    const isAwaitingAnalyticsRoute =
+        isAnalyticsProjectFlagLoading &&
+        Boolean(
+            matchPath('/generalSettings/lightdashAnalytics', location.pathname),
+        );
+
+    const isAwaitingAiCreditsRoute =
+        isAiCreditsLoading &&
+        Boolean(matchPath('/generalSettings/aiCredits', location.pathname));
+
+    // The project settings access check (a training copy's upstream, the
+    // spaces a member can create in) gates only the project's own settings
+    // routes; the sidebar entry simply appears once it resolves elsewhere.
+    const isProjectSettingsRoute = Boolean(
+        matchPath(
+            '/generalSettings/projectManagement/:projectUuid/*',
+            location.pathname,
+        ),
+    );
+    const isAwaitingProjectSettingsRoute =
+        isProjectSettingsAccessLoading && isProjectSettingsRoute;
+    const projectSettingsRouteError = isProjectSettingsRoute
+        ? projectSettingsAccessError
+        : null;
+
     if (
+        (isMyAgentConnectionsLoading &&
+            matchPath(
+                '/generalSettings/myAgentConnections',
+                location.pathname,
+            )) ||
         isHealthLoading ||
         isUserLoading ||
         isOrganizationLoading ||
         isActiveProjectUuidLoading ||
-        isProjectLoading
+        isProjectLoading ||
+        isAwaitingProjectSettingsRoute ||
+        isAwaitingAiSettingsRoute ||
+        isAwaitingAgentIdentityRoute ||
+        isAwaitingDataAppsRoute ||
+        isAwaitingAnalyticsRoute ||
+        isAwaitingAiCreditsRoute
     ) {
         return <PageSpinner />;
     }
 
-    if (userError || healthError || organizationError || projectError) {
+    if (
+        userError ||
+        healthError ||
+        organizationError ||
+        projectError ||
+        projectSettingsRouteError
+    ) {
         return (
             <ErrorState
                 error={
                     userError?.error ||
                     healthError?.error ||
                     organizationError?.error ||
-                    projectError?.error
+                    projectError?.error ||
+                    projectSettingsRouteError?.error
                 }
             />
         );
@@ -669,615 +1141,90 @@ const Settings: FC = () => {
             withFixedContent={isFixedContent}
             withPaddedContent
             title="Settings"
+            sidebarTitle="Settings"
+            sidebarWidthProps={{ defaultWidth: 300, minWidth: 260 }}
+            isSidebarCollapsed={isSidebarCollapsed}
+            isSidebarCollapsible
+            collapsedSidebarContent={
+                <Tooltip label="Pin sidebar" position="right">
+                    <ActionIcon
+                        size="lg"
+                        onClick={() => setIsSidebarCollapsed(false)}
+                        aria-label="Pin sidebar"
+                    >
+                        <MantineIcon icon={IconLayoutSidebarLeftExpand} />
+                    </ActionIcon>
+                </Tooltip>
+            }
             sidebar={
                 <Stack className={classes.sidebarStack}>
-                    <PageBreadcrumbs
-                        items={[{ title: 'Settings', active: true }]}
-                    />
-                    <ScrollArea
-                        variant="primary"
-                        offsetScrollbars
-                        scrollbarSize={8}
+                    <Group
+                        justify="space-between"
+                        align="center"
+                        className={classes.sidebarHeader}
+                        visibleFrom="sm"
                     >
-                        <Stack gap="lg">
-                            <Box>
-                                <Title order={6} fw={600} mb="xs">
-                                    Your settings
-                                </Title>
-                                <RouterNavLink
-                                    exact
-                                    to="/generalSettings/profile"
-                                    label="Profile"
-                                    leftSection={
-                                        <MantineIcon icon={IconUserCircle} />
+                        <PageBreadcrumbs
+                            items={[{ title: 'Settings', active: true }]}
+                        />
+                        <Tooltip
+                            label={
+                                isSidebarCollapsed
+                                    ? 'Pin sidebar'
+                                    : 'Unpin sidebar'
+                            }
+                        >
+                            <ActionIcon
+                                size="lg"
+                                onClick={() =>
+                                    setIsSidebarCollapsed(!isSidebarCollapsed)
+                                }
+                                aria-label={
+                                    isSidebarCollapsed
+                                        ? 'Pin sidebar'
+                                        : 'Unpin sidebar'
+                                }
+                            >
+                                <MantineIcon
+                                    icon={
+                                        isSidebarCollapsed
+                                            ? IconLayoutSidebarLeftExpand
+                                            : IconLayoutSidebarLeftCollapse
                                     }
                                 />
-                                {allowPasswordAuthentication && (
-                                    <RouterNavLink
-                                        label={
-                                            hasSocialLogin
-                                                ? 'Password & Social Logins'
-                                                : 'Password'
-                                        }
-                                        exact
-                                        to="/generalSettings/password"
-                                        leftSection={
-                                            <MantineIcon icon={IconLock} />
-                                        }
-                                    />
-                                )}
-                                <RouterNavLink
-                                    label="My warehouse connections"
-                                    exact
-                                    to="/generalSettings/myWarehouseConnections"
-                                    leftSection={
-                                        <MantineIcon icon={IconDatabaseCog} />
-                                    }
-                                />
-                                {/*A user might not be able to create scheduled
-                                permissions on the org level but on a specific
-                                project level. The check here makes sure that
-                                the user has the ability to create a scheduled
-                                delivery at least somewhere. Since the
-                                service returns specifically the user's
-                                scheduled deliveries, this is completely
-                                intended behavior.*/}
-                                {user.ability.can(
-                                    'create',
-                                    'ScheduledDeliveries',
-                                ) && (
-                                    <RouterNavLink
-                                        label="My scheduled deliveries"
-                                        exact
-                                        to="/generalSettings/userScheduledDeliveries"
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconCalendarStats}
-                                            />
-                                        }
-                                    />
-                                )}
-                                {dataAppsFlag?.enabled &&
-                                    user.ability.can('create', 'DataApp') && (
-                                        <RouterNavLink
-                                            label="My apps"
-                                            exact
-                                            to="/generalSettings/myApps"
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconAppWindow}
-                                                />
-                                            }
-                                        />
-                                    )}
-                                {user.ability.can(
-                                    'manage',
-                                    'PersonalAccessToken',
-                                ) && (
-                                    <RouterNavLink
-                                        label="Personal access tokens"
-                                        exact
-                                        to="/generalSettings/personalAccessTokens"
-                                        leftSection={
-                                            <MantineIcon icon={IconKey} />
-                                        }
-                                    />
-                                )}
-                            </Box>
-
-                            <Box>
-                                <Title order={6} fw={600} mb="xs">
-                                    Organization settings
-                                </Title>
-
-                                {user.ability.can('manage', 'Organization') && (
-                                    <RouterNavLink
-                                        label="General"
-                                        to="/generalSettings/organization"
-                                        exact
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconBuildingSkyscraper}
-                                            />
-                                        }
-                                    />
-                                )}
-                                {isCustomRolesEnabled && (
-                                    <Can I="manage" a="Organization">
-                                        <RouterNavLink
-                                            label="Custom roles"
-                                            to="/generalSettings/customRoles"
-                                            exact
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconIdBadge2}
-                                                />
-                                            }
-                                        />
-                                    </Can>
-                                )}
-
-                                {user.ability.can(
-                                    'update',
-                                    'OrganizationMemberProfile',
-                                ) && (
-                                    <RouterNavLink
-                                        label={
-                                            isGroupManagementEnabled
-                                                ? 'Users & groups'
-                                                : 'User management'
-                                        }
-                                        to="/generalSettings/userManagement"
-                                        exact
-                                        leftSection={
-                                            <MantineIcon icon={IconUserPlus} />
-                                        }
-                                    />
-                                )}
-                                {user.ability.can(
-                                    'manage',
-                                    subject('Organization', {
-                                        organizationUuid:
-                                            organization.organizationUuid,
-                                    }),
-                                ) && (
-                                    <RouterNavLink
-                                        label={
-                                            isGroupManagementEnabled
-                                                ? 'User & group attributes'
-                                                : 'User attributes'
-                                        }
-                                        to="/generalSettings/userAttributes"
-                                        exact
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconUserShield}
-                                            />
-                                        }
-                                    />
-                                )}
-
-                                {user.ability.can('update', 'Organization') && (
-                                    <RouterNavLink
-                                        label="Appearance"
-                                        exact
-                                        to="/generalSettings/appearance"
-                                        leftSection={
-                                            <MantineIcon icon={IconPalette} />
-                                        }
-                                    />
-                                )}
-
-                                {dataAppsFlag?.enabled &&
-                                    user.ability.can(
-                                        'view',
-                                        'OrganizationDesign',
-                                    ) && (
-                                        <RouterNavLink
-                                            label="Themes"
-                                            exact
-                                            to="/generalSettings/themes"
-                                            leftSection={
-                                                <MantineIcon icon={IconBrush} />
-                                            }
-                                        />
-                                    )}
-
-                                {user.ability.can('manage', 'Organization') && (
-                                    <RouterNavLink
-                                        label="Integrations"
-                                        exact
-                                        to="/generalSettings/integrations"
-                                        leftSection={
-                                            <MantineIcon icon={IconPlug} />
-                                        }
-                                    />
-                                )}
-
-                                {user.ability.can('manage', 'Organization') && (
-                                    <RouterNavLink
-                                        label="OAuth applications"
-                                        exact
-                                        to="/generalSettings/oauthClients"
-                                        leftSection={
-                                            <MantineIcon icon={IconApps} />
-                                        }
-                                    />
-                                )}
-
-                                {user.ability.can('manage', 'Organization') &&
-                                    isSsoOrganizationSettingsEnabled && (
-                                        <RouterNavLink
-                                            label="Single Sign-On"
-                                            exact
-                                            to="/generalSettings/sso"
-                                            leftSection={
-                                                <MantineIcon icon={IconLock} />
-                                            }
-                                        />
-                                    )}
-
-                                {user.ability.can(
-                                    'manage',
-                                    subject(
-                                        'OrganizationWarehouseCredentials',
-                                        {
-                                            organizationUuid:
-                                                organization?.organizationUuid,
-                                        },
-                                    ),
-                                ) &&
-                                    isWarehouseCredentialsEnabled && (
-                                        <RouterNavLink
-                                            label="Warehouse credentials"
-                                            exact
-                                            to="/generalSettings/warehouseCredentials"
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconDatabaseCog}
-                                                />
-                                            }
-                                        />
-                                    )}
-
-                                {organization &&
-                                    !organization.needsProject &&
-                                    user.ability.can('view', 'Project') && (
-                                        <RouterNavLink
-                                            label="All projects"
-                                            to="/generalSettings/projectManagement"
-                                            exact
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconDatabase}
-                                                />
-                                            }
-                                        />
-                                    )}
-
-                                {user.ability.can('manage', 'Organization') &&
-                                    isScimTokenManagementEnabled?.enabled && (
-                                        <RouterNavLink
-                                            label="SCIM Access Tokens"
-                                            exact
-                                            to="/generalSettings/scimAccessTokens"
-                                            leftSection={
-                                                <MantineIcon icon={IconKey} />
-                                            }
-                                        />
-                                    )}
-                                {user.ability.can('manage', 'Organization') &&
-                                    isServiceAccountsEnabled && (
-                                        <RouterNavLink
-                                            label="Service Accounts"
-                                            exact
-                                            to="/generalSettings/serviceAccounts"
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconUserCode}
-                                                />
-                                            }
-                                        />
-                                    )}
-                                {isAiCopilotEnabledOrTrial &&
-                                    user.ability.can(
-                                        'manage',
-                                        subject('AiAgent', {
-                                            organizationUuid:
-                                                organization.organizationUuid,
-                                        }),
-                                    ) && (
-                                        <RouterNavLink
-                                            label="AI Agents"
-                                            exact
-                                            to="/ai-agents/admin"
-                                            leftSection={
-                                                <MantineIcon icon={IconBrain} />
-                                            }
-                                        />
-                                    )}
-                            </Box>
-
-                            {organization &&
-                            !organization.needsProject &&
-                            project &&
-                            user.ability.can(
-                                'update',
-                                subject('Project', {
-                                    organizationUuid:
-                                        organization.organizationUuid,
-                                    projectUuid: project.projectUuid,
-                                }),
-                            ) ? (
-                                <Box>
-                                    <Title order={6} fw={600} mb="xs">
-                                        Current project ({project?.name})
-                                    </Title>
-
-                                    <RouterNavLink
-                                        label="Connection settings"
-                                        exact
-                                        to={`/generalSettings/projectManagement/${project.projectUuid}/settings`}
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconDatabaseCog}
-                                            />
-                                        }
-                                    />
-
-                                    <RouterNavLink
-                                        label="Tables configuration"
-                                        exact
-                                        to={`/generalSettings/projectManagement/${project.projectUuid}/tablesConfiguration`}
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconTableOptions}
-                                            />
-                                        }
-                                    />
-
-                                    <RouterNavLink
-                                        label="Changesets"
-                                        exact
-                                        to={`/generalSettings/projectManagement/${project.projectUuid}/changesets`}
-                                        leftSection={
-                                            <MantineIcon icon={IconHistory} />
-                                        }
-                                    />
-
-                                    <RouterNavLink
-                                        label="Compilation history"
-                                        exact
-                                        to={`/generalSettings/projectManagement/${project.projectUuid}/compilationHistory`}
-                                        leftSection={
-                                            <MantineIcon icon={IconRefresh} />
-                                        }
-                                    />
-
-                                    {/* TODO: Consider adding a setting to disable pre-aggregate materializations on preview projects,
-                                        or turn them off by default. Currently materializations still run on previews,
-                                        which can be resource-intensive. Admins/developers should be able to control this. */}
-                                    {health.preAggregates.enabled && (
-                                        <RouterNavLink
-                                            label="Pre-aggregates"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/preAggregates`}
-                                            leftSection={
-                                                <MantineIcon icon={IconBolt} />
-                                            }
-                                            defaultOpened={location.pathname.includes(
-                                                `/projectManagement/${project.projectUuid}/preAggregates`,
-                                            )}
-                                        >
-                                            <RouterNavLink
-                                                label="Materializations"
-                                                exact
-                                                to={`/generalSettings/projectManagement/${project.projectUuid}/preAggregates/materializations`}
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={IconDatabase}
-                                                    />
-                                                }
-                                            />
-                                            <RouterNavLink
-                                                label="Analytics"
-                                                exact
-                                                to={`/generalSettings/projectManagement/${project.projectUuid}/preAggregates/audit`}
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={
-                                                            IconReportAnalytics
-                                                        }
-                                                    />
-                                                }
-                                            />
-                                        </RouterNavLink>
-                                    )}
-
-                                    <RouterNavLink
-                                        label="Parameters"
-                                        exact
-                                        to={`/generalSettings/projectManagement/${project.projectUuid}/parameters`}
-                                        leftSection={
-                                            <MantineIcon icon={IconVariable} />
-                                        }
-                                    />
-
-                                    <Can
-                                        I="update"
-                                        this={subject('Project', {
-                                            organizationUuid:
-                                                organization.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        })}
-                                    >
-                                        <RouterNavLink
-                                            label="Project time zone"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/queryTimezone`}
-                                            leftSection={
-                                                <MantineIcon icon={IconClock} />
-                                            }
-                                        />
-                                    </Can>
-
-                                    <Can
-                                        I="update"
-                                        this={subject('Project', {
-                                            organizationUuid:
-                                                organization.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        })}
-                                    >
-                                        <RouterNavLink
-                                            label="Appearance"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/appearance`}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconPalette}
-                                                />
-                                            }
-                                        />
-                                    </Can>
-
-                                    <Can
-                                        I="manage"
-                                        this={subject('Project', {
-                                            organizationUuid:
-                                                organization.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        })}
-                                    >
-                                        <RouterNavLink
-                                            label="Project access"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/projectAccess`}
-                                            leftSection={
-                                                <MantineIcon icon={IconUsers} />
-                                            }
-                                        />
-                                        <RouterNavLink
-                                            label="Default user spaces"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/defaultUserSpaces`}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconFolders}
-                                                />
-                                            }
-                                        />
-                                    </Can>
-
-                                    {user.ability.can(
-                                        'view',
-                                        subject('Analytics', {
-                                            organizationUuid:
-                                                organization.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        }),
-                                    ) ? (
-                                        <RouterNavLink
-                                            label="Usage analytics"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/usageAnalytics`}
-                                            onClick={() => {
-                                                track({
-                                                    name: EventName.USAGE_ANALYTICS_CLICKED,
-                                                });
-                                            }}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconReportAnalytics}
-                                                />
-                                            }
-                                        />
-                                    ) : null}
-
-                                    <RouterNavLink
-                                        label="Syncs & Scheduled deliveries"
-                                        exact
-                                        to={`/generalSettings/projectManagement/${project.projectUuid}/scheduledDeliveries`}
-                                        leftSection={
-                                            <MantineIcon
-                                                icon={IconCalendarStats}
-                                            />
-                                        }
-                                    />
-
-                                    {user.ability?.can(
-                                        'update',
-                                        subject('Project', {
-                                            organizationUuid:
-                                                project.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        }),
-                                    ) && embeddingEnabled?.enabled ? (
-                                        <RouterNavLink
-                                            label="Embed configuration"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/embed`}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconBrowser}
-                                                />
-                                            }
-                                        />
-                                    ) : null}
-
-                                    {user.ability?.can(
-                                        'manage',
-                                        subject('Validation', {
-                                            organizationUuid:
-                                                project.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        }),
-                                    ) ? (
-                                        <RouterNavLink
-                                            label="Validator"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/validator`}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconChecklist}
-                                                />
-                                            }
-                                        />
-                                    ) : null}
-
-                                    {user.ability?.can(
-                                        'manage',
-                                        subject('ContentVerification', {
-                                            organizationUuid:
-                                                project.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        }),
-                                    ) ? (
-                                        <RouterNavLink
-                                            label="Verified content"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/verifiedContent`}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconShieldCheck}
-                                                />
-                                            }
-                                        />
-                                    ) : null}
-
-                                    {user.ability?.can(
-                                        'promote',
-                                        subject('SavedChart', {
-                                            organizationUuid:
-                                                project.organizationUuid,
-                                            projectUuid: project.projectUuid,
-                                        }),
-                                    ) ? (
-                                        <RouterNavLink
-                                            label="Data ops"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/dataOps`}
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconDatabaseExport}
-                                                />
-                                            }
-                                        />
-                                    ) : null}
-
-                                    {health?.softDelete?.enabled && (
-                                        <RouterNavLink
-                                            label="Recently deleted"
-                                            exact
-                                            to={`/generalSettings/projectManagement/${project.projectUuid}/recentlyDeleted`}
-                                            leftSection={
-                                                <MantineIcon icon={IconTrash} />
-                                            }
-                                        />
-                                    )}
-                                </Box>
-                            ) : null}
-                        </Stack>
+                            </ActionIcon>
+                        </Tooltip>
+                    </Group>
+                    <SettingsSearchInput value={search} onChange={setSearch} />
+                    <ScrollArea
+                        type="scroll"
+                        scrollbarSize={8}
+                        scrollHideDelay={800}
+                        classNames={{
+                            root: classes.sidebarScroll,
+                            viewport: classes.sidebarScrollViewport,
+                        }}
+                    >
+                        {filteredSections.length > 0 ? (
+                            <SettingsNavigation
+                                sections={filteredSections}
+                                searchQuery={debouncedSearch}
+                            />
+                        ) : (
+                            <Stack gap="xs" align="center" py="xl" px="md">
+                                <Text fz="sm" c="dimmed" ta="center">
+                                    No settings match “{debouncedSearch.trim()}”
+                                </Text>
+                                <Anchor
+                                    component="button"
+                                    type="button"
+                                    fz="xs"
+                                    onClick={() => setSearch('')}
+                                >
+                                    Clear search
+                                </Anchor>
+                            </Stack>
+                        )}
                     </ScrollArea>
                 </Stack>
             }

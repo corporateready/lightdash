@@ -11,8 +11,10 @@ import {
     IconAppWindow,
     IconBrowser,
     IconFolder,
+    IconFileText,
     IconLayoutDashboard,
     IconLayoutNavbarInactive,
+    IconSettings,
     IconTable,
 } from '@tabler/icons-react';
 import { getChartIcon } from '../../../components/common/ResourceIcon/utils';
@@ -21,6 +23,7 @@ import { type SearchResultMap } from '../types/searchResultMap';
 
 export const getOmnibarItemColor = (itemType: SearchItemType) => {
     switch (itemType) {
+        case SearchItemType.DOCUMENT:
         case SearchItemType.FIELD:
             return 'ldGray.7';
         case SearchItemType.DASHBOARD_TAB:
@@ -38,6 +41,8 @@ export const getOmnibarItemColor = (itemType: SearchItemType) => {
             return 'blue.7';
         case SearchItemType.DATA_APP:
             return 'orange.6';
+        case SearchItemType.SETTINGS:
+            return 'ldGray.7';
         default:
             return assertUnreachable(
                 itemType,
@@ -47,6 +52,9 @@ export const getOmnibarItemColor = (itemType: SearchItemType) => {
 };
 
 export const getOmnibarItemIcon = (item: SearchItem) => {
+    if (item.icon) {
+        return item.icon;
+    }
     switch (item.type) {
         case SearchItemType.FIELD:
             if (item.typeLabel?.toLowerCase() === 'dimension') {
@@ -54,6 +62,8 @@ export const getOmnibarItemIcon = (item: SearchItem) => {
             } else {
                 return Icon123;
             }
+        case SearchItemType.DOCUMENT:
+            return IconFileText;
         case SearchItemType.DASHBOARD:
             return IconLayoutDashboard;
         case SearchItemType.CHART:
@@ -72,6 +82,8 @@ export const getOmnibarItemIcon = (item: SearchItem) => {
             return IconLayoutNavbarInactive;
         case SearchItemType.DATA_APP:
             return IconAppWindow;
+        case SearchItemType.SETTINGS:
+            return IconSettings;
         default:
             return assertUnreachable(
                 item.type,
@@ -79,6 +91,19 @@ export const getOmnibarItemIcon = (item: SearchItem) => {
             );
     }
 };
+
+export const itemHasValidationError = (searchItem: SearchItem) =>
+    searchItem.item &&
+    ['dashboard', 'saved_chart', 'table'].includes(searchItem.type) &&
+    'validationErrors' in searchItem.item &&
+    searchItem.item.validationErrors?.length > 0;
+
+export const itemHasVerification = (searchItem: SearchItem) =>
+    Boolean(searchItem.recentContent?.verification) ||
+    (searchItem.item &&
+        'verification' in searchItem.item &&
+        searchItem.item.verification !== null &&
+        searchItem.item.verification !== undefined);
 
 export const getSearchResultsGroupsSorted = (results: SearchResultMap) =>
     Object.entries(results)

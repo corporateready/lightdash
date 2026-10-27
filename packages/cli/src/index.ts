@@ -6,8 +6,10 @@ import {
     RenameType,
     ValidationTarget,
 } from '@lightdash/common';
-import { InvalidArgumentError, Option, program } from 'commander';
-import { validate } from 'uuid';
+import { InvalidArgumentError, Option, program, type Command } from 'commander';
+import { registerAgentConnectionConnect } from './agentConnectionConnectOption';
+import { registerAgentConnectionOption } from './agentConnectionOption';
+import { getAgentConnectionSelection } from './credentials';
 import {
     DEFAULT_DBT_PROFILES_DIR as defaultProfilesDir,
     DEFAULT_DBT_PROJECT_DIR as defaultProjectDir,
@@ -16,7 +18,17 @@ import {
 } from './env';
 import { getDiagnosticsHint } from './error';
 import GlobalState from './globalState';
+import { agentConnectHandler } from './handlers/agentConnect';
+import { agentStatusHandler } from './handlers/agentStatus';
+import { appsBuildHandler } from './handlers/apps/build';
+import { createAppHandler } from './handlers/apps/createApp';
+import { appsPreviewHandler } from './handlers/apps/preview';
+import {
+    appsValidateHandler,
+    type AppsValidateFormat,
+} from './handlers/apps/validate';
 import { compileHandler } from './handlers/compile';
+import { connectSnowflakeHandler } from './handlers/connectSnowflake';
 import { refreshHandler } from './handlers/dbt/refresh';
 import { dbtRunHandler } from './handlers/dbt/run';
 import { deployHandler } from './handlers/deploy';
@@ -34,17 +46,24 @@ import { lintHandler } from './handlers/lint';
 import { listProjectsHandler } from './handlers/listProjects';
 import { login } from './handlers/login';
 import { preAggregateAuditHandler } from './handlers/preAggregateAudit';
+import { preAggregateCheckExternalHandler } from './handlers/preAggregateCheckExternal';
 import {
     previewHandler,
     startPreviewHandler,
     stopPreviewHandler,
 } from './handlers/preview';
 import { renameHandler } from './handlers/renameHandler';
+import { renameProjectHandler } from './handlers/renameProject';
 import { runChartHandler } from './handlers/runChart';
 import { setProjectHandler, unsetProjectHandler } from './handlers/setProject';
 import { setWarehouseHandler } from './handlers/setWarehouse';
+import { slugUpdateHandler } from './handlers/slugUpdate';
+import { setSourceHandler } from './handlers/sourceSelection';
 import { sqlHandler } from './handlers/sql';
-import { validateHandler } from './handlers/validate';
+import { registerUpgradeCheckCommand } from './handlers/upgradeCheck';
+import { validateHandler, VALIDATION_SEVERITIES } from './handlers/validate';
+import { warehouseCatalogHandler } from './handlers/warehouseCatalog';
+import { parseRefsArgument } from './refsArgument';
 import * as styles from './styles';
 // Trigger CLI tests
 // Suppress AWS SDK V2 warning, imported by snowflake SDK
@@ -56,6 +75,14 @@ function parseIntArgument(value: string) {
         throw new InvalidArgumentError('Not a number.');
     }
     return parsedValue;
+}
+
+function parseOAuthPortArgument(value: string): number {
+    const port = parseInt(value, 10);
+    if (Number.isNaN(port) || port < 1 || port > 65535) {
+        throw new Error('Port must be a number between 1 and 65535');
+    }
+    return port;
 }
 
 function parseStartOfWeekArgument(value: string) {
@@ -84,19 +111,26 @@ function parseDisableTimestampConversionOption(
     return value.toLowerCase() === 'true';
 }
 
+const validateWarehouseColumnsDescription = `Check physical \${TABLE}.column references in dimensions and metrics by executing zero-row queries against the warehouse. Requires warehouse credentials.`;
+
 function parseProjectArgument(value: string | undefined): string | undefined {
     if (value === undefined) {
         throw new InvalidArgumentError('No project argument provided.');
     }
 
-    const isValidUuid = validate(value);
-
-    if (!isValidUuid) {
-        throw new InvalidArgumentError('Not a valid project UUID.');
+    if (value.trim() === '') {
+        throw new InvalidArgumentError('Not a valid project UUID or slug.');
     }
 
     return value;
 }
+
+let agentConnectionJson = false;
+let agentConnectionConnectInvocation = false;
+registerAgentConnectionOption(program, () => {
+    agentConnectionJson = false;
+    agentConnectionConnectInvocation = false;
+});
 
 program
     .version(getVersionWithSkills())
@@ -108,10 +142,22 @@ program
         '--non-interactive',
         'Disable all interactive prompts. Commands fail with helpful error if required input is missing.',
     )
-    .hook('preAction', (thisCommand) => {
+    .hook('preAction', (thisCommand, actionCommand) => {
         const opts = thisCommand.opts();
         if (opts.nonInteractive) {
             GlobalState.setNonInteractive(true);
+        }
+        if (
+            ['deploy', 'preview', 'start-preview'].includes(
+                actionCommand.name(),
+            ) &&
+            actionCommand.getOptionValueSource('source') === 'cli'
+        ) {
+            console.error(
+                styles.warning(
+                    "--source is deprecated and will be ignored in a future release. Lightdash now works out which dbt source a deploy belongs to from your dbt project. You only need it if the deploy is rejected because the source can't be inferred.",
+                ),
+            );
         }
     })
     .showHelpAfterError(
@@ -174,6 +220,21 @@ ${styles.bold('Examples:')}
 `,
     );
 
+registerUpgradeCheckCommand(program);
+
+program
+    .command('connect-snowflake')
+    .description('Connects Lightdash to Snowflake using browser-based SSO')
+    .requiredOption('--code <one-time-code>', 'One-time Lightdash connect code')
+    .requiredOption('--url <lightdash-url>', 'Lightdash instance URL')
+    .requiredOption('--account <account>', 'Snowflake account identifier')
+    .option('--user <username>', 'Snowflake username override')
+    .option('--database <database>', 'Snowflake database override')
+    .option('--warehouse <warehouse>', 'Snowflake warehouse override')
+    .option('--role <role>', 'Snowflake role override')
+    .option('--schema <schema>', 'Snowflake schema override')
+    .action((options) => connectSnowflakeHandler(options));
+
 // LOGIN
 program
     .command('login [url]')
@@ -224,8 +285,8 @@ ${styles.bold('Examples:')}
     .option('--token <token>', 'Login with an API access token', undefined)
     .addOption(
         new Option(
-            '--project <project uuid>',
-            'Select a project by UUID after login',
+            '--project <project uuid or slug>',
+            'Select a project by UUID or slug after login',
         )
             .argParser(parseProjectArgument)
             .conflicts('skipProjectSelection'),
@@ -234,17 +295,115 @@ ${styles.bold('Examples:')}
     .option(
         '--oauth-port <port>',
         'Port for the local OAuth callback server (default: random available port)',
-        (value: string) => {
-            const port = parseInt(value, 10);
-            if (Number.isNaN(port) || port < 1 || port > 65535) {
-                throw new Error('Port must be a number between 1 and 65535');
-            }
-            return port;
-        },
+        parseOAuthPortArgument,
         undefined,
     )
     .option('--verbose', undefined, false)
     .action(login);
+
+const agentProgram = program
+    .command('agent')
+    .description('Connect your agent to the warehouse and check its status');
+
+agentProgram.hook('preAction', (_root, command) => {
+    agentConnectionConnectInvocation =
+        command.name() === 'connect' &&
+        (command.opts().name !== undefined ||
+            command.opts().capabilities !== undefined ||
+            command.opts().expiresIn !== undefined ||
+            command.opts().connection === true);
+    agentConnectionJson =
+        command.opts().json === true &&
+        (command.name() === 'revoke' ||
+            (command.name() === 'status' &&
+                (command.opts().name !== undefined ||
+                    getAgentConnectionSelection() !== null)));
+});
+
+const agentConnectProgram = agentProgram
+    .command('connect')
+    .description('Connects your agent to the warehouse using browser sign-in')
+    .option(
+        '--project <project uuid or slug>',
+        'Specify the project',
+        parseProjectArgument,
+    )
+    .option(
+        '--oauth-port <port>',
+        'Port for the local callback server (default: LIGHTDASH_OAUTH_PORT or a random available port)',
+        parseOAuthPortArgument,
+    )
+    .option(
+        '--timeout <seconds>',
+        'Seconds the connect link stays valid while the CLI waits for approval',
+        Number,
+        180,
+    )
+    .option('--verbose', undefined, false)
+    .addHelpText(
+        'after',
+        `
+${styles.bold('Examples:')}
+  lightdash agent connect
+  lightdash agent connect --project my-project --oauth-port 4321 --timeout 180
+`,
+    )
+    .action(agentConnectHandler);
+registerAgentConnectionConnect(agentConnectProgram, agentConnectHandler);
+
+agentProgram
+    .command('status')
+    .addOption(
+        new Option(
+            '--name <slot>',
+            'Select an agent connection slot',
+        ).hideHelp(),
+    )
+    .addOption(
+        new Option('--json', 'Output connection status as JSON').hideHelp(),
+    )
+    .description('Shows your agent sign-in status for a project')
+    .option(
+        '--project <project uuid or slug>',
+        'Specify the project',
+        parseProjectArgument,
+    )
+    .option('--verbose', undefined, false)
+    .addHelpText(
+        'after',
+        `
+${styles.bold('Examples:')}
+  lightdash agent status
+  lightdash agent status --project my-project
+`,
+    )
+    .action(agentStatusHandler);
+
+agentProgram
+    .command('revoke', { hidden: true })
+    .addOption(
+        new Option('--name <slot>', 'Select an agent connection slot')
+            .makeOptionMandatory()
+            .hideHelp(),
+    )
+    .addOption(
+        new Option('--json', 'Output revocation status as JSON').hideHelp(),
+    )
+    .addOption(
+        new Option(
+            '--human',
+            'Revoke with a matching personal CLI login',
+        ).hideHelp(),
+    )
+    .action(
+        async (
+            options: import('./handlers/agentRevoke').AgentRevokeOptions,
+        ) => {
+            const { agentRevokeHandler } =
+                await import('./handlers/agentRevoke');
+            await agentRevokeHandler(options);
+        },
+    );
 
 // CONFIG
 const configProgram = program
@@ -270,6 +429,13 @@ configProgram
     )
     .action(setProjectHandler);
 configProgram
+    .command('set-source <name>')
+    .description(
+        'Choose the dbt source that deploys to the active project use, by name.',
+    )
+    .option('--verbose', undefined, false)
+    .action(setSourceHandler);
+configProgram
     .command('list-projects')
     .description(
         'List all projects in the organization (excludes preview projects)',
@@ -281,6 +447,12 @@ configProgram
     .description('Show the currently selected project')
     .option('--verbose', undefined, false)
     .action(getProjectHandler);
+configProgram
+    .command('rename-project')
+    .description('Rename the currently selected project')
+    .requiredOption('--name <name>', 'New project name')
+    .option('--verbose', undefined, false)
+    .action(renameProjectHandler);
 configProgram
     .command('unset-project')
     .description('Clear the currently selected project')
@@ -446,13 +618,25 @@ program
         '--disable-timestamp-conversion [true|false]',
         'Disable timestamp conversion to UTC for Snowflake warehouses. Only use this if your timestamp values are already in UTC.',
         parseDisableTimestampConversionOption,
+    )
+    .option(
+        '--validate-warehouse-columns',
+        validateWarehouseColumnsDescription,
         false,
+    )
+    .option(
+        '--no-partial-compilation',
+        'Fail when a field or join cannot be compiled instead of returning a partial explore',
     )
     .action(compileHandler);
 
 program
     .command('preview')
     .description('Creates a new preview project - waits for a keypress to stop')
+    .option(
+        '--source <name>',
+        '(deprecated) The dbt source to deploy, by name. Its explores use the warehouse connection of that source. Overrides `lightdash config set-source`',
+    )
     .option(
         '--name <preview name>',
         'Custom name for the preview. If a name is not provided, a unique, randomly generated name will be created.',
@@ -532,8 +716,12 @@ program
     )
     .option('--ignore-errors', 'Allows deploy with errors on compile', false)
     .option(
-        '--combine-manifest <path>',
-        'Path to an additional dbt manifest.json. Models present in this file but missing from the preview manifest are merged in so the preview shows the full project. The preview-generated manifest always wins on conflicts.',
+        '--combine-manifest <path-or-url>',
+        'Path or http(s) URL to an additional dbt manifest.json. Models present in this file but missing from the preview manifest are merged in so the preview shows the full project. The preview-generated manifest always wins on conflicts.',
+    )
+    .option(
+        '--no-combine',
+        'Skip combining the preview manifest with the manifest served by Lightdash',
     )
     .option(
         '--table-configuration <prod|all>',
@@ -546,10 +734,14 @@ program
         false,
     )
     .option(
-        '--disable-timestamp-conversion [true|false]',
-        'Disable timestamp conversion to UTC for Snowflake warehouses. Only use this if your timestamp values are already in UTC.',
-        parseDisableTimestampConversionOption,
+        '--async-copy-content',
+        'Copy preview content in a background job to avoid request timeouts',
         false,
+    )
+    .option(
+        '--disable-timestamp-conversion [true|false]',
+        'Disable timestamp conversion to UTC for Snowflake warehouses. Applied when creating the preview project; ignored when updating an existing preview (read from project settings).',
+        parseDisableTimestampConversionOption,
     )
     .option(
         '--no-warehouse-credentials',
@@ -559,10 +751,10 @@ program
         '--organization-credentials <name>',
         'Use organization warehouse credentials with the specified name (Enterprise Edition feature)',
     )
+    .option('--no-batched-deploy', 'Use the legacy single-request deploy')
     .option(
         '--use-batched-deploy',
-        'Use the new batched deploy feature to upload explores in batches',
-        false,
+        'Use batched deploy to upload explores in batches',
     )
     .option(
         '--batch-size <number>',
@@ -578,11 +770,24 @@ program
         '--expires-in <hours>',
         'Number of hours until the preview project auto-expires (default: 720, i.e. 30 days)',
     )
+    .option(
+        '--validate-warehouse-columns',
+        validateWarehouseColumnsDescription,
+        false,
+    )
+    .option(
+        '--no-partial-compilation',
+        'Fail when a field or join cannot be compiled instead of returning a partial explore',
+    )
     .action(previewHandler);
 
 program
     .command('start-preview')
     .description('Creates a new preview project')
+    .option(
+        '--source <name>',
+        '(deprecated) The dbt source to deploy, by name. Its explores use the warehouse connection of that source. Overrides `lightdash config set-source`',
+    )
     .option(
         '--name [preview name]',
         '[required] Name for the preview project. If a preview project with this name already exists, it will be updated, otherwise it will create a new preview project ',
@@ -662,8 +867,12 @@ program
     )
     .option('--ignore-errors', 'Allows deploy with errors on compile', false)
     .option(
-        '--combine-manifest <path>',
-        'Path to an additional dbt manifest.json. Models present in this file but missing from the preview manifest are merged in so the preview shows the full project. The preview-generated manifest always wins on conflicts.',
+        '--combine-manifest <path-or-url>',
+        'Path or http(s) URL to an additional dbt manifest.json. Models present in this file but missing from the preview manifest are merged in so the preview shows the full project. The preview-generated manifest always wins on conflicts.',
+    )
+    .option(
+        '--no-combine',
+        'Skip combining the preview manifest with the manifest served by Lightdash',
     )
     .option(
         '--table-configuration <prod|all>',
@@ -676,20 +885,24 @@ program
         false,
     )
     .option(
-        '--disable-timestamp-conversion [true|false]',
-        'Disable timestamp conversion to UTC for Snowflake warehouses. Only use this if your timestamp values are already in UTC.',
-        parseDisableTimestampConversionOption,
+        '--async-copy-content',
+        'Copy preview content in a background job to avoid request timeouts',
         false,
+    )
+    .option(
+        '--disable-timestamp-conversion [true|false]',
+        'Disable timestamp conversion to UTC for Snowflake warehouses. Applied when creating the preview project; ignored when updating an existing preview (read from project settings).',
+        parseDisableTimestampConversionOption,
     )
     .option(
         '--no-warehouse-credentials',
-        'Create preview without warehouse credentials. Copies credentials from upstream project.',
+        'Create preview without warehouse credentials (copied from the upstream project). When updating an existing preview, keep the credentials it already has.',
     )
     .option('-y, --assume-yes', 'assume yes to prompts', false)
+    .option('--no-batched-deploy', 'Use the legacy single-request deploy')
     .option(
         '--use-batched-deploy',
-        'Use the new batched deploy feature to upload explores in batches',
-        false,
+        'Use batched deploy to upload explores in batches',
     )
     .option(
         '--batch-size <number>',
@@ -705,6 +918,15 @@ program
         '--expires-in <hours>',
         'Number of hours until the preview project auto-expires (default: 720, i.e. 30 days)',
     )
+    .option(
+        '--validate-warehouse-columns',
+        validateWarehouseColumnsDescription,
+        false,
+    )
+    .option(
+        '--no-partial-compilation',
+        'Fail when a field or join cannot be compiled instead of returning a partial explore',
+    )
     .action(startPreviewHandler);
 
 program
@@ -717,19 +939,149 @@ program
     .option('--verbose', undefined, false)
     .action(stopPreviewHandler);
 
-program
+const ORGANIZATION_MODE_OPTIONS = new Set([
+    'organization',
+    'path',
+    'sendInvites',
+    'verbose',
+    'skills',
+    'deleteSkills',
+]);
+
+const withOrganizationMode =
+    <
+        Options extends {
+            organization: boolean;
+            sendInvites?: boolean;
+        },
+    >(
+        handler: (options: Options) => Promise<void>,
+    ) =>
+    async (options: Options, command: Command): Promise<void> => {
+        if (!options.organization && options.sendInvites) {
+            command.error(
+                `error: option '--send-invites' requires option '--organization'`,
+                { code: 'commander.missingMandatoryOptionValue' },
+            );
+        }
+        if (options.organization) {
+            const conflictingOption = Object.keys(options).find(
+                (optionName) => {
+                    const source = command.getOptionValueSource(optionName);
+                    return (
+                        !ORGANIZATION_MODE_OPTIONS.has(optionName) &&
+                        source !== undefined &&
+                        source !== 'default'
+                    );
+                },
+            );
+            if (conflictingOption) {
+                const conflictingFlag = conflictingOption.replace(
+                    /[A-Z]/g,
+                    (letter) => `-${letter.toLowerCase()}`,
+                );
+                command.error(
+                    `error: option '--organization' cannot be used with option '--${conflictingFlag}'`,
+                    { code: 'commander.conflictingOption' },
+                );
+            }
+        }
+        await handler(options);
+    };
+
+const downloadCommand = program
     .command('download')
-    .description('Downloads charts and dashboards as code')
+    .description('Downloads project or organization content as code')
     .option('--verbose', undefined, false)
     .option(
         '-c, --charts <charts...>',
         'specify chart slugs, uuids, or urls to download',
+        parseRefsArgument,
         [],
     )
     .option(
         '-d, --dashboards <dashboards...>',
         'specify dashboard slugs, uuids or urls to download',
+        parseRefsArgument,
         [],
+    )
+    .option(
+        '--agents <slugs...>',
+        'specify AI agent slugs to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--include-agents',
+        "include all of the project's AI agents (enterprise)",
+        false,
+    )
+    .option(
+        '--skills <names...>',
+        'specify custom agent skill names to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--include-skills',
+        'include the custom skills bound to the downloaded AI agents (enterprise)',
+        false,
+    )
+    .option(
+        '--alerts <slugs...>',
+        'specify alert slugs to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--virtual-views <slugs...>',
+        'specify virtual view slugs to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--google-sheets <slugs...>',
+        'specify Google Sheets sync slugs to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--scheduled-deliveries <slugs...>',
+        'specify scheduled delivery slugs to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--homepages <names...>',
+        'specify exact homepage names to download',
+        [],
+    )
+    .option(
+        '--include-homepages',
+        'include all published homepages (enterprise)',
+        false,
+    )
+    .option(
+        '--external-connections <slugs...>',
+        'specify external connection slugs to download (enterprise)',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--include-external-connections',
+        "include all of the project's data-app external connections (enterprise)",
+        false,
+    )
+    .option(
+        '--documents <slugs...>',
+        'specify document slugs to download',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--include-documents',
+        'include all documents you can view in the download',
+        false,
     )
     .option(
         '-l, --language-map',
@@ -738,7 +1090,7 @@ program
     )
     .option(
         '-p, --path <path>',
-        'specify a custom path to download charts and dashboards',
+        'specify a custom path to download content',
         undefined,
     )
     .option(
@@ -747,45 +1099,196 @@ program
         false,
     )
     .option(
-        '--project <project uuid>',
-        'specify a project UUID to download',
+        '--root-spaces',
+        'write new flat space definitions at the content root instead of spaces/ (legacy layout)',
+        false,
+    )
+    .option(
+        '--project <project uuid or slug>',
+        'specify a project (UUID or slug) to download from',
         parseProjectArgument,
         undefined,
     )
     .option(
         '--skip-spaces',
-        'skip writing space metadata files during download',
+        'skip downloading space definitions and access',
         false,
     )
-    .action(downloadHandler);
+    .option(
+        '--spaces-only',
+        'download only space definitions and access',
+        false,
+    )
+    .option('--skip-charts', 'skip downloading charts', false)
+    .option('--skip-dashboards', 'skip downloading dashboards', false)
+    .option('--include-alerts', 'include all alerts in the download', false)
+    .option(
+        '--include-virtual-views',
+        'include all virtual views in the download',
+        false,
+    )
+    .option(
+        '--include-google-sheets',
+        'include all Google Sheets syncs in the download',
+        false,
+    )
+    .option(
+        '--include-scheduled-deliveries',
+        'include all scheduled deliveries in the download',
+        false,
+    )
+    .option(
+        '--include-all',
+        'include all optional content in the download',
+        false,
+    )
+    .option(
+        '--strip-pivot-series',
+        'strip per-value pivot series config from chart YAML for portable downloads',
+        false,
+    )
+    .option(
+        '--apps <appReferences...>',
+        'Download only the specified data apps, by slug, app URL, or UUID (enterprise). Works for apps not added to a space.',
+        parseRefsArgument,
+    )
+    .option(
+        '--include-apps',
+        "Include all of the project's data apps (enterprise), capped at --apps-limit (default: 50)",
+        false,
+    )
+    .option(
+        '--apps-limit <number>',
+        'Maximum number of data apps downloaded by --include-apps or --include-all (default: 50)',
+        undefined,
+    )
+    .option(
+        '--apps-only',
+        "Download only data apps (implies --skip-charts --skip-dashboards --skip-spaces). Bare --apps-only downloads all the project's apps; pass --apps <appReferences...> to select.",
+        false,
+    )
+    .option(
+        '--chart-types <chartTypeReferences...>',
+        'Download only the specified custom chart types, by slug, URL, or UUID (enterprise).',
+        parseRefsArgument,
+    )
+    .option(
+        '--include-chart-types',
+        "Include all of the project's custom chart types (enterprise), capped at --chart-types-limit (default: 50)",
+        false,
+    )
+    .option(
+        '--chart-types-limit <number>',
+        'Maximum number of custom chart types downloaded by --include-chart-types or --include-all (default: 50)',
+        undefined,
+    )
+    .option(
+        '--chart-types-only',
+        "Download only custom chart types (implies --skip-charts --skip-dashboards --skip-spaces). Bare --chart-types-only downloads all the project's chart types; pass --chart-types <chartTypeReferences...> to select.",
+        false,
+    )
+    .option(
+        '--organization',
+        'download all organization-scoped resources, including Data App themes, without selecting a project',
+        false,
+    );
 
-program
+downloadCommand.action(withOrganizationMode(downloadHandler));
+
+const uploadCommand = program
     .command('upload')
-    .description('Uploads charts and dashboards as code')
+    .description('Uploads project or organization content as code')
     .option('--verbose', undefined, false)
     .option(
         '-c, --charts <charts...>',
         'specify chart slugs to force upload',
+        parseRefsArgument,
         [],
     )
     .option(
         '-d, --dashboards <dashboards...>',
         'specify dashboard slugs to force upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--agents <slugs...>',
+        'specify AI agent slugs to upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--skills <names...>',
+        'specify custom agent skill names to upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--delete-skills <names...>',
+        'unbind these custom agent skills from every agent and delete them',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--alerts <slugs...>',
+        'specify alert slugs to upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--virtual-views <slugs...>',
+        'specify virtual view slugs to upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--google-sheets <slugs...>',
+        'specify Google Sheets sync slugs to upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--scheduled-deliveries <slugs...>',
+        'specify scheduled delivery slugs to upload',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--homepages <names...>',
+        'specify exact homepage names to upload',
+        [],
+    )
+    .option('--skip-homepages', 'skip uploading homepages', false)
+    .option(
+        '--publish',
+        'publish uploaded homepages and apply their audience assignments',
+        false,
+    )
+    .option(
+        '--external-connections <slugs...>',
+        'specify external connection slugs to upload (enterprise)',
+        parseRefsArgument,
+        [],
+    )
+    .option(
+        '--documents <slugs...>',
+        'specify document slugs to upload',
+        parseRefsArgument,
         [],
     )
     .option(
         '--force',
-        'Force upload even if local files have not changed, use this when you want to upload files to a new project',
+        'Force upload unchanged files and allow destructive virtual-view column changes',
         false,
     )
     .option(
         '-p, --path <path>',
-        'specify a custom path to upload charts and dashboards from',
+        'specify a custom path to upload content from',
         undefined,
     )
     .option(
-        '--project <project uuid>',
-        'specify a project UUID to upload',
+        '--project <project uuid or slug>',
+        'specify a project (UUID or slug) to upload to',
         parseProjectArgument,
         undefined,
     )
@@ -794,7 +1297,38 @@ program
         'Skip space creation if it does not exist',
         false,
     )
+    .option(
+        '--skip-space-access',
+        'upload spaces without applying their access policies',
+        false,
+    )
+    .option(
+        '--skip-app-access',
+        "upload data apps without applying the access block in their manifest (the app's existing sharing is preserved)",
+        false,
+    )
+    .option(
+        '--skip-spaces',
+        'skip uploading space definitions and access',
+        false,
+    )
+    .option('--spaces-only', 'upload only space definitions and access', false)
     .option('--public', 'Create new spaces as public instead of private', false)
+    .option('--skip-agents', 'skip uploading AI agents', false)
+    .option('--skip-alerts', 'skip uploading alerts', false)
+    .option('--skip-virtual-views', 'skip uploading virtual views', false)
+    .option('--skip-google-sheets', 'skip uploading Google Sheets syncs', false)
+    .option('--skip-documents', 'skip uploading documents', false)
+    .option(
+        '--skip-scheduled-deliveries',
+        'skip uploading scheduled deliveries',
+        false,
+    )
+    .option(
+        '--skip-external-connections',
+        'skip uploading external connections',
+        false,
+    )
     .option(
         '--concurrency <number>',
         'Number of parallel uploads (default: 1)',
@@ -805,16 +1339,179 @@ program
         'Include charts updates when uploading dashboards',
         false,
     )
+    .option(
+        '--include-virtual-views',
+        'Include the virtual views used by the charts and dashboards being uploaded',
+        false,
+    )
     .option('--validate', 'Validate charts and dashboards after upload', false)
     .option('--gzip', 'Enable gzip compression for request bodies', false)
-    .action(uploadHandler);
+    .option(
+        '--apps <appReferences...>',
+        'Upload only the specified data apps, by slug (the app folder name), app URL, or UUID (enterprise). URL and UUID refs are resolved against the target project.',
+        parseRefsArgument,
+    )
+    .option(
+        '--include-apps',
+        'Upload all app folders on disk (enterprise).',
+        false,
+    )
+    .option(
+        '--apps-only',
+        'Upload only data apps, skipping charts, dashboards, and space reconciliation. Bare --apps-only uploads every app folder; pass --apps <appReferences...> to select.',
+        false,
+    )
+    .option(
+        '--chart-types <chartTypeReferences...>',
+        'Upload only the specified custom chart types, by slug (the chart type folder name), URL, or UUID (enterprise). URL and UUID refs are resolved against the target project.',
+        parseRefsArgument,
+    )
+    .option(
+        '--include-chart-types',
+        'Upload all chart type folders on disk (enterprise).',
+        false,
+    )
+    .option(
+        '--chart-types-only',
+        'Upload only custom chart types, skipping charts, dashboards, and space reconciliation. Bare --chart-types-only uploads every chart type folder; pass --chart-types <chartTypeReferences...> to select.',
+        false,
+    )
+    .option(
+        '--allow-custom-dependencies',
+        'Approve uploading apps that declare custom dependencies without prompting. Required for non-interactive runs of such uploads.',
+        false,
+    )
+    .option(
+        '--app-space <spaceRef>',
+        'Space (slug or UUID) for data apps this upload creates. Existing apps keep their space.',
+    )
+    .option(
+        '--create-new',
+        'Always create a new app from the uploaded code instead of updating the app referenced by lightdash-app.yml. The new app gets a fresh slug.',
+        false,
+    )
+    .option(
+        '--organization',
+        'upload all organization-scoped resources, including Data App themes, without selecting a project',
+        false,
+    )
+    .option(
+        '--send-invites',
+        'send invitations to eligible pending users during organization upload',
+        false,
+    );
+
+uploadCommand.action(withOrganizationMode(uploadHandler));
+
+const appsProgram = program
+    .command('apps')
+    .description('Work with data apps (enterprise)');
+appsProgram
+    .command('create <name>')
+    .description('Creates a new data app or custom chart type locally')
+    .option(
+        '--chart-type',
+        'Create a custom chart type (a reusable visualization the explorer chart type picker offers) instead of a data app',
+        false,
+    )
+    .option('--description <text>', 'Set the app description', '')
+    .option('--slug <slug>', 'Override the app slug')
+    .option(
+        '-p, --path <path>',
+        'Specify the Lightdash content root (default: ./lightdash)',
+    )
+    .option(
+        '--project <project uuid or slug>',
+        'Specify the project the app will use',
+        parseProjectArgument,
+        undefined,
+    )
+    .option('-y, --assume-yes', 'approve npm package installation', false)
+    .option('--verbose', undefined, false)
+    .addHelpText(
+        'after',
+        `\n${styles.bold('Examples:')}\n  ${styles.title(
+            '⚡',
+        )}️lightdash ${styles.bold(
+            'apps create "Revenue explorer"',
+        )} ${styles.secondary(
+            '-- creates ./lightdash/apps/revenue-explorer',
+        )}\n  ${styles.title('⚡')}️lightdash ${styles.bold(
+            'apps create "Radial gauge" --chart-type',
+        )} ${styles.secondary(
+            '-- creates a custom chart type at ./lightdash/chart-types/radial-gauge',
+        )}\n`,
+    )
+    .action(createAppHandler);
+appsProgram
+    .command('preview [path]')
+    .description(
+        'Preview a downloaded data app locally against a real Lightdash instance, authenticated as you. Your credential stays in the CLI, behind a local proxy limited to data-app SDK routes.',
+    )
+    .option(
+        '--project <project uuid or slug>',
+        'preview against a specific project by UUID or slug (default: the projectUuid in lightdash-app.yml)',
+    )
+    .option('--url <url>', 'Lightdash server URL (default: your login config)')
+    .option(
+        '--token <token>',
+        'API key / personal access token (default: your login config)',
+    )
+    .option(
+        '-y, --assume-yes',
+        'assume yes to the dependency install prompts when node_modules is missing',
+        false,
+    )
+    .option(
+        '--port <port>',
+        'port for the app dev server (default: Vite picks one, usually 5173)',
+    )
+    .option('--verbose', undefined, false)
+    .action(appsPreviewHandler);
+appsProgram
+    .command('validate [paths...]')
+    .description(
+        'Validate data app and custom chart type source, manifests, dependencies, and semantic-layer references locally.',
+    )
+    .option(
+        '--live',
+        'Validate against fresh explores from each app project instead of its downloaded semantic-layer snapshot.',
+        false,
+    )
+    .option(
+        '--build',
+        'Run the same Vite production build as Lightdash Cloud.',
+        false,
+    )
+    .addOption(
+        new Option('--format <format>', 'Output format: human or json')
+            .choices(['human', 'json'])
+            .default('human' satisfies AppsValidateFormat),
+    )
+    .option('--verbose', undefined, false)
+    .action(appsValidateHandler);
+appsProgram
+    .command('build [path]')
+    .description(
+        'Build a data app or custom chart type with the same Vite production build as Lightdash Cloud, and keep the output.',
+    )
+    .option(
+        '--out-dir <dir>',
+        'Directory to write the built dist output to. Relative paths resolve against the current working directory (default: <path>/dist)',
+    )
+    .option('--verbose', undefined, false)
+    .action(appsBuildHandler);
 
 program
     .command('deploy')
     .description('Compiles and deploys a Lightdash project')
     .option(
-        '--project <project uuid>',
-        'Project UUID to deploy to. Overrides the default project configured via `lightdash config set-project`',
+        '--source <name>',
+        '(deprecated) The dbt source to deploy, by name. Its explores use the warehouse connection of that source. Overrides `lightdash config set-source`',
+    )
+    .option(
+        '--project <project uuid or slug>',
+        'Project UUID or slug to deploy to. Overrides the default project configured via `lightdash config set-project`',
     )
     .option(
         '--project-dir <path>',
@@ -876,8 +1573,8 @@ program
     )
     .option('--ignore-errors', 'Allows deploy with errors on compile', false)
     .option(
-        '--combine-manifest <path>',
-        'Path to an additional dbt manifest.json. Models present in this file but missing from the deploy manifest are merged in so the deploy includes the full project. The deploy-generated manifest always wins on conflicts.',
+        '--combine-manifest <path-or-url>',
+        'Path or http(s) URL to an additional dbt manifest.json. Models present in this file but missing from the deploy manifest are merged in so the deploy includes the full project. The deploy-generated manifest always wins on conflicts.',
     )
     .option(
         '--start-of-week <number>',
@@ -910,15 +1607,14 @@ program
     )
     .option(
         '--disable-timestamp-conversion [true|false]',
-        'Disable timestamp conversion to UTC for Snowflake warehouses. Only use this if your timestamp values are already in UTC.',
+        'Disable timestamp conversion to UTC for Snowflake warehouses. Only used when creating a new project with --create; otherwise the setting is read from the project settings.',
         parseDisableTimestampConversionOption,
-        false,
     )
     .option('-y, --assume-yes', 'assume yes to prompts', false)
+    .option('--no-batched-deploy', 'Use the legacy single-request deploy')
     .option(
         '--use-batched-deploy',
-        'Use batched deploy for large projects (sends explores in batches)',
-        false,
+        'Use batched deploy to upload explores in batches',
     )
     .option(
         '--batch-size <number>',
@@ -931,6 +1627,15 @@ program
         '1',
     )
     .option('--gzip', 'Enable gzip compression for request bodies', false)
+    .option(
+        '--validate-warehouse-columns',
+        validateWarehouseColumnsDescription,
+        false,
+    )
+    .option(
+        '--no-partial-compilation',
+        'Fail when a field or join cannot be compiled instead of returning a partial explore',
+    )
     .action(deployHandler);
 
 program
@@ -950,8 +1655,8 @@ program
     .command('validate')
     .description('Validates a project')
     .option(
-        '--project <project uuid>',
-        'Project UUID to validate, if not provided, the last preview will be used',
+        '--project <project uuid or slug>',
+        'Project UUID or slug to validate, if not provided, the last preview will be used',
     )
     .option('--verbose', undefined, false)
     .option(
@@ -1003,21 +1708,49 @@ program
         parseUseDbtListOption,
         true,
     )
-    .option(
-        '--disable-timestamp-conversion [true|false]',
-        'Disable timestamp conversion to UTC for Snowflake warehouses. Only use this if your timestamp values are already in UTC.',
-        parseDisableTimestampConversionOption,
-        false,
+    .addOption(
+        new Option(
+            '--disable-timestamp-conversion [true|false]',
+            '(deprecated) Ignored: the setting is read from the project settings.',
+        )
+            .argParser(parseDisableTimestampConversionOption)
+            .hideHelp(),
     )
-    .option(
-        '--show-chart-configuration-warnings',
-        'Show chart configuration warnings (e.g., unused dimensions). These are hidden by default.',
-        false,
+    .addOption(
+        new Option(
+            '--severity <level>',
+            'Minimum issue level that fails the command. "error" (default) only fails on errors. "warning" shows chart configuration warnings and treats them as errors.',
+        )
+            .choices([...VALIDATION_SEVERITIES])
+            .default('error'),
+    )
+    .addOption(
+        new Option(
+            '--show-chart-configuration-warnings',
+            '(deprecated) Alias for --severity warning. Shows chart configuration warnings and treats them as errors.',
+        ),
     )
     .addOption(
         new Option('--only <elems...>', 'Specify project elements to validate')
             .choices(Object.values(ValidationTarget))
             .default(Object.values(ValidationTarget)),
+    )
+    .option(
+        '--validate-warehouse-columns',
+        `${validateWarehouseColumnsDescription} Only applies when tables are validated.`,
+        false,
+    )
+    .option(
+        '--include-spaces <spaceSlugs...>',
+        'Only report validation errors for charts, dashboards, and data apps in these spaces (and their sub-spaces). Spaces must be visible to your credentials',
+    )
+    .option(
+        '--exclude-spaces <spaceSlugs...>',
+        'Skip validation errors for charts, dashboards, and data apps in these spaces (and their sub-spaces). Spaces must be visible to your credentials',
+    )
+    .option(
+        '--no-partial-compilation',
+        'Fail when a field or join cannot be compiled instead of returning a partial explore',
     )
     .action(validateHandler);
 
@@ -1109,8 +1842,8 @@ program
     .description('Rename models and fields on Lightdash content')
     .option('--verbose', undefined, false)
     .option(
-        '-p, --project <project uuid>',
-        'specify a project UUID to rename',
+        '-p, --project <project uuid or slug>',
+        'specify a project (UUID or slug) to rename in',
         parseProjectArgument,
         undefined,
     )
@@ -1127,6 +1860,37 @@ program
     .option('--list', 'List all charts and dashboards that are renamed', false)
 
     .action(renameHandler);
+
+program
+    .command('slug-update')
+    .description(
+        'Rename a chart or dashboard slug and update its local references',
+    )
+    .addOption(
+        new Option('--type <resource-type>', 'content type to rename')
+            .choices(['chart', 'dashboard'])
+            .default('chart'),
+    )
+    .option('--verbose', 'show verbose output', false)
+    .option(
+        '--project <project uuid or slug>',
+        'specify a project by UUID or slug',
+        parseProjectArgument,
+        undefined,
+    )
+    .option(
+        '-p, --path <path>',
+        'specify the local content-as-code path to update',
+        undefined,
+    )
+    .option(
+        '--dry-run',
+        'preview the rename and local file changes without making changes',
+        false,
+    )
+    .requiredOption('--from <slug>', 'current content slug')
+    .requiredOption('--to <slug>', 'new content slug')
+    .action(slugUpdateHandler);
 
 program
     .command('generate-exposures')
@@ -1169,6 +1933,11 @@ ${styles.bold('Examples:')}
   )}
   ${styles.title('⚡')}️lightdash ${styles.bold(
       'diagnostics',
+  )} --auth ${styles.secondary(
+      '-- outputs authenticated user and ability rules as JSON',
+  )}
+  ${styles.title('⚡')}️lightdash ${styles.bold(
+      'diagnostics',
   )} --dbt ${styles.secondary('-- includes dbt debug output')}
   ${styles.title('⚡')}️lightdash ${styles.bold(
       'diagnostics',
@@ -1176,6 +1945,11 @@ ${styles.bold('Examples:')}
       '-- runs dbt debug with custom project directory',
   )}
 `,
+    )
+    .option(
+        '--auth',
+        'Output authenticated user and ability rules as JSON',
+        false,
     )
     .option('--dbt', 'Include dbt debug information', false)
     .option(
@@ -1244,6 +2018,41 @@ ${styles.bold('Examples:')}
     .action(lintHandler);
 
 program
+    .command('warehouse-catalog')
+    .description(
+        "Explore the selected project's raw warehouse databases, schemas, tables, and fields",
+    )
+    .option('--database <name>', 'Filter by exact database name')
+    .option('--schema <name>', 'Filter by exact schema name')
+    .option('--table <name>', 'Filter by exact table name')
+    .option(
+        '--include-fields',
+        'Include field names and Lightdash types for one fully qualified table',
+        false,
+    )
+    .option(
+        '--refresh',
+        'Refetch warehouse metadata and refresh the server catalog cache first',
+        false,
+    )
+    .option('--json', 'Emit machine-readable JSON instead of a table', false)
+    .option('--verbose', 'Show detailed output', false)
+    .addHelpText(
+        'after',
+        `
+${styles.bold('Examples:')}
+  ${styles.title('⚡')} lightdash ${styles.bold('warehouse-catalog')}
+  ${styles.title('⚡')} lightdash ${styles.bold(
+      'warehouse-catalog',
+  )} --database analytics --schema public
+  ${styles.title('⚡')} lightdash ${styles.bold(
+      'warehouse-catalog',
+  )} --database analytics --schema public --table orders --include-fields --json
+`,
+    )
+    .action(warehouseCatalogHandler);
+
+program
     .command('pre-aggregate-audit')
     .description(
         'Audit pre-aggregate hit/miss coverage for a dashboard (or every dashboard with --all)',
@@ -1254,8 +2063,8 @@ program
     )
     .option('--all', 'Audit every dashboard in the target project', false)
     .option(
-        '--project <projectUuid>',
-        'Project UUID (defaults to LIGHTDASH_PROJECT_UUID env or config)',
+        '--project <project uuid or slug>',
+        'Project UUID or slug (defaults to LIGHTDASH_PROJECT_UUID env or config)',
     )
     .option(
         '--json',
@@ -1269,6 +2078,73 @@ program
     )
     .option('--verbose', 'Expand the ineligible section in human output', false)
     .action(preAggregateAuditHandler);
+
+program
+    .command('pre-aggregate-check-external')
+    .description(
+        'Generate the expected table shape and materialization SQL for an external pre-aggregate, and check the declared table against it. Runs fully locally against the dbt project and warehouse credentials from profiles.yml.',
+    )
+    .option('--model <model>', 'Model the pre-aggregate is defined on')
+    .option('--name <name>', 'Pre-aggregate name')
+    .option(
+        '--all',
+        'Check every external pre-aggregate (with a `table:` key) in the project',
+        false,
+    )
+    .option(
+        '--project-dir <path>',
+        'The directory of the dbt project',
+        defaultProjectDir,
+    )
+    .option(
+        '--profiles-dir <path>',
+        'The directory of the dbt profiles',
+        defaultProfilesDir,
+    )
+    .option(
+        '--profile <name>',
+        'The name of the profile to use (defaults to profile name in dbt_project.yml)',
+        undefined,
+    )
+    .option('--target <name>', 'target to use in profiles.yml file', undefined)
+    .option(
+        '--target-path <path>',
+        'The target directory for dbt (overrides DBT_TARGET_PATH and dbt_project.yml)',
+        undefined,
+    )
+    .option('--vars <vars>')
+    .option(
+        '--skip-dbt-compile',
+        'Skip `dbt compile` and deploy from the existing ./target/manifest.json',
+        false,
+    )
+    .option(
+        '--skip-warehouse-catalog',
+        'Skip fetch warehouse catalog and use types defined in the YAML.',
+        false,
+    )
+    .option(
+        '--json',
+        'Emit machine-readable JSON instead of human output',
+        false,
+    )
+    .option(
+        '--sql',
+        'Print bare materialization SQL on stdout (human output goes to stderr)',
+        false,
+    )
+    .option(
+        '--fail-on-mismatch',
+        'Exit 1 if any checked pre-aggregate has missing columns, an unreachable table, or an SQL error (CI-friendly)',
+        false,
+    )
+    .option(
+        '--clear-cache',
+        'Bypass warehouse result caches when probing table shapes (use after rebuilding a table, or the warehouse may report its old schema)',
+        false,
+    )
+    .option('--verbose', undefined, false)
+    .action(preAggregateCheckExternalHandler);
 
 program
     .command('sql')
@@ -1331,8 +2207,8 @@ program
         undefined,
     )
     .option(
-        '--project <uuid>',
-        'Lightdash project UUID to update (defaults to currently selected project)',
+        '--project <project uuid or slug>',
+        'Lightdash project UUID or slug to update (defaults to currently selected project)',
         undefined,
     )
     .option(
@@ -1349,8 +2225,12 @@ program
     .description(
         'Export a deployed chart as a PNG image. The chart must already exist on the server.',
     )
-    .argument('<chart>', 'Chart slug')
+    .argument('<chart>', 'Chart UUID or slug')
     .requiredOption('-o, --output <file>', 'Output file path for the PNG image')
+    .option(
+        '--project <project uuid or slug>',
+        'Lightdash project UUID or slug (defaults to the currently selected project)',
+    )
     .option('--verbose', 'Show detailed output', false)
     .action(exportChartImageHandler);
 
@@ -1440,9 +2320,19 @@ const errorHandler = (err: Error) => {
         console.error(
             `\n💡 Contact your Lightdash administrator to request project creation access or if you believe this is incorrect.\n`,
         );
-    } else if (err.name === 'AuthorizationError') {
+    } else if (
+        err.name === 'AuthorizationError' &&
+        program.opts().agentConnection === undefined &&
+        getAgentConnectionSelection() === null
+    ) {
         console.error(
-            `Looks like you did not authenticate or the personal access token expired.\n\n👀 See https://docs.lightdash.com/guides/cli/cli-authentication for help and examples`,
+            `Looks like you did not authenticate or the personal access token expired.${
+                process.env.LIGHTDASH_API_KEY
+                    ? `\n\nLIGHTDASH_API_KEY is set, and it takes precedence over the token saved by \`lightdash login\`. If you expected your saved login to be used, run ${styles.bold(
+                          'unset LIGHTDASH_API_KEY',
+                      )}.`
+                    : ''
+            }\n\n👀 See https://docs.lightdash.com/guides/cli/cli-authentication for help and examples`,
         );
     } else if (!(err instanceof LightdashError)) {
         console.error(err);
@@ -1478,8 +2368,17 @@ const errorHandler = (err: Error) => {
 };
 
 const successHandler = () => {
-    console.error(`Done 🕶`);
-    process.exit(0);
+    if (
+        process.argv.includes('diagnostics') &&
+        process.argv.includes('--auth')
+    ) {
+        process.exit(0);
+    }
+    if (!agentConnectionJson && !agentConnectionConnectInvocation)
+        console.error(`Done 🕶`);
+    // Handlers report partial failures (e.g. some uploads failed) via
+    // process.exitCode; an unconditional exit(0) would wipe it.
+    process.exit(process.exitCode ?? 0);
 };
 
 program.parseAsync().then(successHandler).catch(errorHandler);

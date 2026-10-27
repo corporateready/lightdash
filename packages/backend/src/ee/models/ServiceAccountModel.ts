@@ -1,6 +1,7 @@
 import {
     AuthTokenPrefix,
     CreateServiceAccount,
+    NotFoundError,
     OrganizationMemberRole,
     ParameterError,
     ServiceAccount,
@@ -8,15 +9,19 @@ import {
     ServiceAccountWithToken,
     SessionUser,
     UnexpectedDatabaseError,
+    UpdateServiceAccount,
 } from '@lightdash/common';
 import * as crypto from 'crypto';
 import { Knex } from 'knex';
+import { LightdashConfig } from '../../config/parseConfig';
+import { OrganizationMembershipCustomRolesTableName } from '../../database/entities/organizationMembershipCustomRoles';
 import { OrganizationMembershipsTableName } from '../../database/entities/organizationMemberships';
 import { RolesTableName } from '../../database/entities/roles';
-import { DbUser } from '../../database/entities/users';
-import { deprecatedHash, hash } from '../../utils/hash';
+import { DbUser, UserTableName } from '../../database/entities/users';
+import { deprecatedHash, hash, hashWithSecret } from '../../utils/hash';
 import {
     DbServiceAccounts,
+    DbUpdateServiceAccount,
     ServiceAccountsTableName,
 } from '../database/entities/serviceAccounts';
 
@@ -33,8 +38,17 @@ type DbServiceAccountWithRole = DbServiceAccounts & {
 export class ServiceAccountModel {
     private readonly database: Knex;
 
-    constructor({ database }: { database: Knex }) {
+    private readonly lightdashConfig: Pick<LightdashConfig, 'lightdashSecrets'>;
+
+    constructor({
+        database,
+        lightdashConfig,
+    }: {
+        database: Knex;
+        lightdashConfig: Pick<LightdashConfig, 'lightdashSecrets'>;
+    }) {
         this.database = database;
+        this.lightdashConfig = lightdashConfig;
     }
 
     static mapDbObjectToServiceAccount(
@@ -288,6 +302,137 @@ export class ServiceAccountModel {
         });
     }
 
+    // In-place edit of name + Organization-scope permission. Deliberately
+    // leaves `token_hash` (and expiry / project grants) untouched so existing
+    // integrations keep working — the point of PROD-8133. `description` is
+    // always applied and mirrored onto the SA user's `first_name`. The
+    // permission is only rewritten when `scopes` or `roleUuid` is supplied;
+    // a rename-only edit leaves the scopes / role membership as-is.
+    async update({
+        serviceAccountUuid,
+        data,
+    }: {
+        serviceAccountUuid: string;
+        data: UpdateServiceAccount;
+    }): Promise<ServiceAccount> {
+        // `description` mirrors onto the SA user's NOT NULL `first_name`, so
+        // guard here too (not just at the service) to stay self-defending.
+        if (!data.description || data.description.trim() === '') {
+            throw new ParameterError('Description is required');
+        }
+
+        // Same permission-shape invariant as `save`, minus the "at least one"
+        // requirement: editing the name without changing access is valid.
+        const hasScopes = !!data.scopes && data.scopes.length > 0;
+        const hasRoleUuid = !!data.roleUuid;
+        if (hasScopes && hasRoleUuid) {
+            throw new ParameterError(
+                'Specify either scopes or roleUuid, not both',
+            );
+        }
+
+        return this.database.transaction(async (trx) => {
+            const [existing] = await trx(ServiceAccountsTableName)
+                .where('service_account_uuid', serviceAccountUuid)
+                .select('organization_uuid', 'service_account_user_uuid');
+            if (!existing) {
+                throw new NotFoundError(
+                    `Service account ${serviceAccountUuid} not found`,
+                );
+            }
+            if (!existing.service_account_user_uuid) {
+                throw new UnexpectedDatabaseError(
+                    `Service account ${serviceAccountUuid} is missing service_account_user_uuid`,
+                );
+            }
+
+            const backingUser = await trx(UserTableName)
+                .where('user_uuid', existing.service_account_user_uuid)
+                .first('user_id')
+                .forUpdate();
+            if (!backingUser) {
+                throw new UnexpectedDatabaseError(
+                    `Service account ${serviceAccountUuid} is missing its backing user`,
+                );
+            }
+
+            const serviceAccountUpdate: DbUpdateServiceAccount = {
+                description: data.description,
+            };
+
+            // Permission change: rewrite the SA row's scopes and the backing
+            // user's org-membership role together so the runtime CASL source
+            // of truth stays consistent. Switching to a custom role clears
+            // the legacy scopes; switching to scopes clears the role link.
+            if (hasScopes || hasRoleUuid) {
+                if (data.roleUuid) {
+                    const [roleRow] = await trx(RolesTableName)
+                        .where('role_uuid', data.roleUuid)
+                        .andWhere(
+                            'organization_uuid',
+                            existing.organization_uuid,
+                        )
+                        .select('role_uuid');
+                    if (!roleRow) {
+                        throw new ParameterError(
+                            `Role ${data.roleUuid} not found in this organization`,
+                        );
+                    }
+                }
+
+                const scopes = data.scopes ?? [];
+                const role = hasRoleUuid
+                    ? OrganizationMemberRole.MEMBER
+                    : ServiceAccountModel.getRoleForScopes(scopes);
+                serviceAccountUpdate.scopes = scopes;
+
+                await trx(OrganizationMembershipsTableName)
+                    .update({ role, role_uuid: data.roleUuid ?? null })
+                    .whereIn(
+                        'user_id',
+                        trx('users')
+                            .where(
+                                'user_uuid',
+                                existing.service_account_user_uuid,
+                            )
+                            .select('user_id'),
+                    );
+                // A singular write replaces the whole role set, so extras go too.
+                await trx(OrganizationMembershipCustomRolesTableName)
+                    .whereIn(
+                        'user_id',
+                        trx('users')
+                            .where(
+                                'user_uuid',
+                                existing.service_account_user_uuid,
+                            )
+                            .select('user_id'),
+                    )
+                    .delete();
+            }
+
+            const updatedServiceAccounts = await trx(ServiceAccountsTableName)
+                .update(serviceAccountUpdate)
+                .where('service_account_uuid', serviceAccountUuid);
+            if (updatedServiceAccounts === 0) {
+                throw new NotFoundError(
+                    `Service account ${serviceAccountUuid} no longer exists`,
+                );
+            }
+            await trx('users')
+                .update({ first_name: data.description })
+                .where('user_uuid', existing.service_account_user_uuid);
+
+            const [row] = await this.serviceAccountSelectQuery()
+                .transacting(trx)
+                .where(
+                    `${ServiceAccountsTableName}.service_account_uuid`,
+                    serviceAccountUuid,
+                );
+            return ServiceAccountModel.mapDbObjectToServiceAccount(row);
+        });
+    }
+
     // Tombstone semantics: delete the service-account row only. The dedicated
     // user record persists so historical FK references (`created_by_user_uuid`
     // on charts/dashboards/schedulers/audit log etc.) keep JOINing and the UI
@@ -340,6 +485,24 @@ export class ServiceAccountModel {
         };
     }
 
+    async getSpaceShareCandidates(
+        organizationUuid: string,
+        userUuids?: string[],
+    ): Promise<Pick<ServiceAccount, 'userUuid' | 'description'>[]> {
+        const query = this.database(ServiceAccountsTableName)
+            .where('organization_uuid', organizationUuid)
+            .whereNotNull('service_account_user_uuid')
+            .whereRaw('NOT (scopes @> ?)', [[ServiceAccountScope.SCIM_MANAGE]])
+            .select<Pick<ServiceAccount, 'userUuid' | 'description'>[]>({
+                userUuid: 'service_account_user_uuid',
+                description: 'description',
+            });
+        if (userUuids) {
+            void query.whereIn('service_account_user_uuid', userUuids);
+        }
+        return query;
+    }
+
     async getAllForOrganization(
         organizationUuid: string,
         scopes?: ServiceAccountScope[],
@@ -368,15 +531,49 @@ export class ServiceAccountModel {
         return row && ServiceAccountModel.mapDbObjectToServiceAccount(row);
     }
 
-    async getByToken(token: string): Promise<ServiceAccount> {
-        const hashedToken = await hash(token);
-        const [row] = await this.serviceAccountSelectQuery()
-            .where(`${ServiceAccountsTableName}.token_hash`, hashedToken)
-            .orWhere(
+    async findByToken(token: string): Promise<ServiceAccount | undefined> {
+        const findRowByTokenHashes = (tokenHashes: string[]) =>
+            this.serviceAccountSelectQuery().whereIn(
                 `${ServiceAccountsTableName}.token_hash`,
-                deprecatedHash(token),
-            ); // Adding old sha256 hash for backwards compatibility
-        const mappedRow = ServiceAccountModel.mapDbObjectToServiceAccount(row);
-        return mappedRow;
+                tokenHashes,
+            );
+        // Active bcrypt and legacy sha256 hashes cover every non-rotation
+        // deployment with a single bcrypt operation; fallback bcrypt hashes
+        // are only derived after a miss — concurrently (config caps fallbacks
+        // at three) — and matched with one grouped query that prefers the
+        // earliest configured fallback.
+        const activeTokenHash = await hashWithSecret(
+            token,
+            this.lightdashConfig.lightdashSecrets.active,
+        );
+        const activeRows = await findRowByTokenHashes([
+            activeTokenHash,
+            deprecatedHash(token),
+        ]);
+        let row: (typeof activeRows)[number] | undefined = activeRows[0];
+        if (row === undefined) {
+            const { fallbacks } = this.lightdashConfig.lightdashSecrets;
+            if (fallbacks.length > 0) {
+                const fallbackTokenHashes = await Promise.all(
+                    fallbacks.map((fallbackSecret) =>
+                        hashWithSecret(token, fallbackSecret),
+                    ),
+                );
+                const fallbackRows =
+                    await findRowByTokenHashes(fallbackTokenHashes);
+                row = fallbackTokenHashes
+                    .map((fallbackTokenHash) =>
+                        fallbackRows.find(
+                            (fallbackRow) =>
+                                fallbackRow.token_hash === fallbackTokenHash,
+                        ),
+                    )
+                    .find((match) => match !== undefined);
+            }
+        }
+        if (row === undefined) {
+            return undefined;
+        }
+        return ServiceAccountModel.mapDbObjectToServiceAccount(row);
     }
 }

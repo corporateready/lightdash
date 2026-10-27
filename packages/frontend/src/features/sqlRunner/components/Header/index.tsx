@@ -1,20 +1,15 @@
-import { Paper, Skeleton, Stack } from '@mantine-8/core';
+import { Paper, Skeleton, Stack } from '@mantine/core';
 import { type FC } from 'react';
 import { useAppSelector } from '../../store/hooks';
-import { HeaderCreate } from './HeaderCreate';
 import { HeaderEdit } from './HeaderEdit';
 import { HeaderView } from './HeaderView';
 
 export const Header: FC<{
-    mode: 'create' | 'view' | 'edit';
+    mode: 'view' | 'edit';
 }> = ({ mode }) => {
     const isChartLoaded = useAppSelector(
         (state) => !!state.sqlRunner.savedSqlChart?.savedSqlUuid,
     );
-
-    if (mode === 'create') {
-        return <HeaderCreate />;
-    }
 
     if (isChartLoaded) {
         if (mode === 'view') {
@@ -26,7 +21,7 @@ export const Header: FC<{
     }
 
     return (
-        <Paper shadow="none" radius={0} px="md" py="xs" withBorder={false}>
+        <Paper radius={0} px="md" py="xs" withBorder={false}>
             <Stack gap="xs">
                 <Skeleton height={20} width={'15%'} radius="sm" />
                 <Skeleton height={10} width={'20%'} radius="sm" />

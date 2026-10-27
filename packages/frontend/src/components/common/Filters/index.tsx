@@ -25,8 +25,7 @@ import {
     Stack,
     Text,
     Tooltip,
-    useMantineColorScheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconAlertTriangle, IconPlus, IconX } from '@tabler/icons-react';
 import { memo, useCallback, useMemo, useRef, type FC } from 'react';
 import { useToggle } from 'react-use';
@@ -47,6 +46,7 @@ type Props = {
     filters: Filters;
     setFilters: (value: Filters) => void;
     isEditMode: boolean;
+    compact?: boolean;
 };
 
 type InvalidFilterRule =
@@ -116,26 +116,18 @@ const AddFilterSection: FC<AddFilterSectionProps> = ({
     clearAllFilters,
     addFieldRule,
 }) => {
-    const { colorScheme } = useMantineColorScheme();
     return (
         <Box
             pos="relative"
             style={{
                 zIndex: 2,
-                backgroundColor:
-                    colorScheme === 'dark'
-                        ? 'var(--mantine-color-dark-6)'
-                        : 'white',
+                backgroundColor: 'var(--mantine-color-body)',
             }}
         >
             {!isOpen ? (
-                <Group
-                    align="center"
-                    justify="space-between"
-                    style={{ flex: 1 }}
-                >
+                <Group align="center" justify="space-between" flex={1}>
                     <Button
-                        variant="outline"
+                        variant="light"
                         size="xs"
                         leftSection={<MantineIcon icon={IconPlus} />}
                         disabled={fields.length <= 0}
@@ -172,11 +164,7 @@ const AddFilterSection: FC<AddFilterSectionProps> = ({
                     }}
                     onClosed={toggleFieldInput}
                     rightSection={
-                        <ActionIcon
-                            variant="subtle"
-                            color="gray"
-                            onClick={toggleFieldInput}
-                        >
+                        <ActionIcon onClick={toggleFieldInput}>
                             <MantineIcon icon={IconX} />
                         </ActionIcon>
                     }
@@ -186,7 +174,12 @@ const AddFilterSection: FC<AddFilterSectionProps> = ({
     );
 };
 
-const FiltersForm: FC<Props> = memo(({ filters, setFilters, isEditMode }) => {
+const FiltersFormComponent: FC<Props> = ({
+    filters,
+    setFilters,
+    isEditMode,
+    compact = false,
+}) => {
     // const theme = useMantineTheme();
     const { itemsMap, baseTable } = useFiltersContext<FieldsWithSuggestions>();
     const [isOpen, toggleFieldInput] = useToggle(false);
@@ -296,7 +289,7 @@ const FiltersForm: FC<Props> = memo(({ filters, setFilters, isEditMode }) => {
     }, [andRootFilterGroupItems, orRootFilterGroups]);
 
     return (
-        <Stack gap="xs" pos="relative" m="sm" style={{ flexGrow: 1 }}>
+        <Stack gap="xs" pos="relative" m={compact ? 'xs' : 'sm'} flex={1}>
             {totalFilterRules.length >= 1 &&
                 (showSimplifiedForm ? (
                     <SimplifiedFilterGroupForm
@@ -354,7 +347,7 @@ const FiltersForm: FC<Props> = memo(({ filters, setFilters, isEditMode }) => {
                                 icon={IconAlertTriangle}
                                 color="yellow.6"
                             />
-                            <Text c="yellow.6" fz="xs" style={{ flex: 1 }}>
+                            <Text c="yellow.6" fz="xs" flex={1}>
                                 {entry.reason === 'unknown_field' ? (
                                     <>
                                         Tried to reference field with unknown
@@ -377,9 +370,7 @@ const FiltersForm: FC<Props> = memo(({ filters, setFilters, isEditMode }) => {
                                 )}
                             </Text>
                             <ActionIcon
-                                variant="subtle"
                                 size="sm"
-                                color="gray"
                                 onClick={() =>
                                     updateFiltersFromGroup(
                                         deleteFilterRuleFromGroup(
@@ -409,7 +400,9 @@ const FiltersForm: FC<Props> = memo(({ filters, setFilters, isEditMode }) => {
             )}
         </Stack>
     );
-});
+};
+
+const FiltersForm = memo(FiltersFormComponent);
 
 FiltersForm.displayName = 'FiltersForm';
 

@@ -1,5 +1,21 @@
-import { getScopes, ScopeGroup, type Scope } from '@lightdash/common';
+import {
+    AGENT_CAPABILITY_SCOPES,
+    getScopes,
+    isScopeAssignableAtLevel,
+    ScopeGroup,
+    type RoleLevel,
+    type Scope,
+    type ScopeName,
+} from '@lightdash/common';
 import startCase from 'lodash/startCase';
+import {
+    agentCapabilityGroups,
+    getAgentScopeLabel,
+} from '../../../../features/aiAccess/agentCapabilityLabels';
+
+const agentScopes: string[] = agentCapabilityGroups.flatMap((group) =>
+    group.capabilities.map((capability) => AGENT_CAPABILITY_SCOPES[capability]),
+);
 
 const GROUP_DISPLAY_NAMES: Record<ScopeGroup, string> = {
     [ScopeGroup.CONTENT]: 'Content Management',
@@ -8,6 +24,7 @@ const GROUP_DISPLAY_NAMES: Record<ScopeGroup, string> = {
     [ScopeGroup.DATA]: 'Data Access',
     [ScopeGroup.SHARING]: 'Sharing & Export',
     [ScopeGroup.AI]: 'AI Features',
+    [ScopeGroup.EMBED]: 'Embedding',
     [ScopeGroup.SPOTLIGHT]: 'Spotlight Features',
 };
 
@@ -17,10 +34,30 @@ export type GroupedScopes = {
     scopes: Scope[];
 };
 
-export const getScopesByGroup = (isEnterprise = false): GroupedScopes[] => {
-    const allScopes = getScopes({ isEnterprise });
+export type ScopeDependency = {
+    description?: string;
+    name: Scope['name'];
+};
 
-    const grouped = allScopes.reduce(
+export type DependencyStatus = 'full' | 'partial' | 'empty';
+
+export type DependencyStatusCounts = Record<DependencyStatus, number>;
+
+export const getScopesByGroup = (
+    isEnterprise = false,
+    level?: RoleLevel,
+    agentCapabilitiesEnabled = true,
+): GroupedScopes[] => {
+    const allScopes = getScopes({ isEnterprise }).filter(
+        (scope) => agentCapabilitiesEnabled || !getAgentScopeLabel(scope.name),
+    );
+    const assignableScopes = level
+        ? allScopes.filter((scope) =>
+              isScopeAssignableAtLevel(scope.name, level),
+          )
+        : allScopes;
+
+    const grouped = assignableScopes.reduce(
         (acc, scope) => {
             if (!acc[scope.group]) {
                 acc[scope.group] = [];
@@ -34,7 +71,22 @@ export const getScopesByGroup = (isEnterprise = false): GroupedScopes[] => {
     return Object.entries(grouped).map(([group, scopes]) => ({
         group: group as ScopeGroup,
         groupName: GROUP_DISPLAY_NAMES[group as ScopeGroup],
-        scopes: scopes.sort((a, b) => a.name.localeCompare(b.name)),
+        scopes: scopes
+            .map((scope) => ({
+                ...scope,
+                description:
+                    getAgentScopeLabel(scope.name)?.description ??
+                    scope.description,
+            }))
+            .sort((a, b) => {
+                const aIndex = agentScopes.indexOf(a.name);
+                const bIndex = agentScopes.indexOf(b.name);
+                if (aIndex === -1 && bIndex === -1)
+                    return a.name.localeCompare(b.name);
+                if (aIndex === -1) return -1;
+                if (bIndex === -1) return 1;
+                return aIndex - bIndex;
+            }),
     }));
 };
 
@@ -43,7 +95,126 @@ export const getScopesByGroup = (isEnterprise = false): GroupedScopes[] => {
  * e.g., "manage:Dashboard" -> "Manage Dashboard"
  */
 export const formatScopeName = (scopeName: string): string => {
-    return startCase(scopeName.replace(':', ' '));
+    return (
+        getAgentScopeLabel(scopeName)?.label ??
+        startCase(scopeName.replace(':', ' '))
+    );
+};
+
+export const getScopeDependencies = (scopeName: string): ScopeDependency[] => {
+    const scopeMap = Object.fromEntries(
+        getScopes({ isEnterprise: true }).map((scope) => [scope.name, scope]),
+    ) as Record<string, Scope>;
+    const rootScope = scopeMap[scopeName];
+
+    if (!rootScope) {
+        return [];
+    }
+
+    const visited = new Set<string>([scopeName]);
+    const dependencies: ScopeDependency[] = [];
+    const queue = [rootScope];
+    let queueIndex = 0;
+
+    while (queueIndex < queue.length) {
+        const currentScope = queue[queueIndex];
+        queueIndex += 1;
+
+        currentScope.dependencies.forEach((dependency) => {
+            const dependencyScope = scopeMap[dependency.name];
+
+            if (!dependencyScope || visited.has(dependency.name)) {
+                return;
+            }
+
+            visited.add(dependency.name);
+            dependencies.push({
+                name: dependency.name,
+                description:
+                    dependency.description ?? dependencyScope.description,
+            });
+            queue.push(dependencyScope);
+        });
+    }
+
+    return dependencies;
+};
+
+export const getScopeNamesWithDependencies = (
+    scopeName: ScopeName,
+): ScopeName[] => [
+    scopeName,
+    ...getScopeDependencies(scopeName).map((dependency) => dependency.name),
+];
+
+const getScopeDependencyStatus = (
+    scopeName: string,
+    scopes: Record<string, boolean>,
+): DependencyStatus => {
+    const dependencies = getScopeDependencies(scopeName);
+    const selectedDependencyCount = dependencies.filter(
+        (dependency) => scopes[dependency.name],
+    ).length;
+
+    if (
+        dependencies.length === 0 ||
+        selectedDependencyCount === dependencies.length
+    ) {
+        return 'full';
+    }
+
+    return selectedDependencyCount === 0 ? 'empty' : 'partial';
+};
+
+export const getScopeDependencyStatusCounts = ({
+    isEnterprise = true,
+    agentCapabilitiesEnabled = true,
+    level,
+    scopes,
+}: {
+    isEnterprise?: boolean;
+    agentCapabilitiesEnabled?: boolean;
+    level?: RoleLevel;
+    scopes: Record<string, boolean>;
+}): DependencyStatusCounts => {
+    const selectedScopeNames = new Set(
+        Object.entries(scopes)
+            .filter(([_, isSelected]) => isSelected)
+            .map(([scopeName]) => scopeName),
+    );
+
+    return getScopesByGroup(isEnterprise, level, agentCapabilitiesEnabled)
+        .flatMap((group) => group.scopes)
+        .filter((scope) => selectedScopeNames.has(scope.name))
+        .reduce<DependencyStatusCounts>(
+            (acc, scope) => {
+                const status = getScopeDependencyStatus(scope.name, scopes);
+
+                return { ...acc, [status]: acc[status] + 1 };
+            },
+            { full: 0, partial: 0, empty: 0 },
+        );
+};
+
+export const filterScopesByDependencyStatus = (
+    groupedScopes: GroupedScopes[],
+    scopes: Record<string, boolean>,
+    status?: DependencyStatus,
+): GroupedScopes[] => {
+    if (!status) {
+        return groupedScopes;
+    }
+
+    return groupedScopes
+        .map((group) => ({
+            ...group,
+            scopes: group.scopes.filter(
+                (scope) =>
+                    scopes[scope.name] &&
+                    getScopeDependencyStatus(scope.name, scopes) === status,
+            ),
+        }))
+        .filter((group) => group.scopes.length > 0);
 };
 
 /**
@@ -106,22 +277,4 @@ export const isGroupPartiallySelected = (
         selectedScopes.includes(scope.name),
     ).length;
     return selectedCount > 0 && selectedCount < groupScopes.length;
-};
-
-export const toggleGroupScopes = (
-    groupScopes: Scope[],
-    selectedScopes: string[],
-    isSelected: boolean,
-): string[] => {
-    const groupScopeNames = groupScopes.map((scope) => scope.name as string);
-
-    if (isSelected) {
-        // Add all group scopes
-        return Array.from(new Set([...selectedScopes, ...groupScopeNames]));
-    } else {
-        // Remove all group scopes
-        return selectedScopes.filter(
-            (scope) => !groupScopeNames.includes(scope),
-        );
-    }
 };

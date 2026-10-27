@@ -1,7 +1,11 @@
-import { type SummaryExplore } from '@lightdash/common';
-import { Box, Divider } from '@mantine-8/core';
+import {
+    type SummaryExplore,
+    type WarehouseConnectionForUserCredentials,
+} from '@lightdash/common';
+import { Box, Divider } from '@mantine/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { memo, useCallback, useMemo, useRef, useState, type FC } from 'react';
+import { getConnectionName } from '../../common/connectionName';
 import ExploreNavLink from './ExploreNavLink';
 import {
     collectMatchingGroupPathsFromArray,
@@ -17,6 +21,7 @@ export type VirtualListItem =
           type: 'group-header';
           id: string;
           label: string;
+          description?: string;
           path: string;
           depth: number;
           isExpanded: boolean;
@@ -40,7 +45,9 @@ interface VirtualizedExploreListProps {
     defaultUngroupedExplores: SummaryExplore[];
     customUngroupedExplores: SummaryExplore[];
     preAggregateExplores: SummaryExplore[];
+    externalSourceExplores: SummaryExplore[];
     searchQuery: string;
+    connections: WarehouseConnectionForUserCredentials[] | null;
     onExploreClick: (explore: SummaryExplore) => void;
 }
 
@@ -68,7 +75,9 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
     defaultUngroupedExplores,
     customUngroupedExplores,
     preAggregateExplores,
+    externalSourceExplores,
     searchQuery,
+    connections,
     onExploreClick,
 }) => {
     const [expandedGroupPaths, setExpandedGroupPaths] = useState<Set<string>>(
@@ -130,6 +139,7 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
                         type: 'group-header',
                         id: `group-${itemId++}`,
                         label: node.label,
+                        description: node.description,
                         path: node.path,
                         depth,
                         isExpanded,
@@ -157,6 +167,30 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
                 explore,
                 depth: 0,
             });
+        }
+
+        if (externalSourceExplores.length > 0) {
+            // Auto-expand while searching so matches inside the section are
+            // visible without a manual toggle.
+            const isExternalSourcesExpanded =
+                expandedSections.has('External sources') || !!searchQuery;
+            items.push({ type: 'divider', id: `divider-${itemId++}` });
+            items.push({
+                type: 'section-header',
+                id: `section-${itemId++}`,
+                label: 'External sources',
+                isExpanded: isExternalSourcesExpanded,
+            });
+            if (isExternalSourcesExpanded) {
+                for (const explore of externalSourceExplores) {
+                    items.push({
+                        type: 'explore',
+                        id: `external-source-${itemId++}`,
+                        explore,
+                        depth: 0,
+                    });
+                }
+            }
         }
 
         if (customUngroupedExplores.length > 0) {
@@ -209,6 +243,7 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
         defaultUngroupedExplores,
         customUngroupedExplores,
         preAggregateExplores,
+        externalSourceExplores,
         expandedGroupPaths,
         expandedSections,
         searchQuery,
@@ -249,6 +284,7 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
                         <GroupHeader
                             key={item.id}
                             label={item.label}
+                            description={item.description}
                             isExpanded={item.isExpanded}
                             depth={item.depth}
                             onToggle={() => toggleGroup(item.path)}
@@ -264,6 +300,10 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
                         >
                             <ExploreNavLink
                                 explore={item.explore}
+                                connectionName={getConnectionName(
+                                    connections,
+                                    item.explore.warehouseConnectionUuid,
+                                )}
                                 query={searchQuery}
                                 onClick={() => onExploreClick(item.explore)}
                             />
@@ -274,7 +314,7 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
                         <Divider
                             key={item.id}
                             size={0.5}
-                            c="ldGray.5"
+                            color="ldGray.5"
                             my="xs"
                         />
                     );
@@ -291,7 +331,7 @@ const VirtualizedExploreList: FC<VirtualizedExploreListProps> = ({
                     return null;
             }
         },
-        [searchQuery, toggleGroup, toggleSection, onExploreClick],
+        [searchQuery, connections, toggleGroup, toggleSection, onExploreClick],
     );
 
     return (

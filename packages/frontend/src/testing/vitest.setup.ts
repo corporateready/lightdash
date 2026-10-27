@@ -1,23 +1,43 @@
 import '@testing-library/jest-dom/vitest';
+import { notifyManager } from '@tanstack/react-query';
 import nock from 'nock';
+import nodeFetch from 'node-fetch';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
+import mockDocumentFonts from './__mocks__/implementations/documentFonts.mock';
+import mockElementsFromPoint from './__mocks__/implementations/elementsFromPoint.mock';
 import mockMatchMedia from './__mocks__/implementations/matchMedia.mock';
 import mockResizeObserver from './__mocks__/implementations/resizeObserver.mock';
+import mockScrollIntoView from './__mocks__/implementations/scrollIntoView.mock';
 import ReactMarkdownPreview from './__mocks__/modules/ReactMarkdwnPreview.mock';
+
+// Node's built-in fetch (undici) bypasses nock and disableNetConnect below.
+// Use node-fetch (http-module-backed) so requests stay interceptable and
+// hermetic, matching what `isomorphic-fetch` resolved to here before.
+vi.stubGlobal('fetch', nodeFetch);
+
+vi.mock('@uiw/react-markdown-preview', () => ({
+    default: ReactMarkdownPreview,
+}));
 
 beforeAll(() => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    vi.mock('@uiw/react-markdown-preview', () => ({
-        default: ReactMarkdownPreview,
-    }));
-
     mockMatchMedia();
     mockResizeObserver();
+    mockScrollIntoView();
+    mockElementsFromPoint();
+    mockDocumentFonts();
 });
 
 // Disable all network requests by default
 nock.disableNetConnect();
+
+// React Query notifies on a 0ms timeout. After the last file, jsdom teardown
+// removes `window` and React 19 then throws from `window.event`.
+notifyManager.setNotifyFunction((callback) => {
+    if (typeof window === 'undefined') return;
+    callback();
+});
 
 beforeEach(() => {
     if (!nock.isActive()) {

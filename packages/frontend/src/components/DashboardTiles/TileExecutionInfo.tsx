@@ -2,9 +2,9 @@ import {
     FeatureFlags,
     type CacheMetadata,
     type QueryResultsPerformance,
+    type QueryResultsPreAggregate,
 } from '@lightdash/common';
-import { Divider, Stack } from '@mantine-8/core';
-import { ActionIcon, HoverCard } from '@mantine/core';
+import { ActionIcon, Divider, Menu, Stack, Popover } from '@mantine/core';
 import {
     IconClock,
     IconClockBolt,
@@ -16,29 +16,56 @@ import {
     IconServer,
 } from '@tabler/icons-react';
 import { type FC } from 'react';
+import { useUiStrings } from '../../ee/providers/Embed/useUiStrings';
 import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
 import MantineIcon from '../common/MantineIcon';
 import InfoRow from '../common/PageHeader/InfoRow';
+import { TileHeaderPopover } from './TileBase/TileHeaderPopover';
 
 type TileExecutionInfoProps = {
     cacheMetadata: CacheMetadata;
+    preAggregate: QueryResultsPreAggregate | null;
     performance: QueryResultsPerformance | undefined;
     totalClientFetchTimeMs: number | undefined;
     totalResults: number | undefined;
+    targetVariant?: 'actionIcon' | 'menuItem';
 };
 
-function getResultSource(cacheMetadata: CacheMetadata): string {
+// `cacheMetadata.preAggregate.hit` is the plan-time match; `preAggregate` from
+// results metadata is the post-execution truth, including warehouse fallback.
+function getResultSource(
+    cacheMetadata: CacheMetadata,
+    preAggregate: QueryResultsPreAggregate | null,
+): string {
     if (cacheMetadata.cacheHit) return 'Result cache';
+    if (preAggregate) {
+        if (preAggregate.fallbackReason !== null)
+            return 'Warehouse (pre-aggregate failed)';
+        return preAggregate.execution === 'duckdb'
+            ? 'DuckDB pre-aggregate'
+            : 'External pre-aggregate';
+    }
     if (cacheMetadata.preAggregate?.hit) return 'DuckDB pre-aggregate';
     return 'Warehouse';
 }
 
+function isServedFromPreAggregate(
+    cacheMetadata: CacheMetadata,
+    preAggregate: QueryResultsPreAggregate | null,
+): boolean {
+    if (preAggregate) return preAggregate.fallbackReason === null;
+    return cacheMetadata.preAggregate?.hit ?? false;
+}
+
 const TileExecutionInfo: FC<TileExecutionInfoProps> = ({
     cacheMetadata,
+    preAggregate,
     performance,
     totalClientFetchTimeMs,
     totalResults,
+    targetVariant = 'actionIcon',
 }) => {
+    const getUiString = useUiStrings();
     const { data: showExecutionTimeFlag } = useServerFeatureFlag(
         FeatureFlags.ShowExecutionTime,
     );
@@ -56,24 +83,24 @@ const TileExecutionInfo: FC<TileExecutionInfoProps> = ({
         totalClientFetchTimeMs -
         (performance.initialQueryExecutionMs ?? 0) -
         (performance.queueTimeMs ?? 0);
+    const icon = isServedFromPreAggregate(cacheMetadata, preAggregate)
+        ? IconClockBolt
+        : IconClock;
 
     return (
-        <HoverCard
-            withArrow
-            withinPortal
-            shadow="md"
-            position="bottom-end"
-            offset={4}
-            arrowOffset={10}
-        >
-            <HoverCard.Dropdown>
+        <TileHeaderPopover>
+            <Popover.Dropdown
+                maw="calc(100vw - 24px)"
+                mah="calc(100dvh - 24px)"
+                style={{ overflowY: 'auto' }}
+            >
                 <Stack gap={10} w={240} p={4}>
                     <InfoRow icon={IconLayoutRows} label="Rows">
                         {(totalResults ?? 0).toLocaleString()}
                     </InfoRow>
 
                     <InfoRow icon={IconDatabase} label="Source">
-                        {getResultSource(cacheMetadata)}
+                        {getResultSource(cacheMetadata, preAggregate)}
                     </InfoRow>
 
                     <Divider />
@@ -102,19 +129,25 @@ const TileExecutionInfo: FC<TileExecutionInfoProps> = ({
                         {totalClientFetchTimeMs}ms
                     </InfoRow>
                 </Stack>
-            </HoverCard.Dropdown>
-            <HoverCard.Target>
-                <ActionIcon size="sm">
-                    <MantineIcon
-                        icon={
-                            cacheMetadata.preAggregate?.hit
-                                ? IconClockBolt
-                                : IconClock
-                        }
-                    />
-                </ActionIcon>
-            </HoverCard.Target>
-        </HoverCard>
+            </Popover.Dropdown>
+            <Popover.Target>
+                {targetVariant === 'menuItem' ? (
+                    <Menu.Item
+                        closeMenuOnClick={false}
+                        leftSection={<MantineIcon icon={icon} />}
+                    >
+                        {getUiString('tileMenu.execution')}
+                    </Menu.Item>
+                ) : (
+                    <ActionIcon
+                        aria-label={getUiString('tileMenu.execution')}
+                        size="sm"
+                    >
+                        <MantineIcon icon={icon} />
+                    </ActionIcon>
+                )}
+            </Popover.Target>
+        </TileHeaderPopover>
     );
 };
 

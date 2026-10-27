@@ -1,0 +1,108 @@
+.sidebarSurface {
+    flex-grow: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+    border-radius: 0;
+
+    @mixin light {
+        background-color: transparent;
+        border: none;
+        box-shadow: none;
+    }
+
+    @mixin dark {
+        background-color: transparent;
+        border: none;
+        box-shadow: none;
+    }
+}
+
+.sidebarSurface[data-collapsed='true'] {
+    flex-grow: 0;
+    align-items: center;
+    padding: 0;
+    overflow: visible;
+
+    @mixin light {
+        background-color: transparent;
+        border-color: transparent;
+        box-shadow: none;
+    }
+
+    @mixin dark {
+        background-color: transparent;
+        border-color: transparent;
+        box-shadow: none;
+    }
+}
+
+.threadList {
+    flex-grow: 1;
+    min-height: 0;
+}
+
+.threadListViewport {
+    composes: scrollFade from '../../../../../styles/scrollFade.module.css';
+}
+
+.threadListContent {
+    composes: verticalContent from '../../../../../styles/ScrollArea.module.css';
+}
+
+.threadItems {
+    flex-shrink: 0;
+}
+
+.threadNavLink {
+    border-radius: rem(6px);
+    min-height: rem(28px);
+}
+
+.threadSection[data-position='right'] {
+    position: relative;
+    margin-inline-start: 0;
+}
+
+.threadMenuButton {
+    position: absolute;
+    right: 100%;
+    top: 50%;
+    translate: 0 -50%;
+    display: flex;
+    opacity: 0;
+    pointer-events: none;
+
+    .threadNavLink:hover &,
+    .threadNavLink[data-active] &,
+    .threadNavLink:focus-within &,
+    &:has([aria-expanded='true']) {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    @media (hover: none) {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+.threadNavLink:has(.threadMenuButton) .threadTitle {
+    mask-image: linear-gradient(
+        to right,
+        black calc(100% - rem(28px)),
+        transparent calc(100% - rem(20px))
+    );
+}
+
+@media (hover: hover) {
+    .threadNavLink:not(
+            :hover,
+            [data-active],
+            :focus-within,
+            :has([aria-expanded='true'])
+        )
+        .threadTitle {
+        mask-image: none;
+    }
+}

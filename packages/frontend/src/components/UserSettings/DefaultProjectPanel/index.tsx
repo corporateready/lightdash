@@ -1,5 +1,5 @@
 import { ProjectType } from '@lightdash/common';
-import { Button, Flex, Select, Stack } from '@mantine/core';
+import { Flex, Stack, Button, Select } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { useEffect, type FC } from 'react';
 import { z } from 'zod';
@@ -56,10 +56,17 @@ const DefaultProjectPanel: FC = () => {
         <form onSubmit={handleOnSubmit}>
             <Stack>
                 <Select
+                    allowDeselect={false}
                     key={form.values.defaultProjectUuid}
                     label="Project name"
                     data={projects
-                        .filter(({ type }) => type !== ProjectType.PREVIEW)
+                        // Neither previews nor the training playground can
+                        // be the org's landing project.
+                        .filter(
+                            ({ type }) =>
+                                type !== ProjectType.PREVIEW &&
+                                type !== ProjectType.TRAINING,
+                        )
                         .map((project) => ({
                             value: project.projectUuid,
                             label: project.name,
@@ -67,7 +74,10 @@ const DefaultProjectPanel: FC = () => {
                     disabled={isLoading}
                     required
                     placeholder="No project selected"
-                    dropdownPosition="bottom"
+                    comboboxProps={{
+                        position: 'bottom',
+                        middlewares: { flip: false },
+                    }}
                     {...form.getInputProps('defaultProjectUuid')}
                 />
 

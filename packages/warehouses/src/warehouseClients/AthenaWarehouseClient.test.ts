@@ -1,25 +1,41 @@
+/* eslint-disable prefer-arrow-callback, func-names */
+import {
+    ListDatabasesCommand,
+    ListTableMetadataCommand,
+} from '@aws-sdk/client-athena';
 import {
     AthenaAuthenticationType,
     CreateAthenaCredentials,
+    DimensionType,
     WarehouseConnectionError,
     WarehouseQueryError,
     WarehouseTypes,
 } from '@lightdash/common';
 
-const mockAthenaClient = jest.fn();
-jest.mock('@aws-sdk/client-athena', () => ({
-    ...jest.requireActual('@aws-sdk/client-athena'),
+const { mockAthenaClient } = vi.hoisted(() => ({
+    mockAthenaClient: vi.fn(),
+}));
+vi.mock('@aws-sdk/client-athena', async () => ({
+    ...(await vi.importActual<typeof import('@aws-sdk/client-athena')>(
+        '@aws-sdk/client-athena',
+    )),
     AthenaClient: mockAthenaClient,
 }));
 
-const mockFromTemporaryCredentials = jest.fn(() => 'sts-credentials');
+const { mockFromTemporaryCredentials } = vi.hoisted(() => ({
+    mockFromTemporaryCredentials: vi.fn(() => 'sts-credentials'),
+}));
 
-jest.mock('@aws-sdk/credential-providers', () => ({
+vi.mock('@aws-sdk/credential-providers', () => ({
     fromTemporaryCredentials: mockFromTemporaryCredentials,
 }));
 
 // eslint-disable-next-line import/first -- Must import after mocks are set up
-import { AthenaWarehouseClient } from './AthenaWarehouseClient';
+import {
+    AthenaTypes,
+    AthenaWarehouseClient,
+    convertDataTypeToDimensionType,
+} from './AthenaWarehouseClient';
 
 const baseCredentials: CreateAthenaCredentials = {
     type: WarehouseTypes.ATHENA,
@@ -32,10 +48,24 @@ const baseCredentials: CreateAthenaCredentials = {
     secretAccessKey: 'SECRET',
 };
 
+describe('convertDataTypeToDimensionType', () => {
+    test.each([
+        [AthenaTypes.FLOAT, DimensionType.NUMBER],
+        ['FLOAT', DimensionType.NUMBER],
+        [AthenaTypes.DOUBLE, DimensionType.NUMBER],
+        [AthenaTypes.BIGINT, DimensionType.NUMBER],
+        ['decimal(10, 2)', DimensionType.NUMBER],
+    ])('maps Athena %s columns to %s dimensions', (input, expected) => {
+        expect(convertDataTypeToDimensionType(input)).toBe(expected);
+    });
+});
+
 describe('AthenaWarehouseClient', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
-        mockAthenaClient.mockImplementation(() => ({}));
+        vi.clearAllMocks();
+        mockAthenaClient.mockImplementation(function () {
+            return {};
+        });
     });
 
     describe('authentication', () => {
@@ -48,6 +78,26 @@ describe('AthenaWarehouseClient', () => {
                 credentials: {
                     accessKeyId: 'AKID',
                     secretAccessKey: 'SECRET',
+                },
+            });
+        });
+
+        test('should forward sessionToken for temporary STS credentials', () => {
+            const creds: CreateAthenaCredentials = {
+                ...baseCredentials,
+                accessKeyId: 'ASIATEST',
+                secretAccessKey: 'SECRET',
+                sessionToken: 'SESSIONTOKEN',
+            };
+            // eslint-disable-next-line no-new
+            new AthenaWarehouseClient(creds);
+
+            expect(mockAthenaClient).toHaveBeenCalledWith({
+                region: 'us-east-1',
+                credentials: {
+                    accessKeyId: 'ASIATEST',
+                    secretAccessKey: 'SECRET',
+                    sessionToken: 'SESSIONTOKEN',
                 },
             });
         });
@@ -93,6 +143,31 @@ describe('AthenaWarehouseClient', () => {
             });
         });
 
+        test('should chain assume role using temporary credentials (sessionToken in masterCredentials)', () => {
+            const creds: CreateAthenaCredentials = {
+                ...baseCredentials,
+                accessKeyId: 'ASIATEST',
+                secretAccessKey: 'SECRET',
+                sessionToken: 'SESSIONTOKEN',
+                assumeRoleArn: 'arn:aws:iam::123456789012:role/my-role',
+            };
+            // eslint-disable-next-line no-new
+            new AthenaWarehouseClient(creds);
+
+            expect(mockFromTemporaryCredentials).toHaveBeenCalledWith({
+                masterCredentials: {
+                    accessKeyId: 'ASIATEST',
+                    secretAccessKey: 'SECRET',
+                    sessionToken: 'SESSIONTOKEN',
+                },
+                params: {
+                    RoleArn: 'arn:aws:iam::123456789012:role/my-role',
+                    RoleSessionName: 'lightdash-athena-session',
+                    ExternalId: undefined,
+                },
+            });
+        });
+
         test('should not wrap credentials when assumeRoleArn is not set', () => {
             // eslint-disable-next-line no-new
             new AthenaWarehouseClient(baseCredentials);
@@ -124,6 +199,47 @@ describe('AthenaWarehouseClient', () => {
         });
     });
 
+    describe('web identity', () => {
+        const webIdentityCredentials: CreateAthenaCredentials = {
+            ...baseCredentials,
+            authenticationType: AthenaAuthenticationType.WEB_IDENTITY,
+            accessKeyId: undefined,
+            secretAccessKey: undefined,
+            assumeRoleArn: 'arn:aws:iam::123456789012:role/lightdash',
+        };
+
+        const getCredentialProvider = () => {
+            const config = mockAthenaClient.mock.calls[0][0] as {
+                credentials: () => Promise<unknown>;
+            };
+            return config.credentials;
+        };
+
+        test('should use the credentials the server resolved', async () => {
+            const awsCredentials = vi.fn(async () => ({
+                accessKeyId: 'ASIA',
+                secretAccessKey: 'SECRET',
+            }));
+            // eslint-disable-next-line no-new
+            new AthenaWarehouseClient(webIdentityCredentials, {
+                awsCredentials,
+            });
+
+            expect(getCredentialProvider()).toBe(awsCredentials);
+            expect(mockFromTemporaryCredentials).not.toHaveBeenCalled();
+        });
+
+        test('should fail when the server resolved no credentials', async () => {
+            // eslint-disable-next-line no-new
+            new AthenaWarehouseClient(webIdentityCredentials);
+
+            await expect(getCredentialProvider()()).rejects.toThrow(
+                WarehouseConnectionError,
+            );
+            expect(mockFromTemporaryCredentials).not.toHaveBeenCalled();
+        });
+    });
+
     describe('error translation', () => {
         // Synthesizes an error with the shape produced by the AWS SDK:
         // an Error subclass whose `name` is the AWS error code, with optional
@@ -144,10 +260,44 @@ describe('AthenaWarehouseClient', () => {
         };
 
         const setMockSendToReject = (error: Error) => {
-            mockAthenaClient.mockImplementation(() => ({
-                send: jest.fn().mockRejectedValue(error),
-            }));
+            mockAthenaClient.mockImplementation(function () {
+                return { send: vi.fn().mockRejectedValue(error) };
+            });
         };
+
+        test.each(['ExpiredToken', 'InvalidRequestException'])(
+            'preserves the SDK cause for prefixed and unprefixed %s errors',
+            async (name) => {
+                const sdkError = makeAwsError(name, 'safe', 403);
+                setMockSendToReject(sdkError);
+                const client = new AthenaWarehouseClient(baseCredentials);
+                const queryError = client.parseError(sdkError);
+
+                expect(queryError).toBeInstanceOf(
+                    name === 'ExpiredToken'
+                        ? WarehouseConnectionError
+                        : WarehouseQueryError,
+                );
+                expect(queryError.cause).toBe(sdkError);
+                expect(queryError.message).toMatch(/^\[/);
+
+                const fieldsResult = client.getFields(
+                    'orders',
+                    'my_database',
+                    'AwsDataCatalog',
+                );
+                await expect(fieldsResult).rejects.toBeInstanceOf(
+                    WarehouseConnectionError,
+                );
+                await expect(fieldsResult).rejects.toHaveProperty(
+                    'cause',
+                    sdkError,
+                );
+                await expect(fieldsResult).rejects.toThrow(
+                    "Failed to get fields for table 'AwsDataCatalog.my_database.orders'.",
+                );
+            },
+        );
 
         test('translates UnrecognizedClientException into WarehouseConnectionError with hint', async () => {
             setMockSendToReject(
@@ -300,6 +450,455 @@ describe('AthenaWarehouseClient', () => {
             });
             await expect(client.getAllTables()).rejects.toMatchObject({
                 message: expect.stringContaining('Failed to list tables'),
+            });
+        });
+    });
+
+    describe('listing all tables', () => {
+        // Answers Glue calls from a map of database name to table names
+        const makeSend = ({
+            databases,
+            tablesByDatabase,
+            deniedDatabases = [],
+        }: {
+            databases: string[] | Error;
+            tablesByDatabase: Record<string, string[]>;
+            deniedDatabases?: string[];
+        }) =>
+            vi.fn(async (command: unknown) => {
+                if (command instanceof ListDatabasesCommand) {
+                    if (databases instanceof Error) throw databases;
+                    return {
+                        DatabaseList: databases.map((Name) => ({ Name })),
+                    };
+                }
+                if (command instanceof ListTableMetadataCommand) {
+                    const name = command.input.DatabaseName ?? '';
+                    if (deniedDatabases.includes(name)) {
+                        throw new Error(`Access denied to ${name}`);
+                    }
+                    return {
+                        TableMetadataList: (tablesByDatabase[name] ?? []).map(
+                            (Name) => ({
+                                Name,
+                                TableType: 'EXTERNAL_TABLE',
+                            }),
+                        ),
+                    };
+                }
+                throw new Error('Unexpected command');
+            });
+
+        const listSchemaTables = async (send: ReturnType<typeof makeSend>) => {
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const tables = await new AthenaWarehouseClient(
+                baseCredentials,
+            ).getAllTables();
+            return tables.map(({ schema, table }) => `${schema}.${table}`);
+        };
+
+        test('lists tables from every database in the catalog, each under its own schema', async () => {
+            const tables = await listSchemaTables(
+                makeSend({
+                    databases: ['staging', 'my_database'],
+                    tablesByDatabase: {
+                        my_database: ['orders'],
+                        staging: ['stg_orders', 'stg_customers'],
+                    },
+                }),
+            );
+
+            expect(tables).toEqual([
+                'my_database.orders',
+                'staging.stg_orders',
+                'staging.stg_customers',
+            ]);
+        });
+
+        test('falls back to the configured schema when listing databases is denied', async () => {
+            const tables = await listSchemaTables(
+                makeSend({
+                    databases: new Error(
+                        'not authorized to perform: glue:GetDatabases',
+                    ),
+                    tablesByDatabase: {
+                        my_database: ['orders'],
+                        staging: ['stg_orders'],
+                    },
+                }),
+            );
+
+            expect(tables).toEqual(['my_database.orders']);
+        });
+
+        test('skips another database whose tables cannot be listed', async () => {
+            const tables = await listSchemaTables(
+                makeSend({
+                    databases: ['staging', 'restricted'],
+                    tablesByDatabase: {
+                        my_database: ['orders'],
+                        staging: ['stg_orders'],
+                    },
+                    deniedDatabases: ['restricted'],
+                }),
+            );
+
+            expect(tables).toEqual([
+                'my_database.orders',
+                'staging.stg_orders',
+            ]);
+        });
+
+        test('fails when the configured schema cannot be listed', async () => {
+            await expect(
+                listSchemaTables(
+                    makeSend({
+                        databases: ['staging'],
+                        tablesByDatabase: { staging: ['stg_orders'] },
+                        deniedDatabases: ['my_database'],
+                    }),
+                ),
+            ).rejects.toMatchObject({
+                message: expect.stringContaining(
+                    "Failed to list tables in 'AwsDataCatalog.my_database'",
+                ),
+            });
+        });
+    });
+
+    describe('database listing', () => {
+        test('lists two pages with the default database first', async () => {
+            const send = vi
+                .fn()
+                .mockResolvedValueOnce({
+                    DatabaseList: [{ Name: 'analytics' }, { Name: 'finance' }],
+                    NextToken: 'page-2',
+                })
+                .mockResolvedValueOnce({
+                    DatabaseList: [{ Name: 'marketing' }],
+                });
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            await expect(client.listDatabases()).resolves.toEqual({
+                databases: [
+                    {
+                        name: 'my_database',
+                        database: 'AwsDataCatalog',
+                        schema: 'my_database',
+                        isDefault: true,
+                    },
+                    {
+                        name: 'analytics',
+                        database: 'AwsDataCatalog',
+                        schema: 'analytics',
+                        isDefault: false,
+                    },
+                    {
+                        name: 'finance',
+                        database: 'AwsDataCatalog',
+                        schema: 'finance',
+                        isDefault: false,
+                    },
+                    {
+                        name: 'marketing',
+                        database: 'AwsDataCatalog',
+                        schema: 'marketing',
+                        isDefault: false,
+                    },
+                ],
+                truncated: false,
+                limit: 100,
+            });
+            expect(send).toHaveBeenCalledTimes(2);
+            expect(send.mock.calls[0][0]).toBeInstanceOf(ListDatabasesCommand);
+            expect(send.mock.calls[0][0].input).toEqual({
+                CatalogName: 'AwsDataCatalog',
+                MaxResults: 50,
+                NextToken: undefined,
+            });
+            expect(send.mock.calls[1][0].input.NextToken).toBe('page-2');
+        });
+
+        test('caps the result at 100 and stops when truncation is known', async () => {
+            const send = vi
+                .fn()
+                .mockResolvedValueOnce({
+                    DatabaseList: Array.from({ length: 50 }, (_, index) => ({
+                        Name: `database_${index}`,
+                    })),
+                    NextToken: 'page-2',
+                })
+                .mockResolvedValueOnce({
+                    DatabaseList: Array.from({ length: 50 }, (_, index) => ({
+                        Name: `database_${index + 50}`,
+                    })),
+                    NextToken: 'page-3',
+                })
+                .mockResolvedValueOnce({
+                    DatabaseList: Array.from({ length: 20 }, (_, index) => ({
+                        Name: `database_${index + 100}`,
+                    })),
+                });
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            const result = await client.listDatabases();
+
+            expect(result.databases).toHaveLength(100);
+            expect(result.databases[0]).toMatchObject({
+                name: 'my_database',
+                isDefault: true,
+            });
+            expect(result.truncated).toBe(true);
+            expect(send).toHaveBeenCalledTimes(2);
+        });
+
+        test('does not report truncation for exactly 100 databases', async () => {
+            const send = vi.fn().mockResolvedValueOnce({
+                DatabaseList: Array.from({ length: 99 }, (_, index) => ({
+                    Name: `database_${index}`,
+                })),
+            });
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            const result = await client.listDatabases();
+
+            expect(result.databases).toHaveLength(100);
+            expect(result.truncated).toBe(false);
+            expect(send).toHaveBeenCalledOnce();
+        });
+
+        test('keeps fetching once the cap is reached exactly, to learn whether more exist', async () => {
+            const send = vi
+                .fn()
+                .mockResolvedValueOnce({
+                    DatabaseList: Array.from({ length: 99 }, (_, index) => ({
+                        Name: `database_${index}`,
+                    })),
+                    NextToken: 'page-2',
+                })
+                .mockResolvedValueOnce({
+                    DatabaseList: [{ Name: 'database_99' }],
+                });
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            const result = await client.listDatabases();
+
+            expect(send).toHaveBeenCalledTimes(2);
+            expect(result.databases).toHaveLength(100);
+            expect(result.truncated).toBe(true);
+        });
+
+        test('translates a rejected listDatabases call', async () => {
+            const send = vi.fn().mockRejectedValue(
+                Object.assign(new Error('boom'), {
+                    name: 'AccessDeniedException',
+                    $metadata: { httpStatusCode: 403 },
+                }),
+            );
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            await expect(client.listDatabases()).rejects.toBeInstanceOf(
+                WarehouseConnectionError,
+            );
+            await expect(client.listDatabases()).rejects.toMatchObject({
+                message: expect.stringContaining(
+                    "Failed to list databases in catalog 'AwsDataCatalog'.",
+                ),
+            });
+        });
+    });
+
+    describe('getCatalog', () => {
+        const request = {
+            database: 'AwsDataCatalog',
+            schema: 'analytics',
+            table: 'orders',
+        };
+
+        test('skips tables the credentials cannot read', async () => {
+            const send = vi.fn().mockRejectedValue(
+                Object.assign(new Error('not authorized'), {
+                    name: 'AccessDeniedException',
+                    $metadata: { httpStatusCode: 403 },
+                }),
+            );
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+            expect(await client.getCatalog([request])).toEqual({});
+            expect(warn).toHaveBeenCalledOnce();
+            warn.mockRestore();
+        });
+
+        test('skips tables that do not exist', async () => {
+            const send = vi.fn().mockRejectedValue(
+                Object.assign(new Error('missing'), {
+                    name: 'MetadataException',
+                }),
+            );
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            expect(await client.getCatalog([request])).toEqual({});
+        });
+
+        test('translates other metadata failures', async () => {
+            const send = vi.fn().mockRejectedValue(
+                Object.assign(new Error('boom'), {
+                    name: 'InternalServerException',
+                    $metadata: { httpStatusCode: 500 },
+                }),
+            );
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            await expect(client.getCatalog([request])).rejects.toMatchObject({
+                message: expect.stringContaining(
+                    "Failed to fetch table metadata for 'AwsDataCatalog.analytics.orders'.",
+                ),
+            });
+        });
+    });
+
+    describe('table listing', () => {
+        test('pages tables for the selected database', async () => {
+            const send = vi
+                .fn()
+                .mockResolvedValueOnce({
+                    TableMetadataList: [
+                        { Name: 'orders', TableType: 'EXTERNAL_TABLE' },
+                    ],
+                    NextToken: 'page-2',
+                })
+                .mockResolvedValueOnce({
+                    TableMetadataList: [
+                        { Name: 'customers', TableType: 'VIRTUAL_VIEW' },
+                    ],
+                });
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            const result = await client.getTablesForDatabase({
+                name: 'finance',
+                database: 'AwsDataCatalog',
+                schema: 'finance',
+                isDefault: false,
+            });
+
+            expect(result).toEqual([
+                {
+                    database: 'AwsDataCatalog',
+                    schema: 'finance',
+                    table: 'orders',
+                    tableType: 'external',
+                },
+                {
+                    database: 'AwsDataCatalog',
+                    schema: 'finance',
+                    table: 'customers',
+                    tableType: 'view',
+                },
+            ]);
+            expect(send).toHaveBeenCalledTimes(2);
+            expect(send.mock.calls[0][0]).toBeInstanceOf(
+                ListTableMetadataCommand,
+            );
+            expect(send.mock.calls[0][0].input).toEqual({
+                CatalogName: 'AwsDataCatalog',
+                DatabaseName: 'finance',
+                MaxResults: 50,
+                NextToken: undefined,
+            });
+            expect(send.mock.calls[1][0].input.NextToken).toBe('page-2');
+        });
+
+        test('uses the requested database, not the connection catalog', async () => {
+            const send = vi.fn().mockResolvedValue({
+                TableMetadataList: [{ Name: 'orders' }],
+            });
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            const result = await client.getTablesForDatabase({
+                name: 'shared',
+                database: 'OtherCatalog',
+                schema: 'shared',
+                isDefault: false,
+            });
+
+            expect(result).toEqual([
+                {
+                    database: 'OtherCatalog',
+                    schema: 'shared',
+                    table: 'orders',
+                    tableType: 'table',
+                },
+            ]);
+            expect(send.mock.calls[0][0].input).toMatchObject({
+                CatalogName: 'OtherCatalog',
+                DatabaseName: 'shared',
+            });
+        });
+
+        test('translates a rejected getTablesForDatabase call', async () => {
+            const send = vi.fn().mockRejectedValue(
+                Object.assign(new Error('boom'), {
+                    name: 'AccessDeniedException',
+                    $metadata: { httpStatusCode: 403 },
+                }),
+            );
+            mockAthenaClient.mockImplementation(function () {
+                return { send };
+            });
+            const client = new AthenaWarehouseClient(baseCredentials);
+
+            await expect(
+                client.getTablesForDatabase({
+                    name: 'finance',
+                    database: 'AwsDataCatalog',
+                    schema: 'finance',
+                    isDefault: false,
+                }),
+            ).rejects.toBeInstanceOf(WarehouseConnectionError);
+            await expect(
+                client.getTablesForDatabase({
+                    name: 'finance',
+                    database: 'AwsDataCatalog',
+                    schema: 'finance',
+                    isDefault: false,
+                }),
+            ).rejects.toMatchObject({
+                message: expect.stringContaining(
+                    "Failed to list tables in 'AwsDataCatalog.finance'.",
+                ),
             });
         });
     });

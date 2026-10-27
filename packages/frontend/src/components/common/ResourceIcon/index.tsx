@@ -2,6 +2,7 @@ import {
     assertUnreachable,
     ChartKind,
     ResourceViewItemType,
+    type ContentVerificationInfo,
     type ResourceViewItem,
 } from '@lightdash/common';
 import {
@@ -10,15 +11,16 @@ import {
     Tooltip,
     type IndicatorProps,
     type TooltipProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconAppWindow,
+    IconCircleCheckFilled,
     IconFolder,
+    IconFileText,
     IconLayoutDashboard,
     type Icon as TablerIconType,
 } from '@tabler/icons-react';
 import { useRef, useState, type FC, type ReactNode } from 'react';
-import { type StyledComponent } from 'styled-components';
 import MantineIcon, { type MantineIconProps } from '../MantineIcon';
 import classes from './ResourceIcon.module.css';
 import { getChartIcon } from './utils';
@@ -30,7 +32,8 @@ interface ResourceIconProps {
 interface IconBoxProps extends MantineIconProps {
     color: string;
     bg?: string;
-    icon: TablerIconType | StyledComponent<'svg', any, {}, never>;
+    icon: TablerIconType;
+    boxSize?: number;
 }
 
 export const IconBox: FC<IconBoxProps> = ({
@@ -38,9 +41,16 @@ export const IconBox: FC<IconBoxProps> = ({
     icon,
     size = 'lg',
     bg = 'ldGray.0',
+    boxSize = 32,
     ...mantineIconProps
 }) => (
-    <Paper w={32} h={32} radius="md" bg={bg} className={classes.iconBox}>
+    <Paper
+        w={boxSize}
+        h={boxSize}
+        radius="md"
+        bg={bg}
+        className={classes.iconBox}
+    >
         <MantineIcon
             icon={icon}
             color={color}
@@ -78,6 +88,8 @@ export const ResourceIcon: FC<ResourceIconProps> = ({ item }) => {
             return <ChartIcon chartKind={item.data.chartKind} />;
         case ResourceViewItemType.DATA_APP:
             return <IconBox icon={IconAppWindow} color="orange.6" />;
+        case ResourceViewItemType.DOCUMENT:
+            return <IconBox icon={IconFileText} color="dimmed" />;
         default:
             return assertUnreachable(item, 'Resource type not supported');
     }
@@ -159,5 +171,34 @@ export const ResourceIndicator: FC<
         >
             {children}
         </Indicator>
+    );
+};
+
+/** The resource icon, wrapped in a verified badge when the content is verified. */
+export const VerifiedResourceIcon: FC<{
+    item: ResourceViewItem;
+    verification: ContentVerificationInfo | null;
+}> = ({ item, verification }) => {
+    if (!verification) return <ResourceIcon item={item} />;
+    return (
+        <ResourceIndicator
+            iconProps={{ icon: IconCircleCheckFilled, color: 'green.6' }}
+            tooltipProps={{
+                maw: 300,
+                withinPortal: true,
+                multiline: true,
+                offset: -2,
+                position: 'bottom',
+            }}
+            tooltipLabel={
+                <>
+                    Verified by {verification.verifiedBy.firstName}{' '}
+                    {verification.verifiedBy.lastName} on{' '}
+                    {new Date(verification.verifiedAt).toLocaleDateString()}
+                </>
+            }
+        >
+            <ResourceIcon item={item} />
+        </ResourceIndicator>
     );
 };

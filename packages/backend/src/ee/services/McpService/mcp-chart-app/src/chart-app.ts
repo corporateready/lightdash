@@ -1,5 +1,7 @@
-// Deep import bypasses @lightdash/common's barrel, which transitively pulls
+import type { DataAppVizContext } from '@lightdash/common';
+// Deep imports bypass @lightdash/common's barrel, which transitively pulls
 // in pegjs/postcss and breaks the browser bundle (path.isAbsolute externalized).
+import assertUnreachable from '@lightdash/common/src/utils/assertUnreachable';
 import {
     formatCartesianTooltipRow,
     formatColorIndicator,
@@ -7,25 +9,50 @@ import {
     formatTooltipRow,
     formatTooltipValue,
 } from '@lightdash/common/src/visualizations/helpers/styles/tooltipStyles';
-import { App } from '@modelcontextprotocol/ext-apps';
+import {
+    App,
+    applyDocumentTheme,
+    applyHostStyleVariables,
+    type McpUiHostContext,
+} from '@modelcontextprotocol/ext-apps';
 import * as echarts from 'echarts';
+import { loadMcpCustomChartFrameHtml } from '../../mcpCustomChartFrameHtml';
+import {
+    getCustomChartFrameHandshake,
+    getCustomChartFrameUrl,
+    getCustomChartRenderDeadlineAction,
+    getCustomChartThemeMessage,
+    handleCustomChartFrameMessage,
+    INITIAL_CUSTOM_CHART_RENDER_READINESS,
+    updateCustomChartRenderReadiness,
+    type CustomChartColorScheme,
+    type CustomChartHostMessage,
+} from '../../mcpCustomChartFrameProtocol';
 import { lightdashTheme } from './lightdash-theme';
 
-// Register the custom Lightdash theme
-echarts.registerTheme('lightdash', lightdashTheme);
-
+const card = document.getElementById('card') as HTMLDivElement;
 const chartContainer = document.getElementById('chart') as HTMLDivElement;
-const tableFallback = document.getElementById(
-    'table-fallback',
+const resultContainer = document.getElementById(
+    'result-container',
 ) as HTMLDivElement;
+const customChartContainer = document.getElementById(
+    'custom-chart',
+) as HTMLDivElement;
+const cardFooter = document.getElementById('card-footer') as HTMLDivElement;
+const cardCaption = document.getElementById('card-caption') as HTMLSpanElement;
+const expandButton = document.getElementById('expand-btn') as HTMLButtonElement;
+const exploreButton = document.getElementById(
+    'explore-btn',
+) as HTMLButtonElement;
 
 let chart: echarts.ECharts | null = null;
+let lastChartOption: echarts.EChartsOption | null = null;
 
 // ---------------------------------------------------------------------------
 // Tooltip formatter helpers (client-side, functions can't be serialized)
 // ---------------------------------------------------------------------------
 
-/** Extract color string from ECharts marker HTML or fallback. */
+/** Extract color string from ECharts marker HTML or default. */
 function extractColor(
     param: echarts.DefaultLabelFormatterCallbackParams,
 ): string {
@@ -119,19 +146,53 @@ function itemTooltipFormatter(
     );
 }
 
+const colorProbe = document.createElement('span');
+colorProbe.hidden = true;
+document.body.appendChild(colorProbe);
+
+/** Resolves a CSS colour (var(), light-dark()) to a value the canvas renderer can draw. */
+function resolveCssColor(value: string): string {
+    colorProbe.style.color = value;
+    const resolved = colorProbe.style.color
+        ? getComputedStyle(colorProbe).color
+        : value;
+    colorProbe.style.color = '';
+    return resolved;
+}
+
+function resolveCssVariables<T>(value: T): T {
+    if (typeof value === 'string') {
+        return (
+            value.startsWith('var(--') ? resolveCssColor(value) : value
+        ) as T;
+    }
+    if (Array.isArray(value)) return value.map(resolveCssVariables) as T;
+    if (isRecord(value)) {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, v]) => [
+                key,
+                resolveCssVariables(v),
+            ]),
+        ) as T;
+    }
+    return value;
+}
+
 function initChart(): echarts.ECharts {
     if (chart) {
         chart.dispose();
     }
+    // Re-registered on every init so the theme picks up the host's current colours
+    echarts.registerTheme('lightdash', resolveCssVariables(lightdashTheme));
     chart = echarts.init(chartContainer, 'lightdash');
     return chart;
 }
 
 function renderChart(echartsOption: echarts.EChartsOption): void {
     chartContainer.style.display = 'block';
-    tableFallback.style.display = 'none';
+    resultContainer.style.display = 'none';
 
-    const instance = chart ?? initChart();
+    const instance = initChart();
 
     // Inject client-side tooltip formatter (can't be serialized in JSON)
     const tooltip = (echartsOption.tooltip ?? {}) as Record<string, unknown>;
@@ -148,7 +209,37 @@ function renderChart(echartsOption: echarts.EChartsOption): void {
         },
     };
 
-    instance.setOption(optionWithFormatter, true);
+    lastChartOption = optionWithFormatter;
+    setChartOption(instance, optionWithFormatter);
+}
+
+/** Redraws the visible chart so the canvas picks up the host's current colours. */
+function redrawChart(): void {
+    if (chart && lastChartOption && chartContainer.style.display !== 'none') {
+        setChartOption(initChart(), lastChartOption);
+    }
+}
+
+function setChartOption(
+    instance: echarts.ECharts,
+    option: echarts.EChartsOption,
+): void {
+    // ECharts themes can't style `graphic` text, which the AI chart config uses for axis titles
+    const fill = 'var(--app-text-secondary)';
+    const graphic = Array.isArray(option.graphic)
+        ? option.graphic.map((element: unknown) =>
+              isRecord(element) &&
+              element.type === 'text' &&
+              isRecord(element.style) &&
+              element.style.fill === undefined
+                  ? { ...element, style: { ...element.style, fill } }
+                  : element,
+          )
+        : option.graphic;
+    instance.setOption(
+        resolveCssVariables({ ...option, graphic }) as echarts.EChartsOption,
+        true,
+    );
 }
 
 function renderTable(
@@ -156,10 +247,10 @@ function renderTable(
     fields: Record<string, { label?: string }>,
 ): void {
     chartContainer.style.display = 'none';
-    tableFallback.style.display = 'block';
+    resultContainer.style.display = 'block';
 
     if (rows.length === 0) {
-        tableFallback.innerHTML = '<p>No data available.</p>';
+        resultContainer.innerHTML = '<p>No data available.</p>';
         return;
     }
 
@@ -178,7 +269,7 @@ function renderTable(
         )
         .join('');
 
-    tableFallback.innerHTML = `<table><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+    resultContainer.innerHTML = `<table><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table>`;
 }
 
 function escapeHtml(str: string): string {
@@ -187,59 +278,439 @@ function escapeHtml(str: string): string {
     return div.innerHTML;
 }
 
-function renderExploreButton(url: string): void {
-    // Remove existing button if any
-    const existing = document.getElementById('explore-btn');
-    if (existing) existing.remove();
+const EXPAND_ICON =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></svg>';
+const COLLAPSE_ICON =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 14 2M6.5 9.5 2 14"/></svg>';
 
-    const btn = document.createElement('button');
-    btn.id = 'explore-btn';
-    btn.textContent = 'Explore from here';
-    btn.addEventListener('click', async () => {
-        const { isError } = await app.openLink({ url });
-        if (isError) {
-            console.warn('Host denied the request - URL:', url);
-        }
-    });
+let exploreUrl: string | null = null;
 
-    document.body.appendChild(btn);
+exploreButton.addEventListener('click', async () => {
+    if (!exploreUrl) return;
+    const { isError } = await app.openLink({ url: exploreUrl });
+    if (isError) {
+        console.warn('Host denied the request - URL:', exploreUrl);
+    }
+});
+
+function isFullscreen(): boolean {
+    return document.documentElement.dataset.displayMode === 'fullscreen';
 }
 
-const app = new App({ name: 'Lightdash Chart', version: '1.0.0' });
+expandButton.addEventListener('click', async () => {
+    try {
+        const { mode } = await app.requestDisplayMode({
+            mode: isFullscreen() ? 'inline' : 'fullscreen',
+        });
+        document.documentElement.dataset.displayMode = mode;
+    } catch (error) {
+        console.warn('Host denied the display mode request', error);
+    }
+    updateExpandButton();
+});
+
+function updateExpandButton(): void {
+    const canExpand =
+        app.getHostContext()?.availableDisplayModes?.includes('fullscreen') ??
+        false;
+    expandButton.hidden = !canExpand;
+    const fullscreen = isFullscreen();
+    const label = fullscreen ? 'Exit full screen' : 'Expand to full screen';
+    expandButton.innerHTML = fullscreen ? COLLAPSE_ICON : EXPAND_ICON;
+    expandButton.setAttribute('aria-label', label);
+    expandButton.title = label;
+}
+
+function renderCardFooter({
+    rowCount,
+    url,
+}: {
+    rowCount: number | null;
+    url: string | null;
+}): void {
+    card.dataset.framed = 'true';
+    exploreUrl = url;
+    exploreButton.hidden = url === null;
+    cardCaption.textContent =
+        rowCount === null
+            ? ''
+            : `${rowCount.toLocaleString()} ${rowCount === 1 ? 'row' : 'rows'}`;
+    updateExpandButton();
+    cardFooter.hidden = false;
+}
+
+function hideCardFooter(): void {
+    exploreUrl = null;
+    cardFooter.hidden = true;
+}
+
+function applyHostContext(ctx: Partial<McpUiHostContext>): void {
+    if (ctx.theme) applyDocumentTheme(ctx.theme);
+    if (ctx.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
+    if (ctx.displayMode) {
+        document.documentElement.dataset.displayMode = ctx.displayMode;
+    }
+    if (ctx.safeAreaInsets) {
+        const root = document.documentElement.style;
+        root.setProperty('--safe-area-top', `${ctx.safeAreaInsets.top}px`);
+        root.setProperty('--safe-area-right', `${ctx.safeAreaInsets.right}px`);
+        root.setProperty(
+            '--safe-area-bottom',
+            `${ctx.safeAreaInsets.bottom}px`,
+        );
+        root.setProperty('--safe-area-left', `${ctx.safeAreaInsets.left}px`);
+    }
+    updateExpandButton();
+}
+
+const app = new App(
+    { name: 'Lightdash Chart', version: '1.0.0' },
+    { availableDisplayModes: ['inline', 'fullscreen'] },
+);
+
+type ChartToolStatus = 'done' | 'running' | 'error' | 'cancelled' | 'expired';
+
+type CustomChartTypeResult = {
+    dataAppVizUuid: string;
+    version: number;
+    vizContext: DataAppVizContext;
+    renderArgs: { projectUuid: string; agentUuid?: string };
+};
+
+type ChartToolResult = {
+    status?: ChartToolStatus;
+    echartsOption?: echarts.EChartsOption | null;
+    rows?: Record<string, unknown>[];
+    fields?: Record<string, { label?: string }>;
+    exploreUrl?: string | null;
+    customChartType?: CustomChartTypeResult;
+};
+
+const CUSTOM_CHART_RENDER_TIMEOUT_MS = 10_000;
+// Covers a stalled bundle fetch, and then a frame whose load never fires
+const CUSTOM_CHART_LOAD_TIMEOUT_MS = 20_000;
+
+let teardownCustomChart: (() => void) | null = null;
+let postToCustomChart: ((message: CustomChartHostMessage) => void) | null =
+    null;
+
+function getHostColorScheme(): CustomChartColorScheme {
+    const theme =
+        app.getHostContext()?.theme ??
+        (window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light');
+    return theme === 'dark' ? 'dark' : 'light';
+}
+
+function clearCustomChart(): void {
+    teardownCustomChart?.();
+    teardownCustomChart = null;
+    postToCustomChart = null;
+    customChartContainer.style.display = 'none';
+}
+
+/** Runs the chart type bundle in an opaque-origin blob frame and bridges its SDK. */
+function renderCustomChart(
+    html: string,
+    customChartType: CustomChartTypeResult,
+    onFailure: () => void,
+): void {
+    clearCustomChart();
+    chartContainer.style.display = 'none';
+    resultContainer.style.display = 'none';
+    customChartContainer.style.display = 'block';
+
+    const blobUrl = URL.createObjectURL(
+        new Blob([html], { type: 'text/html;charset=utf-8' }),
+    );
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-scripts');
+    iframe.title = 'Chart';
+    iframe.src = getCustomChartFrameUrl({
+        blobUrl,
+        projectUuid: customChartType.renderArgs.projectUuid,
+        colorScheme: getHostColorScheme(),
+    });
+
+    const post = (message: CustomChartHostMessage) =>
+        iframe.contentWindow?.postMessage(message, '*');
+    let readiness = INITIAL_CUSTOM_CHART_RENDER_READINESS;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const stopDeadline = () => {
+        if (timeout !== null) clearTimeout(timeout);
+        timeout = null;
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+    const onDeadline = () => {
+        timeout = null;
+        const action = getCustomChartRenderDeadlineAction(readiness, {
+            documentHidden: document.visibilityState === 'hidden',
+        });
+        switch (action) {
+            case 'keep-chart':
+                return;
+            case 'wait-for-visible':
+                document.addEventListener(
+                    'visibilitychange',
+                    onVisibilityChange,
+                );
+                return;
+            case 'show-table':
+                clearCustomChart();
+                onFailure();
+                return;
+            default:
+                assertUnreachable(action, 'Unknown render deadline action');
+        }
+    };
+    const startDeadline = (ms = CUSTOM_CHART_RENDER_TIMEOUT_MS) => {
+        stopDeadline();
+        timeout = setTimeout(onDeadline, ms);
+    };
+    const onVisibilityChange = () => {
+        if (document.visibilityState !== 'hidden') startDeadline();
+    };
+    const onLoad = () => {
+        getCustomChartFrameHandshake(getHostColorScheme()).forEach(post);
+        startDeadline();
+    };
+    const onMessage = (event: MessageEvent) => {
+        if (event.source !== iframe.contentWindow) return;
+        readiness = updateCustomChartRenderReadiness(readiness, event.data);
+        const action = handleCustomChartFrameMessage(event.data, {
+            vizContext: customChartType.vizContext,
+            colorScheme: getHostColorScheme(),
+        });
+        switch (action.kind) {
+            case 'reply':
+                post(action.message);
+                return;
+            case 'rendered':
+                stopDeadline();
+                return;
+            case 'ignore':
+                return;
+            default:
+                assertUnreachable(action, 'Unknown chart frame action');
+        }
+    };
+
+    iframe.addEventListener('load', onLoad);
+    window.addEventListener('message', onMessage);
+    customChartContainer.appendChild(iframe);
+    startDeadline(CUSTOM_CHART_LOAD_TIMEOUT_MS);
+    postToCustomChart = post;
+    teardownCustomChart = () => {
+        stopDeadline();
+        window.removeEventListener('message', onMessage);
+        iframe.removeEventListener('load', onLoad);
+        iframe.remove();
+        URL.revokeObjectURL(blobUrl);
+    };
+}
+
+// html and body fill the viewport, so the auto-resize observer misses later content changes
+function reportViewSize(): void {
+    const root = document.documentElement;
+    const previousHeight = root.style.height;
+    root.style.height = 'max-content';
+    const height = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = previousHeight;
+    void app.sendSizeChanged({ width: Math.ceil(window.innerWidth), height });
+}
+
+/** Fetches the bundle from the preview origin; a newer tool result discards a pending fetch. */
+function loadCustomChart(
+    customChartType: CustomChartTypeResult,
+    onFailure: () => void,
+): void {
+    clearCustomChart();
+    chartContainer.style.display = 'none';
+    resultContainer.style.display = 'none';
+    // Keep the view's height while the bundle loads so the host doesn't collapse it
+    customChartContainer.style.display = 'block';
+
+    const controller = new AbortController();
+    let superseded = false;
+    // A timed-out fetch rejects, so it lands on the unavailable path below.
+    const fetchTimeout = setTimeout(
+        () => controller.abort(),
+        CUSTOM_CHART_LOAD_TIMEOUT_MS,
+    );
+    teardownCustomChart = () => {
+        superseded = true;
+        clearTimeout(fetchTimeout);
+        controller.abort();
+    };
+    const hostCallsServerTools = Boolean(
+        app.getHostCapabilities()?.serverTools,
+    );
+    void loadMcpCustomChartFrameHtml(
+        {
+            projectUuid: customChartType.renderArgs.projectUuid,
+            agentUuid: customChartType.renderArgs.agentUuid ?? null,
+            dataAppVizUuid: customChartType.dataAppVizUuid,
+            version: customChartType.version,
+        },
+        {
+            callTool: hostCallsServerTools
+                ? (params, options) => app.callServerTool(params, options)
+                : null,
+            fetchFn: (url, init) => fetch(url, init),
+            signal: controller.signal,
+        },
+    ).then((result) => {
+        clearTimeout(fetchTimeout);
+        if (superseded) return;
+        switch (result.kind) {
+            case 'html':
+                renderCustomChart(result.html, customChartType, onFailure);
+                return;
+            case 'unavailable':
+                clearCustomChart();
+                onFailure();
+                return;
+            default:
+                assertUnreachable(result, 'Unknown chart type html result');
+        }
+    });
+}
+
+type MessageKind = 'loading' | 'error' | 'info';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+
+function getStructuredResult(structuredContent: unknown): ChartToolResult {
+    if (!isRecord(structuredContent)) {
+        return {};
+    }
+
+    // Keep old app payloads working while MCP tool results move under
+    // structuredContent.result.
+    const { result } = structuredContent;
+    if (isRecord(result)) {
+        return result as ChartToolResult;
+    }
+
+    return structuredContent as ChartToolResult;
+}
+
+function getToolResultPayload(result: unknown): ChartToolResult {
+    if (!isRecord(result)) {
+        return {};
+    }
+
+    const structured = getStructuredResult(result.structuredContent);
+    const meta = isRecord(result._meta)
+        ? getStructuredResult(result._meta)
+        : {};
+
+    return {
+        ...structured,
+        ...meta,
+    };
+}
+
+function clearRenderedContent(): void {
+    chartContainer.style.display = 'none';
+    resultContainer.style.display = 'none';
+    resultContainer.innerHTML = '';
+    card.dataset.framed = 'false';
+    hideCardFooter();
+}
+
+function getTextContent(result: unknown): string | null {
+    if (!isRecord(result) || !Array.isArray(result.content)) {
+        return null;
+    }
+
+    const textParts = result.content.flatMap((item) => {
+        if (!isRecord(item) || item.type !== 'text') {
+            return [];
+        }
+
+        return typeof item.text === 'string' ? [item.text] : [];
+    });
+
+    return textParts.length > 0 ? textParts.join('\n') : null;
+}
+
+function getMessageKind(
+    result: unknown,
+    structured: ChartToolResult,
+): MessageKind {
+    if (structured.status === 'running') {
+        return 'loading';
+    }
+
+    if (
+        structured.status === 'error' ||
+        structured.status === 'cancelled' ||
+        structured.status === 'expired' ||
+        (isRecord(result) && result.isError === true)
+    ) {
+        return 'error';
+    }
+
+    return 'info';
+}
+
+function renderMessageContent(text: string, kind: MessageKind): void {
+    chartContainer.style.display = 'none';
+    resultContainer.style.display = 'block';
+    card.dataset.framed = 'false';
+    hideCardFooter();
+    resultContainer.innerHTML = `<div class="message message--${kind}"><pre>${escapeHtml(
+        text,
+    )}</pre></div>`;
+}
 
 app.ontoolresult = (result) => {
-    const structured = result.structuredContent as
-        | {
-              echartsOption?: echarts.EChartsOption;
-              rows?: Record<string, unknown>[];
-              fields?: Record<string, { label?: string }>;
-              exploreUrl?: string;
-          }
-        | undefined;
+    const structured = getToolResultPayload(result);
+    clearCustomChart();
+    const customChartType = structured?.customChartType;
 
-    if (structured?.echartsOption) {
+    if (customChartType?.dataAppVizUuid) {
+        loadCustomChart(customChartType, () =>
+            renderTable(structured.rows ?? [], structured.fields ?? {}),
+        );
+    } else if (structured?.echartsOption) {
         renderChart(structured.echartsOption);
     } else if (structured?.rows) {
         renderTable(structured.rows ?? [], structured.fields ?? {});
     } else {
-        // Fall back to text content
-        const text = result.content?.find(
-            (c: { type: string }) => c.type === 'text',
-        ) as { type: string; text: string } | undefined;
-        if (text?.text) {
-            tableFallback.style.display = 'block';
-            chartContainer.style.display = 'none';
-            tableFallback.innerHTML = `<pre style="white-space: pre-wrap; font-size: 13px;">${escapeHtml(
-                text.text,
-            )}</pre>`;
+        const text = getTextContent(result);
+        if (text) {
+            renderMessageContent(text, getMessageKind(result, structured));
+        } else {
+            clearRenderedContent();
         }
+        return;
     }
 
-    // Show "Explore from here" button if URL is present
-    if (structured?.exploreUrl) {
-        renderExploreButton(structured.exploreUrl);
+    renderCardFooter({
+        rowCount: structured.rows?.length ?? null,
+        url: structured.exploreUrl ?? null,
+    });
+};
+
+app.onhostcontextchanged = (changed) => {
+    applyHostContext(changed);
+    postToCustomChart?.(getCustomChartThemeMessage(getHostColorScheme()));
+    if (changed.theme !== undefined || changed.styles !== undefined) {
+        redrawChart();
     }
 };
+
+// Without a host theme the colours follow the OS colour scheme
+window
+    .matchMedia('(prefers-color-scheme: dark)')
+    .addEventListener('change', () => {
+        if (!app.getHostContext()?.theme) redrawChart();
+    });
 
 let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
 const resizeObserver = new ResizeObserver(() => {
@@ -251,5 +722,9 @@ const resizeObserver = new ResizeObserver(() => {
     }
 });
 resizeObserver.observe(chartContainer);
+new ResizeObserver(reportViewSize).observe(card);
 
-app.connect();
+void app.connect().then(() => {
+    const hostContext = app.getHostContext();
+    if (hostContext) applyHostContext(hostContext);
+});

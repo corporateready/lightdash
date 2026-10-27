@@ -1,0 +1,805 @@
+.reportScroll {
+    height: var(--page-height, calc(100dvh - var(--navbar-height) - 3.75rem));
+    background-color: var(--mantine-color-body);
+}
+
+.reportControls {
+    width: min(100%, var(--report-container-width, 74rem));
+    margin-inline: auto;
+    padding-inline: var(--report-controls-padding, var(--mantine-spacing-lg))
+        var(--report-controls-padding-right, var(--mantine-spacing-lg));
+}
+
+.reportLayout {
+    display: grid;
+    grid-template-columns: 14rem minmax(0, 1fr);
+    width: min(100%, 74rem);
+    min-height: 100%;
+    margin-inline: auto;
+}
+
+.contentsRail {
+    border-right: 1px solid var(--mantine-color-ldGray-2);
+}
+
+.withoutContents {
+    display: block;
+}
+
+.contentsNav {
+    position: sticky;
+    top: 0;
+    display: grid;
+    gap: var(--mantine-spacing-sm);
+    padding: var(--mantine-spacing-xl) var(--mantine-spacing-md)
+        var(--mantine-spacing-3xl) var(--mantine-spacing-lg);
+}
+
+.contentsLabel {
+    padding-inline: var(--mantine-spacing-xs);
+    color: var(--mantine-color-dimmed);
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    line-height: 1.4;
+    text-transform: uppercase;
+}
+
+.contentsList {
+    display: grid;
+    gap: 0.125rem;
+}
+
+.contentsControl {
+    min-width: 0;
+    padding: 0.375rem 0.625rem;
+    overflow: hidden;
+    color: var(--mantine-color-dimmed);
+    font-size: 0.75rem;
+    line-height: 1.35;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    &[data-active='true'] {
+        color: var(--mantine-color-text);
+        background: var(--mantine-color-ldGray-1);
+        font-weight: 600;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--mantine-color-text);
+        outline-offset: 2px;
+    }
+}
+
+.sourceCount {
+    color: var(--mantine-color-dimmed);
+    font-family: var(--mantine-font-family-monospace);
+    font-size: 0.6875rem;
+}
+
+.report {
+    margin-inline: auto;
+    padding: var(--mantine-spacing-lg)
+        var(--report-inline-padding, clamp(1.25rem, 4vw, 3rem))
+        var(--report-bottom-padding, 6rem);
+}
+
+.reportFallback {
+    width: min(100%, 60rem);
+}
+
+.structuredReportLayout {
+    grid-template-columns: 12rem minmax(0, 1fr);
+    width: min(100%, var(--report-container-width, 80rem));
+}
+
+.structuredReportPage {
+    width: 100%;
+}
+
+.reportHeader {
+    display: grid;
+    gap: var(--mantine-spacing-sm);
+    scroll-margin-top: var(--mantine-spacing-lg);
+}
+
+.eyebrow {
+    color: var(--mantine-color-dimmed);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    line-height: 1.35;
+    text-transform: uppercase;
+}
+
+.reportTitle {
+    font-size: clamp(1.6rem, 3vw, 2rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+}
+
+.reportBody {
+    h2 {
+        margin-top: var(--mantine-spacing-3xl);
+        scroll-margin-top: var(--mantine-spacing-lg);
+    }
+
+    li + li {
+        margin-top: var(--mantine-spacing-xs);
+    }
+}
+
+.structuredReport {
+    gap: 0;
+}
+
+.reportIntroduction {
+    padding-bottom: 2.5rem;
+}
+
+.reportIntroductionProse {
+    --ai-markdown-font-size: 1rem;
+    --ai-markdown-padding-left: 0;
+
+    color: var(--mantine-color-text);
+    line-height: 1.7;
+}
+
+.reportFinding {
+    display: grid;
+    gap: 1.25rem;
+    padding-block: 2.5rem;
+    border-top: 1px solid var(--mantine-color-ldGray-2);
+}
+
+.reportFindingTitle {
+    font-size: clamp(1.05rem, 2vw, 1.1875rem);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
+    scroll-margin-top: var(--mantine-spacing-xl);
+}
+
+.reportMarkdownHeading {
+    margin-top: 2.5rem;
+    margin-bottom: 1.25rem;
+    padding-top: 2.5rem;
+    border-top: 1px solid var(--mantine-color-ldGray-2);
+}
+
+.reportMarkdown {
+    .reportFindingTitle {
+        margin: 0;
+        font-size: clamp(1.05rem, 2vw, 1.1875rem);
+        font-weight: 700;
+        letter-spacing: -0.015em;
+        line-height: 1.3;
+    }
+
+    .reportIntroduction,
+    .reportConclusion {
+        font-size: 1rem;
+    }
+}
+
+.reportMarkdown.documentMarkdown {
+    h1 {
+        font-size: var(--mantine-h1-font-size);
+    }
+
+    h2 {
+        font-size: var(--mantine-h3-font-size);
+    }
+
+    h3 {
+        font-size: var(--mantine-h5-font-size);
+    }
+
+    h1,
+    h2,
+    h3 {
+        margin-top: var(--mantine-spacing-xl);
+        margin-bottom: var(--mantine-spacing-sm);
+        scroll-margin-top: var(--mantine-spacing-xl);
+    }
+
+    :is(h1, h2, h3):first-child {
+        margin-top: 0;
+    }
+}
+
+.reportEvidence {
+    min-width: 0;
+    padding: 1.5rem 1.75rem 1rem;
+    border: 1px solid var(--mantine-color-ldGray-2);
+    border-radius: 0.75rem;
+    background: var(--mantine-color-body);
+    box-shadow: var(--mantine-shadow-subtle);
+
+    .chartTile {
+        height: 30rem;
+        margin: 0;
+    }
+
+    /* Short tables shrink to their rows; long ones scroll inside the cap */
+    .chartTile.chartTileFitContent {
+        height: auto;
+        max-height: 30rem;
+    }
+}
+
+.reportNarrative {
+    min-width: 0;
+}
+
+.reportProse {
+    --ai-markdown-font-size: 0.875rem;
+    --ai-markdown-padding-left: 0;
+
+    overflow-wrap: anywhere;
+    color: var(--mantine-color-dimmed);
+    line-height: 1.7;
+
+    > :first-child {
+        margin-top: 0;
+    }
+
+    > :last-child {
+        margin-bottom: 0;
+    }
+}
+
+.reportConclusion {
+    display: grid;
+    gap: 1.25rem;
+    padding-top: 2.5rem;
+    border-top: 1px solid var(--mantine-color-ldGray-2);
+    scroll-margin-top: var(--mantine-spacing-xl);
+}
+
+.reportConclusionProse {
+    --ai-markdown-font-size: 1rem;
+    --ai-markdown-padding-left: 0;
+
+    overflow-wrap: anywhere;
+    color: var(--mantine-color-text);
+    line-height: 1.7;
+
+    > :first-child {
+        margin-top: 0;
+    }
+
+    > :last-child {
+        margin-bottom: 0;
+    }
+}
+
+.chartTile {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 100%;
+    height: 28rem;
+    min-height: 0;
+    min-width: 0;
+    margin: var(--mantine-spacing-lg) 0;
+    overflow: hidden;
+
+    > * {
+        width: 100%;
+        max-width: 100%;
+        min-height: 0;
+        min-width: 0;
+        flex: 1;
+    }
+}
+
+/* Tables hug their rows: every wrapper between the tile and the table's own
+   scroller would otherwise fill the tile through inline heights */
+.chartTileFitContent {
+    > * {
+        flex: 0 1 auto;
+    }
+
+    div:has(table):not(:has(> table)) {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 auto;
+        height: auto !important;
+        min-height: 0 !important;
+        /* The card's own padding already frames the table */
+        padding-bottom: 0 !important;
+    }
+}
+
+.chartActions {
+    flex: 0 0 auto !important;
+}
+
+.chartDragHandle {
+    cursor: grab;
+
+    &:active {
+        cursor: grabbing;
+    }
+}
+
+/* Inert controls keep the group's surface and only dim the glyph */
+.quietDisabled {
+    &:disabled,
+    &[data-disabled] {
+        border-color: var(--mantine-color-default-border);
+        background-color: var(--mantine-color-default);
+        color: var(--mantine-color-dimmed);
+    }
+}
+
+.documentExport {
+    background: var(--mantine-color-body);
+}
+
+.documentLayout {
+    grid-template-columns: 16rem minmax(0, 1fr);
+    width: 100%;
+    max-width: none;
+    /* The scroll viewport's content box has no height, so fill it explicitly
+       to keep the rail full height on short documents */
+    min-height: var(
+        --page-height,
+        calc(100dvh - var(--navbar-height) - 3.75rem)
+    );
+
+    .contentsRail {
+        background: var(--ld-color-page);
+    }
+
+    /* Dark mode inverts the pairing: the rail takes the lighter surface and
+       the document beside it sits on the darker canvas */
+    @mixin dark {
+        &:has(> .contentsRail) {
+            background: var(--ld-color-page);
+        }
+
+        .contentsRail {
+            background: var(--mantine-color-body);
+        }
+    }
+
+    .contentsNav {
+        padding: var(--mantine-spacing-xxl) var(--mantine-spacing-lg);
+    }
+
+    .contentsList {
+        gap: var(--mantine-spacing-xxs);
+    }
+
+    .contentsControl {
+        display: flex;
+        align-items: center;
+        gap: var(--mantine-spacing-xs);
+        padding: var(--mantine-spacing-xs);
+        border-radius: var(--mantine-radius-md);
+        font-size: var(--mantine-font-size-xs);
+        line-height: var(--mantine-line-height-md);
+
+        &::before {
+            content: '';
+            flex: 0 0 var(--mantine-spacing-two);
+            height: var(--mantine-spacing-md);
+            border-radius: var(--mantine-radius-xs);
+            background: transparent;
+        }
+
+        &[data-active='true']::before {
+            background: var(--mantine-color-text);
+        }
+
+        &:hover {
+            background: var(--mantine-color-default-hover);
+        }
+    }
+
+    .report {
+        min-width: 0;
+        padding: var(--mantine-spacing-3xl) var(--mantine-spacing-5xl)
+            var(--mantine-spacing-emptySpace);
+    }
+
+    .reportContent {
+        min-width: 0;
+        max-width: 48rem;
+        margin-inline: auto;
+    }
+
+    .reportHeader {
+        padding-bottom: var(--mantine-spacing-lg);
+        border-bottom: 1px solid var(--mantine-color-default-border);
+    }
+
+    .reportTitleRow {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: var(--mantine-spacing-xl);
+    }
+
+    .reportTitle {
+        flex: 1 1 50%;
+        min-width: 0;
+        font-size: var(--mantine-h1-font-size);
+        font-weight: 700;
+        line-height: var(--mantine-h1-line-height);
+        letter-spacing: -0.02em;
+        overflow-wrap: anywhere;
+    }
+
+    /* The editable title renders exactly like the reading title; doubled to
+       outrank Mantine's input, whose wrapper would otherwise set line height */
+    .titleInput.titleInput {
+        min-height: 0;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        letter-spacing: inherit;
+        line-height: var(--mantine-h1-line-height);
+        resize: none;
+    }
+
+    .reportActions {
+        flex: 0 0 auto;
+    }
+
+    .reportFinding {
+        min-width: 0;
+        padding-block: 0;
+        border-top: 0;
+    }
+
+    .reportEvidence {
+        padding: var(--mantine-spacing-lg) var(--mantine-spacing-xl);
+        border-color: var(--mantine-color-default-border);
+        border-radius: var(--mantine-radius-lg);
+        box-shadow: none;
+    }
+
+    /* One Tiptap document renders the whole body, so every block style
+       targets ProseMirror's DOM; chart cells are React node views. */
+    .documentProse {
+        min-width: 0;
+        color: var(--mantine-color-text);
+        font-size: var(--mantine-font-size-sm);
+        line-height: var(--mantine-line-height-md);
+
+        :global(.ProseMirror) {
+            outline: none;
+
+            > * + * {
+                margin-top: var(--mantine-spacing-sm);
+            }
+
+            > :is(h1, h2, h3, h4, h5, h6) {
+                margin-top: var(--mantine-spacing-xl);
+                margin-bottom: var(--mantine-spacing-sm);
+                font-weight: var(--mantine-h2-font-weight);
+                letter-spacing: normal;
+                scroll-margin-top: var(--mantine-spacing-xl);
+            }
+
+            > :is(h1, h2, h3, h4, h5, h6):first-child {
+                margin-top: 0;
+            }
+
+            /* Title 28 > H1 24 > H2 18 > H3 16 > rest 14: skips the 20px step so
+               each level reads as a distinct drop instead of a 2px nudge */
+            > h1 {
+                font-size: var(--mantine-h2-font-size);
+                line-height: var(--mantine-h2-line-height);
+                letter-spacing: -0.015em;
+            }
+
+            > h2 {
+                font-size: var(--mantine-h4-font-size);
+                line-height: var(--mantine-h4-line-height);
+            }
+
+            > h3 {
+                font-size: var(--mantine-h5-font-size);
+                line-height: var(--mantine-h5-line-height);
+            }
+
+            > :is(h4, h5, h6) {
+                font-size: var(--mantine-h6-font-size);
+                line-height: var(--mantine-h6-line-height);
+            }
+
+            p {
+                margin: 0;
+            }
+
+            strong {
+                font-weight: 600;
+            }
+
+            a {
+                color: var(--mantine-color-anchor);
+                text-decoration: underline;
+                text-decoration-color: var(--mantine-color-ldGray-4);
+                text-underline-offset: 2px;
+
+                &:hover {
+                    text-decoration-color: currentColor;
+                }
+            }
+
+            ul,
+            ol {
+                margin: 0;
+                padding-left: var(--mantine-spacing-xl);
+            }
+
+            li + li {
+                margin-top: var(--mantine-spacing-xxs);
+            }
+
+            li > p + :is(ul, ol) {
+                margin-top: var(--mantine-spacing-xxs);
+            }
+
+            blockquote {
+                margin: 0;
+                padding: var(--mantine-spacing-xxs) 0 var(--mantine-spacing-xxs)
+                    var(--mantine-spacing-sm);
+                border-left: 2px solid var(--mantine-color-ldGray-3);
+                color: var(--mantine-color-dimmed);
+            }
+
+            code {
+                font-family: var(--mantine-font-family-monospace);
+                font-size: 0.875em;
+            }
+
+            :not(pre) > code {
+                padding: 0 var(--mantine-spacing-xxs);
+                border-radius: var(--mantine-radius-xs);
+                background: var(--mantine-color-ldGray-1);
+            }
+
+            pre {
+                margin: 0;
+                padding: var(--mantine-spacing-sm) var(--mantine-spacing-md);
+                border: 1px solid var(--mantine-color-default-border);
+                border-radius: var(--mantine-radius-md);
+                background: var(--mantine-color-ldGray-0);
+                font-size: var(--mantine-font-size-xs);
+                line-height: var(--mantine-line-height-md);
+                overflow-x: auto;
+            }
+
+            hr {
+                margin-block: var(--mantine-spacing-xl);
+                border: 0;
+                border-top: 1px solid var(--mantine-color-default-border);
+            }
+
+            /* The resets above zero every margin, so restate the gap between
+               consecutive top-level blocks; nested blocks stay tight */
+            > * + :is(p, ul, ol, blockquote, pre) {
+                margin-top: var(--mantine-spacing-sm);
+            }
+
+            /* Embedded blocks sit a full step away from surrounding text */
+            > :global(.tableWrapper),
+            > :global(.node-documentChart),
+            > :global(.tableWrapper) + *,
+            > :global(.node-documentChart) + * {
+                margin-top: var(--mantine-spacing-xl);
+            }
+
+            > :global(.tableWrapper) {
+                overflow-x: auto;
+            }
+
+            /* Nothing sits above the first block, so it needs no leading gap */
+            > :first-child {
+                margin-top: 0;
+            }
+
+            /* Markdown tables only: chart tables bring their own styling */
+            > :global(.tableWrapper) table {
+                width: 100%;
+                margin: 0;
+                border-collapse: separate;
+                border-spacing: 0;
+                border: 1px solid var(--mantine-color-default-border);
+                border-radius: var(--mantine-radius-lg);
+                overflow: hidden;
+                font-size: var(--mantine-font-size-sm);
+            }
+
+            > :global(.tableWrapper) :is(th, td) {
+                padding: var(--mantine-spacing-sm) var(--mantine-spacing-md);
+                border-bottom: 1px solid var(--mantine-color-ldGray-1);
+                text-align: left;
+                vertical-align: top;
+            }
+
+            > :global(.tableWrapper) th {
+                border-bottom-color: var(--mantine-color-ldGray-2);
+                background: var(--mantine-color-ldGray-0);
+                color: var(--mantine-color-dimmed);
+                font-size: var(--mantine-font-size-xs);
+                font-weight: 500;
+            }
+
+            > :global(.tableWrapper) tr:last-child td {
+                border-bottom: 0;
+            }
+
+            /* Editing affordances: a generous click target, placeholder and
+               selected table cells */
+            &[contenteditable='true'] {
+                position: relative;
+                min-height: calc(var(--mantine-spacing-9xl) * 2);
+                cursor: text;
+            }
+
+            /* Drop indicator for a chart released above the body */
+            &[data-drop-at-start] {
+                box-shadow: 0 calc(var(--mantine-spacing-two) * -1) 0
+                    var(--mantine-color-text);
+            }
+
+            /* Where text will go between or around charts: it opens an empty
+               line with the usual block spacing, showing a caret and the
+               writing hint. flow-root keeps margins from collapsing through */
+            > :global(.ProseMirror-gapcursor) {
+                position: relative;
+                width: 100%;
+                height: 1.5em;
+                margin: var(--mantine-spacing-xl) 0 0;
+            }
+
+            > :global(.ProseMirror-gapcursor):first-child {
+                margin-top: 0;
+            }
+
+            &:global(.ProseMirror-focused) > :global(.ProseMirror-gapcursor) {
+                display: flow-root;
+            }
+
+            > :global(.ProseMirror-gapcursor)::before,
+            > :global(.ProseMirror-gapcursor)::after {
+                position: absolute;
+                top: 0;
+                left: 0;
+                height: 1.5em;
+            }
+
+            > :global(.ProseMirror-gapcursor)::before {
+                content: "Write something, or type '/' for blocks…";
+                color: var(--mantine-color-placeholder);
+                line-height: 1.5em;
+                white-space: nowrap;
+                pointer-events: none;
+            }
+
+            > :global(.ProseMirror-gapcursor)::after {
+                width: 0;
+                border-top: 0;
+                border-left: 1px solid var(--mantine-color-text);
+            }
+
+            /* The hint follows the cursor into any empty paragraph, so the
+               lines kept around charts are discoverable */
+            > :global(.is-editor-empty:first-child)::before,
+            > p:global(.is-empty)::before {
+                content: attr(data-placeholder);
+                float: left;
+                height: 0;
+                color: var(--mantine-color-placeholder);
+                pointer-events: none;
+            }
+
+            :global(.selectedCell)::after {
+                content: '';
+                position: absolute;
+                inset: 0;
+                background: var(--mantine-color-default-hover);
+                pointer-events: none;
+            }
+
+            td,
+            th {
+                position: relative;
+            }
+        }
+    }
+}
+
+.documentLayout.withoutContents {
+    min-height: 0;
+}
+
+@media (max-width: 48em) {
+    .reportLayout {
+        display: block;
+    }
+    .contentsRail {
+        display: none;
+    }
+    .documentLayout .report {
+        padding: var(--mantine-spacing-xl);
+    }
+}
+
+@media (max-width: 36em) {
+    .report {
+        padding-inline: 1rem;
+    }
+    .reportEvidence {
+        padding: 1rem 1rem 0.5rem;
+    }
+    .reportEvidence .chartTile {
+        height: 24rem;
+    }
+    .reportEvidence .chartTile.chartTileFitContent {
+        height: auto;
+        max-height: 24rem;
+    }
+    .documentLayout {
+        .report,
+        .reportEvidence {
+            padding: var(--mantine-spacing-md);
+        }
+    }
+}
+
+@media print {
+    .reportScroll {
+        height: auto;
+    }
+    .reportLayout {
+        display: block;
+        width: 100%;
+    }
+    .contentsRail {
+        display: none;
+    }
+    .report,
+    .documentLayout .report {
+        width: 100%;
+        padding: 0;
+    }
+
+    .documentLayout {
+        min-height: 0;
+
+        .reportContent {
+            max-width: none;
+        }
+    }
+    /* The printed Document is paper white past its last block, too */
+    :global(body):has(.documentExport) {
+        background: var(--mantine-color-body);
+    }
+    /* Keep each chart whole and headings with the text that follows them */
+    .reportEvidence {
+        break-inside: avoid;
+    }
+    .documentProse :global(.ProseMirror) {
+        > :is(h1, h2, h3, h4, h5, h6) {
+            break-after: avoid;
+        }
+
+        > :is(p, ul, ol, blockquote) {
+            orphans: 3;
+            widows: 3;
+        }
+    }
+}

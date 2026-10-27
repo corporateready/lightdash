@@ -1,41 +1,52 @@
 import { subject } from '@casl/ability';
 import {
+    getCellUrls,
     hasCustomBinDimension,
     isCustomDimension,
     isDimension,
-    isDimensionValueInvalidDate,
     isField,
     isFilterableField,
     type Field,
     type ResultValue,
     type TableCalculation,
 } from '@lightdash/common';
-import { Menu, Text } from '@mantine-8/core';
+import { Menu } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
-import { IconCopy, IconEye, IconFilter, IconStack } from '@tabler/icons-react';
+import { IconCopy, IconStack } from '@tabler/icons-react';
 import mapValues from 'lodash/mapValues';
 import { useCallback, useMemo, type FC } from 'react';
+import { useMergeSafe } from '../../../features/mergeQuery/context/useMerge';
+import { useMergeQuickFilter } from '../../../features/mergeQuery/hooks/useMergeQuickFilter';
+import { useMergeSourceCell } from '../../../features/mergeQuery/hooks/useMergeSourceCell';
 import useToaster from '../../../hooks/toaster/useToaster';
-import { useFilters } from '../../../hooks/useFilters';
 import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { useAccount } from '../../../hooks/user/useAccount';
 import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
+import { JsonCellMenuItem } from '../../common/JsonViewer/JsonCellViewer';
+import {
+    getJsonCellValue,
+    getJsonLikeString,
+} from '../../common/JsonViewer/utils';
 import MantineIcon from '../../common/MantineIcon';
 import { type CellContextMenuProps } from '../../common/Table/types';
 import DrillDownMenuItem from '../../MetricQueryData/DrillDownMenuItem';
 import { useMetricQueryDataContext } from '../../MetricQueryData/useMetricQueryDataContext';
+import QuickFilterMenuItems from '../QuickFilterMenuItems';
 import UrlMenuItems from './UrlMenuItems';
 
 const CellContextMenu: FC<
-    Pick<CellContextMenuProps, 'cell' | 'isEditMode'> & {
+    Pick<CellContextMenuProps, 'cell' | 'isEditMode' | 'onViewJsonCell'> & {
         itemsMap: Record<string, Field | TableCalculation>;
         onExpand: (name: string, data: object) => void;
     }
-> = ({ cell, isEditMode, itemsMap, onExpand }) => {
-    const { addFilter } = useFilters();
-    const { openUnderlyingDataModal, metricQuery, resolvedTimezone } =
+> = ({ cell, isEditMode, itemsMap, onViewJsonCell }) => {
+    const merge = useMergeSafe();
+    const isMerged = !!merge?.mergeResults;
+    const mergeQuickFilter = useMergeQuickFilter();
+    const { openUnderlyingDataModal, metricQuery, tableName } =
         useMetricQueryDataContext();
     const { track } = useTracking();
     const { showToastSuccess } = useToaster();
@@ -43,17 +54,49 @@ const CellContextMenu: FC<
     const meta = cell.column.columnDef.meta;
     const item = meta?.item;
     const { user } = useApp();
+    const { data: account } = useAccount();
     const projectUuid = useProjectUuid();
+    const isEmbedded = account?.isJwtUser() === true;
+    const organizationUuid =
+        user.data?.organizationUuid ?? account?.organization.organizationUuid;
+    const drillDownPermission = subject(
+        'Explore',
+        isEmbedded
+            ? {
+                  organizationUuid,
+                  projectUuid,
+                  exploreNames: [tableName],
+              }
+            : {
+                  organizationUuid: user.data?.organizationUuid,
+                  projectUuid,
+              },
+    );
 
     const value: ResultValue = useMemo(
         () => cell.getValue()?.value || {},
         [cell],
     );
 
+    const urls = useMemo(
+        () => getCellUrls(isField(item) ? item.urls : undefined, value.raw),
+        [item, value],
+    );
+
     const fieldValues = useMemo(
         () => mapValues(cell.row.original, (v) => v?.value) || {},
         [cell.row.original],
     );
+    const { resolve: resolveMergeSourceCell } = useMergeSourceCell();
+    const resolvedSourceCell = useMemo(
+        () =>
+            isMerged && item && isField(item)
+                ? resolveMergeSourceCell(item, fieldValues)
+                : null,
+        [fieldValues, isMerged, item, resolveMergeSourceCell],
+    );
+    const underlyingMetricQuery =
+        resolvedSourceCell?.source.metricQuery ?? metricQuery;
 
     const handleCopyToClipboard = useCallback(() => {
         clipboard.copy(value.formatted);
@@ -62,12 +105,7 @@ const CellContextMenu: FC<
 
     const handleViewUnderlyingData = useCallback(() => {
         if (meta?.item === undefined) return;
-
-        openUnderlyingDataModal({
-            item: meta.item,
-            value,
-            fieldValues,
-        });
+        openUnderlyingDataModal({ item: meta.item, value, fieldValues });
         track({
             name: EventName.VIEW_UNDERLYING_DATA_CLICKED,
             properties: {
@@ -86,79 +124,54 @@ const CellContextMenu: FC<
         projectUuid,
     ]);
 
-    const handleFilterByValue = useCallback(() => {
-        if (!item || !isFilterableField(item)) return;
-
-        track({
-            name: EventName.ADD_FILTER_CLICKED,
-        });
-
-        const filterValue =
-            value.raw === undefined || isDimensionValueInvalidDate(item, value)
-                ? null // Set as null if value is invalid date or undefined
-                : value.raw;
-
-        addFilter(item, filterValue, resolvedTimezone);
-    }, [track, addFilter, item, value, resolvedTimezone]);
-
-    let parseResult: null | object = null;
-    if (
-        !!value.raw &&
-        typeof value.raw === 'string' &&
-        (value.raw.startsWith('{') || value.raw.startsWith('['))
-    ) {
-        try {
-            parseResult = JSON.parse(String(value.raw));
-        } catch {
-            // Do nothing
-        }
-    }
+    const jsonValue =
+        getJsonCellValue(value.raw) ?? getJsonLikeString(value.raw);
 
     return (
         <>
-            {!!value.raw && isField(item) && (
-                <UrlMenuItems
-                    urls={item.urls}
-                    cell={cell}
-                    itemsMap={itemsMap}
-                />
+            {urls.length > 0 && (
+                <>
+                    <UrlMenuItems urls={urls} cell={cell} itemsMap={itemsMap} />
+                    <Menu.Divider />
+                </>
             )}
-            {isField(item) && (item.urls || []).length > 0 && <Menu.Divider />}
             <Menu.Item
                 leftSection={<MantineIcon icon={IconCopy} />}
                 onClick={handleCopyToClipboard}
             >
                 Copy value
             </Menu.Item>
-            {parseResult !== null && (
-                <Menu.Item
-                    leftSection={<MantineIcon icon={IconEye} />}
-                    onClick={() =>
-                        onExpand(
-                            item && 'displayName' in item
-                                ? item.displayName
-                                : item?.name || '',
-                            parseResult || {},
-                        )
-                    }
-                >
-                    Expand
-                </Menu.Item>
+            {jsonValue && onViewJsonCell && (
+                <JsonCellMenuItem onClick={() => onViewJsonCell(jsonValue)} />
             )}
             {item &&
                 !isDimension(item) &&
                 !isCustomDimension(item) &&
-                !hasCustomBinDimension(metricQuery) && (
+                !hasCustomBinDimension(underlyingMetricQuery) &&
+                // Merged actions only appear when compile-time lineage can
+                // resolve the display column back to a real source field.
+                (!isMerged || resolvedSourceCell) && (
                     <Can
                         I="view"
                         this={subject('UnderlyingData', {
-                            organizationUuid: user.data?.organizationUuid,
+                            organizationUuid,
                             projectUuid: projectUuid,
                         })}
                     >
                         <Menu.Item
                             leftSection={<MantineIcon icon={IconStack} />}
                             onClick={handleViewUnderlyingData}
+                            // Walkthrough action for view:UnderlyingData:
+                            // the records behind a number. See
+                            // scripts/scope-tours.
+                            data-tour-scope="view:UnderlyingData"
+                            data-tour-step="2"
+                            data-tour-route="/projects/:projectUuid/saved/:savedQueryUuid"
+                            data-tour-label="Click View underlying data"
+                            data-tour-title="See the records behind a number"
+                            data-tour-interactive="true"
+                            data-tour-via='[data-tour-nav="browse"] >> [data-tour-nav="all-charts"] >> [data-tour-anchor="chart-row"][data-tour-value="Orders over time"] >> [data-tour-anchor="results-heading"] >> [data-tour-anchor="results-metric-cell"]'
+                            data-tour-docs="explore/dashboards/interact.mdx#view-underlying-data:1"
                         >
                             View underlying data
                         </Menu.Item>
@@ -171,29 +184,36 @@ const CellContextMenu: FC<
                     projectUuid: projectUuid,
                 })}
             >
-                {isEditMode && item && isFilterableField(item) && (
-                    <Menu.Item
-                        leftSection={<MantineIcon icon={IconFilter} />}
-                        onClick={handleFilterByValue}
-                    >
-                        <>
-                            Filter by{' '}
-                            <Text span fz="inherit" lh="inherit" fw="bold">
-                                {value.formatted}
-                            </Text>
-                        </>
-                    </Menu.Item>
+                {isEditMode &&
+                    item &&
+                    isFilterableField(item) &&
+                    (!isMerged || mergeQuickFilter.canFilter(item)) && (
+                        <QuickFilterMenuItems
+                            item={item}
+                            value={value}
+                            onAddFilter={
+                                isMerged
+                                    ? mergeQuickFilter.addFilter
+                                    : undefined
+                            }
+                        />
+                    )}
+            </Can>
+            <Can I={isEmbedded ? 'view' : 'manage'} this={drillDownPermission}>
+                {(!isMerged || resolvedSourceCell) && (
+                    <DrillDownMenuItem
+                        item={resolvedSourceCell?.item ?? item}
+                        fieldValues={
+                            resolvedSourceCell?.fieldValues ?? fieldValues
+                        }
+                        source={resolvedSourceCell?.source}
+                        trackingData={{
+                            organizationId: organizationUuid,
+                            userId: user.data?.userUuid,
+                            projectId: projectUuid,
+                        }}
+                    />
                 )}
-
-                <DrillDownMenuItem
-                    item={item}
-                    fieldValues={fieldValues}
-                    trackingData={{
-                        organizationId: user.data?.organizationUuid,
-                        userId: user.data?.userUuid,
-                        projectId: projectUuid,
-                    }}
-                />
             </Can>
         </>
     );

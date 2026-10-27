@@ -6,8 +6,7 @@ import {
     ResourceViewItemType,
     type ResourceViewSpaceItem,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { ActionIcon, Box, Button, Group, Stack } from '@mantine/core';
+import { Box, Group, Menu, Stack, Button, ActionIcon } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import {
     IconDots,
@@ -36,8 +35,12 @@ import CreateResourceToSpace from '../components/Explorer/SpaceBrowser/CreateRes
 import { SpaceBrowserMenu } from '../components/Explorer/SpaceBrowser/SpaceBrowserMenu';
 import { AddToSpaceResources } from '../components/Explorer/SpaceBrowser/types';
 import ForbiddenPanel from '../components/ForbiddenPanel';
+import DocumentCreateModal from '../features/documents/DocumentCreateModal';
 import { useSpacePinningMutation } from '../hooks/pinning/useSpaceMutation';
 import { useContentAction } from '../hooks/useContent';
+import { useContentAuthoringEnabled } from '../hooks/useContentAuthoringEnabled';
+import { useProjectUrlIdentifier } from '../hooks/useProjectRoute';
+import { useProjectUuid } from '../hooks/useProjectUuid';
 import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 import { useSpace } from '../hooks/useSpaces';
 import { Can } from '../providers/Ability';
@@ -47,11 +50,11 @@ import useTracking from '../providers/Tracking/useTracking';
 import { EventName } from '../types/Events';
 
 const Space: FC = () => {
-    const { projectUuid, spaceUuid } = useParams<{
-        projectUuid: string;
+    const projectUuid = useProjectUuid()!;
+    const projectUrlIdentifier = useProjectUrlIdentifier();
+    const { spaceUuid } = useParams<{
         spaceUuid: string;
     }>() as {
-        projectUuid: string;
         spaceUuid: string;
     };
     const {
@@ -63,6 +66,7 @@ const Space: FC = () => {
     const { mutate: pinSpace } = useSpacePinningMutation(projectUuid);
     const { user, health } = useApp();
     const { track } = useTracking();
+    const contentAuthoringEnabled = useContentAuthoringEnabled();
 
     const userCanManageSpace = user.data?.ability?.can(
         'create',
@@ -86,6 +90,8 @@ const Space: FC = () => {
         { open: openTransferToSpace, close: closeTransferToSpace },
     ] = useDisclosure(false);
     const [isCreateDashboardOpen, setIsCreateDashboardOpen] =
+        useState<boolean>(false);
+    const [isCreateDocumentOpen, setIsCreateDocumentOpen] =
         useState<boolean>(false);
     const [isCreateNestedSpaceOpen, setIsCreateNestedSpaceOpen] =
         useState<boolean>(false);
@@ -132,6 +138,11 @@ const Space: FC = () => {
         subject('SavedChart', { ...space }),
     );
 
+    const userCanCreateDocuments = user.data?.ability?.can(
+        'create',
+        subject('Document', { ...space }),
+    );
+
     // Data apps have a project-level `create:DataApp` scope (no @space variant
     // for create), so we combine it with `manage:DataApp` against the space —
     // the latter is only granted to space EDITOR/ADMIN (or project admins),
@@ -170,13 +181,13 @@ const Space: FC = () => {
                 withXLargePaddedContent
                 withLargeContent
             >
-                <Stack spacing="xxl" w="100%">
-                    <Group position="apart">
+                <Stack gap="xxl" w="100%">
+                    <Group justify="space-between">
                         <PageBreadcrumbs
                             items={[
                                 {
                                     title: 'Spaces',
-                                    to: `/projects/${projectUuid}/spaces`,
+                                    to: `/projects/${projectUrlIdentifier}/spaces`,
                                 },
                                 ...(space.breadcrumbs?.map(
                                     (breadcrumb, index) => {
@@ -189,7 +200,25 @@ const Space: FC = () => {
 
                                         return {
                                             title: isAccessible ? (
-                                                breadcrumb.name
+                                                isLastBreadcrumb ? (
+                                                    <span
+                                                        // Walkthrough result
+                                                        // marker for
+                                                        // create:Space: the
+                                                        // new space itself.
+                                                        data-tour-scope="create:Space"
+                                                        data-tour-step="1"
+                                                        data-tour-route="/projects/:projectUuid/spaces/:spaceUuid"
+                                                        data-tour-label="A space keeps related content together"
+                                                        data-tour-docs="explore/spaces.mdx#intro:1-2"
+                                                        data-tour-return="none"
+                                                        data-tour-resultdocs="explore/spaces.mdx#creating-a-space:p2:3"
+                                                    >
+                                                        {breadcrumb.name}
+                                                    </span>
+                                                ) : (
+                                                    breadcrumb.name
+                                                )
                                             ) : (
                                                 <span
                                                     style={{
@@ -209,7 +238,7 @@ const Space: FC = () => {
                                             active: isLastBreadcrumb,
                                             ...(isAccessible
                                                 ? {
-                                                      to: `/projects/${projectUuid}/spaces/${breadcrumb.uuid}`,
+                                                      to: `/projects/${projectUrlIdentifier}/spaces/${breadcrumb.uuid}`,
                                                       onClick: () => {
                                                           if (
                                                               user.data
@@ -245,32 +274,32 @@ const Space: FC = () => {
                             ]}
                         />
 
-                        <Group spacing="xs">
+                        <Group gap="xs">
                             {!isDemo &&
-                                (userCanCreateDashboards ||
-                                    userCanCreateCharts ||
+                                ((contentAuthoringEnabled &&
+                                    (userCanCreateDashboards ||
+                                        userCanCreateCharts ||
+                                        userCanCreateDocuments)) ||
                                     userCanCreateDataApps ||
                                     userCanManageSpace) && (
                                     <Menu
                                         position="bottom-end"
-                                        shadow="md"
                                         closeOnItemClick
                                         withArrow
                                         arrowPosition="center"
                                     >
                                         <Menu.Target>
-                                            <Box>
-                                                <Button
-                                                    data-testid="Space/AddButton"
-                                                    leftIcon={
-                                                        <MantineIcon
-                                                            icon={IconPlus}
-                                                        />
-                                                    }
-                                                >
-                                                    Add
-                                                </Button>
-                                            </Box>
+                                            <Button
+                                                data-testid="Space/AddButton"
+                                                h={{ base: 32, md: 36 }}
+                                                leftSection={
+                                                    <MantineIcon
+                                                        icon={IconPlus}
+                                                    />
+                                                }
+                                            >
+                                                Add
+                                            </Button>
                                         </Menu.Target>
 
                                         <Menu.Dropdown>
@@ -296,7 +325,8 @@ const Space: FC = () => {
                                                 </>
                                             )}
 
-                                            {userCanCreateDashboards ? (
+                                            {contentAuthoringEnabled &&
+                                            userCanCreateDashboards ? (
                                                 <Menu.Item
                                                     leftSection={
                                                         <MantineIcon
@@ -313,7 +343,8 @@ const Space: FC = () => {
                                                 </Menu.Item>
                                             ) : null}
 
-                                            {userCanCreateCharts ? (
+                                            {contentAuthoringEnabled &&
+                                            userCanCreateCharts ? (
                                                 <Menu.Item
                                                     leftSection={
                                                         <MantineIcon
@@ -327,6 +358,24 @@ const Space: FC = () => {
                                                     }}
                                                 >
                                                     Create new chart
+                                                </Menu.Item>
+                                            ) : null}
+
+                                            {contentAuthoringEnabled &&
+                                            userCanCreateDocuments ? (
+                                                <Menu.Item
+                                                    leftSection={
+                                                        <MantineIcon
+                                                            icon={IconPlus}
+                                                        />
+                                                    }
+                                                    onClick={() => {
+                                                        setIsCreateDocumentOpen(
+                                                            true,
+                                                        );
+                                                    }}
+                                                >
+                                                    Create new document
                                                 </Menu.Item>
                                             ) : null}
 
@@ -363,10 +412,19 @@ const Space: FC = () => {
                                     isPinned={!!space?.pinnedListUuid}
                                     spaceUuid={spaceUuid}
                                 >
-                                    <ActionIcon variant="default" size={36}>
+                                    <ActionIcon
+                                        variant="default"
+                                        size={36}
+                                        w={{ base: 32, md: 36 }}
+                                        h={{ base: 32, md: 36 }}
+                                        aria-label="Space actions"
+                                        // Anchor for scope walkthroughs
+                                        data-tour-anchor="space-actions"
+                                        data-tour-hint="Open the space's actions menu"
+                                    >
                                         <MantineIcon
                                             icon={IconDots}
-                                            size="lg"
+                                            size="md"
                                         />
                                     </ActionIcon>
                                 </SpaceBrowserMenu>
@@ -400,11 +458,11 @@ const Space: FC = () => {
                                             ) {
                                                 if (space?.parentSpaceUuid) {
                                                     void navigate(
-                                                        `/projects/${projectUuid}/spaces/${space.parentSpaceUuid}`,
+                                                        `/projects/${projectUrlIdentifier}/spaces/${space.parentSpaceUuid}`,
                                                     );
                                                 } else {
                                                     void navigate(
-                                                        `/projects/${projectUuid}/home`,
+                                                        `/projects/${projectUrlIdentifier}/home`,
                                                     );
                                                 }
                                             }
@@ -425,39 +483,56 @@ const Space: FC = () => {
                             </Can>
                         </Group>
                     </Group>
-                    <InfiniteResourceTable
-                        filters={{
-                            projectUuid,
-                            spaceUuids: [spaceUuid],
-                            contentTypes: [
-                                ContentType.DASHBOARD,
-                                ContentType.CHART,
-                                ContentType.SPACE,
-                                ContentType.DATA_APP,
-                            ],
-                        }}
-                        contentTypeFilter={{
-                            defaultValue: undefined,
-                            options: [
-                                ContentType.DASHBOARD,
-                                ContentType.CHART,
-                                ...(dataAppsEnabled
-                                    ? [ContentType.DATA_APP]
-                                    : []),
-                            ],
-                        }}
-                        columnVisibility={{
-                            [ColumnVisibility.SPACE]: false,
-                        }}
-                        enableBottomToolbar={false}
-                        enableRowSelection={userCanManageSpace}
-                        adminContentView={userCanManageProject}
-                        initialAdminContentViewValue={
-                            userCanManageSpaceAndHasNoDirectAccessToSpace
-                                ? 'all'
-                                : 'shared'
-                        }
-                    />
+                    <Box
+                        // Walkthrough result marker for view:Space: the
+                        // space's own list of dashboards and charts.
+                        data-tour-scope="view:Space"
+                        data-tour-step="1"
+                        data-tour-route="/projects/:projectUuid/spaces/:spaceUuid"
+                        data-tour-label="Spaces are folders for charts and dashboards"
+                        data-tour-docs="explore/spaces.mdx#intro:1-2"
+                        data-tour-return="none"
+                        data-tour-resultdocs="explore/spaces.mdx#intro:p2:1"
+                    >
+                        <InfiniteResourceTable
+                            filters={{
+                                projectUuid,
+                                spaceUuids: [spaceUuid],
+                                contentTypes: [
+                                    ContentType.DASHBOARD,
+                                    ContentType.CHART,
+                                    ContentType.SPACE,
+                                    ContentType.DATA_APP,
+                                    ContentType.DOCUMENT,
+                                ],
+                                // Vizs are spaceless today, but declare the
+                                // exclusion rather than rely on that invariant.
+                                dataAppVizsFilter: 'exclude',
+                            }}
+                            contentTypeFilter={{
+                                defaultValue: undefined,
+                                options: [
+                                    ContentType.DASHBOARD,
+                                    ContentType.CHART,
+                                    ...(dataAppsEnabled
+                                        ? [ContentType.DATA_APP]
+                                        : []),
+                                    ContentType.DOCUMENT,
+                                ],
+                            }}
+                            columnVisibility={{
+                                [ColumnVisibility.SPACE]: false,
+                            }}
+                            enableBottomToolbar={false}
+                            enableRowSelection={userCanManageSpace}
+                            adminContentView={userCanManageProject}
+                            initialAdminContentViewValue={
+                                userCanManageSpaceAndHasNoDirectAccessToSpace
+                                    ? 'all'
+                                    : 'shared'
+                            }
+                        />
+                    </Box>
 
                     {createToSpace && (
                         <CreateResourceToSpace resourceType={createToSpace} />
@@ -469,12 +544,20 @@ const Space: FC = () => {
                         onClose={() => setIsCreateDashboardOpen(false)}
                         onConfirm={(dashboard) => {
                             void navigate(
-                                `/projects/${projectUuid}/dashboards/${dashboard.uuid}/edit`,
+                                `/projects/${projectUrlIdentifier}/dashboards/${dashboard.slug}/edit`,
                             );
 
                             setIsCreateDashboardOpen(false);
                         }}
                     />
+
+                    {isCreateDocumentOpen && (
+                        <DocumentCreateModal
+                            projectUuid={projectUuid}
+                            defaultSpaceUuid={space.uuid}
+                            onClose={() => setIsCreateDocumentOpen(false)}
+                        />
+                    )}
 
                     {isCreateNestedSpaceOpen && (
                         <SpaceActionModal
@@ -507,6 +590,7 @@ const Space: FC = () => {
                                         chartCount: 0,
                                         childSpaceCount: 0,
                                         appCount: 0,
+                                        documentCount: 0,
                                     },
                                     type: ResourceViewItemType.SPACE,
                                 } satisfies ResourceViewSpaceItem,

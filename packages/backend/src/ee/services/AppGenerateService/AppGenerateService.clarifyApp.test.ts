@@ -1,0 +1,376 @@
+// Stub the e2b/ai SDKs before importing AppGenerateService so the tests never
+// reach the real sandbox or model client.
+import {
+    DATA_APP_VIZ_TEMPLATE,
+    FeatureFlags,
+    ForbiddenError,
+    type DataAppTemplate,
+} from '@lightdash/common';
+import { generateText, NoOutputGeneratedError } from 'ai';
+import { buildAppThumbnailClientMock } from '../../clients/AppThumbnailClient.mock';
+import { AppGenerateService } from './AppGenerateService';
+import { featureFlagModelWith } from './AppGenerateService.mock';
+import {
+    CLARIFY_APP_SYSTEM_PROMPT,
+    CLARIFY_VIZ_SYSTEM_PROMPT,
+} from './clarifierPrompts';
+
+vi.mock('e2b', () => ({
+    Sandbox: class {},
+    CommandExitError: class extends Error {},
+    ALL_TRAFFIC: '*',
+}));
+vi.mock('ai', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('ai')>()),
+    generateText: vi.fn(),
+}));
+vi.mock('../ai/models', () => ({
+    resolveKeyManagement: vi.fn(() => 'lightdash'),
+}));
+vi.mock('../ai/utils/aiCallTelemetry', () => ({
+    getAiCallTelemetry: vi.fn(() => ({
+        runtimeContext: { feature: 'data-app' },
+        telemetry: { functionId: 'test' },
+    })),
+    getLanguageModelAttribution: vi.fn(() => ({})),
+}));
+vi.mock('../../../analytics/aiUsage', () => ({
+    emitAiUsage: vi.fn(),
+    languageModelUsageToTokens: vi.fn(() => ({})),
+}));
+
+// `ability`/`abilityRules` are only read by `fromSession`, which the attached
+// -resources path goes through to resolve chart names.
+const USER = {
+    userUuid: 'user-1',
+    organizationUuid: 'org-1',
+    ability: { can: () => true, cannot: () => false },
+    abilityRules: [],
+} as never;
+
+const CATALOG_ITEMS = [
+    {
+        type: 'field',
+        tableName: 'orders',
+        name: 'order_date',
+        fieldType: 'dimension',
+    },
+    {
+        type: 'field',
+        tableName: 'orders',
+        name: 'total_revenue',
+        fieldType: 'metric',
+    },
+];
+
+const FAST_MODEL_OPTIONS = {
+    model: { provider: 'openai.responses', modelId: 'gpt-5.6-luna' },
+    callOptions: {},
+    providerOptions: {},
+    keyManagement: 'lightdash-managed',
+};
+
+function buildService(
+    gates: { dataAppsEnabled: boolean; chartStudioAvailable: boolean } = {
+        dataAppsEnabled: true,
+        chartStudioAvailable: true,
+    },
+) {
+    const getCatalogItemsSummary = vi.fn().mockResolvedValue(CATALOG_ITEMS);
+    const resolveFastModel = vi.fn().mockResolvedValue(FAST_MODEL_OPTIONS);
+    const service = new AppGenerateService({
+        agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
+        aiCreditService: { assertAiCreditsAvailable: async () => undefined },
+        lightdashConfig: {
+            appRuntime: { sampleDataEnabled: true },
+        } as never,
+        analytics: { track: vi.fn() } as never,
+        analyticsModel: {} as never,
+        catalogModel: { getCatalogItemsSummary } as never,
+        userModel: {} as never,
+        appModel: {} as never,
+        featureFlagModel: featureFlagModelWith({
+            [FeatureFlags.EnableDataApps]: gates.dataAppsEnabled,
+        }) as never,
+        organizationDesignModel: {} as never,
+        pinnedListModel: {} as never,
+        projectModel: {
+            getSummary: vi
+                .fn()
+                .mockResolvedValue({ organizationUuid: 'org-1' }),
+        } as never,
+        projectParametersModel: {} as never,
+        spaceModel: {} as never,
+        savedChartModel: {} as never,
+        schedulerClient: {} as never,
+        savedChartService: {
+            get: vi.fn().mockResolvedValue({
+                name: 'Revenue by month',
+                tableName: 'orders',
+            }),
+        } as never,
+        spacePermissionService: {} as never,
+        coderService: {} as never,
+        documentService: {} as never,
+        dashboardService: {} as never,
+        projectService: {} as never,
+        promoteService: {} as never,
+        externalConnectionModel: {} as never,
+        sandboxRegistryModel: {} as never,
+        orgAiCopilotConfigResolver: {
+            getCopilotConfig: vi
+                .fn()
+                .mockResolvedValue({ defaultProvider: 'openai' }),
+            resolveFastModel,
+        } as never,
+        sandboxManager: null,
+        appRuntimeS3: null,
+        appThumbnailClient: buildAppThumbnailClientMock(),
+        chartRegistryClient: {} as never,
+        contentVerificationModel: {
+            getByContent: async () => null,
+            verify: async () => undefined,
+            unverify: async () => undefined,
+        } as never,
+    });
+    vi.spyOn(service, 'isChartStudioAvailable').mockReturnValue(
+        gates.chartStudioAvailable,
+    );
+    // Bypass real CASL — the prompt/context selection is what these tests cover.
+    (
+        service as unknown as { createAuditedAbility: () => unknown }
+    ).createAuditedAbility = () => ({ cannot: () => false });
+    return { service, getCatalogItemsSummary, resolveFastModel };
+}
+
+const generateTextMock = vi.mocked(generateText);
+
+function mockQuestions(questions: string[]) {
+    generateTextMock.mockResolvedValue({
+        output: { questions },
+        usage: {},
+    } as never);
+}
+
+/** The system + user message the clarifier actually handed to the model. */
+function sentMessages() {
+    const call = generateTextMock.mock.calls[0][0] as {
+        messages: { role: string; content: string }[];
+    };
+    const system = call.messages.find((m) => m.role === 'system')!.content;
+    const userMessage = call.messages.find((m) => m.role === 'user')!.content;
+    return { system, userMessage };
+}
+
+async function clarify(template: DataAppTemplate | undefined) {
+    const { service, getCatalogItemsSummary } = buildService();
+    const result = await service.clarifyApp(
+        USER,
+        'project-1',
+        'a radial gauge',
+        template,
+    );
+    return { result, getCatalogItemsSummary, ...sentMessages() };
+}
+
+beforeEach(() => {
+    generateTextMock.mockReset();
+    mockQuestions([]);
+});
+
+describe('AppGenerateService.clarifyApp app gate with data apps off', () => {
+    it('clarifies a chart type while Chart Studio is available', async () => {
+        const { service } = buildService({
+            dataAppsEnabled: false,
+            chartStudioAvailable: true,
+        });
+
+        await expect(
+            service.clarifyApp(
+                USER,
+                'project-1',
+                'a radial gauge',
+                DATA_APP_VIZ_TEMPLATE,
+            ),
+        ).resolves.toEqual({ questions: [] });
+    });
+
+    it('refuses a chart type when Chart Studio is not available', async () => {
+        const { service } = buildService({
+            dataAppsEnabled: false,
+            chartStudioAvailable: false,
+        });
+
+        await expect(
+            service.clarifyApp(
+                USER,
+                'project-1',
+                'a radial gauge',
+                DATA_APP_VIZ_TEMPLATE,
+            ),
+        ).rejects.toThrow(new ForbiddenError('Chart Studio is not available'));
+        expect(generateTextMock).not.toHaveBeenCalled();
+    });
+
+    it('refuses a data app', async () => {
+        const { service } = buildService({
+            dataAppsEnabled: false,
+            chartStudioAvailable: true,
+        });
+
+        await expect(
+            service.clarifyApp(USER, 'project-1', 'a sales dashboard'),
+        ).rejects.toThrow(new ForbiddenError('Data apps are not enabled'));
+        expect(generateTextMock).not.toHaveBeenCalled();
+    });
+});
+
+describe('AppGenerateService.clarifyApp empty model response', () => {
+    it('returns no questions instead of throwing', async () => {
+        // v7 resolves the call and throws from the `output` getter, so an empty
+        // response escapes a catch that only wraps the await.
+        generateTextMock.mockResolvedValue({
+            get output(): { questions: string[] } {
+                throw new NoOutputGeneratedError({
+                    message: 'No output generated.',
+                });
+            },
+            usage: {},
+        } as never);
+        const { service } = buildService();
+
+        await expect(
+            service.clarifyApp(USER, 'project-1', 'a radial gauge'),
+        ).resolves.toEqual({ questions: [] });
+    });
+});
+
+describe('AppGenerateService.clarifyApp model resolution', () => {
+    it('uses the org-resolved fast model for the LLM call', async () => {
+        const { service, resolveFastModel } = buildService();
+
+        await service.clarifyApp(USER, 'project-1', 'a radial gauge');
+
+        expect(resolveFastModel).toHaveBeenCalledWith(
+            { defaultProvider: 'openai' },
+            { enableReasoning: false },
+        );
+        expect(generateTextMock).toHaveBeenCalledWith(
+            expect.objectContaining({ model: FAST_MODEL_OPTIONS.model }),
+        );
+    });
+
+    it('falls through to no questions when no fast model resolves', async () => {
+        const { service, resolveFastModel } = buildService();
+        resolveFastModel.mockRejectedValueOnce(new Error('not configured'));
+
+        await expect(
+            service.clarifyApp(USER, 'project-1', 'a radial gauge'),
+        ).resolves.toEqual({ questions: [] });
+        expect(generateTextMock).not.toHaveBeenCalled();
+    });
+});
+
+describe('AppGenerateService.clarifyApp for the data app viz template', () => {
+    it('never sends catalog context, so no data question can be grounded', async () => {
+        const { getCatalogItemsSummary, userMessage } = await clarify(
+            DATA_APP_VIZ_TEMPLATE,
+        );
+
+        // A data app viz never runs a query — it renders the rows the host
+        // explore hands it — so the catalog is neither fetched nor sent.
+        expect(getCatalogItemsSummary).not.toHaveBeenCalled();
+        expect(userMessage).not.toContain('Available tables and key fields');
+        expect(userMessage).not.toContain('orders');
+        expect(userMessage).not.toContain('total_revenue');
+        // The viz system prompt already fixes the kind.
+        expect(userMessage).not.toContain('App kind');
+        expect(userMessage).toContain('a radial gauge');
+    });
+
+    it('still passes attached resources through as visual reference', async () => {
+        const { service } = buildService();
+
+        await service.clarifyApp(
+            USER,
+            'project-1',
+            'a radial gauge',
+            DATA_APP_VIZ_TEMPLATE,
+            [{ uuid: 'chart-1', includeSampleData: false, linkLive: false }],
+            undefined,
+            ['file-1', 'file-2'],
+        );
+
+        const { userMessage } = sentMessages();
+        expect(userMessage).toContain('Chart: "Revenue by month"');
+        expect(userMessage).toContain(
+            '2 files attached (design references or documents)',
+        );
+    });
+
+    it('routes to the viz system prompt, not the app one', async () => {
+        const { system } = await clarify(DATA_APP_VIZ_TEMPLATE);
+
+        expect(system).toBe(CLARIFY_VIZ_SYSTEM_PROMPT);
+    });
+
+    it('still caps at 4 questions and drops blank ones', async () => {
+        mockQuestions([
+            'Which chart type do you want?',
+            '  ',
+            'Should it split by a series field?',
+            'Is the value axis one metric?',
+            'Do you want a legend?',
+            'A fifth question that must be dropped?',
+        ]);
+        const { service } = buildService();
+
+        const { questions } = await service.clarifyApp(
+            USER,
+            'project-1',
+            'a radial gauge',
+            DATA_APP_VIZ_TEMPLATE,
+        );
+
+        expect(questions).toEqual([
+            'Which chart type do you want?',
+            'Should it split by a series field?',
+            'Is the value axis one metric?',
+            'Do you want a legend?',
+        ]);
+    });
+
+    it('still falls through to no questions when the model call fails', async () => {
+        generateTextMock.mockRejectedValue(new Error('provider exploded'));
+        const { service } = buildService();
+
+        await expect(
+            service.clarifyApp(
+                USER,
+                'project-1',
+                'a radial gauge',
+                DATA_APP_VIZ_TEMPLATE,
+            ),
+        ).resolves.toEqual({ questions: [] });
+    });
+});
+
+describe('AppGenerateService.clarifyApp for app templates', () => {
+    it.each<DataAppTemplate | undefined>([
+        'dashboard',
+        'slideshow',
+        'pdf',
+        'custom',
+        undefined,
+    ])('keeps the catalog-grounded app prompt for %s', async (template) => {
+        const { getCatalogItemsSummary, system, userMessage } =
+            await clarify(template);
+
+        expect(getCatalogItemsSummary).toHaveBeenCalledWith('project-1');
+        expect(userMessage).toContain('Available tables and key fields');
+        expect(userMessage).toContain('orders');
+        expect(userMessage).toContain(`App kind: ${template ?? 'custom'}`);
+
+        expect(system).toBe(CLARIFY_APP_SYSTEM_PROMPT);
+    });
+});

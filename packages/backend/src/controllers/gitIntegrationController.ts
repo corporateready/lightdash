@@ -1,11 +1,11 @@
 import {
     AdditionalMetric,
+    ApiCustomDimensionWriteBackPreview,
     ApiErrorPayload,
-    ApiGitFileContent,
     assertRegisteredAccount,
     CustomDimension,
-    ForbiddenError,
     PullRequestCreated,
+    UUID,
 } from '@lightdash/common';
 import {
     Body,
@@ -24,7 +24,6 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../auth/account';
-import { lightdashConfig } from '../config/lightdashConfig';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -76,6 +75,42 @@ export class GitIntegrationController extends BaseController {
                         type: 'customMetrics',
                         fields: body.customMetrics,
                     },
+                ),
+        };
+    }
+
+    /**
+     * Preview custom dimensions using the project's dbt model and warehouse dialect
+     * @summary Preview custom dimension YAML
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/pull-requests/custom-dimensions/preview')
+    @OperationId('PreviewPullRequestForCustomDimensions')
+    async PreviewPullRequestForCustomDimensions(
+        @Path() projectUuid: UUID,
+        @Body()
+        body: {
+            customDimensions: CustomDimension[];
+            quoteChar?: `"` | `'`;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiCustomDimensionWriteBackPreview> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getGitIntegrationService()
+                .previewCustomDimensions(
+                    req.account,
+                    projectUuid,
+                    body.customDimensions,
+                    body.quoteChar || '"',
                 ),
         };
     }
@@ -143,119 +178,6 @@ export class GitIntegrationController extends BaseController {
             results: await this.services
                 .getGitIntegrationService()
                 .getBranches(toSessionUser(req.account), projectUuid),
-        };
-    }
-
-    /**
-     * Get the YAML file for an explore's base table
-     * @summary Get explore file
-     */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
-    @SuccessResponse('200', 'Success')
-    @Get('/explores/{exploreName}/files')
-    @OperationId('GetGitFileForExplore')
-    async getFileForExplore(
-        @Path() projectUuid: string,
-        @Path() exploreName: string,
-        @Request() req: express.Request,
-    ): Promise<{ status: 'ok'; results: ApiGitFileContent }> {
-        assertRegisteredAccount(req.account);
-        if (!lightdashConfig.editYamlInUi.enabled) {
-            throw new ForbiddenError('Edit YAML in UI feature is not enabled');
-        }
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services
-                .getGitIntegrationService()
-                .getFileForExplore(
-                    toSessionUser(req.account),
-                    projectUuid,
-                    exploreName,
-                ),
-        };
-    }
-
-    /**
-     * Get the file path for an explore's YAML file (without fetching content)
-     * @summary Get explore file path
-     */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
-    @SuccessResponse('200', 'Success')
-    @Get('/explores/{exploreName}/file-path')
-    @OperationId('GetGitFilePathForExplore')
-    async getFilePathForExplore(
-        @Path() projectUuid: string,
-        @Path() exploreName: string,
-        @Request() req: express.Request,
-    ): Promise<{ status: 'ok'; results: { filePath: string } }> {
-        assertRegisteredAccount(req.account);
-        if (!lightdashConfig.editYamlInUi.enabled) {
-            throw new ForbiddenError('Edit YAML in UI feature is not enabled');
-        }
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services
-                .getGitIntegrationService()
-                .getFilePathForExplore(
-                    toSessionUser(req.account),
-                    projectUuid,
-                    exploreName,
-                ),
-        };
-    }
-
-    /**
-     * Create a pull request with arbitrary file changes
-     * @summary Create file PR
-     */
-    @Middlewares([
-        allowApiKeyAuthentication,
-        isAuthenticated,
-        unauthorisedInDemo,
-    ])
-    @SuccessResponse('200', 'Success')
-    @Post('/pull-requests/file-change')
-    @OperationId('CreatePullRequestForFileChange')
-    async createPullRequestForFileChange(
-        @Path() projectUuid: string,
-        @Body()
-        body: {
-            filePath: string;
-            content: string;
-            originalSha: string;
-            title: string;
-            description: string;
-        },
-        @Request() req: express.Request,
-    ): Promise<{ status: 'ok'; results: PullRequestCreated }> {
-        assertRegisteredAccount(req.account);
-        if (!lightdashConfig.editYamlInUi.enabled) {
-            throw new ForbiddenError('Edit YAML in UI feature is not enabled');
-        }
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services
-                .getGitIntegrationService()
-                .createPullRequestWithFileChange(
-                    toSessionUser(req.account),
-                    projectUuid,
-                    body.filePath,
-                    body.content,
-                    body.originalSha,
-                    body.title,
-                    body.description,
-                ),
         };
     }
 }

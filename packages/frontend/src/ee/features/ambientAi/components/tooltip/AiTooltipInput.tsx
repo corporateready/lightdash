@@ -2,9 +2,9 @@ import { ActionIcon, Box, Group, Text, Textarea } from '@mantine/core';
 import { useHotkeys } from '@mantine/hooks';
 import { IconArrowUp, IconSparkles } from '@tabler/icons-react';
 import { useCallback, useState, type FC } from 'react';
-import { useParams } from 'react-router';
 import MantineIcon from '../../../../../components/common/MantineIcon';
 import { useGenerateTooltip } from '../../../../../hooks/useGenerateTooltip';
+import { useProjectUuid } from '../../../../../hooks/useProjectUuid';
 import styles from './AiTooltipInput.module.css';
 
 type Props = {
@@ -14,7 +14,7 @@ type Props = {
 };
 
 export const AiTooltipInput: FC<Props> = ({ fields, currentHtml, onApply }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const [prompt, setPrompt] = useState('');
 
     const handleSuccess = useCallback(
@@ -51,7 +51,7 @@ export const AiTooltipInput: FC<Props> = ({ fields, currentHtml, onApply }) => {
 
     return (
         <Box className={styles.container}>
-            <Group spacing="xs" mb="xs">
+            <Group gap="xs" mb="xs">
                 <MantineIcon icon={IconSparkles} color="indigo.4" />
                 <Text size="xs" c="ldDark.9" fw={500}>
                     {currentHtml
@@ -76,6 +76,7 @@ export const AiTooltipInput: FC<Props> = ({ fields, currentHtml, onApply }) => {
                     autosize
                 />
                 <ActionIcon
+                    variant="filled"
                     size="sm"
                     radius="xl"
                     onClick={handleGenerate}

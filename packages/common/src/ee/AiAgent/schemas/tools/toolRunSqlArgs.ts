@@ -1,65 +1,106 @@
 import { z } from 'zod';
+import { structuredToolOutputSchema } from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
+import {
+    buildMcpVisualizationFollowUpInstruction,
+    MCP_ARTIFACT_INTEGRATION_NOTE,
+    MCP_QUERY_ERROR_NOTE,
+    MCP_QUERY_RESULT_USAGE_NOTE,
+} from './toolMcpQueryResultDescription';
+import {
+    executionStatsContentSchema,
+    mcpSqlQueryRowsColumnsSchema,
+} from './toolQueryResultSchemas';
 
-const TOOL_RUN_SQL_DESCRIPTION = `Tool: run_sql
+export const DEFAULT_RUN_SQL_LIMIT = 500;
+export const DEFAULT_RUN_SQL_MAX_LIMIT = 5000;
 
-Purpose:
-Execute an arbitrary SQL query against the project's data warehouse and return the results. Successful results can be linked from the final answer with [Open in SQL Runner](#sql-runner-link).
+// Execution clamps every limit to the max, so the default never exceeds it.
+export const getRunSqlDefaultLimit = (maxLimit: number): number =>
+    Math.min(DEFAULT_RUN_SQL_LIMIT, maxLimit);
 
-Use this tool when the user wants to run a custom SQL query that doesn't fit the explore-based metric query model.
-This is useful for ad-hoc analysis, data exploration, or queries that join across tables not modeled in explores.
+export const buildAgentRunSqlDescription = (
+    defaultLimit: number,
+    maxLimit: number,
+) => `Execute a read-only SQL query against the project's data warehouse.
 
-The query is executed directly against the warehouse, so use the SQL dialect appropriate for the connected warehouse (e.g., PostgreSQL, BigQuery, Snowflake, etc.).
+The row limit defaults to ${defaultLimit}, max ${maxLimit}.
 
-Parameters:
-- sql: The SQL query to execute. Must be a valid SELECT statement.
-- limit: Maximum number of rows to return (default 500, max 5000).
+Each result renders as its own artifact with a "Continue exploring in SQL Runner" action scoped to that query, so link to SQL Runner only through it: a link in your text cannot be scoped and points at the wrong query when a turn runs more than one.`;
 
-Response shape (MCP CallToolResult):
-- content: [{ type: "text", text: "<CSV string>" }] — header row + data rows, comma-separated. Provided for human/LLM display and as a fallback.
-- structuredContent: {
-    rows:     Array<Record<string, unknown>>,  // each row keyed by column name
-    columns:  string[],                        // column names in order
-    rowCount: number                           // total rows returned
-  }
+export const buildRunSqlDescription = (
+    defaultLimit: number,
+    maxLimit: number,
+) => `Execute a read-only SQL query against the project's data warehouse. For running queries, follow the polling instructions in the response. Prefer run_metric_query when the semantic layer can answer the question; use SQL for ad-hoc analysis or queries outside modeled explores.
 
-When writing code that consumes this tool (e.g. inside a live artifact), prefer structuredContent.rows over parsing the CSV. Example:
+Use a complete SELECT statement in the connected warehouse's SQL dialect. Lightdash applies the row limit (default ${defaultLimit}, max ${maxLimit}).
+${buildMcpVisualizationFollowUpInstruction('run_sql')}
 
-  const result = await callMcpTool('run_sql', { sql, limit });
-  const rows    = result.structuredContent.rows;     // [{ status: 'completed', n: 94, total_amount: 2397 }, ...]
-  const columns = result.structuredContent.columns;  // ['status', 'n', 'total_amount']
+Returns SQL data, not chart artifacts. The platform provides a query-specific SQL Runner action; do not add your own SQL Runner link in the final answer.
+${MCP_QUERY_RESULT_USAGE_NOTE}
+${MCP_QUERY_ERROR_NOTE}
 
-Notes:
-- Values in rows are JSON-serializable primitives: numbers, strings, booleans, ISO date strings, or null. They are NOT pre-stringified — there's no need for parseFloat / parseInt on numeric columns.
-- Empty results still return structuredContent with { rows: [], columns, rowCount: 0 } — distinct from a parse failure.
-- On error, the response has isError: true and content[0].text contains the error message; structuredContent is omitted.
-`;
+${MCP_ARTIFACT_INTEGRATION_NOTE}`;
 
-export const toolRunSqlArgsSchema = createToolSchema({
-    description: TOOL_RUN_SQL_DESCRIPTION,
-})
-    .extend({
-        sql: z
-            .string()
-            .describe('The SQL query to execute against the data warehouse.'),
-        limit: z
-            .number()
-            .int()
-            .positive()
-            .max(5000)
-            .default(500)
-            .describe(
-                'Maximum number of rows to return. Defaults to 500, max 5000.',
-            ),
-    })
-    .build();
+type CreateToolRunSqlArgsSchemaOptions = {
+    maxLimit?: number;
+    defaultLimit?: number;
+};
 
-export const toolRunSqlOutputSchema = z.object({
-    result: z.string(),
+export const createToolRunSqlArgsSchema = ({
+    maxLimit = DEFAULT_RUN_SQL_MAX_LIMIT,
+    defaultLimit = getRunSqlDefaultLimit(maxLimit),
+}: CreateToolRunSqlArgsSchemaOptions = {}) =>
+    createToolSchema()
+        .extend({
+            sql: z
+                .string()
+                .describe(
+                    'The SQL query to execute against the data warehouse.',
+                ),
+            limit: z.coerce
+                .number()
+                .int()
+                .positive()
+                .max(maxLimit)
+                .default(defaultLimit)
+                .describe('Maximum number of rows to return.'),
+        })
+        .build();
+
+export const toolRunSqlArgsSchema = createToolRunSqlArgsSchema();
+
+export const RUN_SQL_PREVIEW_ROW_LIMIT = 50;
+
+export const toolRunSqlStructuredContentSchema = z.object({
+    rowCount: mcpSqlQueryRowsColumnsSchema.shape.rowCount,
+    columns: mcpSqlQueryRowsColumnsSchema.shape.columns,
+    rows: mcpSqlQueryRowsColumnsSchema.shape.rows
+        .nullable()
+        .describe(
+            `Raw values of the preview rows rendered as CSV in the result (first ${RUN_SQL_PREVIEW_ROW_LIMIT} at most); [] when the query returned no rows. Null when data access is disabled and the rows were withheld.`,
+        ),
+    truncated: z
+        .boolean()
+        .describe(
+            'True when `rows` holds only the first rows of a larger result; `rowCount` is the full count.',
+        ),
+    review: z.string().nullable(),
+    executionStats: executionStatsContentSchema,
+});
+
+export const toolRunSqlOutputSchema = structuredToolOutputSchema({
     metadata: z.object({
         status: z.enum(['success', 'error', 'rejected', 'timeout']),
     }),
+    structuredContent: toolRunSqlStructuredContentSchema,
+    // Rejection and timeout are failures for this tool: they carry an error,
+    // not a result set.
+    errorStatuses: z.enum(['error', 'rejected', 'timeout']),
 });
 
 export type ToolRunSqlArgs = z.infer<typeof toolRunSqlArgsSchema>;
+export type ToolRunSqlStructuredContent = z.infer<
+    typeof toolRunSqlStructuredContentSchema
+>;
 export type ToolRunSqlOutput = z.infer<typeof toolRunSqlOutputSchema>;

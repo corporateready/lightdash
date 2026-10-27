@@ -1,5 +1,5 @@
 import { FieldType, type SortField } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
+import { Menu } from '@mantine/core';
 import { useCallback, useMemo, type ComponentProps, type FC } from 'react';
 import {
     explorerActions,
@@ -11,7 +11,8 @@ import {
     useExplorerDispatch,
     useExplorerSelector,
 } from '../../features/explorer/store';
-import { useIsHidePivotDimsEnabled } from '../../hooks/useIsHidePivotDimsEnabled';
+import { selectTableShowSubtotals } from '../../features/visualization/store';
+import { useTableEditorActions } from '../../hooks/tableVisualization/useTableConfig';
 import {
     matchesIdentity,
     normalizePivotValues,
@@ -24,8 +25,8 @@ import {
 import { SortDirection } from '../../utils/sortUtils';
 import PivotTable, { type PivotSortMenuTarget } from '../common/PivotTable';
 import ColumnHeaderSortMenuOptions from '../Explorer/ResultsCard/ColumnHeaderSortMenuOptions';
-import { isTableVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import { useVisualizationInputSelector } from '../LightdashVisualization/useVisualizationContext';
+import { getExplorerPivotSortMenu } from './getExplorerPivotSortMenu';
 
 type ExplorerPivotTableProps = Omit<
     ComponentProps<typeof PivotTable>,
@@ -42,6 +43,7 @@ const ExplorerPivotTable: FC<ExplorerPivotTableProps> = ({
     getFieldLabel,
     getField,
     data,
+    enableContextMenu = true,
     ...rest
 }) => {
     const dispatch = useExplorerDispatch();
@@ -51,14 +53,10 @@ const ExplorerPivotTable: FC<ExplorerPivotTableProps> = ({
     const dimensions = useExplorerSelector(selectDimensions);
     const pivotConfig = useExplorerSelector(selectPivotConfig);
 
-    const { visualizationConfig } = useVisualizationContext();
-    const chartConfig = isTableVisualizationConfig(visualizationConfig)
-        ? visualizationConfig.chartConfig
-        : null;
-
-    const isHidePivotDimsEnabled = useIsHidePivotDimsEnabled();
-
-    const showSubtotals = chartConfig?.showSubtotals ?? false;
+    const showSubtotals = useVisualizationInputSelector(
+        selectTableShowSubtotals,
+    );
+    const { updateColumnProperty } = useTableEditorActions();
     const rowDims = useMemo(
         () => getRowDims(dimensions, pivotConfig?.columns),
         [dimensions, pivotConfig],
@@ -195,7 +193,7 @@ const ExplorerPivotTable: FC<ExplorerPivotTableProps> = ({
                         onSelect={(direction) => applySort(target, direction)}
                         onRemove={() => removeSort(target)}
                     />
-                    {isHidePivotDimsEnabled && chartConfig && isDimTarget && (
+                    {isDimTarget && (
                         <>
                             <Menu.Divider />
                             <Menu.Item
@@ -204,10 +202,9 @@ const ExplorerPivotTable: FC<ExplorerPivotTableProps> = ({
                                     menuTarget.reference,
                                 )}
                                 onClick={() => {
-                                    chartConfig.updateColumnProperty(
-                                        menuTarget.reference,
-                                        { visible: false },
-                                    );
+                                    updateColumnProperty(menuTarget.reference, {
+                                        visible: false,
+                                    });
                                 }}
                             >
                                 Hide column
@@ -219,9 +216,8 @@ const ExplorerPivotTable: FC<ExplorerPivotTableProps> = ({
         },
         [
             applySort,
-            chartConfig,
+            updateColumnProperty,
             getField,
-            isHidePivotDimsEnabled,
             isSubtotalGroupingLevel,
             removeSort,
             sorts,
@@ -235,8 +231,13 @@ const ExplorerPivotTable: FC<ExplorerPivotTableProps> = ({
             data={data}
             getFieldLabel={getFieldLabel}
             getField={getField}
+            enableContextMenu={enableContextMenu}
             sortBy={sorts}
-            renderSortMenu={isEditMode ? renderSortMenu : undefined}
+            renderSortMenu={getExplorerPivotSortMenu({
+                enableContextMenu,
+                isEditMode,
+                renderSortMenu,
+            })}
         />
     );
 };

@@ -1,0 +1,605 @@
+import {
+    buildComposerArtifactPipeline,
+    COMPOSER_QUERY_PREVIEW_ROW_LIMIT,
+    createToolComposerQueriesArgsSchema,
+    getSourceQueryResultReferences,
+    getSqlApprovalSql,
+    getToolComposerQueriesDescription,
+    QuerySourceType,
+    queryToolDefinition,
+    toComposerNodeColumns,
+    toolComposerQueryNodeToSourceQuery,
+    type AnyType,
+    type ParameterDefinitions,
+    type SemanticLayerSourceQuery,
+    type SourceQuery,
+    type SubmittedSourceQuery,
+    type ToolComposerQueriesStructuredContent,
+    type ToolComposerQueriesSuccessMetadata,
+} from '@lightdash/common';
+import { tool } from 'ai';
+import { stringify } from 'csv-stringify/sync';
+import { type AiDecisionClient } from '../decisions/AiDecisionClient';
+import { getEmptyFilterHints } from '../decisions/queryChecks';
+import {
+    preferFilterValueHints,
+    type QueryReviewer,
+} from '../decisions/queryReview';
+import type {
+    GetPromptFn,
+    IsThreadSqlAutoApprovedFn,
+    ListSqlApprovalDecisionsFn,
+    ListThreadComposerQueryNodesFn,
+    RecordSqlApprovalFn,
+    RegisterThreadComposerQueryNodesFn,
+    RunComposerQueriesFn,
+    SearchFieldValuesFn,
+    StoreToolResultsFn,
+    UpdateProgressFn,
+    UpdateSlackMessageFn,
+    WaitForSqlApprovalFn,
+} from '../types/aiAgentDependencies';
+import { type AgentContext } from '../utils/AgentContext';
+import {
+    getAppliedParameters,
+    renderAppliedParameters,
+} from '../utils/appliedParameters';
+import { serializeData } from '../utils/serializeData';
+import type {
+    ExecuteStructuredToolResult,
+    ExecuteToolErrorResult,
+} from '../utils/structuredToolResult';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
+import { validateQueryParameters } from '../utils/validators';
+import { resolveComposerQueryNode } from './composerSemanticLayerFilters';
+import { validateSelectOnly } from './runSql';
+import { getSqlApprovalSteps } from './slackSqlAggregate';
+import { createSqlApprovalGate, type SqlApprovalCopy } from './sqlApprovalGate';
+import {
+    COMPOSER_SQL_REJECTED_RESULT,
+    getSqlApprovalHeading,
+    SqlNotApprovedError,
+    type TrackSqlApprovalTimeoutFn,
+} from './sqlApprovals';
+
+export type FilterValueHintDependencies = {
+    decisions: Pick<AiDecisionClient, 'evaluate'>;
+    searchFieldValues: SearchFieldValuesFn;
+};
+
+type Dependencies = {
+    agentContext: AgentContext;
+    reviewQuery?: QueryReviewer;
+    filterValueHints: FilterValueHintDependencies | null;
+    updateProgress: UpdateProgressFn;
+    runComposerQueries: RunComposerQueriesFn;
+    getPrompt: GetPromptFn;
+    updateSlackMessage: UpdateSlackMessageFn;
+    siteUrl: string;
+    waitForSqlApproval: WaitForSqlApprovalFn;
+    recordSqlApproval: RecordSqlApprovalFn;
+    isThreadSqlAutoApproved: IsThreadSqlAutoApprovedFn;
+    listSqlApprovalDecisions: ListSqlApprovalDecisionsFn;
+    trackSqlApprovalTimeout: TrackSqlApprovalTimeoutFn;
+    storeToolResults: StoreToolResultsFn;
+    listThreadComposerQueryNodes: ListThreadComposerQueryNodesFn;
+    registerThreadComposerQueryNodes: RegisterThreadComposerQueryNodesFn;
+    maxQueryLimit: number;
+    enableDataAccess: boolean;
+    canRunSql: boolean;
+    enablePythonNodes: boolean;
+    autoApproveSql?: boolean;
+    autoApproveSqlUserUuid?: string | null;
+    useSlackStreamCard?: boolean;
+    // Model-level definitions come from the explore.
+    projectParameterDefinitions: ParameterDefinitions;
+};
+
+const toolDefinition = queryToolDefinition.for('agent');
+
+const COMPOSER_SQL_APPROVAL_COPY: SqlApprovalCopy = {
+    slackText: 'SQL execution',
+    pendingProgress: 'Awaiting approval to run SQL...',
+    // The tool reports its own progress once approved.
+    approvedProgress: null,
+    rejectedResult: COMPOSER_SQL_REJECTED_RESULT,
+    timeoutResult:
+        'SQL approval timed out after 5 minutes with no response. The user may have stepped away — acknowledge politely and wait for them to re-ask.',
+    previousTimeoutResult:
+        'A previous SQL approval timed out in this response. Do not call query again in this response; tell the user the SQL was not approved and ask them to retry when ready.',
+};
+
+type ComposerQueriesOutput =
+    | ExecuteStructuredToolResult<
+          ToolComposerQueriesStructuredContent,
+          ToolComposerQueriesSuccessMetadata
+      >
+    | ExecuteToolErrorResult<{ status: 'error' | 'rejected' | 'timeout' }>;
+
+const failure = (
+    result: string,
+    status: 'error' | 'rejected' | 'timeout',
+): ComposerQueriesOutput => ({
+    result,
+    metadata: { status },
+    structuredContent: { error: result },
+});
+
+/**
+ * Resolves which node the artifact should show: the explicit terminalNodeId
+ * when given, otherwise the unique sink (the one node no other node
+ * references in-submission). Throws a model-actionable error otherwise.
+ */
+export const resolveTerminalNodeId = (
+    submitted: SubmittedSourceQuery[],
+    terminalNodeId: string | null,
+    pipeline: SourceQuery[],
+): string => {
+    const nodeIds = new Set(submitted.map((query) => query.nodeId));
+    if (terminalNodeId !== null) {
+        if (!pipeline.some((node) => node.nodeId === terminalNodeId)) {
+            throw new Error(
+                `terminalNodeId "${terminalNodeId}" does not name a node in this pipeline`,
+            );
+        }
+        return terminalNodeId;
+    }
+
+    const referenced = new Set<string>();
+    submitted.forEach((query) => {
+        Object.values(getSourceQueryResultReferences(query))
+            .filter((reference) => nodeIds.has(reference))
+            .forEach((reference) => referenced.add(reference));
+    });
+
+    const sinks = submitted
+        .map((query) => query.nodeId)
+        .filter((nodeId) => !referenced.has(nodeId));
+    if (sinks.length !== 1) {
+        throw new Error(
+            `The pipeline has ${sinks.length} sinks (${sinks.join(
+                ', ',
+            )}); pass terminalNodeId to pick which node's result this tool returns`,
+        );
+    }
+    return sinks[0];
+};
+
+/** Semantic layer nodes the terminal node reads from, itself included. */
+const getSemanticLayerAncestors = (
+    pipeline: SourceQuery[],
+    terminalNodeId: string,
+): SemanticLayerSourceQuery[] => {
+    const byId = new Map(pipeline.map((node) => [node.nodeId, node]));
+    const visited = new Set<string>();
+    const visit = (nodeId: string): SemanticLayerSourceQuery[] => {
+        const node = byId.get(nodeId);
+        if (!node || visited.has(nodeId)) return [];
+        visited.add(nodeId);
+        return node.sourceType === QuerySourceType.SEMANTIC_LAYER
+            ? [node]
+            : Object.values(getSourceQueryResultReferences(node)).flatMap(
+                  visit,
+              );
+    };
+    return visit(terminalNodeId);
+};
+
+const getComposerEmptyFilterHints = async (
+    { decisions, searchFieldValues }: FilterValueHintDependencies,
+    nodes: SemanticLayerSourceQuery[],
+): Promise<string> => {
+    const hints = await Promise.all(
+        nodes.map((node) =>
+            getEmptyFilterHints({
+                decisions,
+                query: {
+                    exploreName: node.exploreName,
+                    filters: node.filters ?? {},
+                },
+                searchFieldValues,
+            }),
+        ),
+    );
+    return hints.filter(Boolean).join(' ');
+};
+
+export const getRunComposerQueries = ({
+    agentContext,
+    reviewQuery,
+    filterValueHints,
+    updateProgress,
+    runComposerQueries,
+    getPrompt,
+    updateSlackMessage,
+    siteUrl,
+    waitForSqlApproval,
+    recordSqlApproval,
+    isThreadSqlAutoApproved,
+    listSqlApprovalDecisions,
+    trackSqlApprovalTimeout,
+    storeToolResults,
+    listThreadComposerQueryNodes,
+    registerThreadComposerQueryNodes,
+    maxQueryLimit,
+    enableDataAccess,
+    canRunSql,
+    enablePythonNodes,
+    autoApproveSql = false,
+    autoApproveSqlUserUuid = null,
+    useSlackStreamCard = false,
+    projectParameterDefinitions,
+}: Dependencies) => {
+    const approvalGate = createSqlApprovalGate(
+        {
+            getPrompt,
+            updateProgress,
+            updateSlackMessage,
+            siteUrl,
+            waitForSqlApproval,
+            recordSqlApproval,
+            isThreadSqlAutoApproved,
+            listSqlApprovalDecisions,
+            trackSqlApprovalTimeout,
+            storeToolResults,
+            autoApproveSql,
+            autoApproveSqlUserUuid,
+            useSlackStreamCard,
+        },
+        'query',
+        COMPOSER_SQL_APPROVAL_COPY,
+    );
+
+    const inputSchema = createToolComposerQueriesArgsSchema({
+        maxLimit: maxQueryLimit,
+        enablePythonNodes,
+    });
+
+    return tool({
+        description: getToolComposerQueriesDescription({ enablePythonNodes }),
+        inputSchema,
+        outputSchema: toolDefinition.outputSchema,
+        toModelOutput: toolDefinition.toModelOutput,
+        // Only sql nodes submitted in this call gate; sql reused from an
+        // earlier call was approved then.
+        needsApproval: (args, { toolCallId }) =>
+            approvalGate.needsNativeApproval({
+                toolCallId,
+                sql: getSqlApprovalSql(args),
+            }),
+        execute: async (
+            args,
+            { toolCallId },
+        ): Promise<ComposerQueriesOutput> => {
+            const {
+                title,
+                description,
+                queries: queryNodes,
+                terminalNodeId,
+            } = args;
+            const approvalSql = getSqlApprovalSql(args);
+            // Every return routes through persistIfResumed so a resumed call
+            // always stores a result.
+            const { approveSql, renderState, persistIfResumed } =
+                await approvalGate.forToolCall(toolCallId, {
+                    sql: approvalSql,
+                });
+            try {
+                const duplicates = queryNodes
+                    .map((node) => node.nodeId)
+                    .filter(
+                        (nodeId, index, nodeIds) =>
+                            nodeIds.indexOf(nodeId) !== index,
+                    );
+                if (duplicates.length > 0) {
+                    return await persistIfResumed(
+                        failure(
+                            `Duplicate node id(s) in submission: ${duplicates.join(', ')}. Give every node a unique nodeId.`,
+                            'error',
+                        ),
+                    );
+                }
+
+                queryNodes.forEach((node) => {
+                    if (
+                        node.sourceType !== QuerySourceType.SEMANTIC_LAYER ||
+                        node.parameters === null
+                    )
+                        return;
+                    validateQueryParameters(
+                        node.parameters,
+                        agentContext.getExplore(node.exploreName),
+                        projectParameterDefinitions,
+                    );
+                });
+
+                const prompt = await getPrompt();
+                // Filters resolve against the explore before anything runs.
+                const submitted = queryNodes.map((node) =>
+                    toolComposerQueryNodeToSourceQuery(
+                        resolveComposerQueryNode(node, {
+                            getExplore: (exploreName) =>
+                                agentContext.getExplore(exploreName),
+                        }),
+                    ),
+                );
+                const queries = buildComposerArtifactPipeline({
+                    queries: submitted,
+                    threadNodes: await listThreadComposerQueryNodes(
+                        prompt.threadUuid,
+                    ),
+                });
+                // Reused nodes run with the values they were defined with.
+                const appliedParameters = queries.flatMap((node) => {
+                    if (node.sourceType !== QuerySourceType.SEMANTIC_LAYER)
+                        return [];
+                    const explore = agentContext
+                        .getAvailableExplores()
+                        .find(({ name }) => name === node.exploreName);
+                    const applied = explore
+                        ? getAppliedParameters(
+                              explore,
+                              projectParameterDefinitions,
+                              node.parameters ?? null,
+                          )
+                        : null;
+                    return applied ? [{ nodeId: node.nodeId, ...applied }] : [];
+                });
+                const resolvedTerminalNodeId = resolveTerminalNodeId(
+                    submitted,
+                    terminalNodeId,
+                    queries,
+                );
+
+                if (
+                    !enablePythonNodes &&
+                    queries.some(
+                        (node) => node.sourceType === QuerySourceType.PYTHON,
+                    )
+                ) {
+                    return await persistIfResumed(
+                        failure(
+                            'This pipeline contains "python" nodes but python queries are not enabled. Rebuild the pipeline with duckdb nodes instead.',
+                            'error',
+                        ),
+                    );
+                }
+
+                const sqlNodes = queries.filter(
+                    (node) => node.sourceType === QuerySourceType.SQL,
+                );
+                if (sqlNodes.length > 0 && !canRunSql) {
+                    return await persistIfResumed(
+                        failure(
+                            'This pipeline contains "sql" nodes but SQL execution is not enabled for this agent. Rebuild the pipeline without sql nodes (semanticLayer and duckdb nodes are still available).',
+                            'error',
+                        ),
+                    );
+                }
+                sqlNodes.forEach((node) => validateSelectOnly(node.sql));
+
+                if (approvalSql !== null) {
+                    try {
+                        await approveSql({
+                            sql: approvalSql,
+                            heading: getSqlApprovalHeading('query'),
+                            steps: getSqlApprovalSteps('query', args),
+                        });
+                    } catch (e) {
+                        if (e instanceof SqlNotApprovedError) {
+                            return await persistIfResumed(
+                                failure(e.message, e.outcome),
+                            );
+                        }
+                        throw e;
+                    }
+                    await renderState({ kind: 'running', sql: approvalSql });
+                }
+
+                await updateProgress('Running composer queries...');
+
+                const [{ terminal }, review] = await Promise.all([
+                    runComposerQueries({
+                        queries,
+                        terminalNodeId: resolvedTerminalNodeId,
+                        // Per-node lifecycle → transient step-progress events the
+                        // web stream renders as live statuses on the pipeline.
+                        // progressId carries `${toolCallId}:${nodeId}` so the
+                        // client can key events to the right call and node.
+                        // Fire-and-forget: status delivery must never block or
+                        // fail the query.
+                        onNodeStatus: ({ nodeId, status, errorMessage }) => {
+                            let message: string;
+                            let progressStatus:
+                                | 'in_progress'
+                                | 'complete'
+                                | 'error';
+                            if (status === 'running') {
+                                message = `Running query "${nodeId}"...`;
+                                progressStatus = 'in_progress';
+                            } else if (status === 'success') {
+                                message = `Query "${nodeId}" complete`;
+                                progressStatus = 'complete';
+                            } else {
+                                message = `Query "${nodeId}" failed${errorMessage ? `: ${errorMessage}` : ''}`;
+                                progressStatus = 'error';
+                            }
+                            void updateProgress(
+                                message,
+                                'query',
+                                `${toolCallId}:${nodeId}`,
+                                progressStatus,
+                            ).catch(() => {});
+                        },
+                    }),
+                    enableDataAccess
+                        ? (reviewQuery?.({
+                              kind: 'composer',
+                              queries,
+                              terminalNodeId: resolvedTerminalNodeId,
+                          }) ?? '')
+                        : '',
+                ]);
+
+                if (approvalSql !== null) {
+                    await renderState({
+                        kind: 'success',
+                        sql: approvalSql,
+                        rowCount: terminal.rowCount,
+                        inlineCsv: '',
+                        truncated: false,
+                    });
+                }
+
+                const artifactTitle = title ?? 'Composer query results';
+                const metadata: ToolComposerQueriesSuccessMetadata = {
+                    status: 'success',
+                    queryUuid: terminal.queryUuid,
+                    terminalNodeId: resolvedTerminalNodeId,
+                    title: artifactTitle,
+                    description: description ?? null,
+                };
+
+                const nodes = queries.map((node) => ({
+                    nodeId: node.nodeId,
+                    title: node.title ?? null,
+                    sourceType: node.sourceType,
+                }));
+                const nodeSummary = nodes
+                    .map((node) =>
+                        node.title === null
+                            ? `- ${node.nodeId} (${node.sourceType})`
+                            : `- ${node.nodeId}: "${node.title}" (${node.sourceType})`,
+                    )
+                    .join('\n');
+                const columns = Object.values(terminal.columns).map(
+                    ({ reference, type }) => ({ reference, type }),
+                );
+                const columnReferences = columns.map(
+                    (column) => column.reference,
+                );
+                const columnSummary = columns
+                    .map((column) => `${column.reference} (${column.type})`)
+                    .join(', ');
+                const isEmpty = enableDataAccess && terminal.rowCount === 0;
+                const [diagnosis, valueHints] = await Promise.all([
+                    isEmpty && reviewQuery
+                        ? reviewQuery(
+                              {
+                                  kind: 'composer',
+                                  queries,
+                                  terminalNodeId: resolvedTerminalNodeId,
+                              },
+                              { emptyResult: true, review },
+                          )
+                        : null,
+                    isEmpty && filterValueHints
+                        ? getComposerEmptyFilterHints(
+                              filterValueHints,
+                              getSemanticLayerAncestors(
+                                  queries,
+                                  resolvedTerminalNodeId,
+                              ),
+                          )
+                        : '',
+                ]);
+                const emptyReview =
+                    diagnosis === null && !valueHints
+                        ? null
+                        : preferFilterValueHints({
+                              diagnosis: diagnosis ?? '',
+                              valueHints,
+                              review,
+                          });
+                const resultSummary = [
+                    `Composer query complete. Terminal node "${resolvedTerminalNodeId}" returned ${terminal.rowCount} rows.`,
+                    `Nodes in this pipeline:\n${nodeSummary}`,
+                    `Terminal columns: ${columnSummary}.`,
+                    ...appliedParameters.map(
+                        ({ nodeId, ...applied }) =>
+                            `Node "${nodeId}":${renderAppliedParameters(applied)}`,
+                    ),
+                    `Not visualized yet. To present it to the user, call visualize with nodeId "${resolvedTerminalNodeId}".`,
+                    ...(review && terminal.rowCount !== 0 ? [review] : []),
+                    ...(emptyReview !== null ? [emptyReview] : []),
+                ].join('\n');
+                const summary = {
+                    terminalNodeId: resolvedTerminalNodeId,
+                    rowCount: terminal.rowCount,
+                    nodes,
+                    columns,
+                    parameters: appliedParameters,
+                    review:
+                        terminal.rowCount === 0 ? emptyReview : review || null,
+                };
+
+                const buildOutput = (): ComposerQueriesOutput => {
+                    if (!enableDataAccess || terminal.rowCount === 0) {
+                        return {
+                            result: resultSummary,
+                            metadata,
+                            structuredContent: { ...summary, preview: null },
+                        };
+                    }
+                    const previewRows = terminal.rows
+                        .slice(0, COMPOSER_QUERY_PREVIEW_ROW_LIMIT)
+                        .map((row) =>
+                            columnReferences.reduce<Record<string, AnyType>>(
+                                (acc, col) => {
+                                    acc[col] = row[col];
+                                    return acc;
+                                },
+                                {},
+                            ),
+                        );
+                    const previewCsv = stringify(previewRows, {
+                        header: true,
+                        columns: columnReferences,
+                    });
+                    const truncated =
+                        terminal.rowCount > COMPOSER_QUERY_PREVIEW_ROW_LIMIT;
+                    const truncatedNote = truncated
+                        ? `\n(Showing first ${COMPOSER_QUERY_PREVIEW_ROW_LIMIT} of ${terminal.rowCount} rows.)`
+                        : '';
+                    return {
+                        result: `${resultSummary}${truncatedNote}\n${serializeData(
+                            previewCsv,
+                            'csv',
+                        )}`,
+                        metadata,
+                        structuredContent: {
+                            ...summary,
+                            preview: { rows: previewRows, truncated },
+                        },
+                    };
+                };
+                const output = buildOutput();
+
+                // Last fallible step: a failure anywhere above registers nothing.
+                await registerThreadComposerQueryNodes({
+                    threadUuid: prompt.threadUuid,
+                    nodes: queries,
+                    nodeColumns: {
+                        [resolvedTerminalNodeId]: toComposerNodeColumns(
+                            terminal.columns,
+                        ),
+                    },
+                });
+
+                return await persistIfResumed(output);
+            } catch (e) {
+                if (approvalSql !== null) {
+                    await renderState({
+                        kind: 'error',
+                        sql: approvalSql,
+                        message:
+                            e instanceof Error ? e.message : 'Unknown error',
+                    }).catch(() => {});
+                }
+                return persistIfResumed(
+                    toolErrorOutput(e, 'Error running composer queries.'),
+                );
+            }
+        },
+    });
+};

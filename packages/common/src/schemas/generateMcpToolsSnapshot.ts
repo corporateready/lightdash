@@ -1,0 +1,131 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { z } from 'zod';
+import { mcpToolDefinitions } from '../ee/AiAgent/schemas/tools/toolDefinitions';
+import { toJsonSchema } from '../utils/zodJsonSchema';
+
+/**
+ * Generates the committed stable/default MCP tool surface used for
+ * release-safety checks.
+ *
+ * `mcpToolDefinitions` intentionally excludes temporary runtime-selected
+ * rollout variants with the same public tool names. Flag-ON rollout contracts
+ * are covered by runtime contract snapshots. When a rollout variant replaces
+ * the default, promote it into the default definitions and regenerate this
+ * snapshot.
+ *
+ * Input and output schemas use the runtime contract snapshot's JSON Schema
+ * settings. Tools and object keys are sorted for byte-stable regeneration. Run
+ * with `--check` to verify the committed snapshot is current.
+ */
+
+type JsonValue =
+    | null
+    | boolean
+    | number
+    | string
+    | JsonValue[]
+    | { [key: string]: JsonValue };
+
+type JsonObject = { [key: string]: JsonValue };
+
+const SNAPSHOT_VERSION = '1';
+
+export const getRepoRoot = (): string =>
+    path.resolve(__dirname, '../../../../');
+
+export const getOutputPath = (): string =>
+    path.join(
+        getRepoRoot(),
+        'packages/common/src/schemas/json/mcp-tools-1.0.json',
+    );
+
+// The MCP SDK rebuilds registered object schemas from their shape before
+// converting, so top-level object metadata never reaches `tools/list`.
+const schemaToJson = (
+    schema: z.ZodType | undefined | null,
+    io: 'input' | 'output',
+): JsonValue => {
+    if (!schema) return null;
+    const served =
+        schema instanceof z.ZodObject ? z.object(schema.shape) : schema;
+    return toJsonSchema(served, { io }) as JsonValue;
+};
+
+/**
+ * PURE. Build the snapshot object from the MCP tool definitions. Exported for
+ * testing/reuse; the IO `run` wraps it.
+ */
+export const buildMcpToolsSnapshot = (): JsonObject => {
+    const tools = mcpToolDefinitions
+        .map((definition) => {
+            const view = definition.for('mcp');
+            const entry: JsonObject = {
+                name: view.name,
+                title: view.title,
+                description: view.description,
+                annotations: (view.annotations ?? {}) as unknown as JsonValue,
+                inputSchema: schemaToJson(
+                    view.inputSchema as unknown as z.ZodType,
+                    'input',
+                ),
+                outputSchema:
+                    'outputSchema' in view && view.outputSchema
+                        ? schemaToJson(view.outputSchema as z.ZodType, 'output')
+                        : null,
+            };
+            return entry;
+        })
+        .sort((left, right) =>
+            String(left.name).localeCompare(String(right.name)),
+        );
+
+    return {
+        schemaVersion: SNAPSHOT_VERSION,
+        tools,
+    };
+};
+
+const sortKeysDeep = (value: JsonValue): JsonValue => {
+    if (Array.isArray(value)) {
+        return value.map((item) => sortKeysDeep(item));
+    }
+    if (!value || typeof value !== 'object') {
+        return value;
+    }
+    const objectValue = value as JsonObject;
+    const sortedEntries = Object.entries(objectValue)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, sortKeysDeep(child)]);
+    return Object.fromEntries(sortedEntries);
+};
+
+const toStableJson = (value: JsonObject): string =>
+    `${JSON.stringify(sortKeysDeep(value), null, 4)}\n`;
+
+const run = (): void => {
+    const checkMode = process.argv.includes('--check');
+    const outputPath = getOutputPath();
+    const nextContent = toStableJson(buildMcpToolsSnapshot());
+
+    if (checkMode) {
+        const currentContent = fs.readFileSync(outputPath, 'utf8');
+        const normalizedCurrentContent = toStableJson(
+            JSON.parse(currentContent) as JsonObject,
+        );
+        if (normalizedCurrentContent !== nextContent) {
+            // eslint-disable-next-line no-console
+            console.error(
+                'mcp-tools snapshot is out of date. Run `pnpm generate:mcp-tools-snapshot`.',
+            );
+            process.exit(1);
+        }
+        return;
+    }
+
+    fs.writeFileSync(outputPath, nextContent, 'utf8');
+};
+
+if (require.main === module) {
+    run();
+}

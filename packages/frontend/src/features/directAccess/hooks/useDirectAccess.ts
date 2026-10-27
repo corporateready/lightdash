@@ -1,0 +1,229 @@
+import {
+    DirectAccessResourceType,
+    type ApiError,
+    type DirectAccessAssignment,
+    type DirectAccessGroupPrincipal,
+    type DirectAccessPrincipalType,
+    type DirectAccessUserPrincipal,
+    type SpaceMemberRole,
+} from '@lightdash/common';
+import {
+    useMutation,
+    useQuery,
+    useQueryClient,
+    type UseQueryOptions,
+} from '@tanstack/react-query';
+import useToaster from '../../../hooks/toaster/useToaster';
+import { invalidateContent } from '../../../hooks/useContent';
+import useApp from '../../../providers/App/useApp';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
+import {
+    getDirectAccessAssignments,
+    getDirectAccessGroups,
+    getDirectAccessUsers,
+    resetDirectAccess,
+    revokeDirectAccessAssignment,
+    upsertDirectAccessAssignment,
+    type DirectAccessResourceRef,
+} from '../api';
+
+const directAccessQueryKey = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => ['direct-access', projectUuid, ref.resourceType, ref.resourceUuid];
+
+export const useDirectAccessAvailability = () => {
+    const { health } = useApp();
+    return {
+        isAvailable: health.data?.license?.valid ?? false,
+        isLoading: health.isInitialLoading,
+    };
+};
+
+export const useDirectAccessAssignments = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+    queryOptions?: UseQueryOptions<DirectAccessAssignment[], ApiError>,
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DirectAccessAssignment[], ApiError>({
+        queryKey: directAccessQueryKey(projectUuid, ref),
+        queryFn: () =>
+            getDirectAccessAssignments(lightdashApi, projectUuid, ref),
+        retry: false,
+        ...queryOptions,
+    });
+};
+
+export const useDirectAccessGroups = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DirectAccessGroupPrincipal[], ApiError>({
+        queryKey: [...directAccessQueryKey(projectUuid, ref), 'groups'],
+        queryFn: () => getDirectAccessGroups(lightdashApi, projectUuid, ref),
+        retry: false,
+    });
+};
+
+export const useDirectAccessUsers = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DirectAccessUserPrincipal[], ApiError>({
+        queryKey: [...directAccessQueryKey(projectUuid, ref), 'users'],
+        queryFn: () => getDirectAccessUsers(lightdashApi, projectUuid, ref),
+        retry: false,
+    });
+};
+
+const useInvalidateAfterDirectAccessMutation = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => {
+    const queryClient = useQueryClient();
+    return async () => {
+        // Grants change what discovery surfaces return for the affected
+        // users; refresh the policy plus every consumer of it.
+        await Promise.all([
+            queryClient.invalidateQueries(
+                directAccessQueryKey(projectUuid, ref),
+            ),
+            queryClient.invalidateQueries(['favorites']),
+            queryClient.invalidateQueries({
+                predicate: ({ queryKey }) => {
+                    switch (ref.resourceType) {
+                        case DirectAccessResourceType.DOCUMENT:
+                            return (
+                                [
+                                    'document',
+                                    'documents',
+                                    'document-chart-query',
+                                ].includes(String(queryKey[0])) &&
+                                queryKey[1] === projectUuid
+                            );
+                        case DirectAccessResourceType.CHART:
+                            return (
+                                queryKey[0] === 'saved_query' &&
+                                queryKey[2] === projectUuid
+                            );
+                        case DirectAccessResourceType.DASHBOARD:
+                            return (
+                                queryKey[0] === 'saved_dashboard_query' &&
+                                queryKey[2] === projectUuid
+                            );
+                        case DirectAccessResourceType.SQL_CHART:
+                            return (
+                                (queryKey[0] === 'sqlRunner' &&
+                                    queryKey[1] === 'savedSqlChart' &&
+                                    queryKey[2] === projectUuid) ||
+                                (queryKey[0] === 'savedSqlChart' &&
+                                    queryKey[2] === 'registered' &&
+                                    queryKey[4] === projectUuid)
+                            );
+                        case DirectAccessResourceType.APP:
+                            return (
+                                queryKey[0] === 'app' &&
+                                queryKey[1] === projectUuid
+                            );
+                    }
+                },
+            }),
+            invalidateContent(queryClient, projectUuid),
+        ]);
+    };
+};
+
+export type UpsertDirectAccessArgs = {
+    principalType: DirectAccessPrincipalType;
+    principalUuid: string;
+    role: SpaceMemberRole;
+};
+
+export const useUpsertDirectAccessAssignment = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => {
+    const lightdashApi = useLightdashApi();
+    const { showToastSuccess, showToastApiError } = useToaster();
+    const invalidate = useInvalidateAfterDirectAccessMutation(projectUuid, ref);
+    return useMutation<unknown, ApiError, UpsertDirectAccessArgs>({
+        mutationFn: ({ principalType, principalUuid, role }) =>
+            upsertDirectAccessAssignment(
+                lightdashApi,
+                projectUuid,
+                ref,
+                principalType,
+                principalUuid,
+                role,
+            ),
+        onSuccess: async () => {
+            await invalidate();
+            showToastSuccess({ title: 'Access updated' });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to update access',
+                apiError: error,
+            });
+        },
+    });
+};
+
+export type RevokeDirectAccessArgs = {
+    principalType: DirectAccessPrincipalType;
+    principalUuid: string;
+};
+
+export const useRevokeDirectAccessAssignment = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => {
+    const lightdashApi = useLightdashApi();
+    const { showToastSuccess, showToastApiError } = useToaster();
+    const invalidate = useInvalidateAfterDirectAccessMutation(projectUuid, ref);
+    return useMutation<unknown, ApiError, RevokeDirectAccessArgs>({
+        mutationFn: ({ principalType, principalUuid }) =>
+            revokeDirectAccessAssignment(
+                lightdashApi,
+                projectUuid,
+                ref,
+                principalType,
+                principalUuid,
+            ),
+        onSuccess: async () => {
+            await invalidate();
+            showToastSuccess({ title: 'Access removed' });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to remove access',
+                apiError: error,
+            });
+        },
+    });
+};
+
+export const useResetDirectAccess = (
+    projectUuid: string,
+    ref: DirectAccessResourceRef,
+) => {
+    const lightdashApi = useLightdashApi();
+    const { showToastSuccess, showToastApiError } = useToaster();
+    const invalidate = useInvalidateAfterDirectAccessMutation(projectUuid, ref);
+    return useMutation<unknown, ApiError, void>({
+        mutationFn: () => resetDirectAccess(lightdashApi, projectUuid, ref),
+        onSuccess: async () => {
+            await invalidate();
+            showToastSuccess({ title: 'All access removed' });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Failed to remove access',
+                apiError: error,
+            });
+        },
+    });
+};

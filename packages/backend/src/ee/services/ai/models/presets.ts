@@ -1,32 +1,130 @@
 import { CallSettings } from 'ai';
 import { ProviderOptionsMap } from './types';
 
-export type ModelPresetProvider = 'openai' | 'anthropic' | 'bedrock';
+export type ModelPresetProvider = 'openai' | 'anthropic' | 'google' | 'bedrock';
+export type SelectableModelProvider =
+    | ModelPresetProvider
+    | 'openrouter'
+    | 'vertex';
 
 export type ReasoningStyle = 'budget' | 'adaptive';
+// How hard a reasoning model should think. 'xhigh' is the top level the
+// provider SDKs expose; budget-style models map it to a large thinking budget.
+export type ReasoningEffort = 'medium' | 'xhigh';
+export const XHIGH_THINKING_BUDGET_TOKENS = 16_000;
+export const XHIGH_MAX_OUTPUT_TOKENS = 24_000;
 
-export type ModelPreset<P extends ModelPresetProvider> = {
+export type ModelPreset<P extends SelectableModelProvider> = {
     name: string;
     provider: P;
     modelId: string;
     displayName: string;
     description: string;
-    contextWindowTokens: number;
+    groupLabel?: string;
     supportsReasoning: boolean;
     // How the provider exposes extended reasoning. 'budget' uses the original
     // `thinking.type: 'enabled'` + `budgetTokens` API; 'adaptive' uses the newer
     // `effort` API (required by Claude Opus 4.7+). Ignored unless supportsReasoning.
     reasoningStyle?: ReasoningStyle;
+    // Excluded from model pickers unless the org's own provider key can access it
+    hiddenUnlessKeyAccess?: boolean;
+    // Kept resolvable for existing configurations, but hidden from new selections
+    deprecated?: boolean;
+    // Name of the same-provider preset that replaces a deprecated one
+    supersededBy?: string;
     callOptions: CallSettings;
     providerOptions: ProviderOptionsMap[P] | undefined;
-};
+} & (
+    | { custom?: false; contextWindowTokens: number }
+    // Instance-configured models may have an unknown context window.
+    | { custom: true; contextWindowTokens: null }
+);
 
 export const MODEL_PRESETS: {
     openai: ModelPreset<'openai'>[];
     anthropic: ModelPreset<'anthropic'>[];
+    google: ModelPreset<'google'>[];
     bedrock: ModelPreset<'bedrock'>[];
 } = {
     openai: [
+        {
+            name: 'gpt-6-sol',
+            provider: 'openai',
+            modelId: 'gpt-6-sol',
+            displayName: 'GPT-6 Sol',
+            description: 'Frontier model for complex professional work',
+            contextWindowTokens: 1050000,
+            supportsReasoning: true,
+            callOptions: {},
+            providerOptions: {
+                // strictJsonSchema: provider default is true
+                parallelToolCalls: false,
+            },
+        },
+        {
+            name: 'gpt-6-luna',
+            provider: 'openai',
+            modelId: 'gpt-6-luna',
+            displayName: 'GPT-6 Luna',
+            description: 'Fast, cost-effective model for lightweight tasks',
+            contextWindowTokens: 1050000,
+            supportsReasoning: true,
+            callOptions: {},
+            providerOptions: {
+                // strictJsonSchema: provider default is true
+                parallelToolCalls: false,
+            },
+        },
+        {
+            name: 'gpt-5.6-sol',
+            provider: 'openai',
+            modelId: 'gpt-5.6-sol',
+            displayName: 'GPT-5.6 Sol',
+            description: 'Frontier model for complex professional work',
+            contextWindowTokens: 1050000,
+            supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-6-sol',
+            callOptions: {},
+            providerOptions: {
+                // strictJsonSchema: provider default is true
+                parallelToolCalls: false,
+            },
+        },
+        {
+            name: 'gpt-5.6-luna',
+            provider: 'openai',
+            modelId: 'gpt-5.6-luna',
+            displayName: 'GPT-5.6 Luna',
+            description: 'Fast, cost-effective model for lightweight tasks',
+            contextWindowTokens: 1050000,
+            supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-6-luna',
+            callOptions: {},
+            providerOptions: {
+                // strictJsonSchema: provider default is true
+                parallelToolCalls: false,
+            },
+        },
+        {
+            name: 'gpt-5.5',
+            provider: 'openai',
+            modelId: 'gpt-5.5-2026-04-23',
+            displayName: 'GPT-5.5',
+            description: 'Newest frontier model for complex professional work',
+            // Cap below the long-context pricing threshold for now:
+            // https://developers.openai.com/api/docs/models/gpt-5.5
+            contextWindowTokens: 265000,
+            supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-5.6-sol',
+            callOptions: {},
+            providerOptions: {
+                // strictJsonSchema: provider default is true
+                parallelToolCalls: false,
+            },
+        },
         {
             name: 'gpt-5.4',
             provider: 'openai',
@@ -37,9 +135,11 @@ export const MODEL_PRESETS: {
             // https://developers.openai.com/api/docs/models/gpt-5.4
             contextWindowTokens: 265000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-5.5',
             callOptions: {},
             providerOptions: {
-                strictJsonSchema: true,
+                // strictJsonSchema: provider default is true
                 parallelToolCalls: false,
             },
         },
@@ -51,9 +151,11 @@ export const MODEL_PRESETS: {
             description: 'Flagship reasoning model for agentic tasks',
             contextWindowTokens: 400000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-5.4',
             callOptions: {},
             providerOptions: {
-                strictJsonSchema: true,
+                // strictJsonSchema: provider default is true
                 parallelToolCalls: false,
             },
         },
@@ -65,9 +167,11 @@ export const MODEL_PRESETS: {
             description: 'Intelligent reasoning model',
             contextWindowTokens: 400000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-5.2',
             callOptions: {},
             providerOptions: {
-                strictJsonSchema: true,
+                // strictJsonSchema: provider default is true
                 parallelToolCalls: false,
             },
         },
@@ -79,15 +183,85 @@ export const MODEL_PRESETS: {
             description: 'Fast and cost-effective model for simple tasks',
             contextWindowTokens: 400000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'gpt-5.6-luna',
             callOptions: {},
             providerOptions: {
-                strictJsonSchema: true,
+                // strictJsonSchema: provider default is true
                 parallelToolCalls: false,
                 reasoningEffort: 'minimal',
             },
         },
     ],
     anthropic: [
+        {
+            name: 'claude-opus-5-5',
+            provider: 'anthropic',
+            modelId: 'claude-opus-5-5',
+            displayName: 'Claude Opus 5.5',
+            description:
+                'Most intelligent Opus model for complex agentic coding and enterprise work',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-sonnet-5-5',
+            provider: 'anthropic',
+            modelId: 'claude-sonnet-5-5',
+            displayName: 'Claude Sonnet 5.5',
+            description: 'Newest Sonnet model balancing speed and intelligence',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-sonnet-5',
+            provider: 'anthropic',
+            modelId: 'claude-sonnet-5',
+            displayName: 'Claude Sonnet 5',
+            description: 'Previous generation Sonnet for daily tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            deprecated: true,
+            supersededBy: 'claude-sonnet-5-5',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-opus-5',
+            provider: 'anthropic',
+            modelId: 'claude-opus-5',
+            displayName: 'Claude Opus 5',
+            description: 'Previous generation Opus for complex tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            deprecated: true,
+            supersededBy: 'claude-opus-5-5',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-opus-4-8',
+            provider: 'anthropic',
+            modelId: 'claude-opus-4-8',
+            displayName: 'Claude Opus 4.8',
+            description: 'Previous generation Opus for complex tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            hiddenUnlessKeyAccess: true,
+            deprecated: true,
+            supersededBy: 'claude-opus-5',
+            callOptions: {},
+            providerOptions: undefined,
+        },
         {
             name: 'claude-opus-4-7',
             provider: 'anthropic',
@@ -97,6 +271,8 @@ export const MODEL_PRESETS: {
             contextWindowTokens: 200000,
             supportsReasoning: true,
             reasoningStyle: 'adaptive',
+            deprecated: true,
+            supersededBy: 'claude-opus-4-8',
             callOptions: {},
             providerOptions: undefined,
         },
@@ -108,6 +284,8 @@ export const MODEL_PRESETS: {
             description: 'Previous generation Opus for complex tasks',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-opus-4-7',
             callOptions: { temperature: 0.2 },
             providerOptions: undefined,
         },
@@ -119,6 +297,8 @@ export const MODEL_PRESETS: {
             description: 'Balanced model for daily tasks',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-sonnet-5',
             callOptions: { temperature: 0.2 },
             providerOptions: undefined,
         },
@@ -130,6 +310,8 @@ export const MODEL_PRESETS: {
             description: 'Previous generation Opus for complex tasks',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-opus-4-6',
             callOptions: { temperature: 0.2 },
             providerOptions: undefined,
         },
@@ -141,7 +323,21 @@ export const MODEL_PRESETS: {
             description: 'Previous generation Sonnet for daily tasks',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-sonnet-4-6',
             callOptions: { temperature: 0.2 },
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-haiku-5-5',
+            provider: 'anthropic',
+            modelId: 'claude-haiku-5-5',
+            displayName: 'Claude Haiku 5.5',
+            description: 'Newest fast model for lightweight tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
             providerOptions: undefined,
         },
         {
@@ -163,11 +359,105 @@ export const MODEL_PRESETS: {
             description: 'Previous generation model with reasoning',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-sonnet-4-5',
             callOptions: { temperature: 0.2 },
             providerOptions: undefined,
         },
     ],
+    google: [
+        {
+            name: 'gemini-3.8-flash',
+            provider: 'google',
+            modelId: 'gemini-3.8-flash',
+            displayName: 'Gemini 3.8 Flash',
+            description: 'Latest Gemini model for fast agentic tasks',
+            // Deliberately compact below the model's 1,048,576-token maximum
+            // to bound per-turn cost while retaining a large working context.
+            contextWindowTokens: 400_000,
+            supportsReasoning: true,
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'gemini-3.5-flash-lite',
+            provider: 'google',
+            modelId: 'gemini-3.5-flash-lite',
+            displayName: 'Gemini 3.5 Flash-Lite',
+            description: 'Fast, cost-effective model for lightweight tasks',
+            // Keep lightweight/background tasks under the same cost ceiling.
+            contextWindowTokens: 400_000,
+            supportsReasoning: true,
+            callOptions: {},
+            providerOptions: undefined,
+        },
+    ],
     bedrock: [
+        {
+            name: 'claude-opus-4-7',
+            provider: 'bedrock',
+            modelId: 'anthropic.claude-opus-4-7',
+            displayName: 'Claude Opus 4.7',
+            description: 'Most intelligent model for complex tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-opus-5-5',
+            provider: 'bedrock',
+            modelId: 'anthropic.claude-opus-5-5',
+            displayName: 'Claude Opus 5.5',
+            description:
+                'Most intelligent Opus model for complex agentic coding and enterprise work',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-sonnet-5-5',
+            provider: 'bedrock',
+            modelId: 'anthropic.claude-sonnet-5-5',
+            displayName: 'Claude Sonnet 5.5',
+            description: 'Newest Sonnet model balancing speed and intelligence',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-sonnet-5',
+            provider: 'bedrock',
+            modelId: 'anthropic.claude-sonnet-5',
+            displayName: 'Claude Sonnet 5',
+            description: 'Previous generation Sonnet for daily tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            deprecated: true,
+            supersededBy: 'claude-sonnet-5-5',
+            callOptions: {},
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-opus-5',
+            provider: 'bedrock',
+            modelId: 'anthropic.claude-opus-5',
+            displayName: 'Claude Opus 5',
+            description: 'Previous generation Opus for complex tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            deprecated: true,
+            supersededBy: 'claude-opus-5-5',
+            callOptions: {},
+            providerOptions: undefined,
+        },
         {
             name: 'claude-opus-4-5',
             provider: 'bedrock',
@@ -187,7 +477,21 @@ export const MODEL_PRESETS: {
             description: 'Balanced model for daily tasks',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-sonnet-5',
             callOptions: { temperature: 0.2 },
+            providerOptions: undefined,
+        },
+        {
+            name: 'claude-haiku-5-5',
+            provider: 'bedrock',
+            modelId: 'anthropic.claude-haiku-5-5',
+            displayName: 'Claude Haiku 5.5',
+            description: 'Newest fast model for lightweight tasks',
+            contextWindowTokens: 200000,
+            supportsReasoning: true,
+            reasoningStyle: 'adaptive',
+            callOptions: {},
             providerOptions: undefined,
         },
         {
@@ -209,17 +513,223 @@ export const MODEL_PRESETS: {
             description: 'Previous generation model with reasoning',
             contextWindowTokens: 200000,
             supportsReasoning: true,
+            deprecated: true,
+            supersededBy: 'claude-sonnet-4-5',
             callOptions: { temperature: 0.2 },
             providerOptions: undefined,
         },
     ],
 };
 
+// Pass-through preset for model names served by an OpenAI-compatible gateway
+// (e.g. LiteLLM's "bedrock/eu.anthropic.claude-sonnet-4-6") that don't exist
+// in the preset table. The name is sent to the endpoint verbatim.
+export function customGatewayPreset(modelName: string): ModelPreset<'openai'> {
+    return {
+        name: modelName,
+        provider: 'openai',
+        modelId: modelName,
+        displayName: modelName,
+        description: 'Custom model served by the configured OpenAI endpoint',
+        custom: true,
+        contextWindowTokens: null,
+        supportsReasoning: false,
+        callOptions: {},
+        providerOptions: undefined,
+    };
+}
+
+const OPENROUTER_MODEL_METADATA: Record<
+    string,
+    {
+        displayName: string;
+        description: string;
+        groupLabel: string;
+        contextWindowTokens: number;
+        supportsReasoning: boolean;
+    }
+> = {
+    'qwen/qwen3.5-9b': {
+        displayName: 'Qwen3.5 9B',
+        description:
+            'Compact multimodal model for affordable reasoning, coding, and visual analysis',
+        groupLabel: 'Qwen',
+        contextWindowTokens: 262_144,
+        supportsReasoning: false,
+    },
+    'moonshotai/kimi-k3': {
+        displayName: 'Kimi K3',
+        description:
+            'Open-weight multimodal model for complex coding and long-running agents',
+        groupLabel: 'Moonshot AI',
+        contextWindowTokens: 1_048_576,
+        supportsReasoning: false,
+    },
+    'minimax/minimax-m3': {
+        displayName: 'MiniMax M3',
+        description:
+            'Multimodal 1M-context model for coding and long-horizon agent work',
+        groupLabel: 'MiniMax',
+        contextWindowTokens: 1_048_576,
+        supportsReasoning: false,
+    },
+    'deepseek/deepseek-v4-flash-0731': {
+        displayName: 'DeepSeek V4 Flash',
+        description:
+            'Fast mixture-of-experts reasoning for coding and tool-driven workflows',
+        groupLabel: 'DeepSeek',
+        contextWindowTokens: 1_310_720,
+        supportsReasoning: false,
+    },
+    'z-ai/glm-5.3-flash': {
+        displayName: 'GLM 5.3 Flash',
+        description:
+            'Efficient multimodal model for coding and long-context agent tasks',
+        groupLabel: 'Z.ai',
+        contextWindowTokens: 1_310_720,
+        supportsReasoning: false,
+    },
+    'z-ai/glm-5.3': {
+        displayName: 'GLM 5.3',
+        description:
+            'Large reasoning model for complex engineering and long-horizon agent tasks',
+        groupLabel: 'Z.ai',
+        contextWindowTokens: 1_310_720,
+        supportsReasoning: false,
+    },
+    'qwen/qwen3.8-flash': {
+        displayName: 'Qwen3.8 Flash',
+        description:
+            'Fast multimodal reasoning model for agentic workflows and chart analysis',
+        groupLabel: 'Qwen',
+        contextWindowTokens: 1_000_000,
+        supportsReasoning: false,
+    },
+    'openai/gpt-oss-120b': {
+        displayName: 'GPT-OSS 120B',
+        description:
+            'Open-weight MoE reasoning model; served by fast-inference upstreams',
+        groupLabel: 'OpenAI (open weights)',
+        contextWindowTokens: 131_072,
+        supportsReasoning: false,
+    },
+};
+
+export function openRouterPreset(modelName: string): ModelPreset<'openrouter'> {
+    const metadata = OPENROUTER_MODEL_METADATA[modelName];
+
+    if (metadata) {
+        return {
+            name: modelName,
+            provider: 'openrouter',
+            modelId: modelName,
+            ...metadata,
+            custom: false,
+            callOptions: {},
+            providerOptions: undefined,
+        };
+    }
+
+    return {
+        name: modelName,
+        provider: 'openrouter',
+        modelId: modelName,
+        displayName: modelName,
+        description: 'Model served through OpenRouter',
+        custom: true,
+        contextWindowTokens: null,
+        supportsReasoning: false,
+        callOptions: {},
+        providerOptions: undefined,
+    };
+}
+
+// Use a 400k context budget for known Vertex models rather than their full window.
+const VERTEX_MODEL_METADATA: Record<
+    string,
+    | {
+          displayName: string;
+          description: string;
+          contextWindowTokens: number;
+      }
+    | undefined
+> = {
+    'gemini-3.8-flash': {
+        displayName: 'Gemini 3.8 Flash (Vertex AI)',
+        description: 'General-purpose model for agentic tasks',
+        contextWindowTokens: 400_000,
+    },
+    'gemini-3.5-flash-lite': {
+        displayName: 'Gemini 3.5 Flash-Lite (Vertex AI)',
+        description: 'Lightweight model for fast, low-cost tasks',
+        contextWindowTokens: 400_000,
+    },
+    'gemini-3.1-pro-preview': {
+        displayName: 'Gemini 3.1 Pro Preview (Vertex AI)',
+        description: 'Preview model for complex reasoning tasks',
+        contextWindowTokens: 400_000,
+    },
+    'gemini-3.6-flash': {
+        displayName: 'Gemini 3.6 Flash (Vertex AI)',
+        description: 'Fast model for agentic tasks',
+        contextWindowTokens: 400_000,
+    },
+};
+
+export function vertexPreset(modelName: string): ModelPreset<'vertex'> {
+    const metadata = VERTEX_MODEL_METADATA[modelName];
+
+    if (metadata) {
+        return {
+            name: modelName,
+            provider: 'vertex',
+            modelId: modelName,
+            ...metadata,
+            groupLabel: 'Google Vertex AI',
+            custom: false,
+            // Metadata does not enable a thinking toggle; use provider defaults.
+            supportsReasoning: false,
+            callOptions: {},
+            providerOptions: undefined,
+        };
+    }
+
+    return {
+        name: modelName,
+        provider: 'vertex',
+        modelId: modelName,
+        displayName: `${modelName} (Vertex AI)`,
+        description: 'Model served through Google Vertex AI',
+        groupLabel: 'Google Vertex AI',
+        custom: true,
+        contextWindowTokens: null,
+        // No thinking toggle: arbitrary Vertex models use provider defaults.
+        supportsReasoning: false,
+        callOptions: {},
+        providerOptions: undefined,
+    };
+}
+
 export function matchesPreset(
-    preset: ModelPreset<ModelPresetProvider>,
+    preset: ModelPreset<SelectableModelProvider>,
     name: string,
 ): boolean {
     return preset.name === name || preset.modelId === name;
+}
+
+// Whether a provider's /v1/models listing grants access to a base model id.
+// Matches the exact id or a dated variant of it — e.g. "claude-opus-4-8" is
+// granted by "claude-opus-4-8" or "claude-opus-4-8-20260115", but not by
+// "claude-opus-4-80". Gateways list models as "vendor/model", so a path
+// prefix is ignored.
+export function keyGrantsModel(
+    accessibleModelIds: readonly string[],
+    baseModelId: string,
+): boolean {
+    return accessibleModelIds.some((listedId) => {
+        const id = listedId.slice(listedId.lastIndexOf('/') + 1);
+        return id === baseModelId || id.startsWith(`${baseModelId}-`);
+    });
 }
 
 export function getModelPreset<T extends ModelPresetProvider>(

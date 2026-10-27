@@ -1,13 +1,35 @@
-import type { AiMcpServer } from '@lightdash/common';
-import { Button, Group, Paper, Skeleton, Stack, Text } from '@mantine-8/core';
-import { IconInfoCircle } from '@tabler/icons-react';
-import { useCallback, useId, useMemo, type FC } from 'react';
+import {
+    GITHUB_MCP_SERVER_NAME,
+    type AiMcpCredentialScope,
+    type AiMcpServer,
+} from '@lightdash/common';
+import { Box, Button, Group, Paper, Stack, Text } from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
+import {
+    IconBrandGithub,
+    IconCircleCheck,
+    IconInfoCircle,
+    IconSparkles,
+} from '@tabler/icons-react';
+import { useCallback, useId, useMemo, useState, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import { useProjectUpdateAiAgentMutation } from '../hooks/useProjectAiAgents';
 import {
     useAgentAiMcpServers,
+    useConnectGithubMcpServerAppMutation,
+    useConnectGithubMcpServerMutation,
+    useGithubMcpAvailability,
     useStartMcpOAuthConnectionMutation,
 } from '../hooks/useProjectAiMcpServers';
+import styles from './AiAgentNewThreadMcpConnections.module.css';
 import { AiMcpServerIcon } from './AiMcpServerIcon';
+import { GithubMcpConnectModal } from './GithubMcpConnectModal';
+import {
+    GITHUB_MCP_CONNECTED_HEADLINE,
+    GITHUB_MCP_CONNECTED_SUMMARY,
+    GITHUB_MCP_SUGGESTED_PROMPT,
+    GITHUB_MCP_VALUE_SUMMARY,
+} from './githubMcpValueContent';
 
 const needsPersonalOauthConnection = (
     mcpServer: Pick<
@@ -72,22 +94,14 @@ const formatAppNames = (names: string[]) => {
     return `${names.slice(0, -1).join(', ')}, and ${names.at(-1)}`;
 };
 
-const getConnectionTitle = (appNames: string[]) => {
-    if (appNames.length === 1) {
-        return `${appNames[0]} is available`;
-    }
-
-    return 'Connect your apps';
-};
-
 const getConnectionSummary = (appNames: string[]) => {
     if (appNames.length === 1) {
-        return `This agent can use ${appNames[0]} if you sign in.`;
+        return `This agent can use ${appNames[0]} if you connect it.`;
     }
 
     return `This agent can use ${formatAppNames(
         appNames,
-    )}. Sign in to the apps you want to use in this thread.`;
+    )}. Connect the apps you want to use in this thread.`;
 };
 
 const getConnectionIconColor = (
@@ -114,13 +128,16 @@ const getConnectionIconColor = (
 type Props = {
     projectUuid: string;
     agentUuid: string;
+    onSuggestedPrompt?: (prompt: string) => void;
 };
 
 export const AiAgentNewThreadMcpConnections: FC<Props> = ({
     projectUuid,
     agentUuid,
+    onSuggestedPrompt,
 }) => {
     const sectionTitleId = useId();
+    const [justConnectedGithub, setJustConnectedGithub] = useState(false);
     const {
         data: mcpServers,
         isLoading,
@@ -133,6 +150,22 @@ export const AiAgentNewThreadMcpConnections: FC<Props> = ({
         isLoading: isStartingMcpOAuthConnection,
         variables: startingMcpOAuthConnection,
     } = useStartMcpOAuthConnectionMutation(projectUuid);
+    const { data: githubMcpAvailability } = useGithubMcpAvailability(
+        projectUuid,
+        { enabled: !!projectUuid },
+    );
+    const { mutateAsync: connectGithubMcp, isLoading: isConnectingGithubMcp } =
+        useConnectGithubMcpServerMutation(projectUuid);
+    const {
+        mutateAsync: connectGithubMcpApp,
+        isLoading: isConnectingGithubMcpApp,
+    } = useConnectGithubMcpServerAppMutation(projectUuid);
+    const { mutateAsync: updateAgentMcpServers, isLoading: isAttachingGithub } =
+        useProjectUpdateAiAgentMutation(projectUuid, {
+            showSuccessToast: false,
+        });
+    const [isGithubConfirmModalOpen, githubConfirmModalHandlers] =
+        useDisclosure(false);
 
     const mcpServersNeedingConnection = useMemo(
         () =>
@@ -141,17 +174,22 @@ export const AiAgentNewThreadMcpConnections: FC<Props> = ({
             ),
         [mcpServers],
     );
-    const appNames = useMemo(
-        () =>
-            Array.from(
-                new Set(
-                    mcpServersNeedingConnection.map(
-                        (mcpServer) => mcpServer.name,
-                    ),
-                ),
+    const githubConnectModes = githubMcpAvailability?.availableModes ?? [];
+    const canGithubAppConnect = githubConnectModes.includes('github_app');
+    const canOneClickConnectGithub =
+        githubConnectModes.length > 0 &&
+        githubMcpAvailability?.alreadyConnected === false;
+
+    const appNames = useMemo(() => {
+        const oauthAppNames = Array.from(
+            new Set(
+                mcpServersNeedingConnection.map((mcpServer) => mcpServer.name),
             ),
-        [mcpServersNeedingConnection],
-    );
+        );
+        return canOneClickConnectGithub
+            ? [...oauthAppNames, GITHUB_MCP_SERVER_NAME]
+            : oauthAppNames;
+    }, [mcpServersNeedingConnection, canOneClickConnectGithub]);
 
     const connectionNote = useMemo(() => {
         for (const mcpServer of mcpServersNeedingConnection) {
@@ -177,132 +215,186 @@ export const AiAgentNewThreadMcpConnections: FC<Props> = ({
         [refetchAgentMcpServers, startMcpOAuthConnection],
     );
 
-    if (isLoading) {
+    const attachGithubMcpServer = useCallback(
+        async (server: Pick<AiMcpServer, 'uuid'>) => {
+            const attachedUuids = (mcpServers ?? []).map(
+                (mcpServer) => mcpServer.uuid,
+            );
+            if (!attachedUuids.includes(server.uuid)) {
+                await updateAgentMcpServers({
+                    uuid: agentUuid,
+                    mcpServerUuids: [...attachedUuids, server.uuid],
+                });
+            }
+            githubConfirmModalHandlers.close();
+            setJustConnectedGithub(true);
+        },
+        [
+            agentUuid,
+            githubConfirmModalHandlers,
+            mcpServers,
+            updateAgentMcpServers,
+        ],
+    );
+
+    const handleConnectGithubMcp = useCallback(
+        async (
+            personalAccessToken: string,
+            credentialScope: AiMcpCredentialScope,
+        ) => {
+            try {
+                const server = await connectGithubMcp({
+                    personalAccessToken,
+                    credentialScope,
+                });
+                if (!server) {
+                    return;
+                }
+                await attachGithubMcpServer(server);
+            } catch {
+            } finally {
+                await refetchAgentMcpServers();
+            }
+        },
+        [attachGithubMcpServer, connectGithubMcp, refetchAgentMcpServers],
+    );
+
+    const handleConnectGithubMcpApp = useCallback(async () => {
+        try {
+            const server = await connectGithubMcpApp();
+            if (!server) {
+                return;
+            }
+            await attachGithubMcpServer(server);
+        } catch {
+            // Errors surface via the mutation's onError toast.
+        } finally {
+            await refetchAgentMcpServers();
+        }
+    }, [attachGithubMcpServer, connectGithubMcpApp, refetchAgentMcpServers]);
+
+    if (isLoading) return null;
+
+    if (justConnectedGithub) {
         return (
             <Paper
-                withBorder
                 radius="md"
                 p="md"
                 component="section"
-                aria-label="Loading tools to connect"
-                aria-busy="true"
+                aria-label={GITHUB_MCP_CONNECTED_HEADLINE}
             >
-                <Stack gap="md">
-                    <Stack gap={4}>
-                        <Skeleton h={16} w={190} radius="xl" />
-                        <Skeleton h={12} w="75%" radius="xl" />
+                <Group align="flex-start" gap="sm" wrap="nowrap">
+                    <Paper p="xxs" radius="sm">
+                        <MantineIcon
+                            icon={IconCircleCheck}
+                            size="sm"
+                            color="var(--mantine-color-green-6)"
+                        />
+                    </Paper>
+                    <Stack gap="xs" flex={1} miw={0}>
+                        <Stack gap={2}>
+                            <Text size="sm" fw={600}>
+                                {GITHUB_MCP_CONNECTED_HEADLINE}
+                            </Text>
+                            <Text size="sm" c="dimmed">
+                                {GITHUB_MCP_CONNECTED_SUMMARY}
+                            </Text>
+                        </Stack>
+                        {onSuggestedPrompt && (
+                            <Group gap="xs">
+                                <Button
+                                    size="xs"
+                                    variant="default"
+                                    leftSection={
+                                        <MantineIcon icon={IconSparkles} />
+                                    }
+                                    onClick={() => {
+                                        onSuggestedPrompt(
+                                            GITHUB_MCP_SUGGESTED_PROMPT,
+                                        );
+                                        setJustConnectedGithub(false);
+                                    }}
+                                >
+                                    {GITHUB_MCP_SUGGESTED_PROMPT}
+                                </Button>
+                                <Button
+                                    size="xs"
+                                    variant="subtle"
+                                    color="gray"
+                                    onClick={() =>
+                                        setJustConnectedGithub(false)
+                                    }
+                                >
+                                    Dismiss
+                                </Button>
+                            </Group>
+                        )}
                     </Stack>
-                    <Group gap="xs">
-                        {[0, 1].map((item) => (
-                            <Skeleton
-                                key={item}
-                                h={30}
-                                w={150}
-                                radius="md"
-                                visible
-                            />
-                        ))}
-                    </Group>
-                </Stack>
+                </Group>
             </Paper>
         );
     }
 
-    if (mcpServersNeedingConnection.length === 0) {
+    if (mcpServersNeedingConnection.length === 0 && !canOneClickConnectGithub) {
         return null;
     }
+
+    const isGithubOnly =
+        canOneClickConnectGithub && mcpServersNeedingConnection.length === 0;
+    const sectionSummary = isGithubOnly
+        ? GITHUB_MCP_VALUE_SUMMARY
+        : getConnectionSummary(appNames);
+
+    const githubConnectButton = canOneClickConnectGithub ? (
+        <Button
+            key="github-connect"
+            size="compact-xs"
+            variant="subtle"
+            color="gray"
+            leftSection={<MantineIcon icon={IconBrandGithub} />}
+            loading={
+                isConnectingGithubMcp ||
+                isConnectingGithubMcpApp ||
+                isAttachingGithub
+            }
+            onClick={
+                canGithubAppConnect
+                    ? () => void handleConnectGithubMcpApp()
+                    : githubConfirmModalHandlers.open
+            }
+        >
+            GitHub
+        </Button>
+    ) : null;
 
     const isSingleApp = appNames.length === 1;
 
     return (
-        <Paper
-            withBorder
-            radius="md"
-            p="md"
+        <Box
+            className={styles.connectionStrip}
             component="section"
             aria-labelledby={sectionTitleId}
             aria-busy={isStartingMcpOAuthConnection}
         >
-            {isSingleApp ? (
-                <Group
-                    justify="space-between"
-                    align="center"
-                    gap="md"
-                    wrap="wrap"
-                >
-                    <Group
-                        align="flex-start"
-                        gap="sm"
-                        style={{ flex: 1, minWidth: 0 }}
-                    >
-                        <Paper p="xxs" withBorder radius="sm">
-                            <MantineIcon icon={IconInfoCircle} size="sm" />
-                        </Paper>
-                        <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
-                            <Text id={sectionTitleId} size="sm" fw={600}>
-                                {getConnectionTitle(appNames)}
-                            </Text>
-                            <Text size="sm" c="dimmed">
-                                {getConnectionSummary(appNames)}
-                            </Text>
-                            {connectionNote && (
-                                <Text size="xs" c="dimmed">
-                                    {connectionNote}
-                                </Text>
-                            )}
-                        </Stack>
-                    </Group>
-                    {mcpServersNeedingConnection.map((mcpServer) => {
-                        const isConnecting =
-                            isStartingMcpOAuthConnection &&
-                            startingMcpOAuthConnection?.mcpServerUuid ===
-                                mcpServer.uuid;
-                        const iconColor = getConnectionIconColor(mcpServer);
-
-                        return (
-                            <Button
-                                key={mcpServer.uuid}
-                                size="xs"
-                                variant="default"
-                                leftSection={
-                                    <AiMcpServerIcon
-                                        color={iconColor}
-                                        name={mcpServer.name}
-                                        size={16}
-                                        src={mcpServer.iconUrl}
-                                    />
-                                }
-                                loading={isConnecting}
-                                onClick={() =>
-                                    void handleStartConnection(mcpServer.uuid)
-                                }
-                            >
-                                {getConnectionActionLabel(mcpServer)}
-                            </Button>
-                        );
-                    })}
-                </Group>
-            ) : (
-                <Stack gap="sm">
-                    <Stack gap={4}>
-                        <Group align="center" gap="xs">
-                            <Paper p="xxs" withBorder radius="sm">
-                                <MantineIcon icon={IconInfoCircle} size="sm" />
-                            </Paper>
-                            <Text id={sectionTitleId} size="sm" fw={600}>
-                                {getConnectionTitle(appNames)}
-                            </Text>
-                        </Group>
-                        <Text size="sm" c="dimmed">
-                            {getConnectionSummary(appNames)}
+            <Group align="flex-start" gap="sm" wrap="nowrap">
+                <MantineIcon
+                    icon={IconInfoCircle}
+                    size={14}
+                    color="ldGray.5"
+                    className={styles.connectionIcon}
+                />
+                <Stack gap="xs" flex={1} miw={0}>
+                    <Stack gap={2}>
+                        <Text id={sectionTitleId} size="xs" c="dimmed">
+                            {sectionSummary}
                         </Text>
                         {connectionNote && (
-                            <Text size="xs" c="dimmed">
+                            <Text size="xs" c="ldGray.5">
                                 {connectionNote}
                             </Text>
                         )}
                     </Stack>
-                    <Group gap="xs">
+                    <Group gap="xs" wrap="wrap">
                         {mcpServersNeedingConnection.map((mcpServer) => {
                             const isConnecting =
                                 isStartingMcpOAuthConnection &&
@@ -313,8 +405,9 @@ export const AiAgentNewThreadMcpConnections: FC<Props> = ({
                             return (
                                 <Button
                                     key={mcpServer.uuid}
-                                    size="xs"
-                                    variant="default"
+                                    size="compact-xs"
+                                    variant="subtle"
+                                    color="gray"
                                     leftSection={
                                         <AiMcpServerIcon
                                             color={iconColor}
@@ -330,15 +423,24 @@ export const AiAgentNewThreadMcpConnections: FC<Props> = ({
                                         )
                                     }
                                 >
-                                    {getMultiAppConnectionActionLabel(
-                                        mcpServer,
-                                    )}
+                                    {isSingleApp
+                                        ? getConnectionActionLabel(mcpServer)
+                                        : getMultiAppConnectionActionLabel(
+                                              mcpServer,
+                                          )}
                                 </Button>
                             );
                         })}
+                        {githubConnectButton}
                     </Group>
                 </Stack>
-            )}
-        </Paper>
+            </Group>
+            <GithubMcpConnectModal
+                opened={isGithubConfirmModalOpen}
+                onClose={githubConfirmModalHandlers.close}
+                isLoading={isConnectingGithubMcp || isAttachingGithub}
+                onConnect={handleConnectGithubMcp}
+            />
+        </Box>
     );
 };

@@ -1,25 +1,32 @@
 import { z } from 'zod';
-import { baseOutputMetadataSchema } from '../outputMetadata';
+import { type ToolDescriptionContext } from '../defineTool';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
+import { makeBuiltInToolResultGuard } from './builtInToolResultGuard';
 
-export const TOOL_FIND_EXPLORES_DESCRIPTION = `Tool: findExplores
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const TOOL_FIND_EXPLORES_DESCRIPTION = ({
+    toolName,
+}: ToolDescriptionContext): string => `Tool: ${toolName}
 
 Purpose:
-Returns an explore with all its fields, joined tables, AI hints and descriptions. When multiple explores match your search, also returns alternative explores and top 50 matching fields across ALL explores.
+Returns explores matching the query with their joined tables, required filters, AI hints and descriptions, plus the top 50 matching fields across ALL explores. Search matches explore and field name, label, and description. A follow-up query runs against a single explore, so this tool is meant to identify the explore whose fields can answer the user's question.
 IMPORTANT: Each explore may include fields from multiple joined tables. Check the "joinedTables" elements to see which tables are included in the explore.
 
 Parameters:
-- searchQuery: Full user query for finding relevant explores
+- searchQuery: Keyword terms for finding relevant explores
 
 Output:
-- Selected explore with all fields and metadata (including fields from joined tables)
-- Alternative explores (if multiple matches) with searchRank scores
+- Matching explores with searchRank scores
 - Top matching fields with their explore names and searchRank scores
+- Required filters set on matching explores, including default values
 `;
 
-export const toolFindExploresArgsSchemaV1 = createToolSchema({
-    description: TOOL_FIND_EXPLORES_DESCRIPTION,
-})
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const toolFindExploresArgsSchemaV1 = createToolSchema()
     .extend({
         exploreName: z
             .string()
@@ -29,9 +36,8 @@ export const toolFindExploresArgsSchemaV1 = createToolSchema({
     .withPagination()
     .build();
 
-export const toolFindExploresArgsSchemaV2 = createToolSchema({
-    description: TOOL_FIND_EXPLORES_DESCRIPTION,
-})
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const toolFindExploresArgsSchemaV2 = createToolSchema()
     .extend({
         exploreName: z
             .string()
@@ -39,22 +45,23 @@ export const toolFindExploresArgsSchemaV2 = createToolSchema({
     })
     .build();
 
-export const toolFindExploresArgsSchemaV3 = createToolSchema({
-    description: TOOL_FIND_EXPLORES_DESCRIPTION,
-})
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const toolFindExploresArgsSchemaV3 = createToolSchema()
     .extend({
         // TODO: check if we need to add exploreName back in for backward compatibility
         searchQuery: z
             .string()
             .describe(
-                'The full user query or search terms to help find the most relevant explore. Use the complete user request for better search results.',
+                "set of high-signal keyword terms for query. Search uses PostgreSQL websearch_to_tsquery after joining whitespace-separated terms with OR. It searches explore and field name, label, and description. Prefer metric/entity/dimension nouns that capture the user's analytical intent.",
             ),
     })
     .build();
 
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export const toolFindExploresArgsSchemaTransformed =
     toolFindExploresArgsSchemaV3;
 
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export const findExploresRankingMetadataSchema = z.object({
     searchQuery: z.string(),
     exploreSearchResults: z
@@ -64,6 +71,19 @@ export const findExploresRankingMetadataSchema = z.object({
                 label: z.string(),
                 searchRank: z.number().nullable().optional(),
                 joinedTables: z.array(z.string()).nullable().optional(),
+                requiredFilters: z
+                    .array(
+                        z.object({
+                            fieldId: z.string(),
+                            fieldRef: z.string(),
+                            tableName: z.string(),
+                            operator: z.string(),
+                            values: z.array(z.unknown()).optional(),
+                            settings: z.unknown().optional(),
+                            required: z.boolean(),
+                        }),
+                    )
+                    .optional(),
             }),
         )
         .optional(),
@@ -82,24 +102,115 @@ export const findExploresRankingMetadataSchema = z.object({
         .optional(),
 });
 
-export const toolFindExploresOutputSchema = z.object({
-    result: z.string(),
-    metadata: baseOutputMetadataSchema.extend({
-        ranking: findExploresRankingMetadataSchema.optional(),
-    }),
+export const findExploresRequiredFilterSchema = z.object({
+    fieldId: z.string(),
+    fieldRef: z.string(),
+    tableName: z.string(),
+    operator: z.string(),
+    values: z.array(z.unknown()).optional(),
+    settings: z.unknown().optional(),
+    required: z.boolean(),
 });
 
+export const findExploresRelevantVerifiedAnswerSchema = z.object({
+    artifactVersionUuid: z.string(),
+    chartConfig: z.record(z.string(), z.unknown()),
+    artifactType: z.enum(['chart', 'dashboard']),
+    verifiedQuestion: z.string().nullable(),
+    title: z.string().nullable(),
+    description: z.string().nullable(),
+    similarity: z.number(),
+});
+
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const toolFindExploresStructuredContentSchema = z.object({
+    searchQuery: z.string(),
+    description: z.string(),
+    searchResults: z.object({
+        count: z.number(),
+        note: z.string(),
+        results: z.array(
+            z.object({
+                name: z.string(),
+                label: z.string(),
+                searchRank: z.number().nullable(),
+                description: z.string().nullable(),
+                aiHints: z.array(z.string()),
+                joinedTables: z.object({
+                    count: z.number(),
+                    note: z.string().nullable(),
+                    tables: z.array(z.string()),
+                }),
+                requiredFilters: z.array(findExploresRequiredFilterSchema),
+            }),
+        ),
+    }),
+    topMatchingFields: z.object({
+        count: z.number(),
+        note: z.string(),
+        fields: z.array(
+            z.object({
+                name: z.string(),
+                label: z.string(),
+                exploreName: z.string(),
+                fieldType: z.string(),
+                searchRank: z.number().nullable(),
+                usageInCharts: z.number(),
+                usageInVerifiedCharts: z.number(),
+            }),
+        ),
+    }),
+    relevantVerifiedAnswers: z
+        .array(findExploresRelevantVerifiedAnswerSchema)
+        .optional(),
+});
+
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const toolFindExploresMetadataSchema = baseOutputMetadataSchema.extend({
+    ranking: findExploresRankingMetadataSchema.optional(),
+});
+
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const findExploresResultSchema = toolFindExploresStructuredContentSchema;
+
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const toolFindExploresOutputSchema = structuredToolOutputSchema({
+    metadata: toolFindExploresMetadataSchema,
+    structuredContent: toolFindExploresStructuredContentSchema,
+});
+
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export const isToolFindExploresResult = makeBuiltInToolResultGuard(
+    'findExplores',
+    toolFindExploresMetadataSchema,
+);
+
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export type ToolFindExploresArgsV1 = z.infer<
     typeof toolFindExploresArgsSchemaV1
 >;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export type ToolFindExploresArgsV2 = z.infer<
     typeof toolFindExploresArgsSchemaV2
 >;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export type ToolFindExploresArgsV3 = z.infer<
     typeof toolFindExploresArgsSchemaV3
 >;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export type ToolFindExploresArgs = z.infer<typeof toolFindExploresArgsSchemaV3>;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export type ToolFindExploresArgsTransformed = ToolFindExploresArgs;
+export type FindExploresRequiredFilter = z.infer<
+    typeof findExploresRequiredFilterSchema
+>;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export type ToolFindExploresStructuredContent = z.infer<
+    typeof toolFindExploresStructuredContentSchema
+>;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
+export type FindExploresResult = ToolFindExploresStructuredContent;
+/** @deprecated Legacy `findExplores` tool contract, kept for historical tool calls. */
 export type ToolFindExploresOutput = z.infer<
     typeof toolFindExploresOutputSchema
 >;

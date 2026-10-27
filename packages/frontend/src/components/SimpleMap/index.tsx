@@ -21,17 +21,16 @@ import {
     type FC,
     type RefObject,
 } from 'react';
-import { renderToString } from 'react-dom/server';
 import {
     CircleMarker,
     GeoJSON,
     MapContainer,
-    TileLayer,
     Tooltip,
     useMap,
 } from 'react-leaflet';
 import * as topojson from 'topojson-client';
 import type { Topology } from 'topojson-specification';
+import useEmbed from '../../ee/providers/Embed/useEmbed';
 import {
     explorerActions,
     useExplorerDispatch,
@@ -40,18 +39,30 @@ import useLeafletMapConfig, {
     type ScatterPoint,
     type TooltipFieldInfo,
 } from '../../hooks/leaflet/useLeafletMapConfig';
+import { useMapTileTelemetry } from '../../hooks/leaflet/useMapTileTelemetry';
 import { useTileFallback } from '../../hooks/leaflet/useTileFallback';
 import { useContextMenuPermissions } from '../../hooks/useContextMenuPermissions';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
+import { useAccount } from '../../hooks/user/useAccount';
+import { type MapUsageContext } from '../../providers/Tracking/types';
+import useTracking from '../../providers/Tracking/useTracking';
+import { EventName } from '../../types/Events';
 import { createMultiColorScale } from '../../utils/colorUtils';
+import { resolveRequestUrl } from '../../utils/request';
 import Callout from '../common/Callout';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
 import { isMapVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationConfig,
+    useVisualizationInputs,
+    useVisualizationServices,
+} from '../LightdashVisualization/useVisualizationContext';
 import HeatmapLayer from './HeatmapLayer';
 import { MAX_HEXBIN_POINTS } from './hexbin/hexbinUtils';
 import MapContextMenu from './MapContextMenu';
 import MapLegend from './MapLegend';
+import MapTileLayer from './MapTileLayer';
 
 const HexbinLayer = lazy(() => import('./hexbin/HexbinLayer'));
 
@@ -140,8 +151,7 @@ type MapContentBaseProps = {
 
 type MapTooltipContentProps = MapContentBaseProps;
 
-// NOTE: Using inline styles because this is rendered via renderToString
-// and Mantine styles won't be applied
+// Inline styles: rendered into a Leaflet tooltip where Mantine styles don't apply
 const MapTooltipContent: FC<MapTooltipContentProps> = ({
     tooltipFields,
     rowData,
@@ -194,6 +204,50 @@ const MapTooltipContent: FC<MapTooltipContentProps> = ({
             )}
         </div>
     );
+};
+
+const escapeHtml = (value: string): string =>
+    value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+// HTML-string twin of MapTooltipContent, for Leaflet's imperative bindTooltip
+const getMapTooltipHtml = ({
+    tooltipFields,
+    rowData,
+    lat,
+    lon,
+    noData,
+}: MapContentBaseProps): string => {
+    if (noData) {
+        return `<div style="padding:4px 6px"><div style="font-size:14px"><strong>${escapeHtml(
+            noData.locationLabel,
+        )}:</strong> ${escapeHtml(
+            noData.locationValue,
+        )}</div><div style="font-size:14px;color:#868e96;font-style:italic">No data</div></div>`;
+    }
+
+    const rows = tooltipFields
+        .filter((f) => f.visible)
+        .map(
+            (field) =>
+                `<div style="font-size:14px"><strong>${escapeHtml(
+                    field.label,
+                )}:</strong> ${escapeHtml(
+                    getFormattedValue(rowData, field.fieldId),
+                )}</div>`,
+        )
+        .join('');
+    const coords =
+        lat !== undefined && lon !== undefined
+            ? `<div style="font-size:12px;color:#868e96;margin-top:8px">Lat: ${lat.toFixed(
+                  4,
+              )}, Lon: ${lon.toFixed(4)}</div>`
+            : '';
+    return `<div style="padding:4px 6px"><div style="display:flex;flex-direction:column;gap:2px">${rows}</div>${coords}</div>`;
 };
 
 // MapMarker component for scatter points with tooltip/context menu behavior
@@ -286,6 +340,25 @@ const MapRefUpdater: FC<{ mapRef: RefObject<L.Map | null> }> = ({ mapRef }) => {
 
 // Component to track map extent and dispatch to Redux
 // This does NOT cause re-renders because nothing subscribes to mapExtent during render
+const MapInteractionTracker: FC<{
+    onInteraction: (type: 'zoom' | 'pan', zoomLevel: number) => void;
+}> = ({ onInteraction }) => {
+    const map = useMap();
+
+    useEffect(() => {
+        const handleZoom = () => onInteraction('zoom', map.getZoom());
+        const handlePan = () => onInteraction('pan', map.getZoom());
+        map.on('zoomend', handleZoom);
+        map.on('dragend', handlePan);
+        return () => {
+            map.off('zoomend', handleZoom);
+            map.off('dragend', handlePan);
+        };
+    }, [map, onInteraction]);
+
+    return null;
+};
+
 const MapExtentTracker: FC = () => {
     const map = useMap();
     const dispatch = useExplorerDispatch();
@@ -444,38 +517,100 @@ type SimpleMapProps = {
 
 const SimpleMap: FC<SimpleMapProps> = memo(
     ({ onScreenshotReady, onScreenshotError, ...props }) => {
+        const { leafletMapRef } = useVisualizationServices();
+        const visualizationConfig = useVisualizationConfig();
         const {
             isLoading,
-            visualizationConfig,
             resultsData,
-            leafletMapRef,
             minimal,
             colorPalette,
-        } = useVisualizationContext();
+            savedChartUuid,
+        } = useVisualizationInputs();
         const mapConfig = useLeafletMapConfig({
             isInDashboard: props.isInDashboard,
         });
-        const { activeTile, tileLayerEventHandlers } = useTileFallback(
+        const tracking = useTracking({ failSilently: true });
+        const { data: account } = useAccount();
+        const projectUuid = useProjectUuid();
+        const { embedToken } = useEmbed();
+        const usageContext: MapUsageContext = embedToken
+            ? 'embed'
+            : minimal
+              ? 'minimal'
+              : props.isInDashboard
+                ? 'dashboard'
+                : 'explore';
+        const {
+            activeTile,
+            activeBackground,
+            hasFallenBack,
+            tileLayerEventHandlers,
+        } = useTileFallback(
             mapConfig?.tile ?? { url: null, attribution: '' },
             mapConfig?.tileBackground ?? MapTileBackground.OPENSTREETMAP,
-            useCallback((event) => {
-                captureException(
-                    new Error(
-                        `Map tile provider fallback: ${event.from} → ${event.to}`,
-                    ),
-                    {
-                        tags: {
-                            component: 'SimpleMap',
-                            tileProviderFrom: event.from,
-                            tileProviderTo: event.to,
+            useCallback(
+                (event) => {
+                    captureException(
+                        new Error(
+                            `Map tile provider fallback: ${event.from} → ${event.to}`,
+                        ),
+                        {
+                            tags: {
+                                component: 'SimpleMap',
+                                tileProviderFrom: event.from,
+                                tileProviderTo: event.to,
+                            },
+                            extra: {
+                                errorCount: event.errorCount,
+                                successCount: event.successCount,
+                            },
                         },
-                        extra: {
+                    );
+                    tracking?.track({
+                        name: EventName.MAP_TILE_FALLBACK,
+                        properties: {
+                            userId: account?.user?.id ?? null,
+                            organizationId:
+                                account?.organization?.organizationUuid ?? null,
+                            projectId: projectUuid ?? null,
+                            chartId: savedChartUuid ?? null,
+                            context: usageContext,
+                            fromTileBackground: event.from,
+                            toTileBackground: event.to,
                             errorCount: event.errorCount,
                             successCount: event.successCount,
                         },
-                    },
-                );
-            }, []),
+                    });
+                },
+                [tracking, account, projectUuid, savedChartUuid, usageContext],
+            ),
+        );
+        const {
+            tileLayerEventHandlers: telemetryTileEventHandlers,
+            recordInteraction,
+        } = useMapTileTelemetry({
+            chartId: savedChartUuid ?? null,
+            projectId: projectUuid ?? null,
+            organizationId: account?.organization?.organizationUuid ?? null,
+            userId: account?.user?.id ?? null,
+            context: usageContext,
+            tileBackground:
+                mapConfig?.tileBackground ?? MapTileBackground.OPENSTREETMAP,
+            activeTileBackground: activeBackground,
+            didFallback: hasFallenBack,
+        });
+        const combinedTileLayerEventHandlers = useMemo(
+            () => ({
+                tileerror: () => {
+                    tileLayerEventHandlers.tileerror();
+                    telemetryTileEventHandlers.tileerror();
+                },
+                tileload: () => {
+                    tileLayerEventHandlers.tileload();
+                    telemetryTileEventHandlers.tileload();
+                },
+            }),
+            [tileLayerEventHandlers, telemetryTileEventHandlers],
         );
         const { shouldShowMenu } = useContextMenuPermissions({ minimal });
 
@@ -560,7 +695,9 @@ const SimpleMap: FC<SimpleMapProps> = memo(
 
             const loadGeoJson = async () => {
                 try {
-                    const response = await fetch(mapConfig.geoJsonUrl!);
+                    const response = await fetch(
+                        resolveRequestUrl(mapConfig.geoJsonUrl!),
+                    );
                     const data = await response.json();
 
                     // Convert TopoJSON to GeoJSON if needed
@@ -901,17 +1038,14 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                           locationValue: rawPropertyValue.toString(),
                       };
 
-                // eslint-disable-next-line testing-library/render-result-naming-convention
-                const tooltipHtml = renderToString(
-                    <MapTooltipContent
-                        tooltipFields={mapConfig?.tooltipFields || []}
-                        rowData={rowData}
-                        noData={noData}
-                    />,
-                );
+                const tooltipHtml = getMapTooltipHtml({
+                    tooltipFields: mapConfig?.tooltipFields || [],
+                    rowData,
+                    noData,
+                });
 
                 if (layer instanceof L.Path) {
-                    layer.bindTooltip(tooltipHtml);
+                    layer.bindTooltip(tooltipHtml, { sticky: true });
 
                     // Determine the correct base and hover opacity for this region
                     const baseOpacity = regionEntry
@@ -1006,6 +1140,9 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                         maxBoundsViscosity={1.0}
                     >
                         <MapRefUpdater mapRef={leafletMapRef} />
+                        <MapInteractionTracker
+                            onInteraction={recordInteraction}
+                        />
                         {/* Only track extent changes in explorer, not on dashboards */}
                         {!props.isInDashboard && <MapExtentTracker />}
                         <MapBoundsFitter
@@ -1016,11 +1153,10 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                             hasSavedExtent={mapConfig.hasSavedExtent}
                         />
                         {activeTile.url && (
-                            <TileLayer
+                            <MapTileLayer
                                 key={activeTile.url}
-                                attribution={activeTile.attribution}
-                                url={activeTile.url}
-                                eventHandlers={tileLayerEventHandlers}
+                                tile={activeTile}
+                                eventHandlers={combinedTileLayerEventHandlers}
                             />
                         )}
                         {isHexbin ? (
@@ -1208,6 +1344,9 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                         maxBoundsViscosity={1.0}
                     >
                         <MapRefUpdater mapRef={leafletMapRef} />
+                        <MapInteractionTracker
+                            onInteraction={recordInteraction}
+                        />
                         {/* Only track extent changes in explorer, not on dashboards */}
                         {!props.isInDashboard && <MapExtentTracker />}
                         <MapBoundsFitter
@@ -1218,11 +1357,10 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                             hasSavedExtent={mapConfig.hasSavedExtent}
                         />
                         {activeTile.url && (
-                            <TileLayer
+                            <MapTileLayer
                                 key={activeTile.url}
-                                attribution={activeTile.attribution}
-                                url={activeTile.url}
-                                eventHandlers={tileLayerEventHandlers}
+                                tile={activeTile}
+                                eventHandlers={combinedTileLayerEventHandlers}
                             />
                         )}
                         {geoJsonData?.features &&

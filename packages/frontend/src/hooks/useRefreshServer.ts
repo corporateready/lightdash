@@ -1,16 +1,18 @@
 import {
     JobStatusType,
     JobStepStatusType,
+    JobType,
     type ApiError,
     type ApiRefreshResults,
     type Job,
     type JobStep,
 } from '@lightdash/common';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useParams } from 'react-router';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
 import useActiveJob from '../providers/ActiveJob/useActiveJob';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import useToaster from './toaster/useToaster';
+import { useProjectUuid } from './useProjectUuid';
 
 export const jobStepStatusLabel = (status: JobStepStatusType) => {
     switch (status) {
@@ -28,19 +30,70 @@ export const jobStepStatusLabel = (status: JobStepStatusType) => {
             throw new Error('Unknown job step status');
     }
 };
-export const jobStatusLabel = (status: JobStatusType) => {
+export const jobStatusLabel = (status: JobStatusType, jobType?: JobType) => {
+    if (jobType === JobType.CREATE_PROJECT) {
+        switch (status) {
+            case JobStatusType.DONE:
+                return 'Project created!';
+            case JobStatusType.STARTED:
+                return 'Pending project creation';
+            case JobStatusType.ERROR:
+                return 'Error while creating project';
+            case JobStatusType.RUNNING:
+                return 'Creating your project';
+            default:
+                throw new Error('Unknown job status');
+        }
+    }
     switch (status) {
         case JobStatusType.DONE:
-            return 'Successfully synced dbt project!';
+            return 'Successfully synced project!';
         case JobStatusType.STARTED:
             return 'Pending sync';
         case JobStatusType.ERROR:
-            return 'Error while syncing dbt project';
+            return 'Error while syncing project';
         case JobStatusType.RUNNING:
-            return 'Syncing dbt project';
+            return 'Syncing project';
         default:
             throw new Error('Unknown job status');
     }
+};
+
+export const getJobCompletionToast = (
+    job: Job,
+): { variant: 'success' | 'warning'; title: string; message?: string } => {
+    const tableErrors =
+        job.jobType === JobType.COMPILE_PROJECT &&
+        job.jobResults?.errorCount !== undefined &&
+        job.jobResults.errorCount > 0 &&
+        job.jobResults.total !== undefined
+            ? `${job.jobResults.errorCount} of ${job.jobResults.total} tables have errors`
+            : null;
+    if (
+        job.jobType === JobType.COMPILE_PROJECT &&
+        job.jobResults?.connectionWarnings?.length
+    ) {
+        return {
+            variant: 'warning',
+            title: tableErrors
+                ? `Connections failed to compile; ${tableErrors}`
+                : 'Connections failed to compile',
+            message: job.jobResults.connectionWarnings
+                .map((warning) => `- ${warning}`)
+                .join('\n'),
+        };
+    }
+    if (tableErrors) {
+        return {
+            variant: 'warning',
+            title: `Synced: ${tableErrors}`,
+        };
+    }
+
+    return {
+        variant: 'success',
+        title: jobStatusLabel(job.jobStatus, job.jobType),
+    };
 };
 
 export const runningStepsInfo = (steps: JobStep[]) => {
@@ -67,14 +120,20 @@ export const runningStepsInfo = (steps: JobStep[]) => {
 
 export const TOAST_KEY_FOR_REFRESH_JOB = 'refresh-job';
 
-const refresh = async (projectUuid: string) =>
+export type RefreshServerVariables = { syncContent: boolean };
+
+const refresh = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    { syncContent }: RefreshServerVariables,
+) =>
     lightdashApi<ApiRefreshResults>({
         method: 'POST',
         url: `/projects/${projectUuid}/refresh`,
-        body: undefined,
+        body: JSON.stringify({ syncContent }),
     });
 
-const getJob = async (jobUuid: string) =>
+const getJob = async (lightdashApi: LightdashApi, jobUuid: string) =>
     lightdashApi<Job>({
         method: 'GET',
         url: `/jobs/${jobUuid}`,
@@ -86,11 +145,12 @@ export const useJob = (
     onSuccess: (job: Job) => void,
     onError: (error: ApiError) => void,
 ) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
 
     return useQuery<Job, ApiError>({
         queryKey: ['job', jobId],
-        queryFn: () => getJob(jobId || ''),
+        queryFn: () => getJob(lightdashApi, jobId || ''),
         enabled: !!jobId,
         refetchInterval: (data) =>
             data === undefined ||
@@ -109,19 +169,21 @@ export const useJob = (
 };
 
 export const useRefreshServer = () => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const lightdashApi = useLightdashApi();
+    const projectUuid = useProjectUuid();
     const queryClient = useQueryClient();
     const { setActiveJobId } = useActiveJob();
     const { showToastApiError } = useToaster();
-    return useMutation<ApiRefreshResults, ApiError>({
+    return useMutation<ApiRefreshResults, ApiError, RefreshServerVariables>({
         mutationKey: ['refresh', projectUuid],
-        mutationFn: () => refresh(projectUuid!),
+        mutationFn: (variables) =>
+            refresh(lightdashApi, projectUuid!, variables),
         onSettled: async () =>
             queryClient.setQueryData(['status', projectUuid], 'loading'),
         onSuccess: (data) => setActiveJobId(data.jobUuid),
         onError: ({ error }) =>
             showToastApiError({
-                title: 'Error syncing dbt project',
+                title: 'Error syncing project',
                 apiError: error,
             }),
     });

@@ -1,23 +1,32 @@
 import { useEffect, type FC } from 'react';
 import { Provider } from 'react-redux';
 import Page from '../components/common/Page/Page';
+import useEmbed from '../ee/providers/Embed/useEmbed';
 import { MetricsCatalogPanel } from '../features/metricsCatalog';
 import {
     setActiveMetric,
     toggleMetricExploreModal,
 } from '../features/metricsCatalog/store/metricsCatalogSlice';
-import { MetricCatalogView } from '../features/metricsCatalog/types';
+import {
+    MetricCatalogView,
+    type MetricsCatalogFilter,
+} from '../features/metricsCatalog/types';
 import { store } from '../features/sqlRunner/store';
 import { useAppDispatch } from '../features/sqlRunner/store/hooks';
 
 type MetricsCatalogProps = {
     metricCatalogView?: MetricCatalogView;
+    hiddenFilters?: MetricsCatalogFilter[];
 };
+
+const NO_HIDDEN_FILTERS: MetricsCatalogFilter[] = [];
 
 const MetricsCatalogContent: FC<MetricsCatalogProps> = ({
     metricCatalogView = MetricCatalogView.LIST,
+    hiddenFilters = NO_HIDDEN_FILTERS,
 }) => {
     const dispatch = useAppDispatch();
+    const { embedToken } = useEmbed();
 
     useEffect(() => {
         // Close any open modals when leaving this page.
@@ -27,19 +36,32 @@ const MetricsCatalogContent: FC<MetricsCatalogProps> = ({
         };
     }, [dispatch]);
 
-    return (
+    const content = (
+        <MetricsCatalogPanel
+            metricCatalogView={metricCatalogView}
+            hiddenFilters={hiddenFilters}
+        />
+    );
+
+    return embedToken ? (
+        content
+    ) : (
         <Page withCenteredRoot withCenteredContent withXLargePaddedContent>
-            <MetricsCatalogPanel metricCatalogView={metricCatalogView} />
+            {content}
         </Page>
     );
 };
 
 const MetricsCatalog: FC<MetricsCatalogProps> = ({
     metricCatalogView = MetricCatalogView.LIST,
+    hiddenFilters = NO_HIDDEN_FILTERS,
 }) => {
     return (
         <Provider store={store}>
-            <MetricsCatalogContent metricCatalogView={metricCatalogView} />
+            <MetricsCatalogContent
+                metricCatalogView={metricCatalogView}
+                hiddenFilters={hiddenFilters}
+            />
         </Provider>
     );
 };

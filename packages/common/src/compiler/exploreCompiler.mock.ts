@@ -17,12 +17,14 @@ import {
     type TimeIntervalUnit,
     type WarehouseCatalog,
     type WarehouseClient,
+    type WarehouseDatabaseListing,
     type WarehouseTables,
 } from '../types/warehouse';
 import { defaultNullSafeEqualSql } from '../utils/warehouse';
 import { type UncompiledExplore } from './exploreCompiler';
 
 export const warehouseClientMock: WarehouseClient = {
+    getSessionTimezone: async () => null,
     credentials: {} as CreateWarehouseCredentials,
     getCatalog: async () => ({
         default: {
@@ -32,15 +34,6 @@ export const warehouseClientMock: WarehouseClient = {
                 },
             },
         },
-    }),
-    getAsyncQueryResults: async () => ({
-        queryId: null,
-        queryMetadata: null,
-        totalRows: 0,
-        durationMs: 0,
-        fields: {},
-        pageCount: 0,
-        rows: [],
     }),
     streamQuery: async (_query, streamCallback) => {
         await streamCallback({
@@ -53,6 +46,7 @@ export const warehouseClientMock: WarehouseClient = {
         queryMetadata: null,
         totalRows: 0,
         durationMs: 0,
+        phaseTimings: {},
     }),
     runQuery: () =>
         Promise.resolve({
@@ -66,7 +60,10 @@ export const warehouseClientMock: WarehouseClient = {
     getEscapeStringQuoteChar: () => "'",
     getFloatingType: () => 'FLOAT',
     getNullSafeEqualSql: defaultNullSafeEqualSql,
+    getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
     getAdapterType: () => SupportedDbtAdapter.POSTGRES,
+    supportsCteMaterialization: () => true,
+    getUnnestSql: () => null,
     getMetricSql: (sql, metric) => {
         switch (metric.type) {
             case MetricType.AVERAGE:
@@ -83,6 +80,12 @@ export const warehouseClientMock: WarehouseClient = {
     getAllTables(): Promise<WarehouseTables> {
         throw new Error('Function not implemented.');
     },
+    listDatabases(): Promise<WarehouseDatabaseListing> {
+        throw new Error('Function not implemented.');
+    },
+    getTablesForDatabase(): Promise<WarehouseTables> {
+        throw new Error('Function not implemented.');
+    },
     getFields(): Promise<WarehouseCatalog> {
         throw new Error('Function not implemented.');
     },
@@ -94,6 +97,9 @@ export const warehouseClientMock: WarehouseClient = {
     },
     escapeString: (value) => value,
     castToTimestamp: (date) => `CAST('${date.toISOString()}' AS TIMESTAMP)`,
+    castToDate: (date) => `CAST('${date.toISOString().slice(0, 10)}' AS DATE)`,
+    castToNaiveTimestamp: (date) =>
+        `CAST('${date.toISOString()}' AS TIMESTAMP)`,
     getIntervalSql: (value: number, unit: TimeIntervalUnit) =>
         `INTERVAL '${value} ${unit}'`,
     getTimestampDiffSeconds: (startTimestampSql, endTimestampSql) =>

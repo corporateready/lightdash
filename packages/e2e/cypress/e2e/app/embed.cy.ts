@@ -1,6 +1,7 @@
 import {
     CreateEmbedJwt,
     FilterInteractivityValues,
+    SEED_ORG_1_ADMIN,
     SEED_PROJECT,
 } from '@lightdash/common';
 
@@ -8,7 +9,7 @@ const EMBED_API_PREFIX = `/api/v1/embed/${SEED_PROJECT.project_uuid}`;
 
 const updateEmbedConfigDashboards = (dashboardUuids: string[]) =>
     cy.request({
-        url: `${EMBED_API_PREFIX}/config/dashboards`,
+        url: `${EMBED_API_PREFIX}/config`,
         headers: { 'Content-type': 'application/json' },
         method: 'PATCH',
         body: {
@@ -31,6 +32,15 @@ const getJaffleDashboard = () =>
     cy.request(
         `/api/v2/content?pageSize=1&contentTypes=dashboard&search=jaffle`,
     );
+
+const getTile = (title: string) =>
+    cy.contains(title).closest('.mantine-Card-root').parent();
+
+const openTileMenu = (title: string) =>
+    getTile(title)
+        .trigger('mouseenter')
+        .findByRole('button', { name: 'Tile actions' })
+        .click();
 
 describe('Embedded dashboard', () => {
     beforeEach(() => {
@@ -80,22 +90,87 @@ describe('Embedded dashboard', () => {
                     cy.contains('Days between created and first order'); // table chart
 
                     // Check filters
-                    cy.contains('Is completed is true');
+                    // Boolean pill values render the localized label ("True"),
+                    // not the raw value, since the uiOverrides refactor
+                    cy.contains('Is completed is True');
 
                     cy.contains(
-                        'Order date year in the last 10 completed years',
+                        /Order date year in the last \d+ completed years/,
                     );
 
                     // Check export options
-                    cy.contains(
-                        `What's the average spend per customer?`,
-                    ).trigger('mouseenter');
-                    cy.findByTestId('tile-icon-more').click();
+                    const chartTitle = `What's the average spend per customer?`;
+                    openTileMenu(chartTitle);
                     cy.contains('Download data');
                     cy.contains('Export image');
 
+                    getTile(chartTitle).trigger('mouseleave');
+                    cy.get('body').click(1, 1);
+                    cy.contains('Download data').should('not.exist');
+
                     // Check date zoom
-                    cy.contains('Date Zoom');
+                    cy.findByRole('button', { name: /zoom/i }).should('exist');
+                });
+            });
+        });
+    });
+
+    it('forwards the ?timezone= session override into embed tile queries', () => {
+        getJaffleDashboard().then((dashboardsResp) => {
+            const dashboardUuid = dashboardsResp.body.results.data[0]?.uuid;
+
+            updateEmbedConfigDashboards([dashboardUuid]).then((updateResp) => {
+                expect(updateResp.status).to.eq(200);
+
+                getEmbedUrl({
+                    content: { type: 'dashboard', dashboardUuid },
+                }).then((resp) => {
+                    cy.logout();
+
+                    cy.intercept(
+                        'POST',
+                        `${EMBED_API_PREFIX}/query/dashboard-tile*`,
+                    ).as('tileQuery');
+
+                    // The session timezone is set via ?timezone= before the JWT
+                    // hash; the frontend should forward it in the request body.
+                    const embedUrl = new URL(resp.body.results.url);
+                    embedUrl.searchParams.set(
+                        'timezone',
+                        'America/Los_Angeles',
+                    );
+                    cy.visit(embedUrl.toString());
+
+                    cy.wait('@tileQuery')
+                        .its('request.body.timezone')
+                        .should('eq', 'America/Los_Angeles');
+                });
+            });
+        });
+    });
+
+    it('omits the timezone from embed tile queries when ?timezone= is absent', () => {
+        getJaffleDashboard().then((dashboardsResp) => {
+            const dashboardUuid = dashboardsResp.body.results.data[0]?.uuid;
+
+            updateEmbedConfigDashboards([dashboardUuid]).then((updateResp) => {
+                expect(updateResp.status).to.eq(200);
+
+                getEmbedUrl({
+                    content: { type: 'dashboard', dashboardUuid },
+                }).then((resp) => {
+                    cy.logout();
+
+                    cy.intercept(
+                        'POST',
+                        `${EMBED_API_PREFIX}/query/dashboard-tile*`,
+                    ).as('tileQuery');
+
+                    cy.visit(resp.body.results.url);
+
+                    cy.wait('@tileQuery')
+                        .its('request.body')
+                        .should('not.have.property', 'timezone');
                 });
             });
         });
@@ -130,10 +205,9 @@ describe('Embedded dashboard', () => {
                     cy.contains('bank_transfer');
 
                     // Find a chart tile and click "Explore from here"
-                    cy.contains(
+                    openTileMenu(
                         `How much revenue do we have per payment method?`,
-                    ).trigger('mouseenter');
-                    cy.findByTestId('tile-icon-more').click();
+                    );
                     cy.contains('Explore from here').click();
 
                     // Should navigate to embedded explore page
@@ -313,10 +387,10 @@ describe('Embedded dashboard', () => {
                     cy.url().should('not.include', 'dateZoom=');
 
                     // Check that Date Zoom dropdown is visible
-                    cy.contains('Date Zoom').should('be.visible');
+                    cy.contains('Default zoom').should('be.visible');
 
                     // Click the Date Zoom dropdown
-                    cy.contains('Date Zoom').click();
+                    cy.contains('Default zoom').click();
 
                     // Select a granularity (e.g., Month)
                     cy.contains('Month').click();
@@ -325,6 +399,80 @@ describe('Embedded dashboard', () => {
                     cy.url().should('include', 'dateZoom=month');
                 });
             });
+        });
+    });
+});
+
+describe('Embedded AI agent dashboard viewer', () => {
+    beforeEach(() => {
+        cy.login();
+    });
+
+    // An aiAgent token opens a saved dashboard from its write space on the
+    // embed's own route, read-only, and returns to the conversation.
+    it('opens a write-space dashboard read-only with a way back', () => {
+        const agentUuid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+        getJaffleDashboard().then((dashboardsResp) => {
+            const dashboard = dashboardsResp.body.results.data[0];
+            cy.request(`/api/v1/dashboards/${dashboard.uuid}`).then(
+                (dashboardResp) => {
+                    const { spaceUuid } = dashboardResp.body.results;
+                    getEmbedUrl({
+                        content: { type: 'aiAgent', agentUuid },
+                        writeActions: {
+                            userUuid: SEED_ORG_1_ADMIN.user_uuid,
+                            spaceUuid,
+                        },
+                    }).then((resp) => {
+                        cy.logout();
+
+                        const token = resp.body.results.url.split('#')[1];
+                        const threadsPath = `/embed/${SEED_PROJECT.project_uuid}/ai-agents/${agentUuid}/threads`;
+                        cy.intercept('POST', '**/api/v1/embed/*/dashboard*').as(
+                            'embedDashboard',
+                        );
+                        cy.visit(
+                            `/embed/${SEED_PROJECT.project_uuid}/ai-agents/${agentUuid}/dashboards/${dashboard.uuid}?embedBackUrl=${encodeURIComponent(threadsPath)}#${token}`,
+                        );
+                        cy.wait('@embedDashboard')
+                            .its('response.statusCode')
+                            .should('eq', 200);
+
+                        cy.contains('Payments total revenue');
+                        cy.contains(`What's the average spend per customer?`);
+
+                        // Read-only: a tile's menu offers Explore from here
+                        // (the write user may explore) and nothing that
+                        // exports or edits. The menu appears once the tile's
+                        // query has loaded, so wait for it rather than
+                        // asserting before the tiles load.
+                        const tileTitle = `What's the average spend per customer?`;
+                        getTile(tileTitle).scrollIntoView();
+                        getTile(tileTitle).trigger('mouseover');
+                        getTile(tileTitle)
+                            .findByRole('button', {
+                                name: 'Tile actions',
+                                timeout: 30000,
+                            })
+                            .click({ force: true });
+                        cy.get('[role="menu"]')
+                            .should('be.visible')
+                            .within(() => {
+                                cy.contains('Explore from here');
+                                cy.findAllByRole('menuitem').should(
+                                    'have.length',
+                                    1,
+                                );
+                            });
+                        cy.contains('Download data').should('not.exist');
+                        cy.contains('Export image').should('not.exist');
+                        cy.get('body').type('{esc}');
+
+                        cy.findByRole('button', { name: 'Back to AI' }).click();
+                        cy.location('pathname').should('eq', threadsPath);
+                    });
+                },
+            );
         });
     });
 });

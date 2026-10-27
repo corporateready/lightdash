@@ -1,3 +1,5 @@
+import { isCompanyDomain } from 'company-email-validator';
+
 export const getEmailDomain = (email: string): string => {
     if (/\s/.test(email)) {
         throw new Error(`Invalid email, contains whitespace: ${email}`);
@@ -10,59 +12,42 @@ export const getEmailDomain = (email: string): string => {
     return domains[1].toLowerCase();
 };
 
-const EMAIL_PROVIDER_LIST = [
-    'gmail.com',
-    'yahoo.com',
-    'hotmail.com',
-    'aol.com',
-    'hotmail.co.uk',
-    'hotmail.fr',
-    'msn.com',
-    'yahoo.fr',
-    'wanadoo.fr',
-    'orange.fr',
-    'comcast.net',
-    'yahoo.co.uk',
-    'yahoo.com.br',
-    'yahoo.co.in',
-    'live.com',
-    'rediffmail.com',
-    'free.fr',
-    'gmx.de',
-    'web.de',
-    'yandex.ru',
-    'outlook.com',
-    'uol.com.br',
-    'bol.com.br',
-    'mail.ru',
-    'cox.net',
-    'hotmail.it',
-    'sbcglobal.net',
+/**
+ * Public-provider domains that the package list doesn't cover but that still
+ * can't be owned by a single customer org on a shared instance.
+ */
+const ADDITIONAL_PUBLIC_PROVIDER_DOMAINS = [
+    'google.com',
+    'microsoft.com',
+    'onmicrosoft.com',
     'sfr.fr',
-    'live.fr',
-    'verizon.net',
-    'live.co.uk',
-    'googlemail.com',
-    'yahoo.es',
-    'ig.com.br',
-    'live.nl',
-    'bigpond.com',
-    'terra.com.br',
-    'yahoo.it',
-    'yahoo.de',
-    'rocketmail.com',
-    'yahoo.in',
-    'hotmail.es',
-    'hotmail.de',
-    'shaw.ca',
-    'yahoo.co.jp',
-    'sky.com',
-    'blueyonder.co.uk',
-    'icloud.com',
 ];
 
-const isEmailProviderDomain = (domain: string): boolean =>
-    EMAIL_PROVIDER_LIST.includes(domain);
+const ADDITIONAL_PUBLIC_PROVIDER_DOMAIN_SET = new Set(
+    ADDITIONAL_PUBLIC_PROVIDER_DOMAINS,
+);
+
+/**
+ * Corporate domains the package list wrongly flags as public providers.
+ */
+const CORPORATE_DOMAIN_OVERRIDES = ['telekom.de'];
+
+const CORPORATE_DOMAIN_OVERRIDE_SET = new Set(CORPORATE_DOMAIN_OVERRIDES);
+
+/**
+ * Whether a domain is a public/consumer email provider that no single
+ * organization can own. Normalizes case before checking.
+ */
+export const isPublicEmailProviderDomain = (domain: string): boolean => {
+    const normalized = domain.trim().toLowerCase();
+    if (CORPORATE_DOMAIN_OVERRIDE_SET.has(normalized)) {
+        return false;
+    }
+    return (
+        ADDITIONAL_PUBLIC_PROVIDER_DOMAIN_SET.has(normalized) ||
+        !isCompanyDomain(normalized)
+    );
+};
 
 const VALID_EMAIL_DOMAIN_REGEX = /^[a-zA-Z0-9][\w.-]+\.\w{2,4}/g;
 export const isValidEmailDomain = (value: string) =>
@@ -70,7 +55,7 @@ export const isValidEmailDomain = (value: string) =>
 
 export const validateOrganizationEmailDomains = (domains: string[]) => {
     const invalidDomains = domains.filter((domain) =>
-        isEmailProviderDomain(domain),
+        isPublicEmailProviderDomain(domain),
     );
 
     if (!invalidDomains.length) {

@@ -7,20 +7,23 @@ import {
 import { ExecaError, ExecaReturnValue } from 'execa';
 
 export const cliArgs = {
-    dbtProjectDirectory: 'dbtProjectDirectory',
-    dbtProfilesDirectory: 'dbtProfilesDirectory',
+    dbtProjectDirectory: '/tmp/dbtProjectDirectory',
+    dbtProfilesDirectory: '/tmp/dbtProfilesDirectory',
     environment: {},
+    environmentVariableAllowlist: [],
+    explicitCredentials: false,
     profileName: 'profileName',
     target: 'target',
+    partialParseBaselinePath: null,
 };
 
 export const expectedDbtOptions = ['--no-use-colors', '--log-format', 'json'];
 
 export const expectedCommandOptions = [
     '--profiles-dir',
-    'dbtProfilesDirectory',
+    '/tmp/dbtProfilesDirectory',
     '--project-dir',
-    'dbtProjectDirectory',
+    '/tmp/dbtProjectDirectory',
     '--target',
     'target',
     '--profile',
@@ -44,13 +47,6 @@ export const cliMockImplementation = {
         throw cliMocks.error;
     },
 };
-
-export const dbtProjectYml = `
-name: 'jaffle_shop'
-version: '0.1'
-profile: 'jaffle_shop'
-config-version: 2
-`;
 
 export const manifestMock: DbtManifest = {
     nodes: {},

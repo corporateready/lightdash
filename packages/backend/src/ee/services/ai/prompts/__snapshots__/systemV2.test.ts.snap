@@ -1,0 +1,86 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`getSystemPromptV2 filter expressions > renders expression-only filter guidance 1`] = `
+"## Filter expressions
+
+For \`generateVisualization\`, \`dimensions\`, \`metrics\`, and \`tableCalculations\` are independent string expressions or null.
+
+- A non-null category contains one raw string expression.
+- Choose the category from discovered field metadata (its dimension/metric kind), never from a field name or whether a numeric field sounds metric-like. A raw numeric dimension belongs in \`dimensions\`; only metrics and custom metrics belong in \`metrics\`.
+- A field used only to restrict rows stays in its filter expression. Do not add it to \`queryConfig.dimensions\` unless the user asked to group by or display it: extra selected dimensions change aggregation and table-calculation grain.
+- Table calculations belong only in \`tableCalculations\`.
+- Each category is flat and uses AND or OR, never both.
+- The three categories combine implicitly with AND.
+- When present, \`searchFieldValues.filters\` is one flat dimension expression string and is AND-only.
+- The tool schema is authoritative for where each string is placed.
+
+Raw placement examples:
+- dimensions: orders_status equals=completed,shipped AND orders_order_date inThePast=2{unit:weeks,completed:true}
+- dimensions (alternatives): orders_promo_code startsWith=VIP OR orders_promo_code endsWith=25
+- metrics: orders_total_order_amount greaterThan=100
+- tableCalculations: rank lessThanOrEqual=10
+
+- Join flat rules with AND or OR. Do not mix both connectors in one expression.
+- Bare scalars work. Double-quote reserved and whitespace/punctuation strings (apostrophes/parentheses); quote when unsure. Quoted commas/braces literal; backslash escapes. E.g. \`orders_product_name equals="Coffee Filters (100pk)"\`.
+- Limits: 256 rules; 256 values including settings/rule; 256 characters/literal; 16384 characters/expression.
+
+### string
+Grammar: <field> <operator form>
+- \`isNull [0 values]\`
+- \`notNull [0 values]\`
+- \`equals=<value>[,<value>...] [1+ values]\`
+- \`notEquals=<value>[,<value>...] [1+ values]\`
+- \`startsWith=<value>[,<value>...] [1+ values]\`
+- \`endsWith=<value>[,<value>...] [1+ values]\`
+- \`include=<value>[,<value>...] [1+ values]\`
+- \`doesNotInclude=<value>[,<value>...] [1+ values]\`
+
+### number
+Grammar: <field> <operator form>
+- \`isNull [0 values]\`
+- \`notNull [0 values]\`
+- \`equals=<value>[,<value>...] [1+ values]\`
+- \`notEquals=<value>[,<value>...] [1+ values]\`
+- \`lessThan=<value> [1 value]\`
+- \`lessThanOrEqual=<value> [1 value]\`
+- \`greaterThan=<value> [1 value]\`
+- \`greaterThanOrEqual=<value> [1 value]\`
+- \`inBetween=<first value>,<second value> [2 values]\`
+- \`notInBetween=<first value>,<second value> [2 values]\`
+
+### date
+Grammar: <field> <operator form>
+- \`isNull [0 values]\`
+- \`notNull [0 values]\`
+- \`equals=<value>[,<value>...] [1+ values]\`
+- \`notEquals=<value>[,<value>...] [1+ values]\`
+- \`lessThan=<value> [1 value]\`
+- \`lessThanOrEqual=<value> [1 value]\`
+- \`greaterThan=<value> [1 value]\`
+- \`greaterThanOrEqual=<value> [1 value]\`
+- \`inThePast=<count>{unit:<unit>,completed:<bool>} [1 count; settings required]\`
+- \`notInThePast=<count>{unit:<unit>,completed:<bool>} [1 count; settings required]\`
+- \`inTheNext=<count>{unit:<unit>,completed:<bool>} [1 count; settings required]\`
+- \`inTheCurrent=<unit>[{toDate:true[,excludeToday:true]}] [1 unit; settings optional]\`
+- \`notInTheCurrent=<unit>[{toDate:true[,excludeToday:true]}] [1 unit; settings optional]\`
+- \`inBetween=<first value>,<second value> [2 values]\`
+- Units: days, weeks, months, quarters, years; completed=false includes partial, true completed only.
+- Current-period bounds: {toDate:true} ends the current week/month/quarter/year at today ("month to date"); {toDate:true,excludeToday:true} ends it at yesterday (today's partial data excluded). Not valid for days.
+
+### boolean
+Grammar: <field> <operator form>
+- \`isNull [0 values]\`
+- \`notNull [0 values]\`
+- \`equals=<value> [1 value]\`
+- \`notEquals=<value> [1 value]\`
+
+## Time-based filtering
+
+When the user mentions a time window ("last 3 months", "this quarter", "past year", "since March"), put every requested window in the dimension expression as an explicit date rule. Describing the window in prose, sorting, limiting, or relying on dates observed in result data is not a substitute: on sparse data it produces wrong results.
+
+- Use \`inThePast\` for relative windows and \`inBetween\` for explicit ranges.
+- A date field from a joined table filters exactly like a base-table date field, so use a joined-table date rule rather than no date rule at all.
+- For multiple granularity-aligned periods, use one multi-value \`equals\` rule when another dimension predicate must be combined with AND.
+- Join arbitrary alternative ranges with OR only when every dimension rule is truly an alternative.
+- Use \`limit\` only for explicit "top N" / "show me 10 rows" requests."
+`;

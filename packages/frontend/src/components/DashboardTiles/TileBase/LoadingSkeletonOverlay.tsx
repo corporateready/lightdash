@@ -6,8 +6,8 @@ import {
     Skeleton as MantineSkeleton,
     Stack,
     type SkeletonProps,
-} from '@mantine-8/core';
-import { clsx } from '@mantine/core';
+} from '@mantine/core';
+import { clsx } from 'clsx';
 import { type FC, type ReactElement } from 'react';
 import styles from './LoadingSkeletonOverlay.module.css';
 
@@ -50,7 +50,7 @@ const PieSkeleton: FC = () => (
     </Center>
 );
 
-const DefaultSkeleton: FC = () => (
+export const DefaultSkeleton: FC = () => (
     <Center h="100%">
         <Skeleton h="80%" radius="lg" />
     </Center>
@@ -83,8 +83,8 @@ const LoadingSkeletonOverlay = ({
             gap="sm"
             style={{ zIndex: 1 }}
         >
-            {hasTitle && <Box h={28} style={{ flexShrink: 0 }} />}
-            <Box flex={1} mih={0} style={{ overflow: 'hidden' }}>
+            {hasTitle && <Box h={28} flex="0 0 auto" />}
+            <Box flex={1} mih={0} className={styles.skeletonBody}>
                 {chartKind ? (
                     getSkeletonByChartKind(chartKind)
                 ) : (

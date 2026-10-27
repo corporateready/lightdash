@@ -1,10 +1,10 @@
 import {
-    CreateWarehouseCredentials,
     DbtProjectEnvironmentVariable,
     SupportedDbtVersions,
 } from '@lightdash/common';
 import { WarehouseClient } from '@lightdash/warehouses';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
+import type { DbtTargetResult } from '../services/WarehouseClientFactory/CredentialResolver';
 import { CachedWarehouse } from '../types';
 import { DbtGitProjectAdapter } from './dbtGitProjectAdapter';
 
@@ -16,17 +16,21 @@ type Args = {
     repository: string;
     branch: string;
     projectDirectorySubPath: string;
-    warehouseCredentials: CreateWarehouseCredentials;
+    dbtTarget: DbtTargetResult;
+    explicitCredentials: boolean;
     targetName: string | undefined;
     environment: DbtProjectEnvironmentVariable[] | undefined;
+    environmentVariableAllowlist: string[];
     cachedWarehouse: CachedWarehouse;
     dbtVersion: SupportedDbtVersions;
     selector?: string;
     analytics?: LightdashAnalytics;
+    partialParseBaselinePath: string | null;
 };
 
 export class DbtAzureDevOpsProjectAdapter extends DbtGitProjectAdapter {
     constructor({
+        partialParseBaselinePath,
         analytics,
         warehouseClient,
         personalAccessToken,
@@ -35,9 +39,11 @@ export class DbtAzureDevOpsProjectAdapter extends DbtGitProjectAdapter {
         repository,
         branch,
         projectDirectorySubPath,
-        warehouseCredentials,
+        dbtTarget,
+        explicitCredentials,
         targetName,
         environment,
+        environmentVariableAllowlist,
         cachedWarehouse,
         dbtVersion,
         selector,
@@ -45,14 +51,17 @@ export class DbtAzureDevOpsProjectAdapter extends DbtGitProjectAdapter {
         const remoteRepositoryUrl = `https://${personalAccessToken}@dev.azure.com/${organization}/${project}/_git/${repository}`;
         super({
             analytics,
+            partialParseBaselinePath,
             warehouseClient,
             gitBranch: branch,
             remoteRepositoryUrl,
             repository,
             projectDirectorySubPath,
-            warehouseCredentials,
+            dbtTarget,
+            explicitCredentials,
             targetName,
             environment,
+            environmentVariableAllowlist,
             cachedWarehouse,
             dbtVersion,
             selector,

@@ -1,15 +1,34 @@
 import { type ApiError, type FeatureFlag } from '@lightdash/common';
-import { useQuery } from '@tanstack/react-query';
-import { lightdashApi } from '../api';
+import { useQuery, type QueryClient } from '@tanstack/react-query';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
+
+const FEATURE_FLAG_QUERY_KEY = 'feature-flag';
+
+/**
+ * Flags resolve per user/organization on the server, so anything that changes
+ * that context (creating or joining an org, creating the first project — which
+ * enables org overrides) has to refresh them. This refetches rather than
+ * invalidates because `refetchOnMount: false` means a stale cached flag would
+ * otherwise be served to the next page that mounts.
+ */
+export const refetchFeatureFlags = (queryClient: QueryClient) =>
+    queryClient.refetchQueries({
+        queryKey: [FEATURE_FLAG_QUERY_KEY],
+        type: 'all',
+    });
 
 /**
  * Get a feature flag value from the backend, which resolves through the
  * unified DB-backed flag system (env-var allowlists → per-flag config
  * handlers → DB).
  */
-export const useServerFeatureFlag = (featureFlagId: string) => {
+export const useServerFeatureFlag = (
+    featureFlagId: string,
+    options?: { retry?: number | boolean; enabled?: boolean },
+) => {
+    const lightdashApi = useLightdashApi();
     return useQuery<FeatureFlag, ApiError>(
-        ['feature-flag', featureFlagId],
+        [FEATURE_FLAG_QUERY_KEY, featureFlagId],
         () => {
             return lightdashApi<FeatureFlag>({
                 url: `/feature-flag/${featureFlagId}`,
@@ -19,7 +38,8 @@ export const useServerFeatureFlag = (featureFlagId: string) => {
             });
         },
         {
-            retry: false,
+            retry: options?.retry ?? false,
+            enabled: options?.enabled ?? true,
             refetchOnMount: false,
         },
     );

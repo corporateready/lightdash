@@ -1,22 +1,17 @@
-import { FeatureFlags, WarehouseTypes } from '@lightdash/common';
+import { WarehouseTypes } from '@lightdash/common';
 import {
-    ActionIcon,
-    Anchor,
-    Button,
-    CopyButton,
-    NumberInput,
-    PasswordInput,
-    Select,
-    Stack,
     TextInput,
-    Tooltip,
+    Stack,
+    Button,
+    Anchor,
+    Select,
+    PasswordInput,
+    Text,
 } from '@mantine/core';
-import { IconCheck, IconCopy } from '@tabler/icons-react';
-import React, { type FC } from 'react';
+import React, { type FC, type ReactNode } from 'react';
 import { useToggle } from 'react-use';
-import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
-import MantineIcon from '../../common/MantineIcon';
-import TimeZonePicker from '../../common/TimeZonePicker';
+import { CopyActionIcon } from '../../common/CopyActionIcon';
+import { NumberInput } from '../../common/NumberInput';
 import FormCollapseButton from '../FormCollapseButton';
 import { useFormContext } from '../formContext';
 import BooleanSwitch from '../Inputs/BooleanSwitch';
@@ -24,19 +19,22 @@ import CertificateFileInput from '../Inputs/CertificateFileInput';
 import FormSection from '../Inputs/FormSection';
 import StartOfWeekSelect from '../Inputs/StartOfWeekSelect';
 import { useProjectFormContext } from '../useProjectFormContext';
+import DataTimezoneField from './DataTimezoneField';
 import { PostgresDefaultValues } from './defaultValues';
 import { useCreateSshKeyPair } from './sshHooks';
+import { SshStaticIpHint } from './SshStaticIpHint';
 
 export const PostgresSchemaInput: FC<{
     disabled: boolean;
-}> = ({ disabled }) => {
+    description?: ReactNode;
+}> = ({ disabled, description }) => {
     const form = useFormContext();
 
     return (
         <TextInput
             name="warehouse.schema"
             label="Schema"
-            description="This is the schema name."
+            description={description ?? 'This is the schema name.'}
             required
             {...form.getInputProps('warehouse.schema')}
             disabled={disabled}
@@ -48,14 +46,14 @@ const PostgresForm: FC<{
     disabled: boolean;
 }> = ({ disabled }) => {
     const [isOpen, toggleOpen] = useToggle(false);
-    const { savedProject } = useProjectFormContext();
+    const {
+        savedProject,
+        isProjectExtraConnection,
+        inheritsPrimaryCredentialRequirement = true,
+    } = useProjectFormContext();
     const requireSecrets: boolean =
         savedProject?.warehouseConnection?.type !== WarehouseTypes.POSTGRES;
     const form = useFormContext();
-    const { data: timezoneSupportFlag } = useServerFeatureFlag(
-        FeatureFlags.EnableTimezoneSupport,
-    );
-    const isTimezoneSupportEnabled = timezoneSupportFlag?.enabled ?? false;
 
     if (form.values.warehouse?.type !== WarehouseTypes.POSTGRES) {
         throw new Error('This form is only available for Postgres');
@@ -88,7 +86,7 @@ const PostgresForm: FC<{
 
     return (
         <>
-            <Stack style={{ marginTop: '8px' }}>
+            <Stack mt="xs">
                 <TextInput
                     label="Host"
                     description="This is the host where the database is running."
@@ -133,21 +131,29 @@ const PostgresForm: FC<{
                     disabled={disabled}
                 />
                 <FormSection isOpen={isOpen} name="advanced">
-                    <Stack style={{ marginTop: '8px' }}>
-                        <BooleanSwitch
-                            name="warehouse.requireUserCredentials"
-                            {...form.getInputProps(
-                                'warehouse.requireUserCredentials',
-                                {
-                                    type: 'checkbox',
-                                },
-                            )}
-                            label="Require users to provide their own credentials"
-                            disabled={disabled}
-                            defaultChecked={
-                                PostgresDefaultValues.requireUserCredentials
-                            }
-                        />
+                    <Stack mt="xs">
+                        {isProjectExtraConnection &&
+                        inheritsPrimaryCredentialRequirement ? (
+                            <Text size="sm" c="dimmed">
+                                Require users to provide their own credentials
+                                follows the primary connection.
+                            </Text>
+                        ) : (
+                            <BooleanSwitch
+                                name="warehouse.requireUserCredentials"
+                                {...form.getInputProps(
+                                    'warehouse.requireUserCredentials',
+                                    {
+                                        type: 'checkbox',
+                                    },
+                                )}
+                                label="Require users to provide their own credentials"
+                                disabled={disabled}
+                                defaultChecked={
+                                    PostgresDefaultValues.requireUserCredentials
+                                }
+                            />
+                        )}
                         <NumberInput
                             name="warehouse.port"
                             {...form.getInputProps('warehouse.port')}
@@ -170,6 +176,7 @@ const PostgresForm: FC<{
                                     system should send a TCP keepalive message
                                     to the client. You can see more details in{' '}
                                     <Anchor
+                                        inherit
                                         target="_blank"
                                         href="https://postgresqlco.nf/doc/en/param/tcp_keepalives_idle/"
                                         rel="noreferrer"
@@ -192,6 +199,7 @@ const PostgresForm: FC<{
                                     This controls the Postgres "search path".
                                     You can see more details in{' '}
                                     <Anchor
+                                        inherit
                                         target="_blank"
                                         href="https://docs.getdbt.com/reference/warehouse-profiles/postgres-profile#search_path"
                                         rel="noreferrer"
@@ -205,6 +213,7 @@ const PostgresForm: FC<{
                         />
 
                         <Select
+                            allowDeselect={false}
                             name="warehouse.sslmode"
                             {...form.getInputProps('warehouse.sslmode')}
                             defaultValue={PostgresDefaultValues.sslmode}
@@ -215,6 +224,7 @@ const PostgresForm: FC<{
                                     databases using SSL. You can see more
                                     details in{' '}
                                     <Anchor
+                                        inherit
                                         target="_blank"
                                         href="https://docs.getdbt.com/reference/warehouse-profiles/postgres-profile#sslmode"
                                         rel="noreferrer"
@@ -296,21 +306,7 @@ const PostgresForm: FC<{
                             {...form.getInputProps('warehouse.role')}
                         />
 
-                        {isTimezoneSupportEnabled && (
-                            <TimeZonePicker
-                                size="sm"
-                                maw="100%"
-                                label="Data timezone"
-                                description="The timezone your warehouse stores ambiguous timestamps in. Defaults to UTC if not set."
-                                searchable
-                                clearable
-                                placeholder="Not set (uses warehouse default)"
-                                disabled={disabled}
-                                {...form.getInputProps(
-                                    'warehouse.dataTimezone',
-                                )}
-                            />
-                        )}
+                        <DataTimezoneField disabled={disabled} />
                         <StartOfWeekSelect disabled={disabled} />
 
                         <NumberInput
@@ -341,7 +337,7 @@ const PostgresForm: FC<{
                             isOpen={showSshTunnelConfiguration}
                             name="ssh-config"
                         >
-                            <Stack style={{ marginBottom: '8px' }}>
+                            <Stack mb="xs">
                                 <TextInput
                                     label="SSH Remote Host"
                                     disabled={disabled}
@@ -350,6 +346,8 @@ const PostgresForm: FC<{
                                         'warehouse.sshTunnelHost',
                                     )}
                                 />
+
+                                <SshStaticIpHint />
 
                                 <NumberInput
                                     name="warehouse.sshTunnelPort"
@@ -372,53 +370,31 @@ const PostgresForm: FC<{
                                     )}
                                 />
 
-                                {sshTunnelPublicKey && (
-                                    <TextInput
-                                        name="warehouse.sshTunnelPublicKey"
-                                        {...form.getInputProps(
-                                            'warehouse.sshTunnelPublicKey',
-                                        )}
-                                        label="Generated SSH Public Key"
-                                        readOnly={true}
-                                        disabled={disabled}
-                                        rightSection={
-                                            <>
-                                                <CopyButton
-                                                    value={sshTunnelPublicKey}
-                                                >
-                                                    {({ copied, copy }) => (
-                                                        <Tooltip
-                                                            label={
-                                                                copied
-                                                                    ? 'Copied'
-                                                                    : 'Copy'
-                                                            }
-                                                            withArrow
-                                                            position="right"
-                                                        >
-                                                            <ActionIcon
-                                                                color={
-                                                                    copied
-                                                                        ? 'teal'
-                                                                        : 'gray'
-                                                                }
-                                                                onClick={copy}
-                                                            >
-                                                                <MantineIcon
-                                                                    icon={
-                                                                        copied
-                                                                            ? IconCheck
-                                                                            : IconCopy
-                                                                    }
-                                                                />
-                                                            </ActionIcon>
-                                                        </Tooltip>
-                                                    )}
-                                                </CopyButton>
-                                            </>
-                                        }
-                                    />
-                                )}
+                                <TextInput
+                                    name="warehouse.sshTunnelPublicKey"
+                                    {...form.getInputProps(
+                                        'warehouse.sshTunnelPublicKey',
+                                    )}
+                                    value={sshTunnelPublicKey ?? ''}
+                                    label="Generated SSH Public Key"
+                                    description="Generate a key and add it to your SSH host before saving."
+                                    placeholder="No key generated yet"
+                                    readOnly={true}
+                                    disabled={disabled}
+                                    rightSectionPointerEvents="all"
+                                    rightSection={
+                                        sshTunnelPublicKey ? (
+                                            <CopyActionIcon
+                                                value={sshTunnelPublicKey}
+                                                tooltipPosition="right"
+                                                aria-label="Copy SSH tunnel public key"
+                                                onMouseDown={(event) =>
+                                                    event.preventDefault()
+                                                }
+                                            />
+                                        ) : undefined
+                                    }
+                                />
                                 <Button
                                     onClick={() => mutate()}
                                     loading={isLoading}

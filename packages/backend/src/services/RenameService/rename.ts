@@ -29,6 +29,7 @@ import {
     SchedulerAndTargets,
     TableCalculationTemplateType,
     type ConditionalFormattingConfig,
+    type DataAppVizChartConfig,
     type SankeyChartConfig,
 } from '@lightdash/common';
 
@@ -46,23 +47,43 @@ export const createRenameFactory = ({
     isPrefix,
     fromFieldName,
     toFieldName,
-}: NameChanges & { isPrefix: boolean }) => {
+    protectedModelNames = [],
+}: NameChanges & { isPrefix: boolean; protectedModelNames?: string[] }) => {
     let replaceId: (str: string) => string;
     let replaceReference: (str: string) => string;
     let replaceString: (str: string) => string;
     let replaceFieldReference: (str: string) => string;
     let replaceFieldName: (str: string) => string;
     let replaceDotFieldId: (str: string) => string;
+    // When the new model name extends the old one (e.g. `orders` -> `orders_restricted`),
+    // a naive prefix replace re-matches its own output, so re-running the rename stacks
+    // the suffix (`orders_restricted_restricted_...`). Guard the prefix replacers below so
+    // they skip already-renamed values, keeping model renames idempotent.
+    const newNameExtendsOld = isPrefix && to.startsWith(`${from}_`);
     if (isPrefix) {
+        const protectedPrefixes = [
+            ...(newNameExtendsOld ? [`${to}_`] : []),
+            ...protectedModelNames
+                .filter((modelName) => modelName.startsWith(`${from}_`))
+                .map((modelName) => `${modelName}_`),
+        ];
+        const isProtectedId = (str: string) =>
+            protectedPrefixes.some((prefix) => str.startsWith(prefix));
         replaceId = (str: string) =>
-            str.replace(new RegExp(`^${from}_`, 'g'), `${to}_`); // table prefix (eg: payment_)
+            isProtectedId(str)
+                ? str
+                : str.replace(new RegExp(`^${from}_`, 'g'), `${to}_`);
         replaceReference = (str: string) =>
             str.replace(
                 new RegExp(`\\$\\{${fromReference}\\.`, 'g'),
                 `\${${toReference}.`,
             ); // SQL normally uses "." on references
         replaceString = (str: string) =>
-            str.replace(new RegExp(`${from}_`, 'g'), `${to}_`);
+            str.replace(
+                new RegExp(`\\b${from}_`, 'g'),
+                (match, offset: number) =>
+                    isProtectedId(str.slice(offset)) ? match : `${to}_`,
+            );
         replaceDotFieldId = (str: string) =>
             str.replace(new RegExp(`^${from}\\.`, 'g'), `${to}.`);
         replaceFieldReference = (str: string) => str; // table prefix (eg: payment_)
@@ -121,7 +142,10 @@ export const createRenameFactory = ({
             });
             return Object.assign({}, ...keyValues);
         },
-        replaceFull: (str: string) => str.replaceAll(from, to), // Full name replace, used in tables
+        replaceFull: (str: string) =>
+            newNameExtendsOld && str === to
+                ? str // already renamed
+                : str.replaceAll(from, to), // Full name replace, used in tables
         replaceList: (list: string[]) => list.map((item) => replaceId(item)),
         replaceOptionalList: (list: string[] | undefined) =>
             list ? list.map((item) => replaceId(item)) : undefined,
@@ -488,6 +512,28 @@ export const renameChartConfigType = (
                 },
             };
         }
+
+        case ChartType.DATA_APP_VIZ: {
+            const dataAppVizConfig = chartConfig as DataAppVizChartConfig;
+            if (!dataAppVizConfig.config) return dataAppVizConfig;
+            // Mapping keys are the viz's internal field names; only query ids change.
+            return {
+                ...dataAppVizConfig,
+                config: {
+                    ...dataAppVizConfig.config,
+                    fieldMapping: Object.fromEntries(
+                        Object.entries(
+                            dataAppVizConfig.config.fieldMapping,
+                        ).map(([field, binding]) => [
+                            field,
+                            Array.isArray(binding)
+                                ? binding.map(replaceId)
+                                : replaceId(binding),
+                        ]),
+                    ),
+                },
+            };
+        }
         default:
             assertUnreachable(
                 chartType,
@@ -538,6 +584,7 @@ export const renameFilters = (
     filters: Filters,
     replaceModelPrefix: (str: string) => string,
 ): Filters => ({
+    ...filters,
     dimensions: filters.dimensions
         ? (renameFilterGroups(
               filters.dimensions,
@@ -589,6 +636,8 @@ const renameDashboardFilters = (
     filters: DashboardFilters,
     methods: ReturnType<typeof createRenameFactory>,
 ): DashboardFilters => ({
+    // Keep key order stable so unchanged filters serialize identically.
+    ...filters,
     dimensions: renameDashboardFilterRules(filters.dimensions, methods),
     metrics: renameDashboardFilterRules(filters.metrics, methods),
     tableCalculations: renameDashboardFilterRules(
@@ -627,12 +676,13 @@ export const renameMetricQuery = (
                         tc.template.fieldId && {
                             fieldId: replaceId(tc.template.fieldId),
                         }),
-                    ...('orderBy' in tc.template && {
-                        orderBy: tc.template.orderBy.map((o) => ({
-                            ...o,
-                            fieldId: replaceId(o.fieldId),
-                        })),
-                    }),
+                    ...('orderBy' in tc.template &&
+                        tc.template.orderBy && {
+                            orderBy: tc.template.orderBy.map((o) => ({
+                                ...o,
+                                fieldId: replaceId(o.fieldId),
+                            })),
+                        }),
                     ...('partitionBy' in tc.template && tc.template.partitionBy
                         ? {
                               partitionBy:
@@ -658,6 +708,9 @@ export const renameMetricQuery = (
             table: replaceFull(am.table),
             baseDimensionName: am.baseDimensionName
                 ? replaceFieldName(am.baseDimensionName)
+                : undefined,
+            baseMetricName: am.baseMetricName
+                ? replaceFieldName(am.baseMetricName)
                 : undefined,
             sql: replaceFieldReference(am.sql), // This reference can contain a ${TABLE} too
         })),
@@ -744,6 +797,15 @@ const buildModelNameChecker = (searchTerms: string[]) => (model: Object) => {
     return searchTerms.some((term) => term && stringified.includes(term));
 };
 
+const getChartModelNames = (chart: SavedChartDAO): string[] => [
+    chart.tableName,
+    ...(chart.metricQuery.additionalMetrics?.map((metric) => metric.table) ??
+        []),
+    ...(chart.metricQuery.customDimensions?.map(
+        (dimension) => dimension.table,
+    ) ?? []),
+];
+
 export const renameSavedChart = ({
     type,
     chart,
@@ -778,6 +840,7 @@ export const renameSavedChart = ({
     const renameMethods = createRenameFactory({
         ...nameChanges,
         isPrefix,
+        protectedModelNames: getChartModelNames(chart),
     });
     const { replaceList } = renameMethods;
 
@@ -788,10 +851,14 @@ export const renameSavedChart = ({
     }
 
     if (containsModelName(chart.metricQuery)) {
-        updatedChart.metricQuery = renameMetricQuery(
-            chart.metricQuery,
-            renameMethods,
-        );
+        updatedChart.metricQuery = renameMetricQuery(chart.metricQuery, {
+            ...renameMethods,
+            // Chart explore/table identities must not match substrings of other models.
+            ...(isPrefix && {
+                replaceFull: (tableName: string) =>
+                    tableName === nameChanges.from ? nameChanges.to : tableName,
+            }),
+        });
     }
 
     if (containsModelName(chart.chartConfig)) {
@@ -808,6 +875,9 @@ export const renameSavedChart = ({
     if (chart.pivotConfig && containsModelName(chart.pivotConfig)) {
         updatedChart.pivotConfig = {
             columns: replaceList(updatedChart.pivotConfig?.columns || []),
+            ...(updatedChart.pivotConfig?.rows && {
+                rows: replaceList(updatedChart.pivotConfig.rows),
+            }),
         };
     }
 
@@ -826,8 +896,6 @@ export const renameDashboard = (
     validate: boolean = false,
 ): { updatedDashboard: DashboardDAO; hasChanges: boolean } => {
     const isPrefix = type === RenameType.MODEL;
-
-    let hasChanges = false;
 
     const searchTerms = isPrefix
         ? [
@@ -850,7 +918,6 @@ export const renameDashboard = (
     const updatedDashboard = { ...dashboard };
 
     if (containsModelName(dashboard.filters)) {
-        hasChanges = true;
         updatedDashboard.filters = renameDashboardFilters(
             dashboard.filters,
             renameMethods,
@@ -866,6 +933,8 @@ export const renameDashboard = (
             nameChanges,
         );
 
+    const hasChanges =
+        JSON.stringify(dashboard) !== JSON.stringify(updatedDashboard);
     return { updatedDashboard, hasChanges };
 };
 
@@ -874,6 +943,7 @@ export const renameAlert = (
     alert: SchedulerAndTargets,
     nameChanges: NameChanges,
     validate: boolean = false,
+    chart: SavedChartDAO | null = null,
 ): { updatedAlert: SchedulerAndTargets; hasChanges: boolean } => {
     const isPrefix = type === RenameType.MODEL;
 
@@ -888,11 +958,10 @@ export const renameAlert = (
     const { replaceId } = createRenameFactory({
         ...nameChanges,
         isPrefix,
+        protectedModelNames: chart ? getChartModelNames(chart) : [],
     });
-    let hasChanges = false;
     const updatedAlert = { ...alert };
     if (containsModelName(alert)) {
-        hasChanges = true;
         updatedAlert.thresholds = alert.thresholds.map((t) => ({
             ...t,
             fieldId: replaceId(t.fieldId),
@@ -902,6 +971,7 @@ export const renameAlert = (
     if (validate)
         validateRename(alert, updatedAlert, alert.name, 'alert', nameChanges);
 
+    const hasChanges = JSON.stringify(alert) !== JSON.stringify(updatedAlert);
     return { updatedAlert, hasChanges };
 };
 
@@ -928,11 +998,8 @@ export const renameDashboardScheduler = (
         ...nameChanges,
         isPrefix,
     });
-    let hasChanges = false;
     const updatedDashboardScheduler = { ...dashboardScheduler };
     if (containsModelName(dashboardScheduler)) {
-        hasChanges = true;
-
         const updateTarget = (target: DashboardFieldTarget) => {
             /* sample target filter:
                 "target": {
@@ -977,5 +1044,8 @@ export const renameDashboardScheduler = (
             nameChanges,
         );
 
+    const hasChanges =
+        JSON.stringify(dashboardScheduler) !==
+        JSON.stringify(updatedDashboardScheduler);
     return { updatedDashboardScheduler, hasChanges };
 };

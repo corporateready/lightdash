@@ -1,0 +1,1446 @@
+import { z } from 'zod';
+import type { ApiSuccess } from '../../types/api/success';
+import type { PullRequestProvider } from '../../types/gitIntegration';
+import type { MetricQuery } from '../../types/metricQuery';
+import type { QueryHistoryStatus } from '../../types/queryHistory';
+import type { AiAgentDocumentStructuredSummary } from './documentTypes';
+import {
+    aiProjectContextTypedObjectRefSchema,
+    projectContextEntryKinds,
+    type AiProjectContextObjectRef,
+} from './projectContext';
+import type { AiAgentReviewClassifierEventType } from './requestTypes';
+
+export type AiAgentReviewClassifierSubject = {
+    type: 'turn_review';
+    assistantPromptUuid: string;
+    threadUuid: string;
+    agentUuid: string;
+    projectUuid: string;
+    organizationUuid: string;
+};
+
+export type AiAgentInteractionSource = 'app' | 'slack';
+
+export type AiAgentTurnSignalSourceRef =
+    | {
+          source: 'app';
+          threadUuid: string;
+          promptUuid: string;
+          appUrl: string | null;
+      }
+    | {
+          source: 'slack';
+          channelId: string;
+          threadTs: string | null;
+          messageTs: string;
+          slackPermalink: string | null;
+      };
+
+export type AiAgentTurnSignal =
+    | 'normal_refinement'
+    | 'implicit_correction'
+    | 'explicit_dispute'
+    | 'retry_after_failure'
+    | 'output_shape_correction'
+    | 'new_question'
+    | 'acceptance_or_continuation'
+    | 'product_capability_request'
+    | 'human_intervention'
+    | 'standing_instruction'
+    | 'ambiguous';
+
+export type AiAgentImplicitSignalSource =
+    | 'next_user_correction'
+    | 'next_user_dispute'
+    | 'next_user_retry'
+    | 'output_shape_correction'
+    | 'tool_error'
+    | 'assistant_no_answer'
+    | 'product_capability_request'
+    | 'human_intervention'
+    | 'standing_instruction';
+
+export type AiAgentReviewClassifierConfidence = 'low' | 'medium' | 'high';
+
+export type AiAgentRootCause =
+    | 'semantic_layer'
+    | 'project_context'
+    | 'agent_configuration'
+    | 'product_capability'
+    | 'runtime_reliability'
+    | 'feedback_quality'
+    | 'not_a_failure'
+    | 'ambiguous';
+
+// Root causes the judge keeps assigning but that are never surfaced as issues:
+// a Lightdash capability gap is not something a customer can action on their
+// board. Findings are still classified and persisted for internal analysis.
+export const HIDDEN_AI_AGENT_REVIEW_ROOT_CAUSES: readonly AiAgentRootCause[] = [
+    'product_capability',
+];
+
+export const isHiddenAiAgentReviewRootCause = (
+    rootCause: AiAgentRootCause | null,
+): boolean =>
+    rootCause !== null &&
+    HIDDEN_AI_AGENT_REVIEW_ROOT_CAUSES.includes(rootCause);
+
+export const getVisibleAiAgentReviewRootCauses = (
+    rootCauses: AiAgentRootCause[],
+): AiAgentRootCause[] =>
+    rootCauses.filter(
+        (rootCause) => !isHiddenAiAgentReviewRootCause(rootCause),
+    );
+
+export type AiAgentFixTarget =
+    | 'semantic_yaml_patch'
+    | 'project_context_rule'
+    | 'agent_configuration_change'
+    | 'dbt_modeling_ticket'
+    | 'semantic_layer_ticket'
+    | 'product_capability_ticket'
+    | 'runtime_reliability_ticket'
+    | 'feedback_needed'
+    | 'no_action';
+
+export type AiAgentConfigurationSetting =
+    | 'instructions'
+    | 'knowledge_documents'
+    | 'data_access'
+    | 'self_improvement'
+    | 'sql_mode'
+    | 'mcp_servers'
+    | 'explore_tags'
+    | 'space_access'
+    | 'user_or_group_access'
+    | 'skills'
+    | 'unknown';
+
+export type AiAgentAvailableCapability =
+    | 'semantic_query'
+    | 'chart_generation'
+    | 'dashboard_generation'
+    | 'data_value_search'
+    | 'chart_data_access'
+    | 'sql_runner'
+    | 'context_improvement'
+    | 'semantic_change_proposals'
+    | 'content_editing'
+    | 'mcp_tools';
+
+export type AiAgentKnowledgeDocumentSnapshot = {
+    uuid: string;
+    name: string;
+    updatedAt: string;
+    summary: AiAgentDocumentStructuredSummary;
+};
+
+export type AiAgentMcpServerSnapshot = {
+    name: string;
+    enabledToolNames: string[];
+};
+
+export type AiAgentConfigSnapshot = {
+    capturedAt: string;
+    agentUpdatedAt: string | null;
+    settings: AiAgentConfigurationSetting[];
+    availableCapabilities: AiAgentAvailableCapability[];
+    instructionHash: string | null;
+    instructionSummary: string | null;
+    knowledgeDocuments: AiAgentKnowledgeDocumentSnapshot[];
+    mcpServers: AiAgentMcpServerSnapshot[];
+    skills: AiAgentSkillSnapshot[];
+};
+
+// Skills already bound to the agent, so the judge never proposes a duplicate.
+export type AiAgentSkillSnapshot = {
+    name: string;
+    description: string;
+};
+
+const normalizeForHash = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+        return value
+            .map(normalizeForHash)
+            .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.keys(value)
+            .sort()
+            .reduce<Record<string, unknown>>((acc, key) => {
+                const normalized = normalizeForHash(
+                    (value as Record<string, unknown>)[key],
+                );
+                if (normalized !== undefined) {
+                    acc[key] = normalized;
+                }
+                return acc;
+            }, {});
+    }
+
+    return value;
+};
+
+const hashStringToBase36 = (
+    input: string,
+    modulus: number,
+    base: number,
+): string => {
+    let hash = 0;
+    for (let i = 0; i < input.length; i += 1) {
+        hash = (hash * base + input.charCodeAt(i)) % modulus;
+    }
+
+    return hash.toString(36).padStart(8, '0');
+};
+
+const hashCanonicalJson = (input: string): string =>
+    [
+        hashStringToBase36(input, 2_147_483_647, 31),
+        hashStringToBase36(input, 2_147_483_629, 37),
+    ].join('');
+
+export const getAiAgentConfigSnapshotHash = (
+    snapshot: AiAgentConfigSnapshot,
+): string => {
+    const canonicalJson = JSON.stringify(normalizeForHash(snapshot));
+    return `ai_agent_review_config_snapshot:${hashCanonicalJson(canonicalJson)}`;
+};
+
+export type AiAgentRuntimeContextSnapshot = {
+    userUuid: string | null;
+    canRunSql: boolean;
+    canManageAgent: boolean;
+};
+
+export type AiAgentModelMetadata = {
+    provider: string | null;
+    model: string | null;
+};
+
+export type AiAgentEvidenceWindow = {
+    userPromptUuid: string;
+    explicitFeedbackUuid: string | null;
+    nextUserPromptUuid: string | null;
+    previousPromptUuids: string[];
+};
+
+// Refs are by name only — the source file path is resolved from cached_explores at writeback time, not by the LLM.
+export type AiAgentSemanticTargetRef =
+    | { type: 'model'; modelName: string }
+    | {
+          type: 'explore';
+          modelName: string;
+          exploreName: string;
+      }
+    | {
+          type: 'join';
+          modelName: string;
+          joinName: string;
+          exploreName?: string;
+      }
+    | {
+          type: 'dimension';
+          modelName: string;
+          dimensionName: string;
+      }
+    | {
+          type: 'metric';
+          modelName: string;
+          metricName: string;
+          dimensionName?: string;
+      }
+    | {
+          type: 'additional_dimension';
+          modelName: string;
+          parentDimensionName: string;
+          dimensionName: string;
+      }
+    | {
+          type: 'required_filter';
+          modelName: string;
+          exploreName: string;
+          fieldName: string;
+      }
+    | {
+          type: 'ai_hint';
+          modelName: string;
+          targetType: 'model' | 'dimension' | 'metric';
+          targetName: string;
+      };
+
+export type AiAgentTargetRef =
+    | AiAgentSemanticTargetRef
+    | { type: 'agent'; agentUuid: string }
+    | { type: 'agent_config'; setting: AiAgentConfigurationSetting }
+    | { type: 'product_capability'; capabilityKey: string }
+    | { type: 'runtime'; key: string }
+    // Content the issue was filed from (manual issues): keeps chart/dashboard
+    // provenance so the board and writeback know what the issue is about.
+    | {
+          type: 'content';
+          chartUuid: string | null;
+          dashboardUuid: string | null;
+          tileUuid: string | null;
+      };
+
+export type AiAgentEvidenceExcerpt = {
+    source:
+        | 'user_prompt'
+        | 'assistant_answer'
+        | 'next_user_prompt'
+        | 'conversation_context'
+        | 'tool_call'
+        | 'tool_result'
+        | 'agent_config';
+    text: string;
+    redacted: boolean;
+};
+
+export type AiAgentRecommendationAction =
+    | 'update_semantic_yaml'
+    | 'update_agent_instructions'
+    | 'add_knowledge_document'
+    | 'enable_data_access'
+    | 'enable_sql_mode'
+    | 'enable_self_improvement'
+    | 'configure_mcp_server'
+    | 'adjust_explore_tags'
+    | 'update_access'
+    | 'route_to_product_work'
+    | 'request_more_evidence'
+    | 'create_skill'
+    | 'no_action';
+
+export type AiAgentRecommendation = {
+    actionType: AiAgentRecommendationAction;
+    title: string;
+    rationale: string;
+    targetRefs: AiAgentTargetRef[];
+};
+
+export type AiAgentReviewClassifierTurnSignal = {
+    subject: AiAgentReviewClassifierSubject;
+    interactionSource: AiAgentInteractionSource;
+    sourceRef: AiAgentTurnSignalSourceRef;
+    signal: AiAgentTurnSignal;
+    implicitSignalSources: AiAgentImplicitSignalSource[];
+    confidence: AiAgentReviewClassifierConfidence;
+    promotedToFinding: boolean;
+    promotionReason: string | null;
+    toolEvidenceRefs: string[];
+    runtimeContextSnapshot: AiAgentRuntimeContextSnapshot;
+    modelMetadata: AiAgentModelMetadata;
+};
+
+export type AiAgentFindingReviewStatus =
+    | 'unreviewed'
+    | 'accepted'
+    | 'rejected'
+    | 'needs_more_evidence';
+
+export type AiAgentReviewItemStatus =
+    | 'triage'
+    | 'open'
+    | 'in_progress'
+    | 'resolved'
+    | 'dismissed'
+    | 'duplicate';
+
+export type AiAgentReviewItemDismissedReason =
+    | 'not_actionable'
+    | 'expected_behavior'
+    | 'duplicate'
+    | 'low_confidence'
+    | 'other';
+
+// Existing item shown to the judge so it can attach a recurring finding to an
+// open card instead of splitting it into a new one. `key` is a server-minted
+// opaque handle ("item_1"); fingerprints are never exposed to the LLM.
+export type AiAgentReviewItemDedupCandidate = {
+    key: string;
+    title: string;
+    status: AiAgentReviewItemStatus;
+    dismissedReason: AiAgentReviewItemDismissedReason | null;
+    primaryRootCause: AiAgentRootCause;
+    objectSummary: string | null;
+};
+
+// A recurring finding reopens a closed item so its "fixed → regressed" history
+// stays on one card — except items dismissed as expected behavior, which stay
+// dismissed rather than clawing back open on every recurrence.
+export const shouldReopenReviewItem = (
+    status: AiAgentReviewItemStatus,
+    dismissedReason: AiAgentReviewItemDismissedReason | null,
+): boolean => {
+    if (status === 'resolved') {
+        return true;
+    }
+    if (status === 'dismissed') {
+        return dismissedReason !== 'expected_behavior';
+    }
+    return false;
+};
+
+export type AiAgentReviewItemOwnerType =
+    | 'semantic_layer_owner'
+    | 'agent_admin'
+    | 'product'
+    | 'support'
+    | 'unknown';
+
+export type AiAgentReviewItemPrState = 'open' | 'merged' | 'closed';
+
+export type AiAgentReviewItemWritebackStatus =
+    | 'queued'
+    | 'running'
+    | 'completed'
+    | 'failed';
+
+export type AiAgentReviewItemWritebackStrategy =
+    | 'semantic_layer'
+    | 'project_context';
+
+export type AiAgentReviewItemWritebackBlockedReason =
+    | 'reviews_disabled'
+    | 'unsupported_root_cause'
+    | 'missing_project'
+    | 'missing_agent'
+    | 'missing_project_context_entry'
+    | 'project_context_disabled'
+    | 'insufficient_source_code_access'
+    | 'unsupported_source_control'
+    | 'git_app_not_installed'
+    | 'bitbucket_token_missing'
+    | 'missing_writeback_config'
+    | 'pull_request_open'
+    | 'source_thread_writeback_exists'
+    | 'terminal_state'
+    | 'writeback_in_progress';
+
+export type AiAgentReviewItemWritebackEligibility =
+    | {
+          eligible: true;
+          provider: PullRequestProvider;
+          strategy: AiAgentReviewItemWritebackStrategy;
+          reason: null;
+      }
+    | {
+          eligible: false;
+          provider: PullRequestProvider | null;
+          strategy: AiAgentReviewItemWritebackStrategy | null;
+          reason: AiAgentReviewItemWritebackBlockedReason;
+      };
+
+export type AiAgentReviewRemediationStatus =
+    | 'queued'
+    | 'running'
+    | 'pr_open'
+    | 'preview_ready'
+    | 'resolved'
+    | 'failed';
+
+export type AiAgentReviewRemediation = {
+    uuid: string;
+    fingerprint: string;
+    organizationUuid: string;
+    sourceFindingUuid: string | null;
+    sourcePromptUuid: string | null;
+    sourceThreadUuid: string | null;
+    sourceProjectUuid: string;
+    sourceAgentUuid: string;
+    workThreadUuid: string | null;
+    pullRequestUuid: string | null;
+    linkedPrUrl: string | null;
+    previewProjectUuid: string | null;
+    previewAgentUuid: string | null;
+    previewThreadUuid: string | null;
+    status: AiAgentReviewRemediationStatus;
+    errorMessage: string | null;
+    retryPrompt: string | null;
+    createdByUserUuid: string | null;
+    resolvedByUserUuid: string | null;
+    resolvedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+};
+
+const aiAgentConfigurationSettingSchema = z.enum([
+    'instructions',
+    'knowledge_documents',
+    'data_access',
+    'self_improvement',
+    'sql_mode',
+    'mcp_servers',
+    'explore_tags',
+    'space_access',
+    'user_or_group_access',
+    'skills',
+    'unknown',
+]);
+
+const aiAgentJudgeTargetRefSchema = z.object({
+    type: z.enum([
+        'model',
+        'explore',
+        'join',
+        'dimension',
+        'metric',
+        'additional_dimension',
+        'required_filter',
+        'ai_hint',
+        'agent',
+        'agent_config',
+        'product_capability',
+        'runtime',
+    ]),
+    label: z.string(),
+    modelName: z.string().nullable(),
+    fieldName: z.string().nullable(),
+    setting: aiAgentConfigurationSettingSchema.nullable(),
+    key: z.string().nullable(),
+});
+
+// Structured project_context living-document entry the judge emits for
+// project_context findings. `id` is required when op === 'update' (the entry
+// it reviewed was already injected into the turn, so it can reference the id).
+export const aiAgentJudgeProjectContextEntrySchema = z
+    .object({
+        op: z.enum(['create', 'update']),
+        id: z.string().min(1).nullable(),
+        kind: z.enum(projectContextEntryKinds),
+        content: z.string(),
+        terms: z.array(z.string()),
+        objects: z.array(aiProjectContextTypedObjectRefSchema),
+    })
+    .superRefine((entry, ctx) => {
+        if (entry.op === 'update' && !entry.id) {
+            ctx.addIssue({
+                code: 'custom',
+                message: 'id is required when op is update',
+                path: ['id'],
+            });
+        }
+    });
+
+// Lenient parse for persisted findings, which can predate typed object refs:
+// drops the whole `objects` array when it isn't a valid typed-ref array,
+// mirroring loadProjectContextFile's legacy handling.
+export const persistedAiAgentJudgeProjectContextEntrySchema = z.preprocess(
+    (entry) => {
+        if (
+            typeof entry !== 'object' ||
+            entry === null ||
+            Array.isArray(entry)
+        ) {
+            return entry;
+        }
+        const candidate = entry as Record<string, unknown>;
+        return z
+            .array(aiProjectContextTypedObjectRefSchema)
+            .safeParse(candidate.objects).success
+            ? entry
+            : { ...candidate, objects: [] };
+    },
+    aiAgentJudgeProjectContextEntrySchema,
+);
+
+// Concrete type (not z.infer) so tsoa can resolve it in API responses. The
+// string union preserves persisted findings written before typed refs.
+export type AiAgentJudgeProjectContextEntry = {
+    op: 'create' | 'update';
+    id: string | null;
+    kind: 'definition' | 'context';
+    content: string;
+    terms: string[];
+    objects: AiProjectContextObjectRef[];
+};
+
+// Signals that describe a healthy turn — mutually exclusive with promotion.
+const NOT_A_FAILURE_SIGNALS: ReadonlySet<string> = new Set([
+    'normal_refinement',
+    'output_shape_correction',
+    'new_question',
+    'acceptance_or_continuation',
+]);
+
+const aiAgentReviewClassifierJudgeOutputBaseSchema = z.object({
+    signal: z.enum([
+        'normal_refinement',
+        'implicit_correction',
+        'explicit_dispute',
+        'retry_after_failure',
+        'output_shape_correction',
+        'new_question',
+        'acceptance_or_continuation',
+        'product_capability_request',
+        'human_intervention',
+        'standing_instruction',
+        'ambiguous',
+    ]),
+    implicitSignalSources: z.array(
+        z.enum([
+            'next_user_correction',
+            'next_user_dispute',
+            'next_user_retry',
+            'output_shape_correction',
+            'tool_error',
+            'assistant_no_answer',
+            'product_capability_request',
+            'human_intervention',
+            'standing_instruction',
+        ]),
+    ),
+    confidence: z.enum(['low', 'medium', 'high']),
+    promotedToFinding: z.boolean(),
+    promotionReason: z.string().nullable(),
+    matchedExistingItemKey: z.string().nullable(),
+    primaryRootCause: z.enum([
+        'semantic_layer',
+        'project_context',
+        'agent_configuration',
+        'product_capability',
+        'runtime_reliability',
+        'feedback_quality',
+        'not_a_failure',
+        'ambiguous',
+    ]),
+    secondaryRootCauses: z.array(
+        z.enum([
+            'semantic_layer',
+            'project_context',
+            'agent_configuration',
+            'product_capability',
+            'runtime_reliability',
+            'feedback_quality',
+            'not_a_failure',
+            'ambiguous',
+        ]),
+    ),
+    subcategories: z.array(z.string()),
+    fixTargets: z.array(
+        z.enum([
+            'semantic_yaml_patch',
+            'project_context_rule',
+            'agent_configuration_change',
+            'dbt_modeling_ticket',
+            'semantic_layer_ticket',
+            'product_capability_ticket',
+            'runtime_reliability_ticket',
+            'feedback_needed',
+            'no_action',
+        ]),
+    ),
+    targetRefs: z.array(aiAgentJudgeTargetRefSchema),
+    agentConfigurationSettings: z.array(aiAgentConfigurationSettingSchema),
+    ownerType: z.enum([
+        'semantic_layer_owner',
+        'agent_admin',
+        'product',
+        'support',
+        'unknown',
+    ]),
+    evidenceExcerpts: z.array(
+        z.object({
+            source: z.enum([
+                'user_prompt',
+                'assistant_answer',
+                'next_user_prompt',
+                'conversation_context',
+                'tool_call',
+                'tool_result',
+                'agent_config',
+            ]),
+            text: z.string(),
+            redacted: z.boolean(),
+        }),
+    ),
+    recommendation: z
+        .object({
+            actionType: z.enum([
+                'update_semantic_yaml',
+                'update_agent_instructions',
+                'add_knowledge_document',
+                'enable_data_access',
+                'enable_sql_mode',
+                'enable_self_improvement',
+                'configure_mcp_server',
+                'adjust_explore_tags',
+                'update_access',
+                'route_to_product_work',
+                'request_more_evidence',
+                'create_skill',
+                'no_action',
+            ]),
+            title: z.string(),
+            rationale: z.string(),
+            targetRefs: z.array(aiAgentJudgeTargetRefSchema),
+        })
+        .nullable(),
+    reviewItem: z.object({
+        title: z.string(),
+        description: z.string(),
+    }),
+});
+
+const judgeOutputRefinement = (
+    output: {
+        promotedToFinding: boolean;
+        primaryRootCause: string;
+        signal: string;
+        recommendation: { actionType: string } | null;
+    },
+    ctx: z.RefinementCtx,
+): void => {
+    if (
+        output.promotedToFinding &&
+        output.primaryRootCause === 'not_a_failure'
+    ) {
+        ctx.addIssue({
+            code: 'custom',
+            message:
+                'promotedToFinding must be false when primaryRootCause is not_a_failure',
+            path: ['promotedToFinding'],
+        });
+    }
+    if (output.promotedToFinding && NOT_A_FAILURE_SIGNALS.has(output.signal)) {
+        ctx.addIssue({
+            code: 'custom',
+            message: `promotedToFinding must be false when signal is ${output.signal}; promoted findings need a failure signal`,
+            path: ['signal'],
+        });
+    }
+    if (
+        output.promotedToFinding &&
+        output.recommendation?.actionType === 'no_action'
+    ) {
+        ctx.addIssue({
+            code: 'custom',
+            message:
+                'promoted findings must carry an actionable recommendation, not no_action',
+            path: ['recommendation', 'actionType'],
+        });
+    }
+};
+
+// LLM-call schema: projectContextEntry is deliberately EXCLUDED. The full
+// schema compiles over the provider's strict-output grammar size limit (the
+// call then fails with "the compiled grammar is too large"), so the entry is
+// emitted via a second small call on the project_context path instead.
+export const aiAgentReviewClassifierJudgeCallOutputSchema =
+    aiAgentReviewClassifierJudgeOutputBaseSchema.superRefine(
+        judgeOutputRefinement,
+    );
+
+// Second-call schema for the project_context path: just the entry.
+export const aiAgentReviewClassifierJudgeProjectContextCallSchema = z.object({
+    projectContextEntry: aiAgentJudgeProjectContextEntrySchema.nullable(),
+});
+
+// Draft skill the judge emits for a create_skill recommendation; prefills the
+// skill editor so the admin only has to review and save.
+export const aiAgentJudgeSkillProposalSchema = z.object({
+    name: z.string().min(1),
+    description: z.string().min(1),
+    instructions: z.string().min(1),
+    // Named inputs the procedure varies on, referenced as $name in the body.
+    arguments: z.array(z.string()),
+    argumentHint: z.string().nullable(),
+});
+
+// Concrete type (not z.infer) so tsoa can resolve it in API responses.
+export type AiAgentJudgeSkillProposal = {
+    name: string;
+    description: string;
+    instructions: string;
+    arguments: string[];
+    argumentHint: string | null;
+};
+
+// Second-call schema for the create_skill path: just the proposal.
+export const aiAgentReviewClassifierJudgeSkillProposalCallSchema = z.object({
+    skillProposal: aiAgentJudgeSkillProposalSchema.nullable(),
+});
+
+// Full judge output as persisted/replayed — the merge of every call. Never
+// pass this to a strict-structured-output LLM call (see grammar note above).
+export const aiAgentReviewClassifierJudgeOutputSchema =
+    aiAgentReviewClassifierJudgeOutputBaseSchema
+        .extend({
+            projectContextEntry:
+                aiAgentJudgeProjectContextEntrySchema.nullable(),
+            skillProposal: aiAgentJudgeSkillProposalSchema.nullable(),
+        })
+        .superRefine(judgeOutputRefinement);
+
+export type AiAgentReviewClassifierJudgeOutput = z.infer<
+    typeof aiAgentReviewClassifierJudgeOutputSchema
+>;
+
+export type AiAgentReviewItem = {
+    uuid: string;
+    fingerprint: string;
+    source: AiAgentReviewItemSource;
+    organizationUuid: string;
+    projectUuid: string | null;
+    agentUuid: string | null;
+    title: string;
+    description: string;
+    primaryRootCause: AiAgentRootCause;
+    priority: AiAgentReviewItemPriority;
+    // Explores/fields the issue is about. For AI findings these come from the
+    // latest finding; for manual issues, from the captured related explores.
+    targetRefs: AiAgentTargetRef[];
+    status: AiAgentReviewItemStatus;
+    dismissedReason: AiAgentReviewItemDismissedReason | null;
+    ownerType: AiAgentReviewItemOwnerType;
+    assignedToUserUuid: string | null;
+    firstSeenAt: Date;
+    lastSeenAt: Date;
+    findingCount: number;
+    statusUpdatedAt: Date;
+    statusUpdatedByUserUuid: string | null;
+    linkedIssueUrl: string | null;
+    linkedJiraIssueUrl?: string | null;
+    linkedPrUrl: string | null;
+    prState: AiAgentReviewItemPrState | null;
+    prWritebackStatus: AiAgentReviewItemWritebackStatus | null;
+    prWritebackMessage: string | null;
+    // Manual board sort key; null = default (last-seen) order.
+    boardPosition: number | null;
+    createdByUserUuid: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+};
+
+export type AiAgentReviewItemSource = 'ai_finding' | 'manual' | 'memory';
+
+export type AiAgentReviewItemPriority =
+    | 'urgent'
+    | 'high'
+    | 'medium'
+    | 'low'
+    | 'none';
+
+export type AiAgentReviewItemSummary = AiAgentReviewItem & {
+    projectContextEntry: AiAgentJudgeProjectContextEntry | null;
+    sourceMemory: { uuid: string; slug: string } | null;
+    nominationReason: string | null;
+    nominator: { name: string | null; email: string | null } | null;
+    /**
+     * Legacy boolean kept for current clients. New clients should use
+     * writebackEligibility for the blocking reason and provider.
+     */
+    writebackEligible: boolean;
+    writebackEligibility: AiAgentReviewItemWritebackEligibility;
+    remediation: AiAgentReviewRemediation | null;
+    latestFinding: {
+        uuid: string;
+        promptUuid: string;
+        threadUuid: string;
+        projectUuid: string;
+        agentUuid: string;
+        subcategories: string[];
+        fixTargets: AiAgentFixTarget[];
+        targetRefs: AiAgentTargetRef[];
+        evidenceExcerpts: AiAgentEvidenceExcerpt[];
+        recommendation: AiAgentRecommendation | null;
+        projectContextEntry: AiAgentJudgeProjectContextEntry | null;
+        skillProposal: AiAgentJudgeSkillProposal | null;
+        createdAt: Date;
+    } | null;
+};
+
+export const getReviewItemProjectContextEntry = (
+    item: AiAgentReviewItemSummary,
+): AiAgentJudgeProjectContextEntry | null =>
+    item.source === 'memory'
+        ? item.projectContextEntry
+        : (item.latestFinding?.projectContextEntry ?? null);
+
+export const getReviewItemSkillProposal = (
+    item: AiAgentReviewItemSummary,
+): AiAgentJudgeSkillProposal | null =>
+    item.latestFinding?.recommendation?.actionType === 'create_skill'
+        ? (item.latestFinding.skillProposal ?? null)
+        : null;
+
+export type ApiAiAgentReviewItemsResponse = ApiSuccess<
+    AiAgentReviewItemSummary[]
+>;
+
+export type UpdateAiAgentReviewItemStatus = {
+    status: AiAgentReviewItemStatus;
+    dismissedReason: AiAgentReviewItemDismissedReason | null;
+    // Optional manual board sort key set on drag-reorder (midpoint between
+    // neighbours). Omitted for plain status changes.
+    boardPosition?: number | null;
+};
+
+export type UpdateAiAgentReviewItemAssignee = {
+    assignedToUserUuid: string | null;
+};
+
+export type CreateAiAgentReviewItem = {
+    title: string;
+    description: string | null;
+    projectUuid: string;
+    agentUuid: string | null;
+    assignedToUserUuid: string | null;
+    primaryRootCause: AiAgentRootCause | null;
+    priority: AiAgentReviewItemPriority;
+    // Explores/fields the issue is about; feeds the manual-issue writeback.
+    targetRefs: AiAgentTargetRef[];
+};
+
+export type UpdateAiAgentReviewItemPriority = {
+    priority: AiAgentReviewItemPriority;
+};
+
+export type CreateAiAgentReviewItemComment = {
+    body: string;
+};
+
+// Persists the board's manual card order: the fingerprints of one lane in their
+// new top-to-bottom order (board_position = array index).
+export type ReorderAiAgentReviewItems = {
+    orderedFingerprints: string[];
+};
+
+export type ApiAiAgentReviewItemResponse = ApiSuccess<AiAgentReviewItemSummary>;
+
+export type PromoteAiAgentMemory = { reason?: string };
+
+export type ApiPromoteAiAgentMemoryResponse = ApiSuccess<
+    Pick<AiAgentReviewItemSummary, 'uuid' | 'fingerprint' | 'status'>
+>;
+
+/**
+ * Preview of the file change a writeback PR would make, computed deterministically
+ * (no PR opened). Only available for the project_context strategy — semantic_layer
+ * runs in a sandbox, so there is no static diff to show before the PR is created.
+ */
+export type AiAgentReviewItemWritebackPreview =
+    | {
+          available: true;
+          fileName: string;
+          before: string;
+          after: string;
+          op: 'create' | 'update';
+          entryId: string;
+          // True when the PR also rewrites a legacy (pre-v2) file as canonical v2.
+          upgradesFileToV2: boolean;
+      }
+    | { available: false };
+
+export type ApiAiAgentReviewItemWritebackPreviewResponse =
+    ApiSuccess<AiAgentReviewItemWritebackPreview>;
+
+export type AiAgentReviewItemPrDiffFile = {
+    path: string;
+    status: string;
+    additions: number;
+    deletions: number;
+    before: string;
+    after: string;
+};
+
+export type AiAgentReviewItemPrDiff = {
+    prUrl: string;
+    files: AiAgentReviewItemPrDiffFile[];
+    totalAdditions: number;
+    totalDeletions: number;
+    truncated: boolean;
+};
+
+export type ApiAiAgentReviewItemPrDiffResponse =
+    ApiSuccess<AiAgentReviewItemPrDiff>;
+
+export type AiAgentReviewRemediationEventDetail =
+    | {
+          eventType: 'finding_opened';
+          payload: {
+              excerpt: string | null;
+              sourceThreadUuid: string | null;
+              sourcePromptUuid: string | null;
+          };
+      }
+    | {
+          eventType: 'writeback_completed';
+          payload: {
+              files: string[];
+              additions: number | null;
+              deletions: number | null;
+          };
+      }
+    | {
+          eventType: 'pr_opened';
+          payload: { prUrl: string; prNumber: number | null };
+      }
+    | {
+          eventType: 'pr_updated';
+          payload: { prUrl: string | null };
+      }
+    | { eventType: 'preview_compiled'; payload: { previewProjectUuid: string } }
+    | {
+          eventType: 'verification_completed';
+          payload: { previewThreadUuid: string };
+      }
+    | { eventType: 'pr_merged'; payload: { prUrl: string } }
+    | { eventType: 'pr_closed'; payload: { prUrl: string } }
+    | { eventType: 'resolved'; payload: Record<string, never> }
+    | { eventType: 'failed'; payload: { errorMessage: string | null } };
+
+export type AiAgentReviewRemediationEventType =
+    AiAgentReviewRemediationEventDetail['eventType'];
+
+export type AiAgentReviewRemediationEvent = {
+    uuid: string;
+    remediationUuid: string | null;
+    occurredAt: Date;
+    createdByUserUuid: string | null;
+} & AiAgentReviewRemediationEventDetail;
+
+export type AiAgentReviewItemEventDetail =
+    | { eventType: 'created'; payload: { rootCause: AiAgentRootCause | null } }
+    | {
+          eventType: 'status_changed';
+          payload: {
+              from: AiAgentReviewItemStatus | null;
+              to: AiAgentReviewItemStatus;
+              dismissedReason: AiAgentReviewItemDismissedReason | null;
+          };
+      }
+    | {
+          eventType: 'assignee_changed';
+          payload: {
+              fromUserUuid: string | null;
+              toUserUuid: string | null;
+          };
+      }
+    | {
+          eventType: 'recurred';
+          payload: { threadUuid: string; promptUuid: string };
+      }
+    | {
+          eventType: 'priority_changed';
+          payload: {
+              from: AiAgentReviewItemPriority;
+              to: AiAgentReviewItemPriority;
+          };
+      }
+    | { eventType: 'comment_added'; payload: { body: string } };
+
+export type AiAgentReviewItemEventType =
+    AiAgentReviewItemEventDetail['eventType'];
+
+export type AiAgentReviewItemEvent = {
+    uuid: string;
+    fingerprint: string;
+    occurredAt: Date;
+    createdByUserUuid: string | null;
+} & AiAgentReviewItemEventDetail;
+
+/** One row of the merged issue activity feed. */
+export type AiAgentReviewActivityEvent =
+    | ({ kind: 'remediation' } & AiAgentReviewRemediationEvent)
+    | ({ kind: 'issue' } & AiAgentReviewItemEvent);
+
+/**
+ * The in-flight step of a remediation, derived from current status + which
+ * events exist — never stored. Renders as the single accented "live" row.
+ */
+export type AiAgentReviewRemediationLiveState =
+    | 'writeback'
+    | 'compiling'
+    | 'verifying';
+
+export type AiAgentReviewItemActivity = {
+    events: AiAgentReviewActivityEvent[];
+    liveState: AiAgentReviewRemediationLiveState | null;
+    /** Streaming progress text for the live row (writeback step messages). */
+    liveMessage: string | null;
+    /**
+     * True when the PR changed after the latest verdict — derived from event
+     * ordering (latest pr_opened/pr_updated/writeback_completed occurred after
+     * the latest verification_completed). Drives the "Retest" prompt.
+     */
+    verdictStale: boolean;
+};
+
+export type ApiAiAgentReviewItemActivityResponse =
+    ApiSuccess<AiAgentReviewItemActivity>;
+
+export type AiAgentReviewSignalSummary = {
+    uuid: string;
+    runUuid: string;
+    promptUuid: string;
+    threadUuid: string;
+    projectUuid: string;
+    agentUuid: string;
+    signal: AiAgentTurnSignal;
+    implicitSignalSources: AiAgentImplicitSignalSource[];
+    confidence: AiAgentReviewClassifierConfidence;
+    promotedToFinding: boolean;
+    promotionReason: string | null;
+    createdAt: Date;
+    runScope: AiAgentReviewClassifierRunScope;
+    prompt: string;
+    responsePreview: string | null;
+    errorMessage: string | null;
+    finding: {
+        uuid: string;
+        reviewItemUuid: string | null;
+        primaryRootCause: AiAgentRootCause;
+        subcategories: string[];
+        fixTargets: AiAgentFixTarget[];
+        evidenceExcerpts: AiAgentEvidenceExcerpt[];
+        recommendation: AiAgentRecommendation | null;
+    } | null;
+};
+
+export type ApiAiAgentReviewSignalsResponse = ApiSuccess<
+    AiAgentReviewSignalSummary[]
+>;
+
+export type AiAgentReviewClassifierRunStatus =
+    | 'queued'
+    | 'running'
+    | 'completed'
+    | 'failed';
+
+export type AiAgentReviewClassifierRunScope =
+    | {
+          type: 'backfill';
+          startedAt: string;
+          endedAt: string;
+          projectUuid?: string;
+          agentUuid?: string;
+          dryRun?: boolean;
+      }
+    | {
+          type: 'live_event';
+          eventType: AiAgentReviewClassifierEventType;
+          promptUuid: string;
+          threadUuid: string;
+          projectUuid: string;
+          agentUuid: string;
+      }
+    | {
+          type: 'manual';
+          requestedByUserUuid: string;
+          filters: Record<string, unknown>;
+      };
+
+export type AiAgentReviewClassifierRun = {
+    uuid: string;
+    organizationUuid: string;
+    status: AiAgentReviewClassifierRunStatus;
+    reviewAgentVersion: string;
+    judgePromptHash: string;
+    agentConfigSnapshotHash: string | null;
+    agentConfigSnapshot: AiAgentConfigSnapshot | null;
+    agentConfigSnapshotAgentUpdatedAt: Date | null;
+    runScope: AiAgentReviewClassifierRunScope;
+    totalTurns: number;
+    processedTurns: number;
+    signalCount: number;
+    findingCount: number;
+    reviewItemCount: number;
+    errorMessage: string | null;
+    completedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+};
+
+export type AiAgentReviewClassifierTurnSnapshot = {
+    promptUuid: string;
+    userPrompt: string;
+    assistantResponse: string | null;
+    errorMessage: string | null;
+    createdAt: Date;
+    respondedAt: Date | null;
+};
+
+export type AiAgentReviewClassifierContextTurn =
+    AiAgentReviewClassifierTurnSnapshot & {
+        relation: 'previous' | 'next' | 'referenced';
+    };
+
+export type AiAgentReviewClassifierTurnCandidate = {
+    subject: AiAgentReviewClassifierSubject;
+    interactionSource: AiAgentInteractionSource;
+    sourceRef: AiAgentTurnSignalSourceRef;
+    targetTurn: AiAgentReviewClassifierTurnSnapshot;
+    contextTurns: AiAgentReviewClassifierContextTurn[];
+    userPrompt: string;
+    assistantResponse: string | null;
+    errorMessage: string | null;
+    humanScore: number | null;
+    humanFeedback: string | null;
+    createdAt: Date;
+    respondedAt: Date | null;
+    nextUserPromptUuid: string | null;
+    nextUserPrompt: string | null;
+    modelMetadata: AiAgentModelMetadata;
+    tokenUsageTotal: number | null;
+    queryHistory: AiAgentReviewClassifierQueryHistorySummary[];
+    supportingEvidence: AiAgentReviewClassifierSupportingEvidence[];
+    toolOutcomes: AiAgentReviewClassifierToolOutcome[];
+    pendingApprovalTimeout: boolean;
+};
+
+// Compact outcome line for every content-mutating / writeback / preview-deploy
+// / MCP tool call in the turn — guaranteed visible to the judge regardless of
+// the relevance-ranked (top-5) supportingEvidence selection.
+export type AiAgentReviewClassifierToolOutcome = {
+    toolCallId: string;
+    toolName: string;
+    // 'unknown' = the tool call has no persisted result (crash, aborted
+    // stream) — the judge must not read it as either success or failure.
+    status: 'success' | 'error' | 'unknown';
+};
+
+export type AiAgentReviewClassifierQueryHistorySummary = {
+    queryUuid: string;
+    status: QueryHistoryStatus;
+    error: string | null;
+    createdAt: Date;
+    totalRowCount: number | null;
+    warehouseExecutionTimeMs: number | null;
+    metricQuery: Pick<
+        MetricQuery,
+        'exploreName' | 'dimensions' | 'metrics' | 'filters' | 'sorts'
+    >;
+};
+
+export type AiAgentReviewClassifierSupportingEvidence = {
+    source: 'tool_trace';
+    toolCallId: string;
+    toolName: string;
+    parentToolCallId: string | null;
+    createdAt: Date;
+    relevanceScore: number;
+    toolArgsPreview: string | null;
+    resultPreview: string | null;
+};
+
+export type AiAgentReviewClassifierSignalFinding = {
+    primaryRootCause: AiAgentRootCause;
+    secondaryRootCauses: AiAgentRootCause[];
+    subcategories: string[];
+    fixTargets: AiAgentFixTarget[];
+    targetRefs: AiAgentTargetRef[];
+    evidenceExcerpts: AiAgentEvidenceExcerpt[];
+    recommendation: AiAgentRecommendation | null;
+    projectContextEntry: AiAgentJudgeProjectContextEntry | null;
+    skillProposal: AiAgentJudgeSkillProposal | null;
+    reviewItem: {
+        fingerprint: string;
+        title: string;
+        description: string;
+        ownerType: AiAgentReviewItemOwnerType;
+    };
+};
+
+export type AiAgentReviewItemFingerprintInput = {
+    organizationUuid: string;
+    projectUuid: string | null;
+    agentUuid: string | null;
+    threadUuid?: string | null;
+    primaryRootCause: AiAgentRootCause;
+    subcategories: string[];
+    fixTargets: AiAgentFixTarget[];
+    targetRefs: AiAgentTargetRef[];
+    agentConfigurationSettings: AiAgentConfigurationSetting[];
+    capabilityKey: string | null;
+};
+
+type AiAgentReviewItemFingerprintScope =
+    | {
+          type: 'organization';
+          organizationUuid: string;
+      }
+    | {
+          type: 'project';
+          organizationUuid: string;
+          projectUuid: string;
+      }
+    | {
+          type: 'agent';
+          organizationUuid: string;
+          agentUuid: string;
+      };
+
+const requireScopeValue = (
+    value: string | null,
+    field: 'projectUuid' | 'agentUuid',
+    rootCause: AiAgentRootCause,
+): string => {
+    if (!value) {
+        throw new Error(`${field} is required for ${rootCause} fingerprints`);
+    }
+    return value;
+};
+
+export const getAiAgentReviewItemFingerprintScope = (
+    input: Pick<
+        AiAgentReviewItemFingerprintInput,
+        'organizationUuid' | 'projectUuid' | 'agentUuid' | 'primaryRootCause'
+    >,
+): AiAgentReviewItemFingerprintScope => {
+    switch (input.primaryRootCause) {
+        case 'semantic_layer':
+        case 'project_context':
+            return {
+                type: 'project',
+                organizationUuid: input.organizationUuid,
+                projectUuid: requireScopeValue(
+                    input.projectUuid,
+                    'projectUuid',
+                    input.primaryRootCause,
+                ),
+            };
+        case 'agent_configuration':
+            return {
+                type: 'agent',
+                organizationUuid: input.organizationUuid,
+                agentUuid: requireScopeValue(
+                    input.agentUuid,
+                    'agentUuid',
+                    input.primaryRootCause,
+                ),
+            };
+        default:
+            return input.projectUuid
+                ? {
+                      type: 'project',
+                      organizationUuid: input.organizationUuid,
+                      projectUuid: input.projectUuid,
+                  }
+                : {
+                      type: 'organization',
+                      organizationUuid: input.organizationUuid,
+                  };
+    }
+};
+
+// Only runtime_reliability is a true per-conversation incident.
+const MODE_A_INCIDENT_ROOT_CAUSES = new Set<AiAgentRootCause>([
+    'runtime_reliability',
+]);
+
+// Durable project objects whose dedup identity is the affected object, across
+// threads. agent_configuration / product_capability already dedup cross-thread
+// on their own scope via the fallback, so they are intentionally excluded.
+const MODE_B_OBJECT_ROOT_CAUSES = new Set<AiAgentRootCause>([
+    'semantic_layer',
+    'project_context',
+]);
+
+// Field-level refs identify the actual broken object; model/explore/join are
+// context the judge names inconsistently across turns. We key on the field leaf
+// names (ignoring modelName) so the same broken field collapses even when the
+// judge varies the model or the surrounding context refs.
+const FIELD_LEVEL_REF_TYPES = new Set<AiAgentTargetRef['type']>([
+    'metric',
+    'dimension',
+    'additional_dimension',
+    'required_filter',
+    'ai_hint',
+]);
+
+// Lightdash field ids are `{model}_{field}`, and the judge uses the qualified
+// and unqualified forms interchangeably. Canonicalize to the unqualified field
+// so `orders_total_order_amount` and `total_order_amount` are one object.
+const stripModelPrefix = (name: string, modelName: string): string =>
+    name.startsWith(`${modelName}_`) ? name.slice(modelName.length + 1) : name;
+
+const getRefLeafName = (ref: AiAgentTargetRef): string | null => {
+    switch (ref.type) {
+        case 'metric':
+            return stripModelPrefix(ref.metricName, ref.modelName);
+        case 'dimension':
+        case 'additional_dimension':
+            return stripModelPrefix(ref.dimensionName, ref.modelName);
+        case 'required_filter':
+            return stripModelPrefix(ref.fieldName, ref.modelName);
+        case 'ai_hint':
+            return ref.targetName;
+        case 'explore':
+            return ref.exploreName;
+        case 'join':
+            return ref.joinName;
+        case 'model':
+            return ref.modelName;
+        default:
+            return null;
+    }
+};
+
+// Identity is the PRIMARY object the finding is about — the first field-level
+// ref. The judge lists the broken object first and varies the rest (related
+// metrics it suggests, surrounding explores), so keying on the whole set splits
+// findings that are really about the same object. Falls back to the first ref
+// of any kind, then empty.
+const getNormalizedObjectKey = (
+    input: AiAgentReviewItemFingerprintInput,
+): string => {
+    const primaryRef =
+        input.targetRefs.find((ref) => FIELD_LEVEL_REF_TYPES.has(ref.type)) ??
+        input.targetRefs[0];
+    const leaf = primaryRef ? getRefLeafName(primaryRef) : null;
+    return leaf ? leaf.trim().toLowerCase() : '';
+};
+
+const getAiAgentReviewItemFingerprintPayload = (
+    input: AiAgentReviewItemFingerprintInput,
+): unknown => {
+    // Mode A — incident: one conversation went sideways. Collapse every
+    // runtime finding in the thread onto one item; which object each retry
+    // touched, and the exact error, are noise.
+    if (
+        MODE_A_INCIDENT_ROOT_CAUSES.has(input.primaryRootCause) &&
+        input.threadUuid
+    ) {
+        return {
+            kind: 'incident',
+            threadUuid: input.threadUuid,
+            primaryRootCause: input.primaryRootCause,
+        };
+    }
+
+    // Mode B — object: a durable project object that recurs across threads.
+    // Identity is the normalized object from targetRefs, not the LLM's phrasing.
+    if (MODE_B_OBJECT_ROOT_CAUSES.has(input.primaryRootCause)) {
+        return {
+            kind: 'object',
+            scope: getAiAgentReviewItemFingerprintScope(input),
+            primaryRootCause: input.primaryRootCause,
+            normalizedObject: getNormalizedObjectKey(input),
+        };
+    }
+
+    return {
+        kind: 'scope',
+        scope: getAiAgentReviewItemFingerprintScope(input),
+        primaryRootCause: input.primaryRootCause,
+        subcategories: input.subcategories,
+        fixTargets: input.fixTargets,
+        targetRefs: input.targetRefs,
+        agentConfigurationSettings: input.agentConfigurationSettings,
+        capabilityKey: input.capabilityKey,
+    };
+};
+
+export const getAiAgentReviewItemFingerprint = (
+    input: AiAgentReviewItemFingerprintInput,
+): string => {
+    const canonicalJson = JSON.stringify(
+        normalizeForHash(getAiAgentReviewItemFingerprintPayload(input)),
+    );
+
+    return `ai_agent_review_item:${hashCanonicalJson(canonicalJson)}`;
+};

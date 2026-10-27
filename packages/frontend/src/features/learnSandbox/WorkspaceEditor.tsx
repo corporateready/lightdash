@@ -1,0 +1,542 @@
+import {
+    chartAsCodeSchema,
+    checkContentAsCodeEntry,
+    checkLearnLessonEntry,
+    isContentAsCodeExpectation,
+    findYamlKeyTypos,
+    type LearnLessonExpectation,
+    lightdashDbtYamlSchema,
+} from '@lightdash/common';
+// Imported by path, not from the package index: the index is built into the
+// file every page loads, and only this page, loaded on demand, needs the
+// dashboard schema. (The chart schema is already in that file: the document
+// helpers use it.)
+import dashboardAsCodeSchema from '@lightdash/common/src/schemas/dashboardAsCodeSchema';
+import { Box, Text } from '@mantine/core';
+import type { editor } from 'monaco-editor';
+import { useCallback, useEffect, useRef, type FC } from 'react';
+import { type TourEditable } from '../../components/common/GuidedTour/GuidedTour';
+import Editor, {
+    type BeforeMount,
+    type Monaco,
+    type OnMount,
+} from '../../components/MonacoEditor';
+import { useEditorTheme } from '../../hooks/useEditorTheme';
+import { configureLightdashYaml } from '../../utils/monacoYaml';
+import {
+    getLightdashMonacoTheme,
+    MONACO_DEFAULT_OPTIONS,
+} from '../sqlRunner/utils/monaco';
+// eslint-disable-next-line css-modules/no-unused-class -- classes used from FileTree.tsx
+import styles from './LearnWorkspace.module.css';
+import {
+    holdsEntry,
+    insertSnippet,
+    insertionPoint,
+    replacementFor,
+} from './snippetInsertion';
+import {
+    CHART_SCHEMA_FILE_MATCH,
+    DASHBOARD_SCHEMA_FILE_MATCH,
+    DBT_SCHEMA_FILE_MATCH,
+} from './yamlSchemas';
+
+/** Registers the dbt YAML schema against the single shared monaco-yaml
+ * instance (see configureLightdashYaml — monaco-yaml only allows one
+ * configured instance per monaco module, so every editor must route
+ * through that shared singleton rather than holding its own). Each schema
+ * is tied to the files it describes (yamlSchemas.ts): the dbt schema to
+ * model files, and the content-as-code schemas to the charts and dashboards
+ * a download writes. The dbt schema on a downloaded chart would flag every
+ * key in it. */
+
+const configureLearnYaml = (monaco: Monaco) => {
+    configureLightdashYaml(monaco, {
+        enableSchemaRequest: false,
+        schemas: [
+            {
+                uri: 'https://schemas.lightdash.com/lightdash/lightdash-dbt-2.0.json',
+                fileMatch: DBT_SCHEMA_FILE_MATCH,
+                schema: lightdashDbtYamlSchema as Record<string, unknown>,
+            },
+            {
+                uri: 'https://schemas.lightdash.com/lightdash/chart-as-code.json',
+                fileMatch: CHART_SCHEMA_FILE_MATCH,
+                schema: chartAsCodeSchema as Record<string, unknown>,
+            },
+            {
+                uri: 'https://schemas.lightdash.com/lightdash/dashboard-as-code.json',
+                fileMatch: DASHBOARD_SCHEMA_FILE_MATCH,
+                schema: dashboardAsCodeSchema as Record<string, unknown>,
+            },
+        ],
+    });
+};
+
+type EditorState = 'saved' | 'dirty' | 'saving' | 'readonly' | 'invalid';
+
+const STATE_LABELS: Record<EditorState, string> = {
+    saved: 'Saved',
+    dirty: 'Unsaved changes',
+    saving: 'Saving…',
+    readonly: 'Read-only',
+    invalid: 'Invalid YAML',
+};
+
+type WorkspaceEditorProps = {
+    path: string;
+    /**
+     * Bumped when the file was replaced from outside the editor (a download
+     * rewrote it): the editor then takes `content` even if it once reported
+     * that very text itself.
+     */
+    revision?: number;
+    content: string;
+    editable: boolean;
+    saving: boolean;
+    dirty: boolean;
+    /**
+     * Why the file cannot be saved as it stands, in one line for the learner;
+     * null when it parses. Shown in the header and read by walkthroughs.
+     */
+    invalid?: string | null;
+    onChange: (content: string) => void;
+    onBlur: () => void;
+};
+
+const isLessonExpectation = (
+    expect: Record<string, string> | undefined,
+): expect is LearnLessonExpectation & Record<string, string> =>
+    expect !== undefined &&
+    typeof expect.model === 'string' &&
+    typeof expect.under === 'string' &&
+    typeof expect.field === 'string';
+
+/** Milliseconds per character when the tour types a snippet in. */
+const TOUR_TYPE_INTERVAL_MS = 24;
+/** How long the lines the tour added stay highlighted. */
+const TOUR_INSERT_HIGHLIGHT_MS = 4000;
+/** Marker owner for misspelt keys, apart from monaco-yaml's own markers. */
+/** How many of its own reports the editor remembers, to know an echo. */
+const REPORTED_LIMIT = 200;
+const KEY_TYPO_MARKERS = 'learn-key-typos';
+/** Long enough that a key is not underlined while it is being typed. */
+const KEY_TYPO_DELAY_MS = 400;
+
+const WorkspaceEditor: FC<WorkspaceEditorProps> = ({
+    path,
+    revision = 0,
+    content,
+    editable,
+    saving,
+    dirty,
+    invalid = null,
+    onChange,
+    onBlur,
+}) => {
+    const wrapperRef = useRef<HTMLDivElement & TourEditable>(null);
+    const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+    const keyTypoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // The dbt key-typo check suits model files only; a downloaded chart or
+    // dashboard is content as code, whose keys are not dbt's.
+    const pathRef = useRef(path);
+    pathRef.current = path;
+    useEffect(
+        () => () => {
+            if (keyTypoTimer.current) clearTimeout(keyTypoTimer.current);
+        },
+        [],
+    );
+    const { monaco: monacoTheme } = useEditorTheme();
+
+    // onMount/appendToEditor are wired up once (Monaco calls onMount a
+    // single time, and the tour attaches appendToEditor to the DOM node
+    // once), so they must read the latest onChange/onBlur through a ref
+    // rather than close over the props from the render that created them.
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
+    // The page holds the file and hands it back as `content`. React renders
+    // a keystroke or two behind a fast typist, so `content` can be text the
+    // editor reported a moment ago and has since moved past. Monaco's React
+    // wrapper replaces the whole file with any value that differs from the
+    // editor's, which drops those keystrokes and throws the cursor to the end
+    // of the file. Text the editor itself reported is never new to it, so it
+    // is not handed back; anything else (a file loading) is.
+    // A file replaced from outside (a download; `revision` says so) is new to
+    // the editor even when it reads like something typed earlier.
+    const reportedRef = useRef<{
+        path: string;
+        revision: number;
+        values: Set<string>;
+    }>({ path, revision, values: new Set() });
+    if (
+        reportedRef.current.path !== path ||
+        reportedRef.current.revision !== revision
+    ) {
+        reportedRef.current = { path, revision, values: new Set() };
+    }
+    const report = useCallback((next: string) => {
+        const { values } = reportedRef.current;
+        values.add(next);
+        if (values.size > REPORTED_LIMIT) {
+            values.delete(values.values().next().value as string);
+        }
+        onChangeRef.current(next);
+    }, []);
+    const isOwnEcho = reportedRef.current.values.has(content);
+    const onBlurRef = useRef(onBlur);
+    onBlurRef.current = onBlur;
+
+    // The tour's "Use it" types the snippet in rather than dropping it in:
+    // one character a tick, directly under the key it extends (see
+    // snippetInsertion.ts), scrolled into view and highlighted for a moment
+    // afterwards, so the learner sees what was added and where. Each tick
+    // fires an input event on the wrapper, which holds the tour's typed-step
+    // advance until the last character has landed.
+    const typingRef = useRef<{ cancel: () => void } | null>(null);
+    useEffect(() => () => typingRef.current?.cancel(), []);
+    // A content-as-code lesson's "Use it" sets one top-level line of the
+    // file (a chart's `name:`) rather than adding lines: the line is
+    // replaced in one edit and highlighted like an insertion. A file that
+    // has lost the key gets the line back at its end, and a line that
+    // already reads that way is left as it is.
+    const replaceInEditor = useCallback(
+        (value: string) => {
+            const ed = editorRef.current;
+            const model = ed?.getModel();
+            if (!ed || !model || typingRef.current) return;
+            const replacement = replacementFor(model.getValue(), value);
+            if (!replacement) return;
+            const from = model.getPositionAt(replacement.from);
+            const to = model.getPositionAt(replacement.to);
+            ed.executeEdits('learn-tour', [
+                {
+                    range: {
+                        startLineNumber: from.lineNumber,
+                        startColumn: from.column,
+                        endLineNumber: to.lineNumber,
+                        endColumn: to.column,
+                    },
+                    text: replacement.text,
+                    forceMoveMarkers: true,
+                },
+            ]);
+            report(model.getValue());
+            // The line the value now sits on: the one replaced, or the new
+            // last line when the key had gone.
+            const lineNumber =
+                model.getValue().split('\n').indexOf(value) + 1 ||
+                from.lineNumber;
+            ed.setPosition({ lineNumber, column: value.length + 1 });
+            ed.revealLineInCenter(lineNumber);
+            const changed = ed.createDecorationsCollection([
+                {
+                    range: {
+                        startLineNumber: lineNumber,
+                        startColumn: 1,
+                        endLineNumber: lineNumber,
+                        endColumn: 1,
+                    },
+                    options: {
+                        isWholeLine: true,
+                        className: styles.tourInsert,
+                    },
+                },
+            ]);
+            window.setTimeout(() => changed.clear(), TOUR_INSERT_HIGHLIGHT_MS);
+            wrapperRef.current?.dispatchEvent(
+                new Event('input', { bubbles: true }),
+            );
+            ed.focus();
+        },
+        [report],
+    );
+
+    const appendToEditor = useCallback(
+        (value: string) => {
+            const ed = editorRef.current;
+            if (!ed) return;
+            const model = ed.getModel();
+            if (!model) return;
+            // A second press while the snippet is still being typed, or once it
+            // is already there, adds nothing: the learner (and the smoke) can
+            // press Use it again without doubling the metric.
+            if (typingRef.current) return;
+            const before = model.getValue();
+            const point = insertionPoint(before, value);
+            if (before.includes(point.text)) return;
+            // What the file must read once the snippet is in, whatever happens
+            // on the way there.
+            const intended = insertSnippet(before, value);
+            const start = point.offset + point.prefix.length;
+            let offset = point.offset;
+            const insertHere = (text: string) => {
+                const at = model.getPositionAt(offset);
+                ed.executeEdits('learn-tour', [
+                    {
+                        range: {
+                            startLineNumber: at.lineNumber,
+                            startColumn: at.column,
+                            endLineNumber: at.lineNumber,
+                            endColumn: at.column,
+                        },
+                        text,
+                        forceMoveMarkers: true,
+                    },
+                ]);
+                offset += text.length;
+            };
+            // By code point, so a character outside the basic plane is typed
+            // whole; offsets below advance by each piece's own length.
+            const chars = Array.from(point.text);
+            const wrapper = wrapperRef.current;
+            let index = 0;
+            let timer: number | undefined;
+            let cancelled = false;
+            let firstLine = 1;
+            const finish = (written = false) => {
+                const end = model.getPositionAt(offset);
+                if (point.suffix && !written) insertHere(point.suffix);
+                report(model.getValue());
+                ed.setPosition(end);
+                ed.revealLineInCenter(end.lineNumber);
+                const added = ed.createDecorationsCollection([
+                    {
+                        range: {
+                            startLineNumber: firstLine,
+                            startColumn: 1,
+                            endLineNumber: end.lineNumber,
+                            endColumn: 1,
+                        },
+                        options: {
+                            isWholeLine: true,
+                            className: styles.tourInsert,
+                        },
+                    },
+                ]);
+                window.setTimeout(
+                    () => added.clear(),
+                    TOUR_INSERT_HIGHLIGHT_MS,
+                );
+                // The caret has to end up where typing would leave it: the page
+                // autosaves on blur, and text dropped into an editor that never
+                // held focus would never blur, so it would sit unsaved until the
+                // learner ran a command.
+                ed.focus();
+                typingRef.current = null;
+            };
+            const tick = () => {
+                if (cancelled) return;
+                // Anything else touching the model while the snippet types (the
+                // learner's own keystrokes, a reset from outside) would leave
+                // the running offset pointing at the wrong place. Stop animating
+                // and write the intended content in one edit instead.
+                const typedSoFar = chars.slice(0, index).join('');
+                if (
+                    model.getValue().slice(start, start + typedSoFar.length) !==
+                        typedSoFar ||
+                    model.getValue().length !==
+                        before.length + point.prefix.length + typedSoFar.length
+                ) {
+                    ed.executeEdits('learn-tour', [
+                        {
+                            range: model.getFullModelRange(),
+                            text: intended,
+                            forceMoveMarkers: true,
+                        },
+                    ]);
+                    offset = start + point.text.length;
+                    index = chars.length;
+                    finish(true);
+                    return;
+                }
+                insertHere(chars[index]);
+                index += 1;
+                ed.revealLineInCenter(model.getPositionAt(offset).lineNumber);
+                wrapper?.dispatchEvent(new Event('input', { bubbles: true }));
+                if (index < chars.length) {
+                    timer = window.setTimeout(tick, TOUR_TYPE_INTERVAL_MS);
+                } else {
+                    finish();
+                }
+            };
+            typingRef.current = {
+                cancel: () => {
+                    cancelled = true;
+                    window.clearTimeout(timer);
+                },
+            };
+            if (point.prefix) insertHere(point.prefix);
+            firstLine = model.getPositionAt(offset).lineNumber;
+            if (chars.length === 0) finish();
+            else tick();
+            // `typingRef` is set before the first tick returns control, and
+            // stays set until `finish`: while it is, the editor's own change
+            // events are not passed up (see `handleEditorChange`).
+        },
+        [report],
+    );
+
+    // The page holds the file as a controlled value. Reporting every typed
+    // character would have it hand Monaco back a value already a character
+    // or two stale, Monaco would reset to it, and the snippet would land
+    // scrambled (seen on slower machines). While the tour types, changes
+    // stay here; `finish` reports the final content once.
+    const handleEditorChange = useCallback(
+        (next: string | undefined) => {
+            if (typingRef.current) return;
+            report(next ?? '');
+        },
+        [report],
+    );
+
+    const handleBeforeMount: BeforeMount = useCallback((monaco) => {
+        monaco.editor.defineTheme('lightdash-light', {
+            base: 'vs',
+            inherit: true,
+            ...getLightdashMonacoTheme('light'),
+        });
+        monaco.editor.defineTheme('lightdash-dark', {
+            base: 'vs-dark',
+            inherit: true,
+            ...getLightdashMonacoTheme('dark'),
+        });
+        configureLearnYaml(monaco);
+    }, []);
+
+    const onMount: OnMount = useCallback(
+        (ed, monaco) => {
+            editorRef.current = ed;
+            // The dbt schema lists the keys it knows without forbidding
+            // others, so monaco-yaml passes `descripton`. Underline a key
+            // that is a slip away from one the schema knows at that spot.
+            const markKeyTypos = () => {
+                const model = ed.getModel();
+                if (!model) return;
+                const typos = pathRef.current.startsWith('models/')
+                    ? findYamlKeyTypos(
+                          model.getValue(),
+                          lightdashDbtYamlSchema as Record<string, unknown>,
+                      )
+                    : [];
+                monaco.editor.setModelMarkers(
+                    model,
+                    KEY_TYPO_MARKERS,
+                    typos.map((typo) => ({
+                        severity: monaco.MarkerSeverity.Warning,
+                        message: `Unknown key "${typo.key}". Did you mean "${typo.suggestion}"?`,
+                        startLineNumber: typo.line,
+                        endLineNumber: typo.line,
+                        startColumn: typo.column,
+                        endColumn: typo.endColumn,
+                    })),
+                );
+            };
+            markKeyTypos();
+            ed.onDidChangeModel(markKeyTypos);
+            ed.onDidChangeModelContent(() => {
+                if (keyTypoTimer.current) clearTimeout(keyTypoTimer.current);
+                keyTypoTimer.current = setTimeout(
+                    markKeyTypos,
+                    KEY_TYPO_DELAY_MS,
+                );
+            });
+            if (wrapperRef.current) {
+                wrapperRef.current.tourEditor = {
+                    getValue: () => ed.getValue(),
+                    // A content-as-code step says so in what it expects:
+                    // its suggestion replaces a line; a dbt lesson's snippet
+                    // is typed in under the key it extends.
+                    setValue: (value, expect) =>
+                        isContentAsCodeExpectation(expect)
+                            ? replaceInEditor(value)
+                            : appendToEditor(value),
+                    isBusy: () => typingRef.current !== null,
+                    // A lesson says what it expects as facts about the dbt
+                    // project; a step that carries none falls back to
+                    // looking for the snippet's entry line.
+                    check: (suggestion, expect) =>
+                        isContentAsCodeExpectation(expect)
+                            ? checkContentAsCodeEntry(ed.getValue(), expect)
+                            : isLessonExpectation(expect)
+                              ? checkLearnLessonEntry(ed.getValue(), expect)
+                              : holdsEntry(ed.getValue(), suggestion)
+                                ? null
+                                : 'Add the highlighted lines, then check again',
+                };
+            }
+            ed.onDidBlurEditorText(() => onBlurRef.current());
+        },
+        [appendToEditor, replaceInEditor],
+    );
+
+    const state: EditorState = !editable
+        ? 'readonly'
+        : invalid !== null
+          ? 'invalid'
+          : saving
+            ? 'saving'
+            : dirty
+              ? 'dirty'
+              : 'saved';
+
+    return (
+        <Box className={styles.editorPane}>
+            <Box className={styles.editorHead} data-learn-editor-state={state}>
+                <Text
+                    className={styles.editorPath}
+                    fz="sm"
+                    c="ldGray.6"
+                    title={path}
+                >
+                    {path}
+                </Text>
+                <Text
+                    fz="xs"
+                    c={
+                        state === 'invalid'
+                            ? 'red.7'
+                            : editable
+                              ? 'ldGray.6'
+                              : 'ldGray.5'
+                    }
+                    data-learn-editor-invalid={invalid ?? undefined}
+                >
+                    {state === 'invalid'
+                        ? invalid
+                        : editable
+                          ? STATE_LABELS[state]
+                          : 'Read-only'}
+                </Text>
+            </Box>
+            <Box
+                ref={wrapperRef}
+                className={styles.editorBody}
+                data-tour-anchor="workspace-editor"
+                data-tour-hint="Edit the file"
+                data-tour-input="true"
+                // A walkthrough's typed step holds while the file does not
+                // parse, and shows these words on its card.
+                data-tour-invalid={invalid ?? undefined}
+                data-tour-suggest="# Edited in the Learn workspace"
+            >
+                <Editor
+                    path={path}
+                    language="yaml"
+                    defaultValue={content}
+                    value={isOwnEcho ? undefined : content}
+                    theme={monacoTheme}
+                    beforeMount={handleBeforeMount}
+                    onMount={onMount}
+                    onChange={handleEditorChange}
+                    options={{
+                        ...MONACO_DEFAULT_OPTIONS,
+                        readOnly: !editable,
+                    }}
+                />
+            </Box>
+        </Box>
+    );
+};
+
+export default WorkspaceEditor;

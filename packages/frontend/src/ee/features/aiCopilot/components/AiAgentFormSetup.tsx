@@ -1,65 +1,98 @@
-import { FeatureFlags } from '@lightdash/common';
+import { subject } from '@casl/ability';
 import {
+    FeatureFlags,
+    MAX_RETENTION_WINDOW_HOURS,
+    MIN_RETENTION_WINDOW_HOURS,
+    type AiAgentModelConfig,
+    type AiAgentUserAccessDetail,
+} from '@lightdash/common';
+import {
+    ActionIcon,
     Anchor,
-    Badge,
     Box,
     Button,
     Card,
     Code,
     Collapse,
+    Divider,
+    FileButton,
     Group,
-    HoverCard,
     LoadingOverlay,
     MultiSelect,
     Paper,
+    Radio,
+    Select,
     Stack,
     Switch,
     TagsInput,
     Text,
     Textarea,
+    type TextareaProps,
     TextInput,
     Title,
     Tooltip,
-} from '@mantine-8/core';
-import { type useForm } from '@mantine/form';
+} from '@mantine/core';
+import { type UseFormReturnType } from '@mantine/form';
 import { useDisclosure } from '@mantine/hooks';
 import {
-    IconAdjustmentsAlt,
     IconAlertTriangle,
+    IconBolt,
     IconBook2,
+    IconCode,
+    IconId,
     IconInfoCircle,
     IconLock,
     IconPlug,
     IconPointFilled,
     IconSparkles,
     IconTrash,
+    IconUpload,
 } from '@tabler/icons-react';
-import { useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useState, type ReactNode } from 'react';
+import { Link } from 'react-router';
 import { z } from 'zod';
+import { BetaBadge } from '../../../../components/common/BetaBadge';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import MantineModal from '../../../../components/common/MantineModal';
+import {
+    renderModelSelectOption,
+    toModelSelectItem,
+} from '../../../../components/common/ModelSelector/modelSelectOption';
 import { SlackChannelSelect } from '../../../../components/common/SlackChannelSelect';
 import { useGetSlack } from '../../../../hooks/slack/useSlack';
 import { useOrganizationGroups } from '../../../../hooks/useOrganizationGroups';
-import { useProject } from '../../../../hooks/useProject';
 import { useServerFeatureFlag } from '../../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../../providers/App/useApp';
 import { UserAccessMultiSelect } from '../../../components/UserAccessMultiSelect';
 import AiExploreAccessTree from '../../../pages/AiAgents/AiExploreAccessTree';
+import {
+    getAiAgentModelConfig,
+    getModelOptionByKey,
+    useDefaultAiAgentModel,
+} from '../hooks/useAiAgentModelSelection';
+import { useAiOrganizationSettings } from '../hooks/useAiOrganizationSettings';
+import { useAiProviderCredentials } from '../hooks/useAiProviderCredentials';
 import { useDeleteAiAgentMutation } from '../hooks/useProjectAiAgents';
 import { useGetAgentExploreAccessSummary } from '../hooks/useUserAgentPreferences';
+import { AgentSettingsSection } from './AgentSettingsSection';
+import { AgentSettingsSubsection } from './AgentSettingsSubsection';
+import AiAgentAsCodeModal from './AiAgentAsCodeModal';
+import classes from './AiAgentFormSetup.module.css';
 import { AiAgentKnowledgeFilesSection } from './AiAgentKnowledgeFilesSection';
 import { AiAgentMcpServersInput } from './AiAgentMcpServersInput';
+import { AiAgentSkillsSection } from './AiAgentSkillsSection';
+import { DeprecatedModelNotice } from './DeprecatedModelNotice';
 import { InstructionsGuidelines } from './InstructionsSupport';
 import { SpaceAccessSelect } from './SpaceAccessSelect';
+import { ThreadRetentionSelect } from './ThreadRetentionSelect';
 
 const formSchema = z.object({
-    name: z.string().min(1),
+    name: z.string().min(1, 'Name is required'),
     description: z.string().nullable(),
     integrations: z.array(
         z.object({
             type: z.literal('slack'),
-            channelId: z.string().min(1),
+            channelId: z.string().min(1, 'Channel is required'),
         }),
     ),
     tags: z.array(z.string()).nullable(),
@@ -71,8 +104,76 @@ const formSchema = z.object({
     mcpServerUuids: z.array(z.string()),
     enableDataAccess: z.boolean(),
     enableSelfImprovement: z.boolean(),
+    enableContentTools: z.boolean(),
+    enableUserContext: z.boolean(),
+    enableSqlMode: z.boolean(),
+    enableSqlAutoApproval: z.boolean(),
+    enableComposerQueries: z.boolean(),
+    adminOnly: z.boolean(),
+    modelConfig: z.custom<AiAgentModelConfig>().nullable(),
+    providerCredentialUuid: z.string().nullable(),
     version: z.number(),
+    threadRetentionHours: z
+        .number()
+        .int()
+        .min(MIN_RETENTION_WINDOW_HOURS)
+        .max(MAX_RETENTION_WINDOW_HOURS)
+        .nullable(),
 });
+
+type CommitOnBlurTextareaProps = Omit<
+    TextareaProps,
+    'defaultValue' | 'value' | 'onChange'
+> & {
+    defaultValue: string;
+    onCommit: (value: string) => void;
+};
+
+const SwitchLabel = ({
+    text,
+    help,
+    badge,
+}: {
+    text: string;
+    help: string;
+    badge: ReactNode | null;
+}) => (
+    <Group gap="xxs" align="center" wrap="nowrap">
+        <Text fz="sm" fw={500}>
+            {text}
+        </Text>
+        {badge}
+        {/* The class lifts the icon above the switch's full-row input overlay,
+            which would otherwise swallow the pointer before it reaches here. */}
+        <Tooltip
+            label={help}
+            events={{ hover: true, focus: true, touch: true }}
+            position="right"
+            maw="300px"
+        >
+            <ActionIcon
+                type="button"
+                color="ldGray"
+                size="xs"
+                aria-label={help}
+                className={classes.switchHelpIcon}
+                onClick={(event) => event.preventDefault()}
+            >
+                <MantineIcon icon={IconInfoCircle} size="sm" />
+            </ActionIcon>
+        </Tooltip>
+    </Group>
+);
+
+const CommitOnBlurTextarea = memo(
+    ({ defaultValue, onCommit, ...props }: CommitOnBlurTextareaProps) => (
+        <Textarea
+            defaultValue={defaultValue}
+            onBlur={(e) => onCommit(e.currentTarget.value)}
+            {...props}
+        />
+    ),
+);
 
 export const AiAgentFormSetup = ({
     mode,
@@ -80,16 +181,74 @@ export const AiAgentFormSetup = ({
     projectUuid,
     agentUuid,
     isSavingAgent,
+    onSubmit,
     persistedMcpServerUuids,
+    userAccessDetails,
+    avatarMode,
+    avatarFileName,
+    onAvatarFileChange,
+    onAvatarModeChange,
+    onAvatarRemove,
+    onAvatarRevert,
 }: {
     mode: 'create' | 'edit';
-    form: ReturnType<typeof useForm<z.infer<typeof formSchema>>>;
+    form: UseFormReturnType<z.infer<typeof formSchema>>;
     projectUuid: string;
     agentUuid?: string;
     isSavingAgent?: boolean;
+    onSubmit: () => void;
     persistedMcpServerUuids?: string[];
+    // Names for the saved user access, so pills are labelled before the
+    // org user search has loaded them.
+    userAccessDetails?: AiAgentUserAccessDetail[];
+    avatarMode: 'upload' | 'link';
+    avatarFileName: string | null;
+    onAvatarFileChange: (file: File | null) => void;
+    onAvatarModeChange: (mode: 'upload' | 'link') => void;
+    onAvatarRemove: () => void;
+    onAvatarRevert: (() => void) | null;
 }) => {
-    const { data: project } = useProject(projectUuid);
+    const { data: aiOrganizationSettings } = useAiOrganizationSettings();
+    const modelOptions = aiOrganizationSettings?.defaultAiAgentModelOptions;
+    // Shown when there is a real choice, or when a pin is already set — a
+    // pinned agent must always offer a way to clear its pin, even when the
+    // credential is unreadable or the viewer cannot list credentials.
+    const providerCredentialsQuery = useAiProviderCredentials({ retry: false });
+    const customProvidersFlagQuery = useServerFeatureFlag(
+        FeatureFlags.OrgAiCustomProviders,
+    );
+    const pinnedCredentialUuid = form.values.providerCredentialUuid;
+    const showCredentialSelector =
+        pinnedCredentialUuid !== null ||
+        (customProvidersFlagQuery.isSuccess &&
+            customProvidersFlagQuery.data.enabled &&
+            (providerCredentialsQuery.data?.credentials.length ?? 0) > 1);
+    const credentialOptions = useMemo(() => {
+        const options: { value: string; label: string; disabled?: boolean }[] =
+            (providerCredentialsQuery.data?.credentials ?? []).map(
+                (credential) => ({
+                    value: credential.uuid,
+                    label: `${credential.label} — ${credential.region}`,
+                }),
+            );
+        if (
+            pinnedCredentialUuid &&
+            !options.some((option) => option.value === pinnedCredentialUuid)
+        ) {
+            const unreadable =
+                providerCredentialsQuery.data?.unreadableCredentials.find(
+                    (credential) => credential.uuid === pinnedCredentialUuid,
+                );
+            options.push({
+                value: pinnedCredentialUuid,
+                label: unreadable
+                    ? `${unreadable.label} — unavailable`
+                    : 'Unavailable credential',
+                disabled: true,
+            });
+        }
+        return options;
+    }, [providerCredentialsQuery.data, pinnedCredentialUuid]);
     const exploreAccessSummaryQuery = useGetAgentExploreAccessSummary(
         projectUuid!,
         {
@@ -101,6 +260,21 @@ export const AiAgentFormSetup = ({
 
     const { user } = useApp();
     const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+    const [isAsCodeModalOpen, asCodeModalHandlers] = useDisclosure(false);
+
+    const canViewContentAsCode = !!user.data?.ability.can(
+        'view',
+        subject('ContentAsCode', {
+            organizationUuid: user.data.organizationUuid,
+            projectUuid,
+        }),
+    );
+
+    const scrollToKnowledgeAndData = useCallback(() => {
+        document
+            .getElementById('knowledge-and-data')
+            ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, []);
 
     const handleDeleteClick = useCallback(() => {
         setDeleteModalOpen(true);
@@ -120,7 +294,19 @@ export const AiAgentFormSetup = ({
 
     const [isExploreAccessSummaryOpen, { toggle: toggleExploreAccessSummary }] =
         useDisclosure(false);
-
+    const {
+        fallbackModelLabel: organizationDefaultModelLabel,
+        modelReplacement,
+        selectedModel,
+        selectedModelKey,
+        showReasoningDefault,
+        visibleModelOptions,
+    } = useDefaultAiAgentModel({
+        modelOptions,
+        modelConfig: form.values.modelConfig,
+        fallbackModelConfig: aiOrganizationSettings?.defaultAiAgentModelConfig,
+        fallbackLabel: 'Organization default',
+    });
     const slackChannelsConfigured = useMemo(
         () =>
             form.values.integrations.some(
@@ -135,9 +321,47 @@ export const AiAgentFormSetup = ({
         FeatureFlags.UserGroupsEnabled,
     );
 
+    const threadRetentionFlagQuery = useServerFeatureFlag(
+        FeatureFlags.AiThreadRetention,
+    );
+
+    const multiSourceQueryFlagQuery = useServerFeatureFlag(
+        FeatureFlags.MultiSourceQuery,
+    );
+    const composeSqlRunnerFlagQuery = useServerFeatureFlag(
+        FeatureFlags.ComposeSqlRunner,
+    );
+    const composerQueriesAvailable =
+        multiSourceQueryFlagQuery.data?.enabled === true &&
+        composeSqlRunnerFlagQuery.data?.enabled === true;
+
     const isGroupsEnabled =
         userGroupsFeatureFlagQuery.isSuccess &&
         userGroupsFeatureFlagQuery.data.enabled;
+
+    const handlePersistedMcpServerChange = useCallback(
+        (value: string[]) => {
+            const dirtyFields = Object.keys(form.values).reduce<
+                Record<string, boolean>
+            >((acc, field) => {
+                if (
+                    field !== 'mcpServerUuids' &&
+                    form.isDirty(field as keyof typeof form.values)
+                ) {
+                    acc[field] = true;
+                }
+
+                return acc;
+            }, {});
+
+            form.resetDirty({
+                ...form.values,
+                mcpServerUuids: value,
+            });
+            form.setDirty(dirtyFields);
+        },
+        [form],
+    );
 
     const { data: groups, isLoading: isLoadingGroups } = useOrganizationGroups(
         {
@@ -157,105 +381,246 @@ export const AiAgentFormSetup = ({
         [groups],
     );
 
+    // UI-only: keeps "Specific users & groups" selected after the user picks it
+    // but before they add anyone (otherwise empty lists would read as "Everyone").
+    const [showSpecificAccess, setShowSpecificAccess] = useState(false);
+
+    const accessMode: 'everyone' | 'admins' | 'specific' = form.values.adminOnly
+        ? 'admins'
+        : showSpecificAccess ||
+            form.values.userAccess.length > 0 ||
+            form.values.groupAccess.length > 0
+          ? 'specific'
+          : 'everyone';
+
+    const handleAccessModeChange = useCallback(
+        (mode: string) => {
+            if (mode === 'admins') {
+                setShowSpecificAccess(false);
+                form.setFieldValue('adminOnly', true);
+                form.setFieldValue('userAccess', []);
+                form.setFieldValue('groupAccess', []);
+            } else if (mode === 'specific') {
+                setShowSpecificAccess(true);
+                form.setFieldValue('adminOnly', false);
+            } else {
+                setShowSpecificAccess(false);
+                form.setFieldValue('adminOnly', false);
+                form.setFieldValue('userAccess', []);
+                form.setFieldValue('groupAccess', []);
+            }
+        },
+        [form],
+    );
+
     return (
         <>
-            <form>
+            <form
+                onSubmit={(event) => {
+                    event.preventDefault();
+                    onSubmit();
+                }}
+            >
                 <Stack gap="sm">
-                    <Paper p="xl">
-                        <Group align="center" gap="xs" mb="md">
-                            <Paper p="xxs" withBorder radius="sm">
-                                <MantineIcon
-                                    icon={IconAdjustmentsAlt}
-                                    size="md"
-                                />
-                            </Paper>
-                            <Title order={5} c="ldGray.9" fw={700}>
-                                Basic information
-                            </Title>
-                        </Group>
-                        <Stack>
-                            <Group>
-                                <TextInput
-                                    label="Agent Name"
-                                    placeholder="Enter a name for this agent"
-                                    {...form.getInputProps('name')}
-                                    style={{ flexGrow: 1 }}
-                                    variant="subtle"
-                                />
-                                <Tooltip label="Agents can only be created within the context of the current project.">
-                                    <TextInput
-                                        label="Project"
-                                        placeholder="Enter a project"
-                                        value={project?.name}
-                                        readOnly
-                                        style={{ flexGrow: 1 }}
-                                        variant="subtle"
-                                    />
-                                </Tooltip>
-                            </Group>
-                            <Textarea
-                                variant="subtle"
-                                label="Description"
-                                description="A brief description of what this agent does and its purpose."
-                                placeholder="Describe what this agent specializes in..."
-                                minRows={3}
-                                maxRows={6}
-                                {...form.getInputProps('description')}
-                                onChange={(e) => {
-                                    const value = e.target.value;
-                                    form.setFieldValue(
-                                        'description',
-                                        value ? value : null,
-                                    );
-                                }}
-                            />
-                            <TextInput
-                                style={{ flexGrow: 1 }}
-                                miw={200}
-                                variant="subtle"
-                                label="Avatar image URL"
-                                description="Please provide an image url like https://example.com/avatar.jpg. If not provided, a default avatar will be used."
-                                placeholder="https://example.com/avatar.jpg"
-                                type="url"
-                                {...form.getInputProps('imageUrl')}
-                                onChange={(e) => {
-                                    const value = e.target.value;
-                                    form.setFieldValue(
-                                        'imageUrl',
-                                        value ? value : null,
-                                    );
-                                }}
-                            />
-                        </Stack>
-                    </Paper>
+                    <AgentSettingsSection
+                        id="identity"
+                        icon={IconId}
+                        title="Identity"
+                        description="How this agent introduces itself wherever it appears."
+                        action={
+                            mode === 'edit' &&
+                            agentUuid &&
+                            canViewContentAsCode ? (
+                                <Button
+                                    variant="default"
+                                    size="xs"
+                                    onClick={asCodeModalHandlers.open}
+                                    leftSection={
+                                        <MantineIcon icon={IconCode} />
+                                    }
+                                >
+                                    View as code
+                                </Button>
+                            ) : null
+                        }
+                    >
+                        <TextInput
+                            label="Name"
+                            placeholder="Enter a name for this agent"
+                            variant="subtle"
+                            // Typed anchor for scope walkthroughs, read first
+                            // as a look at naming.
+                            data-tour-anchor="agent-name"
+                            data-tour-hint="Name the agent"
+                            data-tour-input="true"
+                            data-tour-suggest="Sales analyst"
+                            data-tour-scope="manage:AiAgent"
+                            data-tour-look="2"
+                            data-tour-after='[data-tour-anchor="agent-new"]'
+                            data-tour-label="A name your team will recognise"
+                            data-tour-docs="agents/set-up-agents.mdx#name-and-image:1"
+                            {...form.getInputProps('name')}
+                        />
+                        <CommitOnBlurTextarea
+                            key={`description-${
+                                form.values.description != null
+                            }`}
+                            variant="subtle"
+                            label="Description"
+                            description="A brief description of what this agent does and its purpose."
+                            placeholder="Describe what this agent specializes in..."
+                            minRows={3}
+                            maxRows={6}
+                            error={form.errors.description}
+                            defaultValue={form.values.description ?? ''}
+                            onCommit={(value) =>
+                                form.setFieldValue(
+                                    'description',
+                                    value ? value : null,
+                                )
+                            }
+                        />
+                        <Box>
+                            <Text size="sm" fw={500}>
+                                Avatar
+                            </Text>
+                            <Text size="xs" c="dimmed" mt={2}>
+                                Upload an image (PNG, JPG, GIF) or use an image
+                                URL. Images are cropped to a square; a default
+                                avatar is used if none is set.
+                            </Text>
 
-                    <Paper p="xl">
-                        <Stack gap="md">
-                            <Group align="center" gap="xs">
-                                <Paper p="xxs" withBorder radius="sm">
-                                    <MantineIcon icon={IconBook2} size="md" />
-                                </Paper>
-                                <Title order={5} c="ldGray.9" fw={700}>
-                                    Knowledge & expertise
-                                </Title>
-                            </Group>
-                            <Stack gap="xs">
-                                <Textarea
+                            {avatarMode === 'link' ? (
+                                <TextInput
+                                    mt="sm"
                                     variant="subtle"
-                                    label="Instructions"
-                                    description="Set the overall behavior and task for the agent. This defines how it should respond and what its purpose is."
-                                    placeholder="You are a marketing analytics expert. Focus on campaign performance, customer acquisition costs, and ROI metrics. Always use bar charts and tables to visualize data."
-                                    resize="vertical"
-                                    autosize
-                                    minRows={3}
-                                    maxRows={8}
-                                    {...form.getInputProps('instruction')}
+                                    label="Avatar image URL"
+                                    placeholder="https://example.com/avatar.jpg"
+                                    type="url"
+                                    {...form.getInputProps('imageUrl')}
+                                    onChange={(e) => {
+                                        const value = e.target.value;
+                                        form.setFieldValue(
+                                            'imageUrl',
+                                            value ? value : null,
+                                        );
+                                    }}
                                 />
-                                <Text size="xs" c="dimmed">
-                                    {form.values.instruction?.length ?? 0}{' '}
-                                    characters
-                                </Text>
-                            </Stack>
+                            ) : (
+                                <Group align="center" gap="sm" mt="sm">
+                                    <FileButton
+                                        accept="image/png,image/jpeg,image/gif"
+                                        onChange={onAvatarFileChange}
+                                    >
+                                        {(props) => (
+                                            <Button
+                                                {...props}
+                                                size="xs"
+                                                variant="light"
+                                                leftSection={
+                                                    <MantineIcon
+                                                        icon={IconUpload}
+                                                    />
+                                                }
+                                            >
+                                                Upload image
+                                            </Button>
+                                        )}
+                                    </FileButton>
+                                    {avatarFileName !== null && (
+                                        <Text size="xs" c="dimmed">
+                                            {avatarFileName}
+                                        </Text>
+                                    )}
+                                </Group>
+                            )}
+
+                            <Group gap="md" mt="xs">
+                                <Anchor
+                                    component="button"
+                                    type="button"
+                                    size="xs"
+                                    c="dimmed"
+                                    onClick={() =>
+                                        onAvatarModeChange(
+                                            avatarMode === 'link'
+                                                ? 'upload'
+                                                : 'link',
+                                        )
+                                    }
+                                >
+                                    {avatarMode === 'link'
+                                        ? 'Upload an image instead'
+                                        : 'Use an image URL instead'}
+                                </Anchor>
+                                {onAvatarRevert !== null && (
+                                    <Anchor
+                                        component="button"
+                                        type="button"
+                                        size="xs"
+                                        c="dimmed"
+                                        onClick={onAvatarRevert}
+                                    >
+                                        Revert
+                                    </Anchor>
+                                )}
+                                {(avatarFileName !== null ||
+                                    form.values.imageUrl) && (
+                                    <Anchor
+                                        component="button"
+                                        type="button"
+                                        size="xs"
+                                        c="red"
+                                        onClick={onAvatarRemove}
+                                    >
+                                        Remove
+                                    </Anchor>
+                                )}
+                            </Group>
+                        </Box>
+                    </AgentSettingsSection>
+
+                    <AgentSettingsSection
+                        id="behaviour"
+                        icon={IconSparkles}
+                        title="Behaviour"
+                        description="How the agent acts on every request, the workflows it can follow, and the model it thinks with."
+                    >
+                        <AgentSettingsSubsection
+                            title="Instructions"
+                            description="Always applied. Guidance for the agent's role, behaviour, priorities, and response style."
+                        >
+                            <CommitOnBlurTextarea
+                                key={`instruction-${
+                                    form.values.instruction != null
+                                }`}
+                                variant="subtle"
+                                aria-label="Instructions"
+                                placeholder="You are a marketing analytics expert. Focus on campaign performance, customer acquisition costs, and ROI metrics. Always use bar charts and tables to visualize data."
+                                resize="vertical"
+                                autosize
+                                minRows={3}
+                                maxRows={8}
+                                // Typed anchor for scope walkthroughs, read first
+                                // as a look at what instructions do.
+                                data-tour-anchor="agent-instructions"
+                                data-tour-hint="Write the instructions"
+                                data-tour-input="true"
+                                data-tour-suggest="You are the analyst for a jaffle shop. Answer questions about customers, orders and payments, and prefer charts over tables."
+                                data-tour-scope="manage:AiAgent"
+                                data-tour-look="3"
+                                data-tour-after='[data-tour-anchor="agent-name"]'
+                                data-tour-label="Instructions shape every answer"
+                                data-tour-docs="agents/set-up-agents.mdx#instructions:1"
+                                error={form.errors.instruction}
+                                defaultValue={form.values.instruction ?? ''}
+                                onCommit={(value) =>
+                                    form.setFieldValue(
+                                        'instruction',
+                                        value ? value : null,
+                                    )
+                                }
+                            />
                             <Stack gap="sm">
                                 <Box>
                                     <Title
@@ -285,262 +650,178 @@ export const AiAgentFormSetup = ({
                                     they work.
                                 </Text>
                             </Stack>
-                            {agentUuid && (
+                        </AgentSettingsSubsection>
+
+                        {user.data?.organizationUuid ? (
+                            <>
+                                <Divider />
+                                <AiAgentSkillsSection
+                                    agentUuid={agentUuid ?? null}
+                                    projectUuid={projectUuid}
+                                    organizationUuid={
+                                        user.data.organizationUuid
+                                    }
+                                />
+                            </>
+                        ) : null}
+
+                        <Divider />
+
+                        <AgentSettingsSubsection
+                            title="Default model"
+                            description="Used for new chats with this agent. Users can still change it in each chat."
+                        >
+                            <Select
+                                variant="subtle"
+                                aria-label="Default model"
+                                value={selectedModelKey}
+                                disabled={
+                                    isSavingAgent || !modelOptions?.length
+                                }
+                                placeholder={organizationDefaultModelLabel}
+                                clearable
+                                data={visibleModelOptions.map(
+                                    toModelSelectItem,
+                                )}
+                                renderOption={renderModelSelectOption}
+                                onChange={(modelKey) => {
+                                    const model = getModelOptionByKey(
+                                        modelOptions,
+                                        modelKey,
+                                    );
+                                    form.setFieldValue(
+                                        'modelConfig',
+                                        model
+                                            ? (getAiAgentModelConfig(
+                                                  model,
+                                                  form.values.modelConfig
+                                                      ?.reasoning ??
+                                                      aiOrganizationSettings
+                                                          ?.defaultAiAgentModelConfig
+                                                          ?.reasoning ??
+                                                      false,
+                                              ) ?? null)
+                                            : null,
+                                    );
+                                }}
+                            />
+
+                            {selectedModel?.deprecated && (
+                                <DeprecatedModelNotice
+                                    model={selectedModel}
+                                    replacement={modelReplacement}
+                                    disabled={isSavingAgent ?? false}
+                                    onSwitch={(modelConfig) => {
+                                        form.setFieldValue(
+                                            'modelConfig',
+                                            modelConfig,
+                                        );
+                                        onSubmit();
+                                    }}
+                                />
+                            )}
+
+                            {showReasoningDefault && (
+                                <Switch
+                                    variant="subtle"
+                                    label="High reasoning"
+                                    description="Use high reasoning for new chats with this agent."
+                                    checked={
+                                        form.values.modelConfig?.reasoning ===
+                                        true
+                                    }
+                                    disabled={isSavingAgent}
+                                    onChange={(event) => {
+                                        if (!selectedModel) return;
+                                        form.setFieldValue('modelConfig', {
+                                            ...form.values.modelConfig,
+                                            modelName: selectedModel.name,
+                                            modelProvider:
+                                                selectedModel.provider,
+                                            reasoning:
+                                                event.currentTarget.checked,
+                                        });
+                                    }}
+                                />
+                            )}
+                        </AgentSettingsSubsection>
+
+                        {showCredentialSelector && (
+                            <>
+                                <Divider />
+                                <AgentSettingsSubsection
+                                    title="AI provider credential"
+                                    description="Where this agent's requests are processed. Leave empty to follow the project or organization setting."
+                                >
+                                    <Select
+                                        variant="subtle"
+                                        aria-label="AI provider credential"
+                                        value={pinnedCredentialUuid}
+                                        disabled={isSavingAgent}
+                                        placeholder="Project or organization default"
+                                        clearable
+                                        data={credentialOptions}
+                                        onChange={(value) =>
+                                            form.setFieldValue(
+                                                'providerCredentialUuid',
+                                                value ?? null,
+                                            )
+                                        }
+                                    />
+                                </AgentSettingsSubsection>
+                            </>
+                        )}
+                    </AgentSettingsSection>
+
+                    <AgentSettingsSection
+                        id="knowledge-and-data"
+                        icon={IconBook2}
+                        title="Knowledge & data"
+                        description="What this agent can look at when it answers."
+                    >
+                        <AgentSettingsSubsection
+                            title="Reference documents"
+                            description="Consulted when relevant. Business context and source material the agent can retrieve, or include on every request. A short summary is generated for each file."
+                        >
+                            {agentUuid ? (
                                 <AiAgentKnowledgeFilesSection
                                     agentUuid={agentUuid}
                                     projectUuid={projectUuid}
+                                    withHeading={false}
                                 />
-                            )}
-                            <Stack gap="sm">
-                                <Box>
-                                    <Title
-                                        order={6}
-                                        c="ldGray.7"
-                                        size="sm"
-                                        fw={500}
-                                    >
-                                        Configuration
-                                    </Title>
-                                    <Text c="dimmed" size="xs">
-                                        Control how this agent interacts with
-                                        your data and semantic layer.
+                            ) : (
+                                <Paper variant="dotted" p="sm">
+                                    <Text size="xs" c="dimmed" ta="center">
+                                        You can upload documents once this agent
+                                        is created.
                                     </Text>
-                                </Box>
-                            </Stack>
-                            <Switch
-                                variant="subtle"
-                                label={
-                                    <Group gap="xs">
-                                        <Text fz="sm" fw={500}>
-                                            Enable Data Access
-                                        </Text>
-                                        <Tooltip
-                                            label="When enabled, the AI agent can analyze chart data and provide insights. When disabled, the agent only creates visualizations without accessing the underlying data."
-                                            withArrow
-                                            withinPortal
-                                            multiline
-                                            position="right"
-                                            maw="300px"
-                                        >
-                                            <MantineIcon
-                                                icon={IconInfoCircle}
-                                            />
-                                        </Tooltip>
-                                    </Group>
-                                }
-                                description={
-                                    <>
-                                        Allows the agent to access and analyze
-                                        the actual data behind charts to provide
-                                        detailed insights and answer questions
-                                        about the data.{' '}
-                                        <Anchor
-                                            href="https://docs.lightdash.com/guides/ai-agents#data-access-control"
-                                            target="_blank"
-                                            size="xs"
-                                        >
-                                            Learn more
-                                        </Anchor>
-                                    </>
-                                }
-                                {...form.getInputProps('enableDataAccess', {
-                                    type: 'checkbox',
-                                })}
-                            />
-                            <Switch
-                                variant="subtle"
-                                label={
-                                    <Group gap="xs">
-                                        <Text fz="sm" fw={500}>
-                                            Enable Self-Improvement
-                                        </Text>
-                                        <Tooltip
-                                            label="When enabled, the AI agent can make improvements to your semantic layer by updating field descriptions, creating new metrics, and refining dimensions based on user interactions."
-                                            withArrow
-                                            withinPortal
-                                            multiline
-                                            position="right"
-                                            maw="300px"
-                                        >
-                                            <MantineIcon
-                                                icon={IconInfoCircle}
-                                            />
-                                        </Tooltip>
-                                        <Badge
-                                            color="indigo"
-                                            radius="sm"
-                                            variant="light"
-                                            leftSection={
-                                                <MantineIcon
-                                                    icon={IconSparkles}
-                                                />
-                                            }
-                                        >
-                                            Beta
-                                        </Badge>
-                                    </Group>
-                                }
-                                description={
-                                    <>
-                                        Allows the agent to improve the
-                                        project's explores by updating
-                                        descriptions, creating metrics and
-                                        dimensions based on conversations.
-                                        Changes are tracked in changesets for
-                                        review.{' '}
-                                        <Anchor
-                                            href="https://docs.lightdash.com/guides/ai-agents#self-improvement"
-                                            target="_blank"
-                                            size="xs"
-                                        >
-                                            Learn more
-                                        </Anchor>
-                                    </>
-                                }
-                                {...form.getInputProps(
-                                    'enableSelfImprovement',
-                                    {
-                                        type: 'checkbox',
-                                    },
-                                )}
-                            />
-                        </Stack>
-                    </Paper>
-
-                    <AiAgentMcpServersInput
-                        agentUuid={agentUuid}
-                        isSavingAgent={isSavingAgent}
-                        persistedMcpServerUuids={persistedMcpServerUuids}
-                        projectUuid={projectUuid}
-                        value={form.values.mcpServerUuids}
-                        onChange={(value) => {
-                            form.setFieldValue('mcpServerUuids', value);
-                        }}
-                    />
-
-                    <Paper p="xl">
-                        <Group align="center" gap="xs" mb="md">
-                            <Paper p="xxs" withBorder radius="sm">
-                                <MantineIcon icon={IconLock} size="md" />
-                            </Paper>
-                            <Title order={5} c="ldGray.9" fw={700}>
-                                Access control
-                            </Title>
-                        </Group>
-                        <Stack>
-                            <UserAccessMultiSelect
-                                projectUuid={projectUuid!}
-                                isGroupsEnabled={isGroupsEnabled}
-                                value={form.values.userAccess}
-                                onChange={(value) => {
-                                    form.setFieldValue('userAccess', value);
-                                }}
-                            />
-
-                            {isGroupsEnabled && (
-                                <Stack gap="xs">
-                                    <MultiSelect
-                                        variant="subtle"
-                                        label={
-                                            <Group gap="xs">
-                                                <Text fz="sm" fw={500}>
-                                                    Group Access
-                                                </Text>
-                                                <Tooltip
-                                                    label="Admins and developers will always have access to this agent."
-                                                    withArrow
-                                                    withinPortal
-                                                    multiline
-                                                    position="right"
-                                                    maw="250px"
-                                                >
-                                                    <MantineIcon
-                                                        icon={IconInfoCircle}
-                                                    />
-                                                </Tooltip>
-                                            </Group>
-                                        }
-                                        description="Select groups that can access this agent."
-                                        placeholder={
-                                            isLoadingGroups
-                                                ? 'Loading groups...'
-                                                : groupOptions.length === 0
-                                                  ? 'No groups available'
-                                                  : 'Select groups or leave empty for all users'
-                                        }
-                                        data={groupOptions}
-                                        disabled={
-                                            isLoadingGroups ||
-                                            groupOptions.length === 0
-                                        }
-                                        comboboxProps={{
-                                            transitionProps: {
-                                                transition: 'pop',
-                                                duration: 200,
-                                            },
-                                        }}
-                                        clearable
-                                        {...form.getInputProps('groupAccess')}
-                                        value={
-                                            form.getInputProps('groupAccess')
-                                                .value ?? []
-                                        }
-                                        onChange={(value) => {
-                                            form.setFieldValue(
-                                                'groupAccess',
-                                                value.length > 0 ? value : [],
-                                            );
-                                        }}
-                                    />
-                                </Stack>
+                                </Paper>
                             )}
+                        </AgentSettingsSubsection>
 
-                            <SpaceAccessSelect
-                                projectUuid={projectUuid}
-                                value={form.values.spaceAccess}
-                                onChange={(value) => {
-                                    form.setFieldValue('spaceAccess', value);
-                                }}
-                            />
+                        <Divider />
 
+                        <AgentSettingsSubsection
+                            title="Explores"
+                            description={
+                                <>
+                                    Limit which explores, metrics and dimensions
+                                    the agent can query, by tag. Leave empty to
+                                    allow all of them.{' '}
+                                    <Anchor
+                                        fz="xs"
+                                        href="https://docs.lightdash.com/guides/ai-agents#limiting-access-to-specific-explores-and-fields"
+                                        target="_blank"
+                                    >
+                                        Learn more
+                                    </Anchor>
+                                </>
+                            }
+                        >
                             <Box>
                                 <TagsInput
                                     variant="subtle"
-                                    label={
-                                        <Group gap="xs">
-                                            <Text fz="sm" fw={500}>
-                                                Tags
-                                            </Text>
-                                            <HoverCard
-                                                position="right"
-                                                withArrow
-                                            >
-                                                <HoverCard.Target>
-                                                    <MantineIcon
-                                                        icon={IconInfoCircle}
-                                                    />
-                                                </HoverCard.Target>
-                                                <HoverCard.Dropdown maw="250px">
-                                                    <Text fz="xs">
-                                                        Add tags to control
-                                                        which metrics and
-                                                        dimensions your AI agent
-                                                        can access. See more in
-                                                        our{' '}
-                                                        <Anchor
-                                                            fz="xs"
-                                                            c="dimmed"
-                                                            underline="always"
-                                                            href="https://docs.lightdash.com/guides/ai-agents#limiting-access-to-specific-explores-and-fields"
-                                                            target="_blank"
-                                                        >
-                                                            docs
-                                                        </Anchor>
-                                                    </Text>
-                                                </HoverCard.Dropdown>
-                                            </HoverCard>
-                                        </Group>
-                                    }
+                                    aria-label="Explore tags"
                                     placeholder="Select tags"
                                     inputWrapperOrder={[
                                         'label',
@@ -573,7 +854,7 @@ export const AiAgentFormSetup = ({
                                                 </>
                                             )
                                         ) : (
-                                            `Loading AI access information...`
+                                            `Loading agent access information...`
                                         )
                                     }
                                     {...form.getInputProps('tags')}
@@ -591,7 +872,7 @@ export const AiAgentFormSetup = ({
                                 {exploreAccessSummaryQuery.isSuccess ? (
                                     <Collapse
                                         mt="xs"
-                                        in={isExploreAccessSummaryOpen}
+                                        expanded={isExploreAccessSummaryOpen}
                                     >
                                         <Card>
                                             <AiExploreAccessTree
@@ -603,25 +884,340 @@ export const AiAgentFormSetup = ({
                                     </Collapse>
                                 ) : null}
                             </Box>
-                        </Stack>
-                    </Paper>
+                        </AgentSettingsSubsection>
 
-                    <Paper p="xl">
-                        <Group align="center" gap="xs" mb="md">
-                            <Paper p="xxs" withBorder radius="sm">
-                                <MantineIcon icon={IconPlug} size="md" />
-                            </Paper>
-                            <Title order={5} c="ldGray.9" fw={700}>
-                                Integrations
-                            </Title>
-                        </Group>
-                        <Stack gap="sm">
-                            <Group
-                                align="center"
-                                justify="space-between"
-                                gap="xs"
+                        <Divider />
+
+                        <AgentSettingsSubsection
+                            title="Spaces"
+                            description="Restrict which saved charts and dashboards the agent can read. Empty selection means all spaces."
+                        >
+                            <SpaceAccessSelect
+                                projectUuid={projectUuid}
+                                value={form.values.spaceAccess}
+                                onChange={(value) => {
+                                    form.setFieldValue('spaceAccess', value);
+                                }}
+                            />
+                        </AgentSettingsSubsection>
+                    </AgentSettingsSection>
+
+                    <AgentSettingsSection
+                        id="capabilities"
+                        icon={IconBolt}
+                        title="Capabilities"
+                        description="What the agent may do with your data."
+                    >
+                        <Stack gap="md">
+                            <Switch
+                                variant="subtle"
+                                label={
+                                    <SwitchLabel
+                                        text="Read the rows behind a chart"
+                                        help="When enabled, the agent can analyze chart data and provide insights. When disabled, it only builds visualizations, without reading the data behind them."
+                                        badge={null}
+                                    />
+                                }
+                                description={
+                                    <>
+                                        Query the underlying data, not just the
+                                        chart.{' '}
+                                        <Anchor
+                                            href="https://docs.lightdash.com/guides/ai-agents#data-access-control"
+                                            target="_blank"
+                                            size="xs"
+                                            className={classes.switchLink}
+                                        >
+                                            Learn more
+                                        </Anchor>
+                                    </>
+                                }
+                                {...form.getInputProps('enableDataAccess', {
+                                    type: 'checkbox',
+                                })}
+                                onChange={(event) => {
+                                    const enabled = event.currentTarget.checked;
+
+                                    form.setFieldValue(
+                                        'enableDataAccess',
+                                        enabled,
+                                    );
+
+                                    if (!enabled) {
+                                        form.setFieldValue(
+                                            'enableContentTools',
+                                            false,
+                                        );
+                                    }
+                                }}
+                            />
+                            <Switch
+                                variant="subtle"
+                                label={
+                                    <SwitchLabel
+                                        text="Create and edit content"
+                                        help="Requires reading rows to be enabled. Only works for users with content-as-code access (admins, developers, and editors)."
+                                        badge={<BetaBadge />}
+                                    />
+                                }
+                                description="Build or change dashboards, charts and scheduled deliveries."
+                                {...form.getInputProps('enableContentTools', {
+                                    type: 'checkbox',
+                                })}
+                                disabled={!form.values.enableDataAccess}
+                            />
+                            <Switch
+                                variant="subtle"
+                                label={
+                                    <SwitchLabel
+                                        text="Run SQL against the warehouse"
+                                        help="SQL Runner is only available to users whose role includes SQL Runner access (project developers and admins by default). This setting never grants permission: users without access cannot use SQL Runner, whether this is on or off."
+                                        badge={null}
+                                    />
+                                }
+                                description={
+                                    <>
+                                        On by default in new chats; users can
+                                        switch it off per conversation.{' '}
+                                        <Anchor
+                                            component={Link}
+                                            to={`/generalSettings/projectManagement/${projectUuid}/agentDataScope`}
+                                            size="xs"
+                                            className={classes.switchLink}
+                                        >
+                                            Configure which schemas and tables
+                                            it can query
+                                        </Anchor>
+                                    </>
+                                }
+                                {...form.getInputProps('enableSqlMode', {
+                                    type: 'checkbox',
+                                })}
+                            />
+                            <Switch
+                                variant="subtle"
+                                label={
+                                    <SwitchLabel
+                                        text="Run SQL without approval"
+                                        help="Applies everywhere the agent runs, including Slack. Users still need SQL Runner access, and queries stay limited to the agent data scope."
+                                        badge={null}
+                                    />
+                                }
+                                description="Skip the approval step for SQL queries and SQL charts. Off by default."
+                                {...form.getInputProps(
+                                    'enableSqlAutoApproval',
+                                    {
+                                        type: 'checkbox',
+                                    },
+                                )}
+                            />
+                            {composerQueriesAvailable && (
+                                <Switch
+                                    variant="subtle"
+                                    label={
+                                        <SwitchLabel
+                                            text="Composer queries"
+                                            help="Requires reading rows to be enabled."
+                                            badge={<BetaBadge />}
+                                        />
+                                    }
+                                    description="Queries run through the composer pipeline instead of the classic query tools."
+                                    {...form.getInputProps(
+                                        'enableComposerQueries',
+                                        {
+                                            type: 'checkbox',
+                                        },
+                                    )}
+                                    disabled={!form.values.enableDataAccess}
+                                />
+                            )}
+                        </Stack>
+
+                        <Text size="xs" c="dimmed">
+                            Which explores, spaces and documents it can read is
+                            set in{' '}
+                            <Anchor
+                                component="button"
+                                type="button"
+                                size="xs"
+                                onClick={scrollToKnowledgeAndData}
                             >
-                                <Title order={6}>Slack</Title>
+                                Knowledge &amp; data
+                            </Anchor>
+                            .
+                        </Text>
+                    </AgentSettingsSection>
+
+                    <AgentSettingsSection
+                        id="access-and-privacy"
+                        icon={IconLock}
+                        title="Access & privacy"
+                        description="What the agent knows about the person asking, how long threads are kept, and who can use it."
+                    >
+                        <Switch
+                            variant="subtle"
+                            label={
+                                <SwitchLabel
+                                    text="Use user information"
+                                    help="Only applies when the agent knows who is asking — on Slack this requires the OAuth requirement to be enabled in the organization's Slack settings."
+                                    badge={null}
+                                />
+                            }
+                            description="Shares the requesting user's name, role and group memberships, so answers can be tailored to who is asking."
+                            {...form.getInputProps('enableUserContext', {
+                                type: 'checkbox',
+                            })}
+                        />
+
+                        {threadRetentionFlagQuery.data?.enabled && (
+                            <>
+                                <Divider />
+                                <AgentSettingsSubsection
+                                    title="Thread retention"
+                                    description={`Delete this agent's threads after a period of inactivity. Active threads are never cut off.${
+                                        aiOrganizationSettings?.threadRetentionHours !=
+                                        null
+                                            ? ' The organization retention policy caps this setting.'
+                                            : ''
+                                    }`}
+                                >
+                                    <ThreadRetentionSelect
+                                        value={form.values.threadRetentionHours}
+                                        ceilingHours={
+                                            aiOrganizationSettings?.threadRetentionHours ??
+                                            null
+                                        }
+                                        onChange={(hours) =>
+                                            form.setFieldValue(
+                                                'threadRetentionHours',
+                                                hours,
+                                            )
+                                        }
+                                    />
+                                </AgentSettingsSubsection>
+                            </>
+                        )}
+
+                        <Divider />
+
+                        <AgentSettingsSubsection title="Who can use the agent">
+                            <Stack gap="md">
+                                <Radio.Group
+                                    value={accessMode}
+                                    onChange={handleAccessModeChange}
+                                >
+                                    <Stack gap="sm">
+                                        <Radio
+                                            value="everyone"
+                                            label="Everyone in the project"
+                                            description="All project members can see and use this agent."
+                                        />
+                                        <Radio
+                                            value="admins"
+                                            label="Admins & developers only"
+                                            description="Hidden from everyone else — useful while setting up or testing the agent."
+                                        />
+                                        <Radio
+                                            value="specific"
+                                            label={`Specific users ${isGroupsEnabled ? ' & groups' : ''}`}
+                                            description={`Only the users${isGroupsEnabled ? ' and groups ' : ' '}you choose. Admins and developers (Manage AI Agents scope) always have access.`}
+                                        />
+                                    </Stack>
+                                </Radio.Group>
+
+                                {accessMode === 'specific' && (
+                                    <Stack pl="xl">
+                                        <UserAccessMultiSelect
+                                            projectUuid={projectUuid!}
+                                            isGroupsEnabled={isGroupsEnabled}
+                                            selectedUserDetails={
+                                                userAccessDetails
+                                            }
+                                            value={form.values.userAccess}
+                                            onChange={(value) => {
+                                                form.setFieldValue(
+                                                    'userAccess',
+                                                    value,
+                                                );
+                                            }}
+                                        />
+
+                                        {isGroupsEnabled && (
+                                            <MultiSelect
+                                                variant="subtle"
+                                                label={
+                                                    <Group gap="xs">
+                                                        <Text fz="sm" fw={500}>
+                                                            Group Access
+                                                        </Text>
+                                                        <Tooltip
+                                                            label="Admins and developers (Manage AI Agents scope) will always have access to this agent."
+                                                            position="right"
+                                                            maw="250px"
+                                                        >
+                                                            <MantineIcon
+                                                                icon={
+                                                                    IconInfoCircle
+                                                                }
+                                                            />
+                                                        </Tooltip>
+                                                    </Group>
+                                                }
+                                                description="Select groups that can access this agent."
+                                                placeholder={
+                                                    isLoadingGroups
+                                                        ? 'Loading groups...'
+                                                        : groupOptions.length ===
+                                                            0
+                                                          ? 'No groups available'
+                                                          : 'Select groups or leave empty for all users'
+                                                }
+                                                data={groupOptions}
+                                                disabled={
+                                                    isLoadingGroups ||
+                                                    groupOptions.length === 0
+                                                }
+                                                comboboxProps={{
+                                                    transitionProps: {
+                                                        transition: 'pop',
+                                                        duration: 200,
+                                                    },
+                                                }}
+                                                clearable
+                                                {...form.getInputProps(
+                                                    'groupAccess',
+                                                )}
+                                                value={
+                                                    form.getInputProps(
+                                                        'groupAccess',
+                                                    ).value ?? []
+                                                }
+                                                onChange={(value) => {
+                                                    form.setFieldValue(
+                                                        'groupAccess',
+                                                        value.length > 0
+                                                            ? value
+                                                            : [],
+                                                    );
+                                                }}
+                                            />
+                                        )}
+                                    </Stack>
+                                )}
+                            </Stack>
+                        </AgentSettingsSubsection>
+                    </AgentSettingsSection>
+
+                    <AgentSettingsSection
+                        id="connections"
+                        icon={IconPlug}
+                        title="Connections"
+                        description="Where people reach this agent, and which external tools it can reach."
+                    >
+                        <AgentSettingsSubsection
+                            title="Slack"
+                            description="Channels where people can talk to this agent."
+                            action={
                                 <Group
                                     c={
                                         slackChannelsConfigured
@@ -629,7 +1225,8 @@ export const AiAgentFormSetup = ({
                                             : 'dimmed'
                                     }
                                     gap="xxs"
-                                    align="flex-start"
+                                    align="center"
+                                    wrap="nowrap"
                                 >
                                     <MantineIcon
                                         icon={IconPointFilled}
@@ -643,8 +1240,8 @@ export const AiAgentFormSetup = ({
                                               : 'Enabled'}
                                     </Text>
                                 </Group>
-                            </Group>
-
+                            }
+                        >
                             <LoadingOverlay
                                 visible={isLoadingSlackInstallation}
                             />
@@ -668,68 +1265,65 @@ export const AiAgentFormSetup = ({
                                     </Text>
                                 </Paper>
                             ) : (
-                                <Box>
-                                    <Stack gap="xs">
+                                <Stack gap="xs">
+                                    {slackChannelsConfigured && (
                                         <Text size="sm" c="dimmed">
-                                            Select the channels where this agent
-                                            will be available.
-                                            {slackChannelsConfigured && (
-                                                <>
-                                                    {' '}
-                                                    Tag the Slack app{' '}
-                                                    <Code>
-                                                        @
-                                                        {
-                                                            slackInstallation.appName
-                                                        }
-                                                    </Code>{' '}
-                                                    to get started.
-                                                </>
-                                            )}
+                                            Tag the Slack app{' '}
+                                            <Code>
+                                                @{slackInstallation.appName}
+                                            </Code>{' '}
+                                            to get started.
                                         </Text>
-                                        <SlackChannelSelect
-                                            includeGroups
-                                            multiple
-                                            withRefresh
-                                            size="sm"
-                                            variant="subtle"
-                                            label="Channels"
-                                            placeholder="Search channel(s)"
-                                            value={form.values.integrations.map(
-                                                (i) => i.channelId,
-                                            )}
-                                            onChange={(value) => {
-                                                form.setFieldValue(
-                                                    'integrations',
-                                                    value.map(
-                                                        (v) =>
-                                                            ({
-                                                                type: 'slack',
-                                                                channelId: v,
-                                                            }) as const,
-                                                    ),
-                                                );
-                                            }}
-                                        />
-                                    </Stack>
-                                </Box>
+                                    )}
+                                    <SlackChannelSelect
+                                        includeGroups
+                                        multiple
+                                        withRefresh
+                                        size="sm"
+                                        variant="subtle"
+                                        label="Channels"
+                                        placeholder="Search channel(s)"
+                                        value={form.values.integrations.map(
+                                            (i) => i.channelId,
+                                        )}
+                                        onChange={(value) => {
+                                            form.setFieldValue(
+                                                'integrations',
+                                                value.map(
+                                                    (v) =>
+                                                        ({
+                                                            type: 'slack',
+                                                            channelId: v,
+                                                        }) as const,
+                                                ),
+                                            );
+                                        }}
+                                    />
+                                </Stack>
                             )}
-                        </Stack>
-                    </Paper>
+                        </AgentSettingsSubsection>
+
+                        <Divider />
+
+                        <AiAgentMcpServersInput
+                            agentUuid={agentUuid}
+                            isSavingAgent={isSavingAgent}
+                            onPersistedChange={handlePersistedMcpServerChange}
+                            persistedMcpServerUuids={persistedMcpServerUuids}
+                            projectUuid={projectUuid}
+                            value={form.values.mcpServerUuids}
+                            onChange={(value) => {
+                                form.setFieldValue('mcpServerUuids', value);
+                            }}
+                        />
+                    </AgentSettingsSection>
 
                     {mode === 'edit' && (
-                        <Paper p="xl" withBorder>
-                            <Group align="center" gap="xs" mb="md">
-                                <Paper p="xxs" withBorder radius="sm">
-                                    <MantineIcon
-                                        icon={IconAlertTriangle}
-                                        size="md"
-                                    />
-                                </Paper>
-                                <Title order={5} c="ldGray.9" fw={700}>
-                                    Danger zone
-                                </Title>
-                            </Group>
+                        <AgentSettingsSection
+                            id="danger-zone"
+                            icon={IconAlertTriangle}
+                            title="Danger zone"
+                        >
                             <Group
                                 gap="xs"
                                 align="center"
@@ -745,8 +1339,8 @@ export const AiAgentFormSetup = ({
                                         Delete agent
                                     </Title>
                                     <Text c="dimmed" size="xs">
-                                        Deleting an agent will remove all its
-                                        data and conversations.
+                                        Removes all of its data and
+                                        conversations.
                                     </Text>
                                 </Box>
                                 <Button
@@ -760,7 +1354,7 @@ export const AiAgentFormSetup = ({
                                     Delete
                                 </Button>
                             </Group>
-                        </Paper>
+                        </AgentSettingsSection>
                     )}
                 </Stack>
             </form>
@@ -773,6 +1367,14 @@ export const AiAgentFormSetup = ({
                 description="This action cannot be undone."
                 onConfirm={handleDelete}
             />
+            {agentUuid && (
+                <AiAgentAsCodeModal
+                    opened={isAsCodeModalOpen}
+                    onClose={asCodeModalHandlers.close}
+                    projectUuid={projectUuid}
+                    agentUuid={agentUuid}
+                />
+            )}
         </>
     );
 };

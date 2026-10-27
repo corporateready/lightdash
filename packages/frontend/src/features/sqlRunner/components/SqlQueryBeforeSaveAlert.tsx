@@ -1,4 +1,4 @@
-import { Alert, Text } from '@mantine-8/core';
+import { Alert, Text } from '@mantine/core';
 import { IconAlertCircle } from '@tabler/icons-react';
 import { type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
@@ -8,8 +8,8 @@ export const SqlQueryBeforeSaveAlert: FC<{ withDescription?: boolean }> = ({
 }) => {
     return (
         <Alert
-            icon={<MantineIcon icon={IconAlertCircle} color="yellow" />}
-            color="yellow"
+            icon={<MantineIcon icon={IconAlertCircle} />}
+            color="orange"
             title="You haven't run your query yet"
         >
             {withDescription && (

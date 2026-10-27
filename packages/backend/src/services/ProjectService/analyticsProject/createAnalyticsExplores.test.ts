@@ -1,0 +1,305 @@
+import { FilterOperator, MetricType, WarehouseTypes } from '@lightdash/common';
+import { warehouseSqlBuilderFromType } from '@lightdash/warehouses';
+import { MetricQueryBuilder } from '../../../utils/QueryBuilder/MetricQueryBuilder';
+import { createAnalyticsExplores } from './createAnalyticsExplores';
+
+describe('createAnalyticsExplores', () => {
+    it('exposes database history without combining its counts with native views', () => {
+        const history = createAnalyticsExplores().find(
+            ({ name }) => name === 'historical_activity',
+        )!;
+        expect(history).toBeDefined();
+        expect(
+            history.tables.historical_activity.metrics.record_count,
+        ).toMatchObject({ type: MetricType.COUNT });
+        expect(
+            history.tables.historical_activity.dimensions.activity_type
+                .description,
+        ).toContain('must not be added');
+        expect(
+            history.tables.historical_activity.dimensions.current_status
+                .description,
+        ).toContain('last import');
+    });
+
+    it('offers native content links through the same Explore URL aliases', () => {
+        const explores = createAnalyticsExplores();
+        for (const name of [
+            'query_events',
+            'export_events',
+            'semantic_usage',
+            'content_reach',
+            'content_health',
+        ]) {
+            const table = explores.find((explore) => explore.name === name)!
+                .tables[name];
+            for (const type of name.startsWith('content_')
+                ? ['content']
+                : ['chart', 'dashboard']) {
+                expect(table.dimensions[`${type}_name`].urls).toEqual([
+                    {
+                        label: `Open ${type}`,
+                        url: `\${row.${name}.${type}_url.raw}`,
+                    },
+                ]);
+            }
+        }
+    });
+
+    it('exposes one field list per Explore including available names and slugs', () => {
+        const explores = createAnalyticsExplores();
+        for (const explore of explores) {
+            expect(
+                Object.values(explore.tables)
+                    .filter((table) => !table.hidden)
+                    .map((table) => table.name),
+            ).toEqual([explore.baseTable]);
+        }
+        const ai = explores.find(({ name }) => name === 'ai_usage')!;
+        expect(ai.tables.ai_usage.dimensions.user_name.hidden).toBe(false);
+        expect(ai.tables.ai_usage.dimensions.agent_name.hidden).toBe(false);
+        const exports = explores.find(({ name }) => name === 'export_events')!;
+        expect(exports.tables.export_events.dimensions).toMatchObject({
+            chart_name: { label: 'Chart name', hidden: false },
+            chart_slug: { label: 'Chart slug', hidden: false },
+            chart_url: { label: 'Chart url', hidden: false },
+            dashboard_name: { label: 'Dashboard name', hidden: false },
+            dashboard_slug: { label: 'Dashboard slug', hidden: false },
+            dashboard_url: { label: 'Dashboard url', hidden: false },
+            chart_id: { hidden: false },
+            dashboard_id: { hidden: false },
+            explore_name: { hidden: false },
+        });
+    });
+
+    it.each([
+        ['ai_usage', 'lightdash_users_name', 'user_name', 'total_ai_calls'],
+        ['ai_usage', 'lightdash_agents_name', 'agent_name', 'total_ai_calls'],
+        [
+            'query_events',
+            'lightdash_charts_slug',
+            'chart_slug',
+            'total_queries',
+        ],
+        [
+            'export_events',
+            'lightdash_dashboards_name',
+            'dashboard_name',
+            'total_events',
+        ],
+        ['export_events', 'query_events_chart_id', 'chart_id', 'total_events'],
+        ['data_app_events', 'lightdash_apps_name', 'app_name', 'total_views'],
+        [
+            'data_app_events',
+            'lightdash_apps_project_name',
+            'project_name',
+            'total_views',
+        ],
+        ['user_activity', 'lightdash_users_name', 'user_name', 'total_events'],
+        [
+            'historical_activity',
+            'lightdash_users_name',
+            'user_name',
+            'record_count',
+        ],
+        [
+            'historical_activity',
+            'lightdash_content_content_name',
+            'content_name',
+            'record_count',
+        ],
+        [
+            'historical_activity',
+            'lightdash_apps_name',
+            'app_name',
+            'record_count',
+        ],
+    ])(
+        'keeps the same SQL work for %s %s selections, filters and sorts',
+        (name, original, alias, metric) => {
+            const explore = createAnalyticsExplores().find(
+                (item) => item.name === name,
+            )!;
+            const compile = (fieldId: string | null) =>
+                new MetricQueryBuilder({
+                    explore,
+                    compiledMetricQuery: {
+                        exploreName: name,
+                        dimensions: fieldId ? [fieldId] : [],
+                        metrics: [`${name}_${metric}`],
+                        filters: fieldId
+                            ? {
+                                  dimensions: {
+                                      id: 'filter-group',
+                                      and: [
+                                          {
+                                              id: 'filter',
+                                              target: { fieldId },
+                                              operator: FilterOperator.EQUALS,
+                                              values: ['Example'],
+                                          },
+                                      ],
+                                  },
+                              }
+                            : {},
+                        sorts: fieldId ? [{ fieldId, descending: false }] : [],
+                        limit: 50,
+                        tableCalculations: [],
+                        compiledTableCalculations: [],
+                        compiledAdditionalMetrics: [],
+                        compiledCustomDimensions: [],
+                    },
+                    warehouseSqlBuilder: warehouseSqlBuilderFromType(
+                        WarehouseTypes.DUCKDB,
+                    ),
+                    intrinsicUserAttributes: {},
+                    parameterDefinitions: {},
+                    timezone: 'UTC',
+                }).compileQuery();
+            const fieldId = `${name}_${alias}`;
+            const before = compile(original);
+            const after = compile(fieldId);
+            const originalDimension = Object.values(explore.tables)
+                .flatMap((table) => Object.values(table.dimensions))
+                .find((field) => `${field.table}_${field.name}` === original)!;
+            const aliasDimension = explore.tables[name].dimensions[alias];
+            // The compiler wraps references in parentheses; execution otherwise
+            // has exactly the same expressions, joins and storage dependencies.
+            expect(aliasDimension.compiledSql).toBe(
+                `(${originalDimension.compiledSql})`,
+            );
+            expect(after.warnings).toEqual([]);
+            expect(after.query).toBe(
+                before.query
+                    .replaceAll(
+                        originalDimension.compiledSql,
+                        aliasDimension.compiledSql,
+                    )
+                    .replaceAll(original, fieldId),
+            );
+            expect(compile(null).query).not.toContain('JOIN');
+        },
+    );
+
+    it.each([
+        ['agent_requests', 'users', 'total_requests'],
+        ['agent_requests', 'agents', 'total_requests'],
+        ['tool_activity', 'users', 'total_calls'],
+        ['tool_activity', 'agents', 'error_rate'],
+        ['user_activity', 'users', 'total_csv_downloads'],
+        ['agent_steps', 'agents', 'total_steps'],
+        ['ai_usage', 'users', 'total_ai_calls'],
+        ['ai_usage', 'agents', 'total_ai_calls'],
+        ['query_events', 'charts', 'total_queries'],
+        ['query_events', 'dashboards', 'total_queries'],
+        ['export_events', 'charts', 'total_events'],
+        ['export_events', 'dashboards', 'total_events'],
+    ])(
+        'compiles %s joined to %s without primary-key warnings',
+        (name, dimension, metric) => {
+            const explore = createAnalyticsExplores().find(
+                (item) => item.name === name,
+            )!;
+            const { warnings } = new MetricQueryBuilder({
+                explore,
+                compiledMetricQuery: {
+                    exploreName: name,
+                    dimensions: [`lightdash_${dimension}_name`],
+                    metrics: [`${name}_${metric}`],
+                    filters: {},
+                    sorts: [],
+                    limit: 500,
+                    tableCalculations: [],
+                    compiledTableCalculations: [],
+                    compiledAdditionalMetrics: [],
+                    compiledCustomDimensions: [],
+                },
+                warehouseSqlBuilder: warehouseSqlBuilderFromType(
+                    WarehouseTypes.DUCKDB,
+                ),
+                intrinsicUserAttributes: {},
+                parameterDefinitions: {},
+                timezone: 'UTC',
+            }).compileQuery();
+            expect(warnings).toEqual([]);
+        },
+    );
+
+    it('compiles curated metrics and time dimensions against internal views', () => {
+        const explores = createAnalyticsExplores();
+        const [queries, ai, apps, exports] = explores;
+        expect(exports.tables.export_events.metrics.total_events.type).toBe(
+            MetricType.COUNT,
+        );
+        expect(exports.tables.export_events.dimensions.format).toBeDefined();
+        expect(exports.tables.export_events.dimensions.query_id).toBeDefined();
+        expect(exports.joinedTables.map(({ table }) => table)).toEqual([
+            'query_events',
+            'lightdash_charts',
+            'lightdash_dashboards',
+            'lightdash_users',
+        ]);
+        expect(exports.tables.lightdash_users.dimensions.name).toBeDefined();
+        expect(exports.tables.query_events.dimensions.chart_id).toBeDefined();
+        expect(
+            exports.tables.query_events.dimensions.dashboard_id,
+        ).toBeDefined();
+        expect(exports.tables.query_events.metrics).toEqual({});
+        expect(explores.map(({ name }) => name)).toEqual([
+            'query_events',
+            'ai_usage',
+            'data_app_events',
+            'export_events',
+            'agent_steps',
+            'user_activity',
+            'historical_activity',
+            'tool_activity',
+            'content_reach',
+            'content_health',
+            'agent_requests',
+            'agent_request_events',
+            'semantic_usage',
+            'data_app_reach',
+            'data_app_outcomes',
+            'people_adoption',
+        ]);
+        expect(apps.tables.data_app_events.dimensions.app_id).toBeDefined();
+        expect(apps.tables.data_app_events.dimensions.user_id).toBeDefined();
+        expect(
+            apps.tables.data_app_events.dimensions.event_ts_day,
+        ).toBeDefined();
+        expect(apps.tables.data_app_events.metrics.total_views.type).toBe(
+            MetricType.COUNT,
+        );
+        expect(apps.tables.data_app_events.metrics.unique_viewers.type).toBe(
+            MetricType.COUNT_DISTINCT,
+        );
+        expect(queries.tables.query_events.sqlTable).toBe('"query_events"');
+        expect(queries.tables.query_events.metrics.total_queries.type).toBe(
+            MetricType.COUNT,
+        );
+        expect(
+            queries.tables.query_events.metrics.p90_warehouse_execution_time_ms
+                .percentile,
+        ).toBe(90);
+        expect(
+            queries.tables.query_events.dimensions.event_ts_day,
+        ).toBeDefined();
+        expect(ai.tables.ai_usage.metrics.total_input_tokens.type).toBe(
+            MetricType.SUM,
+        );
+        expect(ai.tables.ai_usage.metrics.unique_users.type).toBe(
+            MetricType.COUNT_DISTINCT,
+        );
+    });
+
+    it('does not turn unexpected source columns into model fields or metrics', () => {
+        const [queries] = createAnalyticsExplores();
+        expect(
+            queries.tables.query_events.dimensions.extra_numeric,
+        ).toBeUndefined();
+        expect(
+            queries.tables.query_events.metrics.total_row_count_total,
+        ).toBeUndefined();
+    });
+});

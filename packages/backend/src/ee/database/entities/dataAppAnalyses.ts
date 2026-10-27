@@ -1,0 +1,127 @@
+import type {
+    DataAppAnalysisSource,
+    DataAppDetectResult,
+    DataAppInvestigateResult,
+    DataAppPromptResult,
+} from '@lightdash/common';
+import { Knex } from 'knex';
+
+export const DataAppAnalysesTableName = 'data_app_analyses';
+
+/** Hash of one source's section (legend + rows), keyed by the query it came from. */
+export type DataAppSourceHash = { queryUuid: string; hash: string };
+
+/** Exactly one target per row, enforced by a CHECK constraint. */
+export type DbDataAppAnalysisTarget =
+    | { app_id: string; app_version: number; dashboard_uuid: null }
+    | { app_id: null; app_version: null; dashboard_uuid: string };
+
+type DbDataAppAnalysisBase = DbDataAppAnalysisTarget & {
+    data_app_analysis_uuid: string;
+    organization_uuid: string;
+    project_uuid: string;
+    created_by_user_uuid: string;
+    sources: DataAppAnalysisSource[];
+    instructions: string | null;
+    model_id: string | null;
+    content_hash: string | null;
+    source_hashes: DataAppSourceHash[] | null;
+    reused_from_analysis_uuid: string | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    /**
+     * detect/prompt: the model call only. investigate: the whole job from
+     * pickup, gates included. Don't average across operations.
+     */
+    latency_ms: number | null;
+    created_at: Date;
+};
+
+export type DbDataAppAnalysis = DbDataAppAnalysisBase &
+    (
+        | {
+              operation: 'detect';
+              result: DataAppDetectResult;
+              parent_analysis_uuid: null;
+              anomaly_id: null;
+              agent_uuid: null;
+              thread_uuid: null;
+          }
+        | {
+              operation: 'investigate';
+              result: DataAppInvestigateResult;
+              parent_analysis_uuid: string;
+              anomaly_id: string;
+              agent_uuid: string;
+              thread_uuid: string;
+          }
+        | {
+              operation: 'prompt';
+              result: DataAppPromptResult;
+              parent_analysis_uuid: null;
+              anomaly_id: null;
+              agent_uuid: null;
+              thread_uuid: null;
+          }
+    );
+
+// jsonb columns are JSON-stringified on insert (pg would treat a JS array
+// as a Postgres array, not jsonb)
+export type DbCreateDataAppAnalysis = Omit<
+    DbDataAppAnalysisBase,
+    | 'data_app_analysis_uuid'
+    | 'created_at'
+    | 'sources'
+    | 'source_hashes'
+    | keyof DbDataAppAnalysisTarget
+> &
+    DbDataAppAnalysisTarget & {
+        operation: 'detect' | 'investigate' | 'prompt';
+        sources: string;
+        source_hashes: string | null;
+        result: string;
+        parent_analysis_uuid: string | null;
+        anomaly_id: string | null;
+        agent_uuid: string | null;
+        thread_uuid: string | null;
+    };
+
+export type DataAppAnalysesTable = Knex.CompositeTableType<
+    DbDataAppAnalysis,
+    DbCreateDataAppAnalysis
+>;
+
+export const DataAppAnalysisRateCountersTableName =
+    'data_app_analysis_rate_counters';
+
+export type DataAppAnalysisOperation = 'detect' | 'prompt' | 'investigate';
+
+export type DbDataAppAnalysisRateCounter = {
+    /** Target uuid (app or dashboard); named for its original app-only scope. */
+    app_id: string;
+    user_uuid: string;
+    operation: DataAppAnalysisOperation;
+    window_started_at: Date;
+    request_count: number;
+};
+
+export type DataAppAnalysisRateCountersTable = Knex.CompositeTableType<
+    DbDataAppAnalysisRateCounter,
+    DbDataAppAnalysisRateCounter
+>;
+
+export const DataAppAnalysisDailyCountersTableName =
+    'data_app_analysis_daily_counters';
+
+export type DbDataAppAnalysisDailyCounter = {
+    organization_uuid: string;
+    operation: DataAppAnalysisOperation;
+    /** UTC calendar day, YYYY-MM-DD. */
+    day: string;
+    request_count: number;
+};
+
+export type DataAppAnalysisDailyCountersTable = Knex.CompositeTableType<
+    DbDataAppAnalysisDailyCounter,
+    DbDataAppAnalysisDailyCounter
+>;

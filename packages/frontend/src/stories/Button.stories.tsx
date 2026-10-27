@@ -7,8 +7,8 @@ const meta: Meta<typeof Button> = {
     argTypes: {
         variant: {
             control: 'select',
-            options: ['darkPrimary', 'default'],
-            defaultValue: 'darkPrimary',
+            options: ['filled', 'default'],
+            defaultValue: 'filled',
         },
         loading: {
             control: 'boolean',
@@ -32,7 +32,7 @@ type Story = StoryObj<typeof Button>;
 export const PrimaryButton: Story = {
     args: {
         children: 'Primary Button',
-        variant: 'darkPrimary',
+        variant: 'filled',
         radius: 'md',
         loading: false,
         disabled: false,

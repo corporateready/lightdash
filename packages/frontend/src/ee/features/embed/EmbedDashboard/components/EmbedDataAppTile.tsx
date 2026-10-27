@@ -1,13 +1,18 @@
-import { type DashboardDataAppTile } from '@lightdash/common';
-import { Box, Loader, Stack } from '@mantine-8/core';
+import {
+    hashStringToBase36,
+    type DashboardDataAppTile,
+} from '@lightdash/common';
+import { Box, Loader, Stack } from '@mantine/core';
 import { IconAppsOff } from '@tabler/icons-react';
-import { useMemo, type FC } from 'react';
+import { useCallback, useEffect, useMemo, type FC } from 'react';
 import SuboptimalState from '../../../../../components/common/SuboptimalState/SuboptimalState';
+import DashboardDataAppIframe from '../../../../../components/DashboardTiles/DashboardDataAppIframe';
 import TileBase from '../../../../../components/DashboardTiles/TileBase';
-import AppIframePreview from '../../../../../features/apps/AppIframePreview';
+import { getVisiblePreviewTokenError } from '../../../../../features/apps/hooks/previewTokenQueryOptions';
 import { useEmbedAppPreviewToken } from '../../../../../features/apps/hooks/useEmbedAppPreviewToken';
 import { usePreviewOrigin } from '../../../../../features/apps/previewOrigin';
 import useDashboardFiltersForTile from '../../../../../hooks/dashboard/useDashboardFiltersForTile';
+import useDashboardTileStatusContext from '../../../../../providers/Dashboard/useDashboardTileStatusContext';
 import { convertDateDashboardFilters } from '../../../../../utils/dateFilter';
 
 type Props = {
@@ -48,20 +53,40 @@ const EmbedDataAppTile: FC<Props> = ({ tile, projectUuid }) => {
 
     // Bumping the URL whenever filters change forces the iframe to remount so
     // its mount-time metric queries re-fire — matching DashboardDataAppTile.
+    // Hash instead of serialize so the URL doesn't 502 on large dashboards.
     const filtersKey = useMemo(
-        () => JSON.stringify(dashboardFiltersForApp),
+        () => hashStringToBase36(JSON.stringify(dashboardFiltersForApp)),
         [dashboardFiltersForApp],
     );
 
     const previewUrl = tokenQuery.data
-        ? `${previewOrigin}/api/apps/${appUuid}/versions/${tokenQuery.data.version}/t/${tokenQuery.data.token}/?f=${encodeURIComponent(
-              filtersKey,
-          )}#transport=postMessage&projectUuid=${projectUuid}`
+        ? `${previewOrigin}/api/apps/${appUuid}/versions/${tokenQuery.data.version}/t/${tokenQuery.data.token}/?f=${filtersKey}#transport=postMessage&projectUuid=${projectUuid}`
         : undefined;
 
-    const statusCode = tokenQuery.error?.error?.statusCode;
+    const visibleTokenError = getVisiblePreviewTokenError(
+        tokenQuery.error,
+        !!tokenQuery.data,
+    );
+    const statusCode = visibleTokenError?.error?.statusCode;
     const isNotFound = !!appDeletedAt || statusCode === 404;
     const isForbidden = statusCode === 403;
+    const hasLoadError = isNotFound || isForbidden || !!visibleTokenError;
+    const markEmbedTileComplete = useDashboardTileStatusContext(
+        (c) => c.markEmbedTileComplete,
+    );
+    const markTileScreenshotErrored = useDashboardTileStatusContext(
+        (c) => c.markTileScreenshotErrored,
+    );
+    const handleIframeLoad = useCallback(
+        () => markEmbedTileComplete(uuid),
+        [markEmbedTileComplete, uuid],
+    );
+
+    useEffect(() => {
+        if (!hasLoadError) return;
+        markEmbedTileComplete(uuid);
+        markTileScreenshotErrored(uuid);
+    }, [hasLoadError, markEmbedTileComplete, markTileScreenshotErrored, uuid]);
 
     return (
         <TileBase
@@ -71,7 +96,7 @@ const EmbedDataAppTile: FC<Props> = ({ tile, projectUuid }) => {
             onDelete={() => {}}
             onEdit={() => {}}
         >
-            <Box className="non-draggable" style={{ flex: 1, minHeight: 0 }}>
+            <Box className="non-draggable" flex={1} mih={0}>
                 {isNotFound ? (
                     <SuboptimalState
                         icon={IconAppsOff}
@@ -84,16 +109,23 @@ const EmbedDataAppTile: FC<Props> = ({ tile, projectUuid }) => {
                         title="No access"
                         description="This data app isn't authorized for this embed."
                     />
-                ) : tokenQuery.isLoading || !previewUrl ? (
+                ) : tokenQuery.isLoading || !previewUrl || !tokenQuery.data ? (
                     <Stack align="center" justify="center" h="100%">
                         <Loader size="sm" />
                     </Stack>
                 ) : (
-                    <AppIframePreview
+                    // Marks screenshot-ready once the app's queries go quiet.
+                    <DashboardDataAppIframe
+                        key={`${appUuid}:${tokenQuery.data.version}:${filtersKey}`}
+                        tileUuid={uuid}
                         src={previewUrl}
+                        previewToken={tokenQuery.data.token}
                         expectedPreviewOrigin={previewOrigin}
-                        identityKey={`${appUuid}:${tokenQuery.data!.version}`}
+                        projectUuid={projectUuid}
+                        appUuid={appUuid}
+                        identityKey={`${appUuid}:${tokenQuery.data.version}`}
                         dashboardFilters={dashboardFiltersForApp}
+                        onIframeLoad={handleIframeLoad}
                     />
                 )}
             </Box>

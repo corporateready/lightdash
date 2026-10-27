@@ -1,0 +1,286 @@
+import { ChartKind } from '@lightdash/common';
+import { Anchor, Box, Text, type AnchorProps } from '@mantine/core';
+import {
+    IconAppWindow,
+    IconArrowRight,
+    IconBrandGithub,
+    IconBrush,
+    IconChartBar,
+    IconClick,
+    IconFile,
+    IconFileSpreadsheet,
+    IconFileText,
+    IconFlask,
+    IconGitPullRequest,
+    IconLayoutDashboard,
+    IconLicense,
+    IconMessages,
+    IconPencil,
+    IconSearch,
+    IconSend,
+    type Icon,
+} from '@tabler/icons-react';
+import {
+    type AnchorHTMLAttributes,
+    type MouseEventHandler,
+    type ReactNode,
+} from 'react';
+import { Link, type LinkProps } from 'react-router';
+import MantineIcon from '../../../../../components/common/MantineIcon';
+import { getChartIcon } from '../../../../../components/common/ResourceIcon/utils';
+import styles from './ContentLink.module.css';
+
+type ContentReferenceKind =
+    | 'artifact'
+    | 'chart'
+    | 'dashboard'
+    | 'document'
+    | 'data_app'
+    | 'data_app_element'
+    | 'design'
+    | 'thread'
+    | 'file'
+    | 'repository'
+    | 'external_source'
+    | 'thread_file'
+    | 'pull_request'
+    | 'proposed_change'
+    | 'review_finding'
+    | 'preview_environment'
+    | 'scheduled_delivery'
+    | 'skill';
+
+type Props = {
+    chartKind?: ChartKind;
+    children: ReactNode;
+    kind: ContentReferenceKind;
+    /** Overrides the icon the kind implies, e.g. a table for a CSV attachment. */
+    icon?: Icon;
+    showArrow?: boolean;
+    /** Replaces the trailing arrow, e.g. to signal opening in a modal. */
+    trailingIcon?: Icon;
+    to?: LinkProps['to'];
+} & Omit<
+    AnchorProps,
+    'children' | 'classNames' | 'c' | 'component' | 'fw' | 'fz' | 'td'
+> &
+    Pick<
+        AnchorHTMLAttributes<HTMLAnchorElement>,
+        'href' | 'onClick' | 'rel' | 'target' | 'title'
+    >;
+
+const getIconMeta = ({
+    chartKind,
+    kind,
+}: {
+    chartKind?: ChartKind;
+    kind: ContentReferenceKind;
+}): { color: string; fill: string; icon: Icon } => {
+    switch (kind) {
+        case 'document':
+            return {
+                color: 'ldGray.7',
+                fill: 'ldGray.4',
+                icon: IconFileText,
+            };
+        case 'dashboard':
+            return {
+                color: 'green.7',
+                fill: 'green.6',
+                icon: IconLayoutDashboard,
+            };
+        case 'data_app':
+            return {
+                color: 'orange.7',
+                fill: 'orange.6',
+                icon: IconAppWindow,
+            };
+        case 'data_app_element':
+            return {
+                color: 'violet.7',
+                fill: 'violet.4',
+                icon: IconClick,
+            };
+        case 'design':
+            return {
+                color: 'pink.7',
+                fill: 'pink.4',
+                icon: IconBrush,
+            };
+        case 'skill':
+            return {
+                color: 'indigo.7',
+                fill: 'indigo.4',
+                icon: IconLicense,
+            };
+        case 'artifact':
+            return {
+                color: 'indigo.6',
+                fill: 'indigo.1',
+                icon: IconChartBar,
+            };
+        case 'thread':
+            return {
+                color: 'violet.7',
+                fill: 'violet.4',
+                icon: IconMessages,
+            };
+        case 'file':
+            return {
+                color: 'ldGray.7',
+                fill: 'ldGray.4',
+                icon: IconFile,
+            };
+        case 'repository':
+            return {
+                color: 'ldGray.7',
+                fill: 'ldGray.4',
+                icon: IconBrandGithub,
+            };
+        case 'external_source':
+            return {
+                color: 'teal.7',
+                fill: 'teal.4',
+                icon: IconFileSpreadsheet,
+            };
+        case 'thread_file':
+            return {
+                color: 'ldGray.7',
+                fill: 'ldGray.4',
+                icon: IconFileText,
+            };
+        case 'pull_request':
+            return {
+                color: 'teal.7',
+                fill: 'teal.4',
+                icon: IconGitPullRequest,
+            };
+        case 'proposed_change':
+            return {
+                color: 'violet.7',
+                fill: 'violet.4',
+                icon: IconPencil,
+            };
+        case 'review_finding':
+            return {
+                color: 'orange.7',
+                fill: 'orange.4',
+                icon: IconSearch,
+            };
+        case 'preview_environment':
+            return {
+                color: 'cyan.7',
+                fill: 'cyan.4',
+                icon: IconFlask,
+            };
+        case 'scheduled_delivery':
+            return {
+                color: 'grape.7',
+                fill: 'grape.4',
+                icon: IconSend,
+            };
+        case 'chart':
+        default:
+            return {
+                color: 'blue.7',
+                fill: 'blue.4',
+                icon: getChartIcon(chartKind ?? ChartKind.VERTICAL_BAR),
+            };
+    }
+};
+
+export const ContentReferenceLink = ({
+    chartKind,
+    children,
+    kind,
+    icon: iconOverride,
+    showArrow = true,
+    trailingIcon,
+    to,
+    ...props
+}: Props) => {
+    const { color, fill, icon } = getIconMeta({ chartKind, kind });
+
+    const content = (
+        <>
+            <MantineIcon
+                icon={iconOverride ?? icon}
+                size={13}
+                color={color}
+                fill={fill}
+                fillOpacity={0.2}
+                stroke={1.5}
+            />
+
+            <Text fz="xs" fw={500} m={0} truncate>
+                {children}
+            </Text>
+
+            {showArrow && (
+                <MantineIcon
+                    icon={trailingIcon ?? IconArrowRight}
+                    color="dimmed"
+                    size={11}
+                    stroke={1.5}
+                />
+            )}
+        </>
+    );
+
+    const anchorProps = {
+        ...props,
+        fz: 'xs',
+        fw: 500,
+        c: 'ldGray.8',
+        td: 'none',
+        classNames: { root: styles.contentLink },
+    };
+
+    // A chip that acts in place (opens a panel, navigates inside an embed)
+    // has no destination to link to.
+    if (!to && props.onClick) {
+        const { href, onClick, rel, target, ...buttonProps } = anchorProps;
+        return (
+            <Anchor
+                {...buttonProps}
+                component="button"
+                type="button"
+                // The handler only reacts to the click; the element type differs.
+                onClick={
+                    onClick as unknown as MouseEventHandler<HTMLButtonElement>
+                }
+                data-content-link="true"
+            >
+                {content}
+            </Anchor>
+        );
+    }
+
+    // With no destination, render a plain span — no link semantics, no pointer,
+    // no hover — so the chip reads as a static reference, not a clickable link.
+    if (!to) {
+        return (
+            <Box
+                component="span"
+                fz="xs"
+                fw={500}
+                c="ldGray.8"
+                className={`${styles.contentLink} ${styles.static}`}
+                data-content-link="true"
+            >
+                {content}
+            </Box>
+        );
+    }
+
+    return (
+        <Anchor
+            {...anchorProps}
+            component={Link}
+            data-content-link="true"
+            to={to}
+        >
+            {content}
+        </Anchor>
+    );
+};

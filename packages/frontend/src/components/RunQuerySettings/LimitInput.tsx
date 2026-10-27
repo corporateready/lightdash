@@ -1,4 +1,5 @@
-import { NumberInput, type NumberInputProps } from '@mantine-8/core';
+import { type NumberInputProps } from '@mantine/core';
+import { NumberInput } from '../common/NumberInput';
 import { type Props } from './index';
 
 type LimitInputProps = Pick<
@@ -29,7 +30,7 @@ const LimitInput = ({
             max={maxLimit}
             step={100}
             size={size}
-            label="Row limit:"
+            label="Row limit"
             clampBehavior="strict"
             {...numberInputProps}
         />

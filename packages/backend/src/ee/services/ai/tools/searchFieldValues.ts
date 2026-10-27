@@ -1,47 +1,152 @@
 import {
-    toolSearchFieldValuesArgsSchema,
+    searchFieldValuesFilterExpressionToolDefinition,
+    searchFieldValuesToolDefinition,
     toolSearchFieldValuesArgsSchemaTransformed,
-    toolSearchFieldValuesOutputSchema,
+    toolSearchFieldValuesExpressionArgsSchema,
+    type ToolSearchFieldValuesArgs,
+    type ToolSearchFieldValuesExpressionArgs,
+    type ToolSearchFieldValuesStructuredContent,
 } from '@lightdash/common';
-import { tool } from 'ai';
-import type { SearchFieldValuesFn } from '../types/aiAgentDependencies';
+import { tool, type Schema } from 'ai';
+import type { AiDecisionClient } from '../decisions/AiDecisionClient';
+import { resolveFieldValue } from '../decisions/fieldValues';
+import type {
+    GetExploreFn,
+    SearchFieldValuesFn,
+} from '../types/aiAgentDependencies';
+import {
+    formatFilterExpressionError,
+    resolveSearchFieldValuesFilterExpression,
+} from '../utils/filterExpressions';
 import { serializeData } from '../utils/serializeData';
+import type {
+    ExecuteStructuredToolResult,
+    ExecuteToolErrorResult,
+} from '../utils/structuredToolResult';
 import { toModelOutput } from '../utils/toModelOutput';
-import { toolErrorHandler } from '../utils/toolErrorHandler';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
 
 type Dependencies = {
+    decisions?: AiDecisionClient;
     searchFieldValues: SearchFieldValuesFn;
+    getExplore: GetExploreFn;
+    enableFilterExpressions: boolean;
 };
 
-export const getSearchFieldValues = ({ searchFieldValues }: Dependencies) =>
-    tool({
-        description: toolSearchFieldValuesArgsSchema.description,
-        inputSchema: toolSearchFieldValuesArgsSchema,
-        outputSchema: toolSearchFieldValuesOutputSchema,
-        execute: async (toolArgs) => {
+type SearchFieldValuesToolInput =
+    | ToolSearchFieldValuesArgs
+    | ToolSearchFieldValuesExpressionArgs;
+
+type SearchFieldValuesExecuteResult =
+    | ExecuteStructuredToolResult<ToolSearchFieldValuesStructuredContent>
+    | ExecuteToolErrorResult;
+
+// The search returns either bare values or values with a note; the text keeps
+// that raw shape while the structured form is normalised.
+const toStructuredContent = (
+    results: Awaited<ReturnType<SearchFieldValuesFn>>,
+    resolved: ToolSearchFieldValuesStructuredContent['matchingValue'],
+): ToolSearchFieldValuesStructuredContent =>
+    Array.isArray(results)
+        ? { results, note: null, matchingValue: resolved }
+        : {
+              results: results.results,
+              note: results.note,
+              matchingValue: resolved,
+          };
+
+export const getSearchFieldValues = ({
+    searchFieldValues,
+    getExplore,
+    enableFilterExpressions,
+    decisions,
+}: Dependencies) => {
+    const toolView = enableFilterExpressions
+        ? searchFieldValuesFilterExpressionToolDefinition.for('agent')
+        : searchFieldValuesToolDefinition.for('agent');
+    const inputSchema: Schema<SearchFieldValuesToolInput> =
+        toolView.inputSchema;
+
+    return tool({
+        ...toolView,
+        inputSchema,
+        execute: async (toolArgs): Promise<SearchFieldValuesExecuteResult> => {
             try {
-                const args =
-                    toolSearchFieldValuesArgsSchemaTransformed.parse(toolArgs);
+                let args: Parameters<SearchFieldValuesFn>[0];
+                if (enableFilterExpressions) {
+                    const expressionArgs =
+                        toolSearchFieldValuesExpressionArgsSchema.parse(
+                            toolArgs,
+                        );
+                    let filters: Parameters<SearchFieldValuesFn>[0]['filters'];
+                    if (expressionArgs.filters === null) {
+                        filters = undefined;
+                    } else {
+                        const explore = await getExplore({
+                            table: expressionArgs.table,
+                        });
+                        const resolution =
+                            resolveSearchFieldValuesFilterExpression({
+                                expressionInput: expressionArgs.filters,
+                                explore,
+                            });
+                        if (!resolution.success) {
+                            const result = formatFilterExpressionError(
+                                resolution.error,
+                            );
+                            return {
+                                result,
+                                metadata: { status: 'error' },
+                                structuredContent: {
+                                    error: result,
+                                },
+                            };
+                        }
+                        filters = resolution.data;
+                    }
+                    args = {
+                        ...expressionArgs,
+                        query: expressionArgs.query ?? '',
+                        filters,
+                    };
+                } else {
+                    args =
+                        toolSearchFieldValuesArgsSchemaTransformed.parse(
+                            toolArgs,
+                        );
+                }
 
                 const results = await searchFieldValues(args);
+                const values = Array.isArray(results)
+                    ? results
+                    : results.results;
+                const resolved = decisions
+                    ? await resolveFieldValue({
+                          decisions,
+                          fieldId: args.fieldId,
+                          requested: args.query,
+                          values,
+                      })
+                    : null;
 
                 return {
-                    result: serializeData(results, 'json'),
+                    result:
+                        serializeData(results, 'json') +
+                        (resolved === null
+                            ? ''
+                            : `\nMatching value for ${JSON.stringify(args.query)}: ${JSON.stringify(resolved)}. Use the original field and filter operator.`) +
+                        (decisions && values.length === 0 && args.query.trim()
+                            ? '\nNo matching values were observed. This does not restrict permitted filter literals: keep an explicitly requested exclusion even though it currently removes no rows, say so, and do not substitute other categories.'
+                            : ''),
                     metadata: {
-                        status: 'success',
+                        status: 'success' as const,
                     },
+                    structuredContent: toStructuredContent(results, resolved),
                 };
             } catch (e) {
-                return {
-                    result: toolErrorHandler(
-                        e,
-                        'Error searching field values.',
-                    ),
-                    metadata: {
-                        status: 'error',
-                    },
-                };
+                return toolErrorOutput(e, 'Error searching field values.');
             }
         },
         toModelOutput: ({ output }) => toModelOutput(output),
     });
+};

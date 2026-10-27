@@ -1,4 +1,5 @@
 import {
+    resolveParameterDefault,
     type Dashboard,
     type LightdashProjectParameter,
     type ParameterDefinitions,
@@ -12,7 +13,7 @@ import {
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconPencil, IconRotate2 } from '@tabler/icons-react';
 import isEqual from 'lodash/isEqual';
 import { useCallback, useMemo, useState, type FC } from 'react';
@@ -63,34 +64,15 @@ const ParameterItem: FC<SchedulerParameterItemProps> = ({
     }, [currentValue]);
 
     return (
-        <Group gap="xs" wrap="nowrap">
-            <Tooltip
-                label="Reset parameter back to dashboard default"
-                fz="xs"
-                disabled={!hasChanged}
-            >
-                <ActionIcon
-                    size="xs"
-                    disabled={!hasChanged}
-                    onClick={() => {
-                        if (isEditing) {
-                            setIsEditing(false);
-                        }
-                        onRevert();
-                    }}
-                >
-                    <MantineIcon icon={IconRotate2} />
-                </ActionIcon>
-            </Tooltip>
-
-            <Stack key={paramKey} gap="xs" w="100%">
-                <Group gap="xs">
+        <Stack key={paramKey} gap="xs">
+            <Group gap="xs" wrap="nowrap" align="flex-start">
+                <Group gap="xs" flex={1} miw={0}>
                     <Text span fw={500} fz="sm">
                         {parameter.label || paramKey}
                     </Text>
 
                     {parameter.description && (
-                        <Text span size="xs" c="ldGray.6">
+                        <Text span size="xs" c="dimmed">
                             - {parameter.description}
                         </Text>
                     )}
@@ -100,7 +82,26 @@ const ParameterItem: FC<SchedulerParameterItemProps> = ({
                             = {displayValue}
                         </Text>
                     )}
-
+                </Group>
+                <Group gap={4} wrap="nowrap">
+                    {hasChanged && (
+                        <Tooltip
+                            label="Reset parameter back to dashboard default"
+                            fz="xs"
+                        >
+                            <ActionIcon
+                                size="xs"
+                                onClick={() => {
+                                    if (isEditing) {
+                                        setIsEditing(false);
+                                    }
+                                    onRevert();
+                                }}
+                            >
+                                <MantineIcon icon={IconRotate2} />
+                            </ActionIcon>
+                        </Tooltip>
+                    )}
                     <ActionIcon
                         size="xs"
                         variant="light"
@@ -112,30 +113,33 @@ const ParameterItem: FC<SchedulerParameterItemProps> = ({
                         <MantineIcon icon={IconPencil} />
                     </ActionIcon>
                 </Group>
+            </Group>
 
-                {(isEditing || hasChanged) && (
-                    <ParameterInput
-                        paramKey={paramKey}
-                        parameter={parameter}
-                        value={currentValue}
-                        onParameterChange={(key, value) => {
-                            onChange(key, value);
-                            if (isEditing) {
-                                setIsEditing(false);
-                            }
-                        }}
-                        size="xs"
-                        projectUuid={projectUuid}
-                        parameterValues={parameterValues}
-                    />
-                )}
-            </Stack>
-        </Group>
+            {(isEditing || hasChanged) && (
+                <ParameterInput
+                    paramKey={paramKey}
+                    parameter={parameter}
+                    value={currentValue}
+                    onParameterChange={(key, value) => {
+                        onChange(key, value);
+                        if (isEditing) {
+                            setIsEditing(false);
+                        }
+                    }}
+                    size="xs"
+                    projectUuid={projectUuid}
+                    parameterValues={parameterValues}
+                />
+            )}
+        </Stack>
     );
 };
 
 type SchedulerParametersProps = {
     dashboard?: Dashboard;
+    // Charts (threshold alerts) pass projectUuid directly since they have no
+    // dashboard to source it from.
+    projectUuid?: string;
     currentParameterValues?: ParametersValuesMap;
     onChange: (schedulerParameters: ParametersValuesMap) => void;
     schedulerParameterValues: ParametersValuesMap | undefined;
@@ -145,6 +149,7 @@ type SchedulerParametersProps = {
 
 export const SchedulerFormParametersTab: FC<SchedulerParametersProps> = ({
     dashboard,
+    projectUuid,
     currentParameterValues = {},
     schedulerParameterValues,
     availableParameters,
@@ -220,7 +225,7 @@ export const SchedulerFormParametersTab: FC<SchedulerParametersProps> = ({
                     // Use actual dashboard parameter value, fallback to default if not set
                     const dashboardValue =
                         currentParameterValues?.[paramKey] ??
-                        parameter.default ??
+                        resolveParameterDefault(parameter) ??
                         null;
 
                     return (
@@ -233,7 +238,9 @@ export const SchedulerFormParametersTab: FC<SchedulerParametersProps> = ({
                             onChange={handleParameterChange}
                             onRevert={() => handleRevertParameter(paramKey)}
                             hasChanged={hasParameterChanged(paramKey)}
-                            projectUuid={dashboard?.projectUuid || ''}
+                            projectUuid={
+                                projectUuid || dashboard?.projectUuid || ''
+                            }
                             parameterValues={{
                                 ...currentParameterValues,
                                 ...schedulerParameterValues,

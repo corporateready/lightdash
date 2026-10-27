@@ -1,32 +1,40 @@
-import { Center, Loader, useMantineTheme } from '@mantine/core';
-import Editor, {
-    useMonaco,
-    type BeforeMount,
-    type OnChange,
-    type OnMount,
-} from '@monaco-editor/react';
+import { Box, Center, Loader } from '@mantine/core';
 import { IconAlertCircle } from '@tabler/icons-react';
 import debounce from 'lodash/debounce';
 import isEmpty from 'lodash/isEmpty';
 import { type editor } from 'monaco-editor';
 import { useCallback, useEffect, useMemo, useRef, type FC } from 'react';
+import { type TourEditable } from '../../../components/common/GuidedTour/GuidedTour';
 import SuboptimalState from '../../../components/common/SuboptimalState/SuboptimalState';
-import { useParameters } from '../../../hooks/parameters/useParameters';
+import Editor, {
+    useMonaco,
+    type BeforeMount,
+    type EditorProps,
+    type OnChange,
+    type OnMount,
+} from '../../../components/MonacoEditor';
 import '../../../styles/monaco.css';
+import { useParameters } from '../../../hooks/parameters/useParameters';
+import { useEditorTheme } from '../../../hooks/useEditorTheme';
 import { useDetectedTableFields } from '../hooks/useDetectedTableFields';
-import { useSqlEditorPreferences } from '../hooks/useSqlEditorPreferences';
-import { useTableFields } from '../hooks/useTableFields';
+import {
+    useTableFields,
+    type WarehouseTableField,
+    type WarehouseTableFieldWithContext,
+} from '../hooks/useTableFields';
 import { useTables, type TablesBySchema } from '../hooks/useTables';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { setSql } from '../store/sqlRunnerSlice';
 import {
-    generateTableCompletions,
     getLightdashMonacoTheme,
     getMonacoLanguage,
     MONACO_DEFAULT_OPTIONS,
     registerCustomCompletionProvider,
     registerMonacoLanguage,
 } from '../utils/monaco';
+import { getSqlFunctions } from '../utils/sqlCompletion/vocabulary';
+import { inferSqlEditorPreferences } from '../utils/sqlEditorPreferences';
+import styles from './SqlEditor.module.css';
 
 // monaco highlight character
 export type MonacoHighlightChar = {
@@ -42,24 +50,36 @@ type MonacoHighlightLine = {
 
 const DEBOUNCE_TIME = 500;
 
-export const SqlEditor: FC<{
+// Widgets escape the card's overflow clipping; padding keeps line 1 off the toolbar.
+const SQL_RUNNER_MONACO_OPTIONS: EditorProps['options'] = {
+    ...MONACO_DEFAULT_OPTIONS,
+    padding: { top: 12, bottom: 12 },
+    fixedOverflowWidgets: true,
+    // Suggestions come from the context-aware provider only
+    wordBasedSuggestions: 'off',
+};
+
+export type SqlEditorProps = {
     onSubmit?: (sql: string) => void;
     highlightText?: MonacoHighlightLine;
     resetHighlightError?: () => void;
-}> = ({ onSubmit, highlightText, resetHighlightError }) => {
-    const theme = useMantineTheme();
+};
+
+export type EditorTables = { database: string; tablesBySchema: TablesBySchema };
+
+export type SqlEditorCatalog = {
+    transformedData: EditorTables | undefined;
+    isTablesDataLoading: boolean;
+    tableFieldsData: WarehouseTableField[] | undefined;
+    detectedTablesFieldData: WarehouseTableFieldWithContext[] | undefined;
+    currentTable: string | undefined;
+    currentSchema: string | undefined;
+};
+
+export const SqlEditor: FC<SqlEditorProps> = (props) => {
     const sql = useAppSelector((state) => state.sqlRunner.sql);
-    const dispatch = useAppDispatch();
     const quoteChar = useAppSelector((state) => state.sqlRunner.quoteChar);
     const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
-    const warehouseConnectionType = useAppSelector(
-        (state) => state.sqlRunner.warehouseConnectionType,
-    );
-
-    const [settings] = useSqlEditorPreferences(warehouseConnectionType);
-
-    // Fetch all available parameters for the project
-    const { data: availableParameters } = useParameters(projectUuid, undefined);
 
     const { data: tablesData, isLoading: isTablesDataLoading } = useTables({
         projectUuid,
@@ -77,9 +97,7 @@ export const SqlEditor: FC<{
         search: undefined,
     });
 
-    const transformedData:
-        | { database: string; tablesBySchema: TablesBySchema }
-        | undefined = useMemo(() => {
+    const transformedData: EditorTables | undefined = useMemo(() => {
         if (!tablesData || isEmpty(tablesData)) return undefined;
         const [database] = Object.keys(tablesData);
         if (!database) return undefined;
@@ -105,7 +123,57 @@ export const SqlEditor: FC<{
         transformedData,
     });
 
+    return (
+        <SqlEditorView
+            {...props}
+            catalog={{
+                transformedData,
+                isTablesDataLoading,
+                tableFieldsData,
+                detectedTablesFieldData,
+                currentTable,
+                currentSchema,
+            }}
+        />
+    );
+};
+
+export const SqlEditorView: FC<
+    SqlEditorProps & { catalog: SqlEditorCatalog }
+> = ({ onSubmit, highlightText, resetHighlightError, catalog }) => {
+    const {
+        transformedData,
+        isTablesDataLoading,
+        tableFieldsData,
+        detectedTablesFieldData,
+        currentTable,
+        currentSchema,
+    } = catalog;
+    const { monaco: monacoTheme } = useEditorTheme();
+    const sql = useAppSelector((state) => state.sqlRunner.sql);
+    const dispatch = useAppDispatch();
+    const quoteChar = useAppSelector((state) => state.sqlRunner.quoteChar);
+    const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
+    const warehouseConnectionType = useAppSelector(
+        (state) => state.sqlRunner.warehouseConnectionType,
+    );
+
+    // Derived from the query text, so suggestions match how the user writes identifiers
+    const { quotePreference, casePreference, qualification } = useMemo(
+        () =>
+            inferSqlEditorPreferences(sql, quoteChar, warehouseConnectionType),
+        [sql, quoteChar, warehouseConnectionType],
+    );
+    const settings = useMemo(
+        () => ({ quotePreference, casePreference, qualification }),
+        [quotePreference, casePreference, qualification],
+    );
+
+    // Fetch all available parameters for the project
+    const { data: availableParameters } = useParameters(projectUuid, undefined);
+
     const editorRef = useRef<Parameters<OnMount>['0'] | null>(null);
+    const wrapperRef = useRef<HTMLDivElement & TourEditable>(null);
 
     const language = useMemo(
         () => getMonacoLanguage(warehouseConnectionType),
@@ -137,6 +205,12 @@ export const SqlEditor: FC<{
     const onMount: OnMount = useCallback(
         (editorObj, monacoObj) => {
             editorRef.current = editorObj;
+            if (wrapperRef.current) {
+                wrapperRef.current.tourEditor = {
+                    getValue: () => editorObj.getValue(),
+                    setValue: (value) => editorObj.setValue(value),
+                };
+            }
             decorationsCollectionRef.current =
                 editorObj.createDecorationsCollection();
             editorObj.addCommand(
@@ -145,6 +219,21 @@ export const SqlEditor: FC<{
                     const currentSql = editorObj.getValue();
                     if (!onSubmit) return;
                     onSubmit(currentSql ?? '');
+                },
+            );
+            // Runs just the highlighted text, or everything when nothing is selected
+            editorObj.addCommand(
+                monacoObj.KeyMod.CtrlCmd |
+                    monacoObj.KeyMod.Shift |
+                    monacoObj.KeyCode.Enter,
+                () => {
+                    if (!onSubmit) return;
+                    const selection = editorObj.getSelection();
+                    const selected =
+                        selection && !selection.isEmpty()
+                            ? editorObj.getModel()?.getValueInRange(selection)
+                            : undefined;
+                    onSubmit(selected?.trim() || editorObj.getValue());
                 },
             );
 
@@ -163,9 +252,6 @@ export const SqlEditor: FC<{
                 completionProviderRef.current.dispose();
                 completionProviderRef.current = null;
             }
-            const tablesList = transformedData
-                ? generateTableCompletions(quoteChar, transformedData, settings)
-                : [];
             // Transform current table fields to include context and combine with detected table fields
             const currentTableFieldsWithContext = (tableFieldsData || []).map(
                 (field) => ({
@@ -183,11 +269,18 @@ export const SqlEditor: FC<{
             const provider = registerCustomCompletionProvider(
                 monaco,
                 language,
-                quoteChar,
-                tablesList || [],
-                allFieldsData.length > 0 ? allFieldsData : undefined,
-                settings,
-                availableParameters,
+                {
+                    quoteChar,
+                    catalog: transformedData,
+                    fields: allFieldsData,
+                    parameters: availableParameters ?? {},
+                    functions: getSqlFunctions(warehouseConnectionType),
+                    settings,
+                    activeTable:
+                        currentTable && currentSchema
+                            ? { table: currentTable, schema: currentSchema }
+                            : null,
+                },
             );
             completionProviderRef.current = provider;
         }
@@ -228,24 +321,55 @@ export const SqlEditor: FC<{
                 char: highlightText.start.char + 1,
             };
         }
-        const range = new monaco.Range(
-            highlightText.start.line,
-            highlightText.start.char,
-            highlightText.end.line,
-            highlightText.end.char,
-        );
-        const newDecorations = [
+        const model = editorRef.current.getModel();
+        const word = model?.getWordAtPosition({
+            lineNumber: highlightText.start.line,
+            column: highlightText.start.char,
+        });
+        // Tint the whole line, squiggle the offending token (or the reported span)
+        const spanRange = word
+            ? new monaco.Range(
+                  highlightText.start.line,
+                  word.startColumn,
+                  highlightText.start.line,
+                  word.endColumn,
+              )
+            : new monaco.Range(
+                  highlightText.start.line,
+                  highlightText.start.char,
+                  highlightText.end.line,
+                  highlightText.end.char,
+              );
+        decorationsCollectionRef.current.set([
             {
-                range,
-                options: {
-                    inlineClassName: 'editorError',
-                },
+                range: new monaco.Range(
+                    highlightText.start.line,
+                    1,
+                    highlightText.start.line,
+                    1,
+                ),
+                options: { isWholeLine: true, className: 'editorErrorLine' },
             },
-        ];
-
-        // Update decorations using the decorations collection
-        decorationsCollectionRef.current.set(newDecorations);
+            {
+                range: spanRange,
+                options: { inlineClassName: 'editorErrorSquiggle' },
+            },
+        ]);
     }, [sql, monaco, highlightText]);
+
+    const revealRequest = useAppSelector(
+        (state) => state.sqlRunner.editorRevealRequest,
+    );
+    useEffect(() => {
+        if (!revealRequest || !editorRef.current) return;
+        const position = {
+            lineNumber: revealRequest.line,
+            column: revealRequest.char,
+        };
+        editorRef.current.setPosition(position);
+        editorRef.current.revealLineInCenter(position.lineNumber);
+        editorRef.current.focus();
+    }, [revealRequest]);
 
     const debouncedSetSql = useMemo(
         () =>
@@ -284,19 +408,33 @@ export const SqlEditor: FC<{
     }
 
     return (
-        <Editor
-            loading={<Loader color="gray" size="xs" />}
-            beforeMount={beforeMount}
-            onMount={onMount}
-            language={language}
-            value={sql}
-            onChange={onChange}
-            options={MONACO_DEFAULT_OPTIONS}
-            theme={
-                theme.colorScheme === 'dark'
-                    ? 'lightdash-dark'
-                    : 'lightdash-light'
-            }
-        />
+        <Box
+            ref={wrapperRef}
+            h="100%"
+            // Typed anchor for scope walkthroughs: the query. The card
+            // suggests a query over the sample warehouse; the editor is
+            // handed to the tour on mount (tourEditor).
+            data-tour-anchor="sql-runner-editor"
+            data-tour-hint="Write your query"
+            data-tour-input="true"
+            data-tour-suggest="SELECT status, COUNT(*) AS orders FROM jaffle.orders GROUP BY 1"
+            data-tour-scope="manage:SqlRunner"
+            data-tour-look="1"
+            data-tour-after='[data-tour-nav="new-sql-runner"]'
+            data-tour-label="Write a query, then run it"
+            data-tour-docs="explore/sql-runner.mdx#getting-started-with-the-sql-runner:p3:1"
+        >
+            <Editor
+                className={styles.editor}
+                loading={<Loader color="gray" size="xs" />}
+                beforeMount={beforeMount}
+                onMount={onMount}
+                language={language}
+                value={sql}
+                onChange={onChange}
+                options={SQL_RUNNER_MONACO_OPTIONS}
+                theme={monacoTheme}
+            />
+        </Box>
     );
 };

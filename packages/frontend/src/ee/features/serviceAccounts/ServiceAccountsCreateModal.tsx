@@ -1,40 +1,35 @@
 import {
     CommercialFeatureFlags,
-    ProjectMemberRole,
-    ProjectMemberRoleLabels,
     ServiceAccountScope,
+    type ProjectMemberRole,
+    type RoleLevel,
 } from '@lightdash/common';
 import {
-    ActionIcon,
     Anchor,
     Button,
-    CopyButton,
-    Group,
     SegmentedControl,
     Select,
     Stack,
     Text,
     TextInput,
-    Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
-import {
-    IconCheck,
-    IconCopy,
-    IconKey,
-    IconPlus,
-    IconX,
-} from '@tabler/icons-react';
+import { IconKey } from '@tabler/icons-react';
 import { addDays } from 'date-fns';
 import { useMemo, type FC } from 'react';
 import { Link } from 'react-router';
 import Callout from '../../../components/common/Callout';
-import MantineIcon from '../../../components/common/MantineIcon';
+import { CopyActionIcon } from '../../../components/common/CopyActionIcon';
 import MantineModal from '../../../components/common/MantineModal';
 import { useProjects } from '../../../hooks/useProjects';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../providers/App/useApp';
 import { useCustomRoles } from '../customRoles/useCustomRoles';
+import {
+    SYSTEM_PROJECT_ROLE_OPTIONS,
+    type ProjectRoleRow,
+} from './projectRoleOptions';
+import { ServiceAccountProjectRoles } from './ServiceAccountProjectRoles';
 
 // Organization-mode role options. `Member` is intentionally hidden — it's
 // the backend marker for "Project-scope SA" (see the SegmentedControl
@@ -53,24 +48,6 @@ const SYSTEM_ROLE_OPTIONS: { value: string; label: string }[] = [
     { value: `scope:${ServiceAccountScope.SYSTEM_ADMIN}`, label: 'Admin' },
 ];
 
-// Project-mode role options. Each row's role select offers stock
-// `ProjectMemberRole`s OR any of the org's custom roles (loaded at runtime).
-// Values are tagged so the submit handler can route them into the backend
-// contract: `system:<role>` → `{ projectUuid, role }`, `role:<uuid>` →
-// `{ projectUuid, roleUuid }`. Mirrors the org-mode `scope:` / `role:`
-// convention so the two pickers feel symmetric.
-const SYSTEM_PROJECT_ROLE_OPTIONS = [
-    ProjectMemberRole.VIEWER,
-    ProjectMemberRole.INTERACTIVE_VIEWER,
-    ProjectMemberRole.EDITOR,
-    ProjectMemberRole.DEVELOPER,
-    ProjectMemberRole.ADMIN,
-].map((role) => ({
-    value: `system:${role}`,
-    label: ProjectMemberRoleLabels[role],
-}));
-const DEFAULT_PROJECT_ROLE_SELECTION = `system:${ProjectMemberRole.VIEWER}`;
-
 const expireOptions = [
     { label: 'No expiration', value: '' },
     { label: '7 days', value: '7' },
@@ -82,13 +59,6 @@ const expireOptions = [
 ];
 
 type Scope = 'organization' | 'project';
-
-type ProjectRoleRow = {
-    projectUuid: string;
-    // Tagged selection: `system:<ProjectMemberRole>` or `role:<roleUuid>`.
-    // Parsed at submit time into either { role } or { roleUuid }.
-    roleSelection: string;
-};
 
 type Props = {
     isOpen: boolean;
@@ -123,35 +93,53 @@ export const ServiceAccountsCreateModal: FC<Props> = ({
     const isCustomRolesEnabled =
         health?.isCustomRolesEnabled || customRolesFlag?.enabled;
 
-    const customRoleOptions = useMemo(
-        () =>
-            isCustomRolesEnabled
-                ? (listRoles.data ?? [])
-                      .map((role) => ({
-                          value: `role:${role.roleUuid}`,
-                          label: role.name,
-                      }))
-                      .sort((a, b) =>
-                          a.label.localeCompare(b.label, undefined, {
-                              sensitivity: 'base',
-                          }),
-                      )
-                : [],
-        [listRoles.data, isCustomRolesEnabled],
-    );
-
-    const roleOptions = useMemo(() => {
-        const groups: {
-            group: string;
-            items: { value: string; label: string }[];
-        }[] = [
-            { group: 'Organization system roles', items: SYSTEM_ROLE_OPTIONS },
-        ];
-        if (customRoleOptions.length > 0) {
-            groups.push({ group: 'Custom roles', items: customRoleOptions });
+    const customRoleOptions = useMemo(() => {
+        if (!isCustomRolesEnabled) {
+            return {
+                organization: [],
+                project: [],
+            };
         }
-        return groups;
-    }, [customRoleOptions]);
+
+        const buildOptions = (level: RoleLevel) =>
+            (listRoles.data ?? [])
+                .filter((role) => role.level === level)
+                .map((role) => ({
+                    value: `role:${role.roleUuid}`,
+                    label: role.name,
+                }))
+                .sort((a, b) =>
+                    a.label.localeCompare(b.label, undefined, {
+                        sensitivity: 'base',
+                    }),
+                );
+
+        return {
+            organization: buildOptions('organization'),
+            project: buildOptions('project'),
+        };
+    }, [listRoles.data, isCustomRolesEnabled]);
+
+    const organizationCustomRoleOptions = customRoleOptions.organization;
+    const projectCustomRoleOptions = customRoleOptions.project;
+
+    const roleOptions = useMemo(
+        () => [
+            {
+                group: 'Organization system roles',
+                items: SYSTEM_ROLE_OPTIONS,
+            },
+            ...(organizationCustomRoleOptions.length > 0
+                ? [
+                      {
+                          group: 'Custom roles',
+                          items: organizationCustomRoleOptions,
+                      },
+                  ]
+                : []),
+        ],
+        [organizationCustomRoleOptions],
+    );
 
     // Per-row role picker for project mode. Same grouped shape as the
     // org-mode role select so the dropdown visually matches and custom
@@ -161,11 +149,14 @@ export const ServiceAccountsCreateModal: FC<Props> = ({
             group: string;
             items: { value: string; label: string }[];
         }[] = [{ group: 'System roles', items: SYSTEM_PROJECT_ROLE_OPTIONS }];
-        if (customRoleOptions.length > 0) {
-            groups.push({ group: 'Custom roles', items: customRoleOptions });
+        if (projectCustomRoleOptions.length > 0) {
+            groups.push({
+                group: 'Custom roles',
+                items: projectCustomRoleOptions,
+            });
         }
         return groups;
-    }, [customRoleOptions]);
+    }, [projectCustomRoleOptions]);
 
     const form = useForm({
         initialValues: {
@@ -204,34 +195,6 @@ export const ServiceAccountsCreateModal: FC<Props> = ({
     const closeModal = () => {
         form.reset();
         onClose();
-    };
-
-    const projectOptions = useMemo(
-        () =>
-            projects.map((p) => ({
-                value: p.projectUuid,
-                label: p.name,
-            })),
-        [projects],
-    );
-
-    // Each row's project picker hides projects already picked in OTHER
-    // rows. The current row's value stays visible so the row renders the
-    // selected label, not a blank.
-    const projectOptionsForRow = (rowIdx: number) => {
-        const taken = new Set(
-            form.values.projectRoles
-                .filter((_, i) => i !== rowIdx)
-                .map((r) => r.projectUuid),
-        );
-        return projectOptions.filter((opt) => !taken.has(opt.value));
-    };
-
-    const addProjectRow = () => {
-        form.insertListItem('projectRoles', {
-            projectUuid: '',
-            roleSelection: DEFAULT_PROJECT_ROLE_SELECTION,
-        } satisfies ProjectRoleRow);
     };
 
     const handleOnSubmit = form.onSubmit(
@@ -286,6 +249,7 @@ export const ServiceAccountsCreateModal: FC<Props> = ({
         <MantineModal
             opened={isOpen}
             onClose={closeModal}
+            role="alertdialog"
             title="New Service Account"
             icon={IconKey}
             cancelLabel={token ? false : 'Cancel'}
@@ -373,77 +337,13 @@ export const ServiceAccountsCreateModal: FC<Props> = ({
                                 {...form.getInputProps('roleSelection')}
                             />
                         ) : (
-                            <Stack gap="xs">
-                                <Text size="sm" fw={500}>
-                                    Project access
-                                </Text>
-                                {form.values.projectRoles.length === 0 && (
-                                    <Text size="xs" c="dimmed">
-                                        No projects added yet.
-                                    </Text>
-                                )}
-                                {form.values.projectRoles.map((_, idx) => (
-                                    <Group key={idx} gap="xs" wrap="nowrap">
-                                        <Select
-                                            flex={1}
-                                            placeholder="Pick a project"
-                                            data={projectOptionsForRow(idx)}
-                                            searchable
-                                            disabled={isWorking}
-                                            {...form.getInputProps(
-                                                `projectRoles.${idx}.projectUuid`,
-                                            )}
-                                        />
-                                        <Select
-                                            w={200}
-                                            data={projectRoleOptions}
-                                            searchable
-                                            disabled={
-                                                isWorking || listRoles.isLoading
-                                            }
-                                            {...form.getInputProps(
-                                                `projectRoles.${idx}.roleSelection`,
-                                            )}
-                                        />
-                                        <Tooltip label="Remove">
-                                            <ActionIcon
-                                                variant="subtle"
-                                                color="gray"
-                                                disabled={isWorking}
-                                                onClick={() =>
-                                                    form.removeListItem(
-                                                        'projectRoles',
-                                                        idx,
-                                                    )
-                                                }
-                                            >
-                                                <MantineIcon icon={IconX} />
-                                            </ActionIcon>
-                                        </Tooltip>
-                                    </Group>
-                                ))}
-                                {form.errors.projectRoles && (
-                                    <Text size="xs" c="red">
-                                        {form.errors.projectRoles}
-                                    </Text>
-                                )}
-                                <Button
-                                    leftSection={
-                                        <MantineIcon icon={IconPlus} />
-                                    }
-                                    variant="subtle"
-                                    size="xs"
-                                    disabled={
-                                        isWorking ||
-                                        form.values.projectRoles.length >=
-                                            projects.length
-                                    }
-                                    onClick={addProjectRow}
-                                    style={{ alignSelf: 'flex-start' }}
-                                >
-                                    Add project
-                                </Button>
-                            </Stack>
+                            <ServiceAccountProjectRoles
+                                form={form}
+                                projects={projects}
+                                projectRoleOptions={projectRoleOptions}
+                                rolesLoading={listRoles.isLoading}
+                                disabled={isWorking}
+                            />
                         )}
                     </Stack>
                 </form>
@@ -455,28 +355,10 @@ export const ServiceAccountsCreateModal: FC<Props> = ({
                         className="sentry-block ph-no-capture"
                         value={token}
                         rightSection={
-                            <CopyButton value={token}>
-                                {({ copied, copy }) => (
-                                    <Tooltip
-                                        label={copied ? 'Copied' : 'Copy'}
-                                        withArrow
-                                        position="right"
-                                    >
-                                        <ActionIcon
-                                            color={copied ? 'teal' : 'gray'}
-                                            onClick={copy}
-                                        >
-                                            <MantineIcon
-                                                icon={
-                                                    copied
-                                                        ? IconCheck
-                                                        : IconCopy
-                                                }
-                                            />
-                                        </ActionIcon>
-                                    </Tooltip>
-                                )}
-                            </CopyButton>
+                            <CopyActionIcon
+                                value={token}
+                                tooltipPosition="right"
+                            />
                         }
                     />
                     <Callout

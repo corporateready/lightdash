@@ -1,9 +1,19 @@
 import { assertUnreachable } from '@lightdash/common';
-import { generateObject, LanguageModel } from 'ai';
+import { generateText, LanguageModel, Output } from 'ai';
 import { JSONDiff, Score } from 'autoevals';
 import { z } from 'zod';
+import {
+    emitAiUsage,
+    languageModelUsageToTokens,
+    type AiKeyManagement,
+} from '../../../../analytics/aiUsage';
 import { defaultAgentOptions } from '../agents/agentV2';
 import { getOpenaiGptmodel } from '../models/openai-gpt';
+import {
+    AiCallAttribution,
+    getAiCallTelemetry,
+    getLanguageModelAttribution,
+} from './aiCallTelemetry';
 
 export const factualityScores = {
     A: 0.4,
@@ -78,9 +88,11 @@ type BaseLlmAsJudgeParams = {
     context?: string[];
     judge: Exclude<LanguageModel, string>;
     callOptions: ReturnType<typeof getOpenaiGptmodel>['callOptions'];
+    keyManagement: AiKeyManagement;
     contextRelevancyThreshold?: number; // Threshold for context relevancy (default 0.7)
     factualityThreshold?: 'A' | 'B' | 'C' | 'D' | 'E'; // Minimum acceptable factuality score (default 'A' = subset or better)
     jsonDiffThreshold?: number; // Threshold for JSON diff score (default 0.9)
+    telemetry?: Omit<AiCallAttribution, 'keyManagement'>; // org/project/user attribution for the ai.usage stream
 };
 
 // Function overloads for type safety
@@ -122,10 +134,12 @@ export async function llmAsAJudge({
     context,
     judge,
     callOptions,
+    keyManagement,
     scorerType,
     contextRelevancyThreshold = 0.7,
     factualityThreshold = 'A',
     jsonDiffThreshold = 0.9,
+    telemetry,
 }: BaseLlmAsJudgeParams & {
     scorerType: 'factuality' | 'jsonDiff' | 'contextRelevancy';
 }): Promise<{
@@ -178,19 +192,29 @@ export async function llmAsAJudge({
       ************`
                     : '';
 
-            const { object } = await generateObject({
+            const telemetryConfig = getAiCallTelemetry({
+                functionId: 'llmAsAJudge',
+                feature: 'llm-judge',
+                ...getLanguageModelAttribution(judge),
+                ...telemetry,
+                keyManagement,
+            });
+            const result = await generateText({
                 model: judge,
                 ...defaultAgentOptions,
                 ...callOptions,
-                schema: z.object({
-                    answer: z
-                        .enum(['A', 'B', 'C', 'D', 'E'])
-                        .describe('Your selection.'),
-                    rationale: z
-                        .string()
-                        .describe(
-                            'Why you chose this answer. Be very detailed.',
-                        ),
+                ...telemetryConfig,
+                output: Output.object({
+                    schema: z.object({
+                        answer: z
+                            .enum(['A', 'B', 'C', 'D', 'E'])
+                            .describe('Your selection.'),
+                        rationale: z
+                            .string()
+                            .describe(
+                                'Why you chose this answer. Be very detailed.',
+                            ),
+                    }),
                 }),
                 /**
                  * Prompt taken from autoevals:
@@ -226,14 +250,19 @@ ${
       (E) The answers differ, but these differences don't matter from the perspective of factuality.
       `,
             });
+            emitAiUsage(
+                telemetryConfig,
+                languageModelUsageToTokens(result.usage),
+            );
+            const { output } = result;
 
             const factualityResult = {
-                answer: object.answer,
-                rationale: object.rationale,
+                answer: output.answer,
+                rationale: output.rationale,
             };
 
             const passed = meetsFactualityThreshold(
-                object.answer,
+                output.answer,
                 factualityThreshold,
             );
 
@@ -256,19 +285,29 @@ ${
                 throw new Error('context is required for contextRelevancy');
             }
 
-            const { object } = await generateObject({
+            const telemetryConfig = getAiCallTelemetry({
+                functionId: 'llmAsAJudge',
+                feature: 'llm-judge',
+                ...getLanguageModelAttribution(judge),
+                ...telemetry,
+                keyManagement,
+            });
+            const result = await generateText({
                 model: judge,
                 ...defaultAgentOptions,
                 ...callOptions,
-                schema: z.object({
-                    score: z
-                        .number()
-                        .min(0)
-                        .max(1)
-                        .describe('Relevancy score between 0 and 1'),
-                    reason: z
-                        .string()
-                        .describe('Explanation for the relevancy score'),
+                ...telemetryConfig,
+                output: Output.object({
+                    schema: z.object({
+                        score: z
+                            .number()
+                            .min(0)
+                            .max(1)
+                            .describe('Relevancy score between 0 and 1'),
+                        reason: z
+                            .string()
+                            .describe('Explanation for the relevancy score'),
+                    }),
                 }),
                 prompt: `
 You are evaluating the relevancy of context used to answer a query.
@@ -284,7 +323,9 @@ ${context.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 ************
 [END DATA]
 
-Evaluate how relevant the provided context is to answering the query. Consider:
+Evaluate how relevant the provided context is to answering the query. This is not a factuality assessment: do not use the response as supporting context or judge whether its claims are correct. When the context includes a chart artifact and configuration that identifies the requested metric and applicable dimensions, filters, and time range, missing computed result rows alone must not lower the relevancy score or require independently verifying the response.
+
+Consider:
 1. Does the context contain information needed to answer the query?
 2. Is the context directly related to the query topic?
 3. How much of the context is actually useful for answering the query?
@@ -292,13 +333,18 @@ Evaluate how relevant the provided context is to answering the query. Consider:
 Provide a relevancy score between 0 (not relevant at all) and 1 (highly relevant), and explain your reasoning.
                 `,
             });
+            emitAiUsage(
+                telemetryConfig,
+                languageModelUsageToTokens(result.usage),
+            );
+            const { output } = result;
 
             const contextResult = {
-                score: object.score,
-                reason: object.reason,
+                score: output.score,
+                reason: output.reason,
             };
 
-            const passed = object.score >= contextRelevancyThreshold;
+            const passed = output.score >= contextRelevancyThreshold;
 
             return {
                 result: contextResult,

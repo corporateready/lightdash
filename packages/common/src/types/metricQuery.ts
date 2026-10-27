@@ -2,7 +2,6 @@ import { type AnyType } from './any';
 import { type DateZoom } from './api/paginatedQuery';
 import {
     BinType,
-    friendlyName,
     isCustomBinDimension,
     isCustomDimension,
     isCustomSqlDimension,
@@ -18,6 +17,7 @@ import {
     type Format,
     type Metric,
     type MetricType,
+    type NumberSeparator,
     type TableCalculation,
 } from './field';
 import { type Filters, type MetricFilterRule } from './filter';
@@ -42,6 +42,8 @@ export interface AdditionalMetric {
     compact?: CompactOrAlias;
     /** Format string (legacy format specification) */
     format?: Format | string; // // Format type is deprecated, use format expression(string) instead
+    /** Number separator style for grouping/decimal characters */
+    separator?: NumberSeparator;
     /** Table name the metric belongs to */
     table: string;
     /** Internal name of the metric */
@@ -52,6 +54,8 @@ export interface AdditionalMetric {
     filters?: MetricFilterRule[];
     /** Name of the base dimension/column this metric aggregates */
     baseDimensionName?: string;
+    /** Name of the explore metric this metric was cloned from */
+    baseMetricName?: string;
     /** Unique identifier for the metric */
     uuid?: string | null;
     /** Percentile value for percentile metrics */
@@ -224,9 +228,6 @@ export type SortField = {
     /** Pins the row-sort anchor to a specific pivot column. Ignored for non-pivoted results. */
     pivotValues?: PivotSortAnchor[];
 };
-
-export const getAdditionalMetricLabel = (item: AdditionalMetric) =>
-    `${friendlyName(item.table)} ${item.label}`;
 
 type FilterGroupResponse =
     | {

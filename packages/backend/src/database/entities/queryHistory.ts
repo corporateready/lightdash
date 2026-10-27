@@ -1,18 +1,26 @@
 import type {
+    AgentIdentityClaim,
     AuthType,
-    ExecuteAsyncQueryRequestParams,
+    DuckdbExecutionSpec,
     ItemsMap,
     MetricQuery,
+    ParametersValuesMap,
     PivotConfiguration,
     PivotValuesColumn,
+    PreAggregateExecutionEngine,
+    PreAggregateFallbackReason,
     QueryExecutionContext,
+    QueryHistory,
     QueryHistoryStatus,
     ResultColumns,
+    WarehouseExecutionStats,
     WarehouseQueryMetadata,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 
 export type DbQueryHistory = {
+    agent_identity: AgentIdentityClaim | null;
+    warehouse_connection_uuid?: string | null;
     query_uuid: string;
     created_at: Date;
     created_by_user_uuid: string | null;
@@ -25,9 +33,11 @@ export type DbQueryHistory = {
     compiled_sql: string;
     warehouse_query_id: string | null;
     warehouse_query_metadata: WarehouseQueryMetadata | null;
+    warehouse_execution_stats: WarehouseExecutionStats | null;
     metric_query: MetricQuery;
     fields: ItemsMap;
-    request_parameters: ExecuteAsyncQueryRequestParams;
+    request_parameters: QueryHistory['requestParameters'];
+    used_parameters: ParametersValuesMap | null;
     total_row_count: number | null;
     warehouse_execution_time_ms: number | null;
     error: string | null;
@@ -44,14 +54,19 @@ export type DbQueryHistory = {
     columns: ResultColumns | null; // result columns with or without pivoting
     original_columns: ResultColumns | null; // columns from original SQL, before pivoting
     pre_aggregate_compiled_sql: string | null; // DuckDB SQL for pre-aggregate execution path
+    pre_aggregate_execution: PreAggregateExecutionEngine | null; // engine for pre_aggregate_compiled_sql
+    pre_aggregate_fallback_reason: PreAggregateFallbackReason | null; // non-null ⇒ matched but served from source warehouse
     processing_started_at: Date | null; // when the NATS worker picked up the job
+    duckdb_execution: DuckdbExecutionSpec | null; // how a DuckDB source query runs, for the worker to rebuild it
 };
 
 export type DbQueryHistoryIn = Omit<
     DbQueryHistory,
-    'query_uuid' | 'created_at' | 'created_by_actor_type'
+    'query_uuid' | 'created_at' | 'created_by_actor_type' | 'agent_identity'
 > & {
     created_by_actor_type: AuthType;
+    agent_identity?: AgentIdentityClaim;
+    warehouse_connection_uuid?: string | null;
 };
 
 export type DbQueryHistoryUpdate = Partial<
@@ -60,10 +75,13 @@ export type DbQueryHistoryUpdate = Partial<
         | 'status'
         | 'error'
         | 'errored_at'
+        | 'compiled_sql'
+        | 'fields'
         | 'warehouse_execution_time_ms'
         | 'total_row_count'
         | 'warehouse_query_id'
         | 'warehouse_query_metadata'
+        | 'warehouse_execution_stats'
         | 'default_page_size'
         | 'pivot_configuration'
         | 'pivot_values_columns'
@@ -75,7 +93,11 @@ export type DbQueryHistoryUpdate = Partial<
         | 'columns'
         | 'original_columns'
         | 'pre_aggregate_compiled_sql'
+        | 'pre_aggregate_execution'
+        | 'cache_key'
+        | 'pre_aggregate_fallback_reason'
         | 'processing_started_at'
+        | 'duckdb_execution'
     >
 >;
 

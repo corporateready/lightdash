@@ -6,13 +6,20 @@ import {
     type VizColumn,
 } from '@lightdash/common';
 import { useMutation, type UseMutationOptions } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
+import { SHARED_SIGN_IN_RECONNECTED } from '../../../hooks/useReconnectSharedSignIn';
+import { reportSharedSignInQueryFailure } from '../../../hooks/useReconnectSharedSignIn';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 import { executeSqlQuery } from '../../queryRunner/executeQuery';
+import { useAppSelector } from '../store/hooks';
+import { selectConnectionUuid } from '../store/sqlRunnerSlice';
 
 export type ResultsAndColumns = {
     queryUuid: string;
     fileUrl: string | undefined;
     results: RawResultRow[];
     columns: VizColumn[];
+    durationMs: number | null;
 };
 
 type UseSqlQueryRunParams = {
@@ -33,16 +40,55 @@ export const useSqlQueryRun = (
         UseSqlQueryRunParams
     >,
 ) => {
-    return useMutation<
+    const lightdashApi = useLightdashApi();
+    const warehouseConnectionUuid = useAppSelector(selectConnectionUuid);
+    const lastFailedRun = useRef<UseSqlQueryRunParams | null>(null);
+    const mutation = useMutation<
         ResultsAndColumns | undefined,
         ApiError,
         UseSqlQueryRunParams
     >(
         async ({ sql, limit, parameterValues }) =>
-            executeSqlQuery(projectUuid, sql, limit, parameterValues),
+            executeSqlQuery(
+                lightdashApi,
+                projectUuid,
+                sql,
+                limit,
+                parameterValues,
+                undefined,
+                warehouseConnectionUuid,
+            ),
         {
             mutationKey: ['sqlRunner', 'run'],
             ...useMutationOptions,
+            onError: (error, variables, context) => {
+                lastFailedRun.current = variables;
+                reportSharedSignInQueryFailure(projectUuid, error);
+                useMutationOptions?.onError?.(error, variables, context);
+            },
+            onSuccess: (data, variables, context) => {
+                lastFailedRun.current = null;
+                useMutationOptions?.onSuccess?.(data, variables, context);
+            },
         },
     );
+    const { mutate } = mutation;
+    useEffect(() => {
+        const retryFailedRun = (event: Event) => {
+            if (
+                event instanceof CustomEvent &&
+                event.detail === projectUuid &&
+                lastFailedRun.current
+            ) {
+                mutate(lastFailedRun.current);
+            }
+        };
+        window.addEventListener(SHARED_SIGN_IN_RECONNECTED, retryFailedRun);
+        return () =>
+            window.removeEventListener(
+                SHARED_SIGN_IN_RECONNECTED,
+                retryFailedRun,
+            );
+    }, [mutate, projectUuid]);
+    return mutation;
 };

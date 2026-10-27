@@ -15,7 +15,7 @@ import type { CaslAuditWrapper } from '../../logging/caslAuditWrapper';
  * Accepts an object with string or string[] values and normalizes all values to arrays.
  */
 export const userAttributeOverridesSchema = z
-    .record(z.union([z.string(), z.array(z.string())]))
+    .record(z.string(), z.union([z.string(), z.array(z.string())]))
     .transform((obj) => {
         const normalized: UserAttributeValueMap = {};
         for (const [key, value] of Object.entries(obj)) {
@@ -180,6 +180,11 @@ export const exploreHasFilteredAttribute = (explore: Explore) =>
                 (dimension) =>
                     dimension?.requiredAttributes !== undefined ||
                     dimension?.anyAttributes !== undefined,
+            ) ||
+            Object.values(table.metrics).some(
+                (metric) =>
+                    metric?.requiredAttributes !== undefined ||
+                    metric?.anyAttributes !== undefined,
             )
         );
     });

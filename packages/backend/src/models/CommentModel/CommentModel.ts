@@ -1,5 +1,7 @@
 import {
     Comment,
+    getUserAvatarUrl,
+    isUserAvatarColorValue,
     LightdashUser,
     NotFoundError,
     sanitizeHtml,
@@ -15,6 +17,7 @@ import {
     DashboardVersionsTableName,
 } from '../../database/entities/dashboards';
 import { SavedChartsTableName } from '../../database/entities/savedCharts';
+import { UserAvatarsTableName } from '../../database/entities/userAvatars';
 import { DbUser, UserTableName } from '../../database/entities/users';
 
 type CommentModelArguments = {
@@ -28,9 +31,49 @@ export class CommentModel {
         this.database = args.database;
     }
 
+    private getDashboardCommentExistsQuery(dashboardUuid: string) {
+        return this.database
+            .select(this.database.raw('1'))
+            .from(DashboardTilesTableName)
+            .join(
+                DashboardVersionsTableName,
+                `${DashboardVersionsTableName}.dashboard_version_id`,
+                '=',
+                `${DashboardTilesTableName}.dashboard_version_id`,
+            )
+            .join(
+                DashboardsTableName,
+                `${DashboardsTableName}.dashboard_id`,
+                '=',
+                `${DashboardVersionsTableName}.dashboard_id`,
+            )
+            .where(
+                `${DashboardTilesTableName}.dashboard_tile_uuid`,
+                '=',
+                this.database.ref(
+                    `${DashboardTileCommentsTableName}.dashboard_tile_uuid`,
+                ),
+            )
+            .andWhere(`${DashboardsTableName}.dashboard_uuid`, dashboardUuid)
+            .whereNull(`${DashboardsTableName}.deleted_at`);
+    }
+
+    private getCommentThreadQuery(dashboardUuid: string, commentId: string) {
+        return this.database(DashboardTileCommentsTableName)
+            .where((builder) => {
+                void builder
+                    .where('comment_id', commentId)
+                    .orWhere('reply_to', commentId);
+            })
+            .whereExists(this.getDashboardCommentExistsQuery(dashboardUuid));
+    }
+
     private static parseComments(
         commentsWithUsers: (DbDashboardTileComments &
-            Pick<DbUser, 'first_name' | 'last_name'>)[],
+            Pick<DbUser, 'first_name' | 'last_name'> & {
+                avatar_gradient: string | null;
+                avatar_content_hash: string | null;
+            })[],
         userUuid?: string,
         canUserRemoveAnyComment?: boolean,
     ) {
@@ -49,7 +92,21 @@ export class CommentModel {
                 text: comment.text,
                 textHtml: comment.text_html,
                 replyTo: comment.reply_to ?? undefined,
-                user: { name: `${comment.first_name} ${comment.last_name}` },
+                user: {
+                    name: `${comment.first_name} ${comment.last_name}`,
+                    userUuid: comment.user_uuid,
+                    avatarUrl: comment.avatar_content_hash
+                        ? getUserAvatarUrl(
+                              comment.user_uuid,
+                              comment.avatar_content_hash,
+                          )
+                        : null,
+                    avatarGradient:
+                        comment.avatar_gradient &&
+                        isUserAvatarColorValue(comment.avatar_gradient)
+                            ? comment.avatar_gradient
+                            : null,
+                },
                 createdAt: comment.created_at,
                 resolved: comment.resolved,
                 replies: [],
@@ -182,7 +239,12 @@ export class CommentModel {
             text: comment.text,
             textHtml: comment.text_html,
             replyTo: comment.reply_to ?? undefined,
-            user: { name: `${user.firstName} ${user.lastName}` },
+            user: {
+                name: `${user.firstName} ${user.lastName}`,
+                userUuid: user.userUuid,
+                avatarUrl: user.avatarUrl,
+                avatarGradient: user.avatarGradient,
+            },
             createdAt: comment.created_at,
             resolved: comment.resolved,
             replies: [],
@@ -195,6 +257,7 @@ export class CommentModel {
         dashboardUuid: string,
         userUuid: string,
         canUserRemoveAnyComment: boolean,
+        resolved: boolean,
     ): Promise<Record<string, Comment[]>> {
         const dashboard = await this.database(DashboardsTableName)
             .leftJoin(
@@ -225,17 +288,25 @@ export class CommentModel {
                 '=',
                 `${UserTableName}.user_uuid`,
             )
+            .leftJoin(
+                UserAvatarsTableName,
+                `${DashboardTileCommentsTableName}.user_uuid`,
+                '=',
+                `${UserAvatarsTableName}.user_uuid`,
+            )
             .select(
                 `${DashboardTileCommentsTableName}.*`,
                 `${UserTableName}.first_name`,
                 `${UserTableName}.last_name`,
+                `${UserTableName}.avatar_gradient`,
+                `${UserAvatarsTableName}.content_hash as avatar_content_hash`,
                 `${DashboardTileCommentsTableName}.dashboard_tile_uuid`,
             )
             .whereIn(
                 `${DashboardTileCommentsTableName}.dashboard_tile_uuid`,
                 tileUuids,
             )
-            .andWhere(`${DashboardTileCommentsTableName}.resolved`, false)
+            .andWhere(`${DashboardTileCommentsTableName}.resolved`, resolved)
             .orderBy(`${DashboardTileCommentsTableName}.created_at`, 'asc');
 
         return CommentModel.parseComments(
@@ -259,16 +330,29 @@ export class CommentModel {
         }));
     }
 
-    async resolveComment(commentId: string): Promise<void> {
-        await this.database(DashboardTileCommentsTableName)
-            .update({ resolved: true })
-            .where('comment_id', commentId);
+    async resolveComment(
+        dashboardUuid: string,
+        commentId: string,
+    ): Promise<void> {
+        await this.getCommentThreadQuery(dashboardUuid, commentId).update({
+            resolved: true,
+        });
     }
 
-    async getComment(commentId: string) {
+    async unresolveComment(
+        dashboardUuid: string,
+        commentId: string,
+    ): Promise<void> {
+        await this.getCommentThreadQuery(dashboardUuid, commentId).update({
+            resolved: false,
+        });
+    }
+
+    async getComment(dashboardUuid: string, commentId: string) {
         const result = await this.database(DashboardTileCommentsTableName)
             .select('user_uuid', 'dashboard_tile_uuid', 'reply_to', 'mentions')
             .where('comment_id', commentId)
+            .whereExists(this.getDashboardCommentExistsQuery(dashboardUuid))
             .first();
 
         if (result === undefined) throw new NotFoundError('Comment not found');
@@ -281,10 +365,10 @@ export class CommentModel {
         };
     }
 
-    async deleteComment(commentId: string): Promise<void> {
-        await this.database(DashboardTileCommentsTableName)
-            .delete()
-            .where('reply_to', commentId)
-            .orWhere('comment_id', commentId);
+    async deleteComment(
+        dashboardUuid: string,
+        commentId: string,
+    ): Promise<void> {
+        await this.getCommentThreadQuery(dashboardUuid, commentId).delete();
     }
 }

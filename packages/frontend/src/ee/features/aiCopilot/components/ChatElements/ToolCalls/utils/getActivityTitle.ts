@@ -15,21 +15,23 @@ type ActivityTitle = {
 
 const SEARCH_TOOLS = new Set([
     'findExplores',
+    'findCustomChartTypes',
     'findFields',
     'discoverFields',
+    'grepFields',
+    'getMetadata',
+    'searchSemanticLayer',
     'searchFieldValues',
     'findContent',
+    'listContent',
     'findDashboards',
     'findCharts',
     'getDashboardCharts',
     'listWarehouseTables',
     'describeWarehouseTable',
-]);
-
-const VIZ_TOOLS = new Set([
-    'generateBarVizConfig',
-    'generateTimeSeriesVizConfig',
-    'generateTableVizConfig',
+    'listKnowledgeDocuments',
+    'getKnowledgeDocumentContent',
+    'resolveUrl',
 ]);
 
 /**
@@ -43,10 +45,15 @@ export const getActivityTitle = (
     if (toolGroups.length === 0) {
         return { title: 'Steps taken', icon: IconRoute };
     }
-    const toolNames = toolGroups.map((g) => g.toolName);
+    const toolNames = toolGroups.flatMap((g) =>
+        g.calls.map((call) => call.toolName),
+    );
     const hasDashboard = toolNames.includes('generateDashboard');
-    const hasViz = toolNames.some((n) => VIZ_TOOLS.has(n));
-    const hasQuery = toolNames.includes('runQuery');
+    const hasCreateContent = toolNames.includes('createContent');
+    const hasQuery =
+        toolNames.includes('generateVisualization') ||
+        toolNames.includes('runContentQuery') ||
+        toolNames.includes('runQuery');
     const hasRunSql = toolNames.includes('runSql');
     const onlySearches = toolNames.every((n) => SEARCH_TOOLS.has(n));
 
@@ -56,7 +63,13 @@ export const getActivityTitle = (
             icon: IconLayoutDashboard,
         };
     }
-    if (hasViz || hasQuery) {
+    if (hasCreateContent) {
+        return {
+            title: 'How this content was created',
+            icon: IconLayoutDashboard,
+        };
+    }
+    if (hasQuery) {
         return { title: 'How this chart was built', icon: IconChartLine };
     }
     if (hasRunSql) {

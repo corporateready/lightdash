@@ -3,19 +3,15 @@ import {
     getErrorMessage,
     type Space,
 } from '@lightdash/common';
-import {
-    Button,
-    Group,
-    MantineProvider,
-    useMantineColorScheme,
-    type DefaultMantineColor,
-} from '@mantine/core';
-import { useForm, zodResolver, type UseFormReturnType } from '@mantine/form';
+import { Button, Group, type DefaultMantineColor } from '@mantine/core';
+import { useForm, type UseFormReturnType } from '@mantine/form';
 import { type Icon } from '@tabler/icons-react';
+import { zod4Resolver as zodResolver } from 'mantine-form-zod-resolver';
 import { useState, type FC } from 'react';
 import { useNavigate } from 'react-router';
 import { z } from 'zod';
 import useToaster from '../../../hooks/toaster/useToaster';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
 import {
     useCreateMutation,
     useSpace,
@@ -77,7 +73,6 @@ const SpaceModal: FC<ActionModalProps> = ({
     parentSpaceUuid,
 }) => {
     const { showToastError } = useToaster();
-    const { colorScheme } = useMantineColorScheme();
 
     const isNestedSpace = !!parentSpaceUuid;
     const [inheritanceValue, setInheritanceValue] = useState<InheritanceType>(
@@ -128,55 +123,61 @@ const SpaceModal: FC<ActionModalProps> = ({
     }
 
     return (
-        <MantineProvider inherit theme={{ colorScheme }}>
-            <MantineModal
-                opened
-                size="lg"
-                icon={icon}
-                title={title}
-                onClose={onClose}
-                actions={
-                    <Group spacing="xs" position="right">
-                        <Button
-                            type="submit"
-                            disabled={isDisabled || !form.isValid}
-                            color={confirmButtonColor}
-                            loading={isLoading}
-                            form="form-space-action-modal"
-                        >
-                            {confirmButtonLabel}
-                        </Button>
-                    </Group>
-                }
+        <MantineModal
+            opened
+            size="lg"
+            icon={icon}
+            title={title}
+            onClose={onClose}
+            actions={
+                <Group gap="xs" justify="flex-end">
+                    <Button
+                        type="submit"
+                        disabled={isDisabled || !form.isValid}
+                        color={confirmButtonColor}
+                        loading={isLoading}
+                        form="form-space-action-modal"
+                        // Walkthrough marker for create:Space: the space is
+                        // created here; the learner then opens it by name.
+                        // See scripts/scope-tours/generate.ts.
+                        data-tour-scope="create:Space"
+                        data-tour-step="2"
+                        data-tour-route="/projects/:projectUuid/spaces"
+                        data-tour-label="Click Create"
+                        data-tour-title="Create a space"
+                        data-tour-interactive="true"
+                        data-tour-via='[data-tour-nav="browse"] >> [data-tour-nav="all-spaces"] >> [data-tour-anchor="add-space"] >> [data-tour-anchor="space-name"]'
+                        data-tour-docs="explore/spaces.mdx#creating-a-space:1"
+                    >
+                        {confirmButtonLabel}
+                    </Button>
+                </Group>
+            }
+        >
+            <form
+                name={title}
+                onSubmit={form.onSubmit(handleSubmit)}
+                id="form-space-action-modal"
             >
-                <form
-                    name={title}
-                    onSubmit={form.onSubmit(handleSubmit)}
-                    id="form-space-action-modal"
-                >
-                    {actionType === ActionType.CREATE ? (
-                        <CreateSpaceModalContent
-                            form={form}
-                            projectUuid={projectUuid}
-                            parentSpaceUuid={parentSpaceUuid}
-                            inheritanceValue={inheritanceValue}
-                            onInheritanceChange={setInheritanceValue}
-                        />
-                    ) : actionType === ActionType.UPDATE ? (
-                        <UpdateSpaceModalContent
-                            data={data}
-                            form={form}
-                            projectUuid={projectUuid}
-                        />
-                    ) : (
-                        assertUnreachable(
-                            actionType,
-                            'Unexpected action in space',
-                        )
-                    )}
-                </form>
-            </MantineModal>
-        </MantineProvider>
+                {actionType === ActionType.CREATE ? (
+                    <CreateSpaceModalContent
+                        form={form}
+                        projectUuid={projectUuid}
+                        parentSpaceUuid={parentSpaceUuid}
+                        inheritanceValue={inheritanceValue}
+                        onInheritanceChange={setInheritanceValue}
+                    />
+                ) : actionType === ActionType.UPDATE ? (
+                    <UpdateSpaceModalContent
+                        data={data}
+                        form={form}
+                        projectUuid={projectUuid}
+                    />
+                ) : (
+                    assertUnreachable(actionType, 'Unexpected action in space')
+                )}
+            </form>
+        </MantineModal>
     );
 };
 
@@ -191,6 +192,9 @@ const SpaceActionModal: FC<
     parentSpaceUuid,
     ...props
 }) => {
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
     const { data, isInitialLoading } = useSpace(projectUuid, spaceUuid, {
         enabled: !!spaceUuid,
     });
@@ -202,7 +206,7 @@ const SpaceActionModal: FC<
             onSuccess: (space) => {
                 if (shouldRedirect) {
                     void navigate(
-                        `/projects/${projectUuid}/spaces/${space.uuid}`,
+                        `/projects/${projectUrlIdentifier}/spaces/${space.uuid}`,
                     );
                 }
             },

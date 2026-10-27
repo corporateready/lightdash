@@ -45,16 +45,31 @@ export enum PageName {
     NO_PROJECT_ACCESS = 'no_project_access',
     SPACE = 'space',
     SPACES = 'spaces',
+    CONTENT_REVIEW_REQUESTS = 'content_review_requests',
+    CONTENT_REVIEW_REQUEST = 'content_review_request',
+    SHARED_WITH_ME = 'shared_with_me',
     SHARE = 'share',
     USER_ACTIVITY = 'user_activity',
+    QUERY_HISTORY = 'query_history',
     VERIFY_EMAIL = 'verify_email',
     JOIN_ORGANIZATION = 'join_organization',
+    ORGANIZATION_SETUP = 'organization_setup',
+    ONBOARDING_DATA_SOURCE = 'onboarding_data_source',
+    ONBOARDING_DBT = 'onboarding_dbt',
+    ONBOARDING_INVITE_EXPERT = 'onboarding_invite_expert',
+    AGENT_ONBOARDING_START = 'agent_onboarding_start',
+    AGENT_ONBOARDING_RUN = 'agent_onboarding_run',
+    NO_PROJECT_HOMEPAGE = 'no_project_homepage',
     EMBED_DASHBOARD = 'embed_dashboard',
     EMBED_SAVED_CHART = 'embed_saved_chart',
     EMBED_EXPLORE = 'embed_explore',
+    EMBED_DATA_APP = 'embed_data_app',
     CATALOG = 'catalog',
     METRICS_CATALOG = 'metrics_catalog',
     FUNNEL_BUILDER = 'funnel_builder',
+    ROADMAP = 'roadmap',
+    LEARN = 'learn',
+    LEARN_WORKSPACE = 'learn_workspace',
 }
 
 export enum CategoryName {
@@ -72,6 +87,22 @@ export enum SectionName {
 }
 
 export enum EventName {
+    HOMEPAGE_QUICK_ACTION_CLICKED = 'homepage_quick_action.clicked',
+    DOCUMENT_CHART_EXPLORE_CLICKED = 'document_chart_explore.clicked',
+    DOCUMENT_CHART_APPLIED = 'document_chart.applied',
+    HOMEPAGE_V2_PROMO_VIEWED = 'homepage_v2_promo.viewed',
+    HOMEPAGE_V2_PROMO_DISMISSED = 'homepage_v2_promo.dismissed',
+    HOMEPAGE_V2_OPTED_IN = 'homepage_v2.opted_in',
+    CHART_STUDIO_VEGA_NUDGE_VIEWED = 'chart_studio_vega_nudge.viewed',
+    CHART_STUDIO_VEGA_NUDGE_DISMISSED = 'chart_studio_vega_nudge.dismissed',
+    CHART_STUDIO_VEGA_NUDGE_OPENED = 'chart_studio_vega_nudge.opened',
+    HOMEPAGE_BLOCK_ADDED = 'homepage_block.added',
+    HOMEPAGE_BLOCK_REMOVED = 'homepage_block.removed',
+    HOMEPAGE_OPENING_SWAPPED = 'homepage_opening.swapped',
+    HOMEPAGE_RECOMMENDED_ACTION_CLICKED = 'homepage_recommended_action.clicked',
+    HOMEPAGE_RECOMMENDED_ACTION_SKIPPED = 'homepage_recommended_action.skipped',
+    DATA_APP_RECENT_SUGGESTION_CLICK = 'data_app.recent_suggestion_click',
+    DATA_APP_CLARIFY_ROUND_RESOLVED = 'data_app.clarify_round_resolved',
     REVOKE_INVITES_BUTTON_CLICKED = 'revoke_invites_button.clicked',
     INVITE_BUTTON_CLICKED = 'invite_users_to_organisation_button.clicked',
     RUN_QUERY_BUTTON_CLICKED = 'run_query_button.clicked',
@@ -86,6 +117,7 @@ export enum EventName {
     FORMULA_TABLE_CALCULATION_AI_GENERATE_CLICKED = 'formula_table_calculation_ai_generate.clicked',
     UPDATE_PROJECT_BUTTON_CLICKED = 'update_project_button.click',
     CREATE_PROJECT_BUTTON_CLICKED = 'create_project_button.click',
+    CREATE_PROJECT_FAILED = 'create_project.failed',
     REFRESH_DBT_CONNECTION_BUTTON_CLICKED = 'refresh_dbt_connection_button.click',
     UPDATE_PROJECT_TABLES_CONFIGURATION_BUTTON_CLICKED = 'update_project_tables_configuration.click',
     UPDATE_DASHBOARD_NAME_CLICKED = 'update_dashboard_name.click',
@@ -93,14 +125,29 @@ export enum EventName {
     TRY_DEMO_CLICKED = 'try_demo.clicked',
     CREATE_PROJECT_CLI_BUTTON_CLICKED = 'create_project_cli_button.click',
     CREATE_PROJECT_MANUALLY_BUTTON_CLICKED = 'create_project_manually_click.click',
+    CREATE_PROJECT_AGENT_BUTTON_CLICKED = 'create_project_agent_button.click',
+    CREATE_PROJECT_WAREHOUSE_BUTTON_CLICKED = 'create_project_warehouse_button.click',
+    CREATE_PROJECT_CLI_SSO_OPTION_CLICKED = 'create_project_cli_sso_option.click',
     COPY_CREATE_PROJECT_CODE_BUTTON_CLICKED = 'copy_create_project_code_click.click',
     ONBOARDING_STEP_CLICKED = 'onboarding_step.click',
     LANDING_RUN_QUERY_CLICKED = 'landing_run_query.click',
     SETUP_STEP_CLICKED = 'setup_step.click',
     ADD_FILTER_CLICKED = 'add_filter.click',
     DASHBOARD_FILTER_LOCK_TOGGLED = 'dashboard_filter_lock.toggled',
+    DASHBOARD_FILTER_REQUIREMENTS_SAVED = 'dashboard_filter_requirements.saved',
+    DASHBOARD_SECTION_CREATED = 'dashboard_section.created',
+    DASHBOARD_SECTIONS_TIP_DISMISSED = 'dashboard_sections_tip.dismissed',
+    DASHBOARD_FILTERS_MOVED = 'dashboard_filters.moved',
+    DASHBOARD_FILTER_EDITOR_OPENED = 'dashboard_filter_editor.opened',
+    DASHBOARD_FILTER_EDITOR_CLOSED = 'dashboard_filter_editor.closed',
+    DASHBOARD_FILTER_EDITOR_SWITCH_ANSWERED = 'dashboard_filter_editor.switch_answered',
+    DASHBOARD_SECTION_TOGGLED = 'dashboard_section.toggled',
     GO_TO_LINK_CLICKED = 'go_to_link.click',
     ADD_CUSTOM_METRIC_CLICKED = 'add_custom_metric.click',
+    DASHBOARD_CUSTOM_METRIC_CREATED = 'dashboard_custom_metric.created',
+    DASHBOARD_CUSTOM_METRIC_REUSED = 'dashboard_custom_metric.reused',
+    DASHBOARD_CHART_CREATED_IN_PLACE = 'dashboard_chart.created_in_place',
+    DASHBOARD_CHART_EDITED_IN_PLACE = 'dashboard_chart.edited_in_place',
     REMOVE_CUSTOM_METRIC_CLICKED = 'remove_custom_metric.click',
     // Headway-related notifications
     NOTIFICATIONS_CLICKED = 'notifications.clicked',
@@ -110,6 +157,7 @@ export enum EventName {
     EMBED_DOWNLOAD_CSV_CLICKED = 'embed_download_csv.clicked',
     EMBED_DOWNLOAD_IMAGE_CLICKED = 'embed_download_image.clicked',
 
+    // Misspelt since 2024; kept so the warehouse history stays in one piece.
     DOWNLOAD_IMAGE_CLICKED = 'ownload_image.clicked',
     CUSTOM_AXIS_RANGE_TOGGLE_CLICKED = 'custom_axis_range_toggle_clicked',
     CREATE_PROJECT_ACCESS_BUTTON_CLICKED = 'create_project_access.clicked',
@@ -124,6 +172,7 @@ export enum EventName {
     ADD_CUSTOM_DIMENSION_CLICKED = 'add_custom_dimension.clicked',
     DATE_ZOOM_CLICKED = 'date_zoom.clicked',
     COMMENTS_CLICKED = 'comments.clicked',
+    DASHBOARD_COMMENTS_PANEL_OPENED = 'dashboard_comments_panel.opened',
     NOTIFICATIONS_COMMENTS_ITEM_CLICKED = 'notifications_comments_item.clicked',
     DASHBOARD_AUTO_REFRESH_UPDATED = 'dashboard_auto_refresh.updated',
 
@@ -157,6 +206,10 @@ export enum EventName {
 
     DASHBOARD_CHART_LOADED = 'dashboard_chart.loaded',
 
+    // Map charts
+    MAP_TILE_USAGE = 'map_chart.tile_usage',
+    MAP_TILE_FALLBACK = 'map_chart.tile_fallback',
+
     // Spaces
     SPACE_BREADCRUMB_CLICKED = 'space_breadcrumb.clicked',
 
@@ -167,12 +220,61 @@ export enum EventName {
     AI_AGENT_CHART_EXPLORED = 'ai_agent_chart.explored',
     AI_AGENT_ASK_CLICKED = 'ai_agent_ask.clicked',
     AI_AGENT_CHAT_MINIMIZED = 'ai_agent_chat.minimized',
+    AI_AGENT_SUGGESTIONS_DISPLAYED = 'ai_agent.suggestions_displayed',
     AI_AGENT_SUGGESTION_IMPRESSION = 'ai_agent.suggestion_impression',
     AI_AGENT_SUGGESTION_CLICK = 'ai_agent.suggestion_click',
+    AI_DEEP_RESEARCH_REPORT_ENGAGED = 'ai_deep_research.report_engaged',
+    AI_AGENT_BATTLE_STARTED = 'ai_agent_battle.started',
+
+    // Content review
+    CONTENT_REVIEW_SIMILAR_CONTENT_CLICKED = 'content_review_similar_content.clicked',
 
     // Theme
     THEME_TOGGLED = 'theme.toggled',
 
     // Dashboard UI Version Toggle
     DASHBOARD_UI_VERSION_TOGGLED = 'dashboard_ui_version.toggled',
+    SIGNUP_FORM_SUBMITTED = 'signup_form.submitted',
+    OTP_RESEND_CLICKED = 'otp.resend_clicked',
+    LOGIN_FLOW_METHOD_SELECTED = 'login_flow.method_selected',
+    ORGANIZATION_SETUP_STEP_COMPLETED = 'organization_setup_step.completed',
+    ORGANIZATION_BRAND_DETECTED = 'organization_brand.detected',
+    ONBOARDING_WAREHOUSE_SELECTED = 'onboarding_warehouse.selected',
+    BIGQUERY_SSO_SIGNIN_CLICKED = 'bigquery_sso.signin_clicked',
+    BIGQUERY_SSO_SIGNIN_COMPLETED = 'bigquery_sso.signin_completed',
+    SNOWFLAKE_CLI_SSO_COMMAND_COPIED = 'snowflake_cli_sso.command_copied',
+    SNOWFLAKE_CLI_SSO_CONNECT_COMPLETED = 'snowflake_cli_sso.connect_completed',
+    SETUP_INVITE_SENT = 'setup_invite.sent',
+    PLAYGROUND_PROJECT_ENTERED = 'playground_project.entered',
+    PLAYGROUND_PROJECT_SETUP_FAILED = 'playground_project.setup_failed',
+    ONBOARDING_PROJECT_READY_START_EXPLORING_CLICKED = 'onboarding_project_ready.start_exploring_clicked',
+    HOMEPAGE_ASK_SUBMITTED = 'homepage_ask.submitted',
+    HOMEPAGE_RECOMMENDED_ACTION_IMPRESSION = 'homepage_recommended_action.impression',
+    HOMEPAGE_RECOMMENDED_ACTION_RESTORED = 'homepage_recommended_action.restored',
+    HOMEPAGE_STARS_MEDIA_CARD_CLICKED = 'homepage_stars_media_card.clicked',
+    AGENT_SETUP_PROMPT_COPIED = 'agent_setup_prompt.copied',
+    AGENT_ONBOARDING_DEMO_OFFER_SHOWN = 'agent_onboarding_demo_offer.shown',
+    AGENT_ONBOARDING_DEMO_OFFER_ACCEPTED = 'agent_onboarding_demo_offer.accepted',
+    AGENT_ONBOARDING_COMPLETION_TOAST_SHOWN = 'agent_onboarding_completion_toast.shown',
+    AGENT_ONBOARDING_COMPLETION_TOAST_CLICKED = 'agent_onboarding_completion_toast.clicked',
+    CREATE_PROJECT_COLUMNS_DEFINED_BUTTON_CLICKED = 'create_project_columns_defined_button.click',
+
+    // Chart type library (registry) funnel
+    CHART_TYPE_LIBRARY_VIEWED = 'chart_type_library.viewed',
+    CHART_TYPE_LIBRARY_CHART_CLICKED = 'chart_type_library.chart_clicked',
+    CHART_TYPE_LIBRARY_INSTALL_CLICKED = 'chart_type_library.install_clicked',
+    CHART_TYPE_DETAIL_VIEWED = 'chart_type.detail_viewed',
+    CHART_TYPE_PREVIEW_IN_EXPLORER = 'chart_type.preview_in_explorer',
+    CHART_TYPE_FORK_MODAL_OPENED = 'chart_type.fork_modal_opened',
+
+    SQL_RUNNER_CONNECTION_SWITCHED = 'sql_runner_connection.switched',
+    SQL_RUNNER_CONNECTION_HINT_RESOLVED = 'sql_runner_connection_hint.resolved',
+    SQL_RUNNER_SHARE_LINK_OPENED = 'sql_runner_share_link.opened',
+    OPEN_IN_SQL_RUNNER_CLICKED = 'open_in_sql_runner.clicked',
+
+    // Learn: the training library and the walkthroughs started from it
+    LEARN_LIBRARY_VIEWED = 'learn_library.viewed',
+    LEARN_WALKTHROUGH_STARTED = 'learn_walkthrough.started',
+    LEARN_WALKTHROUGH_COMPLETED = 'learn_walkthrough.completed',
+    LEARN_WALKTHROUGH_DISMISSED = 'learn_walkthrough.dismissed',
 }

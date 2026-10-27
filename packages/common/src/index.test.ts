@@ -1,9 +1,16 @@
 import moment from 'moment';
 import {
+    DimensionType,
+    formatRawValue,
     getDateGroupLabel,
+    getDateGroupLabelWithGranularity,
     getFilterRuleFromFieldWithDefaultValue,
     getPasswordSchema,
+    getUserNameSchema,
     isValidEmailAddress,
+    TimeFrames,
+    validateUserName,
+    type Dimension,
 } from '.';
 import {
     dateDayDimension,
@@ -95,6 +102,19 @@ describe('Common index', () => {
 });
 
 describe('Password Validation', () => {
+    test('reports every unmet requirement in UI order', () => {
+        const result = getPasswordSchema().safeParse('');
+
+        expect(result.success).toBe(false);
+        if (!result.success) {
+            expect(result.error.issues.map(({ message }) => message)).toEqual([
+                'must be at least 8 characters long',
+                'must contain a letter',
+                'must contain a number or symbol',
+            ]);
+        }
+    });
+
     test('valid password', () => {
         const validPasswords = [
             'Lightdash1!',
@@ -114,7 +134,7 @@ describe('Password Validation', () => {
             const result = getPasswordSchema().safeParse(password);
             expect(result.success).toBe(false);
             if (!result.success) {
-                expect(result.error.errors[0].message).toBe(
+                expect(result.error.issues[0].message).toBe(
                     'must contain a letter',
                 );
             }
@@ -127,7 +147,7 @@ describe('Password Validation', () => {
             const result = getPasswordSchema().safeParse(password);
             expect(result.success).toBe(false);
             if (!result.success) {
-                expect(result.error.errors[0].message).toBe(
+                expect(result.error.issues[0].message).toBe(
                     'must contain a number or symbol',
                 );
             }
@@ -140,11 +160,40 @@ describe('Password Validation', () => {
             const result = getPasswordSchema().safeParse(password);
             expect(result.success).toBe(false);
             if (!result.success) {
-                expect(result.error.errors[0].message).toBe(
+                expect(result.error.issues[0].message).toBe(
                     'must be at least 8 characters long',
                 );
             }
         });
+    });
+});
+
+describe('User name validation', () => {
+    test.each(['José da Silva', "O'Connor", '李 小龍', 'Anne-Marie'])(
+        'accepts plain-text name %s',
+        (name) => {
+            expect(validateUserName(name)).toBe(true);
+        },
+    );
+
+    test.each([
+        '<script>alert(1)</script>',
+        '<img src=x onerror=alert(1)>',
+        'Jane <b>Doe</b>',
+    ])('rejects name containing HTML delimiters %s', (name) => {
+        expect(validateUserName(name)).toBe(false);
+    });
+
+    test('provides a trimmed frontend validation schema', () => {
+        expect(getUserNameSchema().parse('  José  ')).toBe('José');
+
+        const result = getUserNameSchema().safeParse('<b>José</b>');
+        expect(result.success).toBe(false);
+        if (!result.success) {
+            expect(result.error.issues[0].message).toBe(
+                'Name cannot contain < or >',
+            );
+        }
     });
 });
 
@@ -178,6 +227,47 @@ describe('getDateGroupLabel', () => {
     });
 });
 
+describe('getDateGroupLabelWithGranularity', () => {
+    test('appends the standard granularity to the base field label', () => {
+        expect(
+            getDateGroupLabelWithGranularity({
+                ...dateDayDimensionWithGroup,
+                timeIntervalBaseDimensionName: 'date',
+            } as Dimension),
+        ).toEqual('date (Day)');
+    });
+
+    test('preserves a project granularity label override', () => {
+        expect(
+            getDateGroupLabelWithGranularity({
+                ...dateDayDimensionWithGroup,
+                label: 'date Week starting Monday',
+                timeInterval: TimeFrames.WEEK,
+                timeIntervalLabel: 'Week starting Monday',
+                timeIntervalBaseDimensionName: 'date',
+            } as Dimension),
+        ).toEqual('date (Week starting Monday)');
+    });
+
+    test('uses the base field group for a custom granularity', () => {
+        expect(
+            getDateGroupLabelWithGranularity({
+                ...dateDayDimensionWithGroup,
+                label: 'Fiscal quarter',
+                timeInterval: undefined,
+                customTimeInterval: 'fiscal_quarter',
+                timeIntervalBaseDimensionName: 'date',
+            } as Dimension),
+        ).toEqual('date group (Fiscal quarter)');
+    });
+
+    test('returns undefined for a non-date-granularity field', () => {
+        expect(
+            getDateGroupLabelWithGranularity(stringDimension),
+        ).toBeUndefined();
+    });
+});
+
 describe('email validation', () => {
     test.each([
         'demo@lightdash.com',
@@ -201,5 +291,30 @@ describe('email validation', () => {
         ['demo@lightdash.c', 'Top-level domain too short'],
     ])('invalid email: %s - %s', (email) => {
         expect(isValidEmailAddress(email)).toBe(false);
+    });
+});
+
+describe('formatRawValue (GLITCH-452)', () => {
+    const value = '2024-01-15T00:00:00.000Z';
+    const dateField = { ...dateDayDimension, type: DimensionType.DATE };
+    const tsField = { ...dateDayDimension, type: DimensionType.TIMESTAMP };
+
+    test('flag off (no timezone): DATE keeps the full ISO raw (unchanged)', () => {
+        expect(formatRawValue(dateField, value)).toContain('T');
+    });
+
+    test('flag on (timezone present): DATE emits a bare YYYY-MM-DD raw, never shifted', () => {
+        // The timezone only signals "tz-aware mode is on"; a calendar DATE is
+        // never shifted, so the result is identical across offsets.
+        expect(formatRawValue(dateField, value, 'Asia/Tokyo')).toBe(
+            '2024-01-15',
+        );
+        expect(formatRawValue(dateField, value, 'Pacific/Pago_Pago')).toBe(
+            '2024-01-15',
+        );
+    });
+
+    test('TIMESTAMP keeps the full ISO raw even in tz-aware mode (still an instant)', () => {
+        expect(formatRawValue(tsField, value, 'Asia/Tokyo')).toContain('T');
     });
 });

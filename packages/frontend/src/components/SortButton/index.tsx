@@ -1,8 +1,9 @@
 import { isField, type SortField } from '@lightdash/common';
-import { Badge, Group, Popover, Text } from '@mantine-8/core';
+import { Badge, Group, Popover, Text } from '@mantine/core';
 import {
     IconArrowDown,
     IconArrowUp,
+    IconArrowsSort,
     IconChevronDown,
 } from '@tabler/icons-react';
 import { type FC } from 'react';
@@ -32,11 +33,11 @@ const SortButton: FC<Props> = ({ sorts, isEditMode }) => {
     };
 
     return (
-        <Popover position="top-start" shadow="subtle" disabled={!isEditMode}>
+        <Popover position="top-start" disabled={!isEditMode}>
             <Popover.Target>
                 <Badge
-                    variant="light"
                     color="blue"
+                    variant="transparent"
                     className={`${classes.badge} ${isEditMode ? classes.interactive : ''}`}
                     rightSection={
                         isEditMode ? (
@@ -44,22 +45,19 @@ const SortButton: FC<Props> = ({ sorts, isEditMode }) => {
                         ) : null
                     }
                 >
-                    <Group gap={2}>
-                        {sorts.length === 1 && (
-                            <MantineIcon
-                                icon={
-                                    sorts[0].descending
-                                        ? IconArrowDown
-                                        : IconArrowUp
-                                }
-                                strokeWidth={3}
-                                size="sm"
-                            />
-                        )}
-                        <Text span fw={400} fz="xs">
-                            Sorted by
-                        </Text>
-                        <Text fw={600} fz="xs">
+                    <Group className={classes.content} gap={2} wrap="nowrap">
+                        <MantineIcon
+                            icon={
+                                sorts.length !== 1
+                                    ? IconArrowsSort
+                                    : sorts[0].descending
+                                      ? IconArrowDown
+                                      : IconArrowUp
+                            }
+                            strokeWidth={3}
+                            size="sm"
+                        />
+                        <Text className={classes.field} fw={600} fz="xs">
                             {getSortText()}
                         </Text>
                     </Group>

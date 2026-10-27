@@ -1,4 +1,25 @@
-import { type AiChartRuntimeOverrides } from '@lightdash/common';
+import {
+    type AiAgentBattleProfile,
+    type AiAgentLoadoutBase,
+    type AiAgentModelConfig,
+    type AiChartRuntimeOverrides,
+    type AiDashboardRuntimeOverrides,
+    type AiDeepResearchLimits,
+    type AiOrgModelVisibility,
+    type AiPromptExternalSourceSnapshot,
+    type AiPromptResponseTiming,
+    type AiPromptThreadFileSnapshot,
+    type AiPromptTokenUsage,
+    type AiProviderApiKeyHints,
+    type AiProviderBaseUrls,
+    type AiThreadBinding,
+    type AiThreadCreatedFrom,
+    type AiWritebackRunStatus,
+    type AiWritebackSource,
+    type AiWritebackWorkstream,
+    type DataAppAnalysisLimits,
+    type DataAppModelVisibility,
+} from '@lightdash/common';
 import { Knex } from 'knex';
 
 export const AiThreadTableName = 'ai_thread';
@@ -6,12 +27,22 @@ export const AiThreadTableName = 'ai_thread';
 export type DbAiThread = {
     agent_uuid: string | null;
     ai_thread_uuid: string;
+    share_source_thread_share_uuid: string | null;
     created_at: Date;
+    // Last prompt activity only; don't bump on other thread updates.
+    // Regenerating a response on an existing prompt must bump it.
+    updated_at: Date | null;
     organization_uuid: string;
     project_uuid: string;
-    created_from: 'slack' | 'web_app' | 'evals'; // slack, web_app, evals etc
+    created_from: AiThreadCreatedFrom;
     title: string | null;
     title_generated_at: Date | null;
+    sql_auto_approved_at: Date | null;
+    pinned_at: Date | null;
+    battle_profile: AiAgentBattleProfile | null;
+    bound_entity_type: AiThreadBinding['type'] | null;
+    bound_entity_uuid: string | null;
+    thread_context: string | null;
 };
 
 export type AiThreadTable = Knex.CompositeTableType<
@@ -19,13 +50,57 @@ export type AiThreadTable = Knex.CompositeTableType<
     Pick<
         DbAiThread,
         'organization_uuid' | 'project_uuid' | 'created_from' | 'agent_uuid'
-    >,
+    > &
+        Partial<
+            Pick<
+                DbAiThread,
+                | 'battle_profile'
+                | 'bound_entity_type'
+                | 'bound_entity_uuid'
+                | 'thread_context'
+            >
+        >,
     Partial<
         Pick<
             DbAiThread,
-            'agent_uuid' | 'title' | 'title_generated_at' | 'project_uuid'
-        >
+            | 'agent_uuid'
+            | 'title'
+            | 'title_generated_at'
+            | 'project_uuid'
+            | 'share_source_thread_share_uuid'
+            | 'sql_auto_approved_at'
+            | 'pinned_at'
+        > & { updated_at: Date | Knex.Raw }
     >
+>;
+
+export const AiThreadShareTableName = 'ai_thread_share';
+
+export type DbAiThreadShare = {
+    ai_thread_share_uuid: string;
+    nanoid: string;
+    ai_thread_uuid: string;
+    agent_uuid: string;
+    project_uuid: string;
+    organization_uuid: string;
+    snapshot_prompt_uuid: string;
+    created_by_user_uuid: string | null;
+    created_at: Date;
+    revoked_at: Date | null;
+};
+
+export type AiThreadShareTable = Knex.CompositeTableType<
+    DbAiThreadShare,
+    Pick<
+        DbAiThreadShare,
+        | 'nanoid'
+        | 'ai_thread_uuid'
+        | 'agent_uuid'
+        | 'project_uuid'
+        | 'organization_uuid'
+        | 'snapshot_prompt_uuid'
+    > & { created_by_user_uuid: string },
+    Pick<DbAiThreadShare, 'revoked_at'>
 >;
 
 export const AiSlackThreadTableName = 'ai_slack_thread';
@@ -41,9 +116,11 @@ export type DbAiSlackThread = {
 };
 
 type DbWebAppThread = {
-    ai_slack_thread_uuid: string;
+    ai_web_app_thread_uuid: string;
     ai_thread_uuid: string;
     user_uuid: string;
+    embed_space_uuid: string | null;
+    embed_space_uuids: string[] | null;
 };
 
 export type AiSlackThreadTable = Knex.CompositeTableType<
@@ -60,11 +137,198 @@ export type AiSlackThreadTable = Knex.CompositeTableType<
 
 export type AiWebAppThreadTable = Knex.CompositeTableType<
     DbWebAppThread,
-    Pick<DbWebAppThread, 'ai_thread_uuid'>,
+    Pick<DbWebAppThread, 'ai_thread_uuid' | 'user_uuid'> &
+        Partial<Pick<DbWebAppThread, 'embed_space_uuid' | 'embed_space_uuids'>>,
     never
 >;
 
+export const AiWritebackThreadTableName = 'ai_writeback_thread';
+
+export type DbAiWritebackThread = {
+    ai_writeback_thread_uuid: string;
+    ai_thread_uuid: string;
+    /**
+     * The registry-owned, turn-stable sandbox id (see sandbox_registry).
+     * Backfilled for pre-registry rows by the registry migration. Null only for
+     * a row an old pod inserts mid-rollout (it sets the legacy `sandbox_id`
+     * column instead); such a thread is treated as unresumable and cleared on
+     * its next turn.
+     */
+    sandbox_uuid: string | null;
+    pull_request_uuid: string | null;
+    /**
+     * The dbt source this thread (and its single PR) is bound to: a
+     * `project_dbt_sources` row uuid for an additional source, or null for the
+     * project's primary dbt connection. Every resumed turn re-resolves to this
+     * source so the thread keeps editing the same repo. FK is ON DELETE SET
+     * NULL — deleting the source degrades a resume back to the primary.
+     */
+    project_dbt_source_uuid: string | null;
+    workstream: AiWritebackWorkstream;
+    /** "owner/repo" this row's sandbox + PR target; null only on legacy rows. */
+    target_repo: string | null;
+    created_at: Date;
+};
+
+export type AiWritebackThreadTable = Knex.CompositeTableType<
+    DbAiWritebackThread,
+    Pick<
+        DbAiWritebackThread,
+        | 'ai_thread_uuid'
+        | 'sandbox_uuid'
+        | 'pull_request_uuid'
+        | 'target_repo'
+        | 'workstream'
+    > &
+        Partial<Pick<DbAiWritebackThread, 'project_dbt_source_uuid'>>,
+    Partial<Pick<DbAiWritebackThread, 'sandbox_uuid' | 'pull_request_uuid'>>
+>;
+
+export const AiWritebackRunTableName = 'ai_writeback_run';
+
+export type DbAiWritebackRun = {
+    ai_writeback_run_uuid: string;
+    organization_uuid: string;
+    project_uuid: string;
+    ai_thread_uuid: string | null;
+    created_by_user_uuid: string;
+    source: AiWritebackSource;
+    status: AiWritebackRunStatus;
+    branch_name: string | null;
+    pr_url: string | null;
+    error_message: string | null;
+    prompt_uuid: string | null;
+    tool_call_id: string | null;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type AiWritebackRunTable = Knex.CompositeTableType<
+    DbAiWritebackRun,
+    Pick<
+        DbAiWritebackRun,
+        | 'organization_uuid'
+        | 'project_uuid'
+        | 'ai_thread_uuid'
+        | 'created_by_user_uuid'
+        | 'source'
+    > &
+        Partial<
+            Pick<DbAiWritebackRun, 'status' | 'prompt_uuid' | 'tool_call_id'>
+        >,
+    Partial<
+        Pick<
+            DbAiWritebackRun,
+            'status' | 'branch_name' | 'pr_url' | 'error_message' | 'updated_at'
+        >
+    >
+>;
+
 export const AiPromptTableName = 'ai_prompt';
+
+export const AiPromptDecisionTableName = 'ai_prompt_decision';
+
+export const AI_PROMPT_TURN_DECISION_OPERATIONS = [
+    'chart-intent',
+    'document-edit',
+    'model-routing',
+] as const;
+
+export type DbAiPromptTurnDecisionOutcome =
+    | 'intent'
+    | 'compound'
+    | 'needs_values'
+    | 'clarify'
+    | 'not_an_edit'
+    | 'unresolved'
+    | 'unavailable'
+    | 'routed'
+    | 'instant_reply';
+
+type DbAiPromptDecisionFields = {
+    ai_prompt_decision_uuid: string;
+    ai_prompt_uuid: string;
+    created_at: Date;
+    reason: string | null;
+    intent: object | null;
+    applied: boolean;
+    fallback_reason: string | null;
+    simple_data_answer: boolean;
+    answers: object | null;
+    thresholds: object;
+    latency_ms: number;
+    jev_service_ms: number | null;
+    jev_model: string;
+};
+
+export type DbAiPromptTurnDecision = DbAiPromptDecisionFields & {
+    operation: (typeof AI_PROMPT_TURN_DECISION_OPERATIONS)[number];
+    outcome: DbAiPromptTurnDecisionOutcome;
+};
+
+export type DbAiPromptDecision = DbAiPromptTurnDecision;
+
+type DbAiPromptDecisionGenerated = 'ai_prompt_decision_uuid' | 'created_at';
+
+export type DbAiPromptDecisionInsert = Omit<
+    DbAiPromptTurnDecision,
+    DbAiPromptDecisionGenerated
+>;
+
+export type AiPromptDecisionTable = Knex.CompositeTableType<
+    DbAiPromptDecision,
+    DbAiPromptDecisionInsert,
+    never
+>;
+
+export const AiPromptDecisionShadowTableName = 'ai_prompt_decision_shadow';
+
+/** A live decision paired with a second provider's answers to the same questions. */
+export type DbAiPromptDecisionShadow = {
+    ai_prompt_decision_shadow_uuid: string;
+    ai_prompt_uuid: string;
+    created_at: Date;
+    operation: string;
+    questions: object;
+    state: unknown;
+    live_provider: string;
+    live_model: string;
+    live_outcome: string;
+    live_answers: object | null;
+    live_latency_ms: number;
+    live_service_ms: number | null;
+    shadow_provider: string;
+    shadow_model: string;
+    shadow_outcome: string;
+    shadow_answers: object | null;
+    shadow_latency_ms: number;
+    shadow_service_ms: number | null;
+};
+
+export type AiPromptDecisionShadowTable = Knex.CompositeTableType<
+    DbAiPromptDecisionShadow,
+    Omit<
+        DbAiPromptDecisionShadow,
+        'ai_prompt_decision_shadow_uuid' | 'created_at'
+    >,
+    never
+>;
+
+export type AiPromptClassifierNeedsUserInputMetadata = {
+    gate: 'match' | 'no_match';
+    model: string | null;
+    durationMs: number;
+    confidence: number | null;
+};
+
+export type AiPromptStructuredNeedsUserInputMetadata = {
+    gate: 'structured';
+    reason: 'writeback_source_selection';
+};
+
+export type AiPromptNeedsUserInputMetadata =
+    | AiPromptClassifierNeedsUserInputMetadata
+    | AiPromptStructuredNeedsUserInputMetadata;
 
 export type DbAiPrompt = {
     ai_prompt_uuid: string;
@@ -75,6 +339,7 @@ export type DbAiPrompt = {
     response: string | null;
     error_message: string | null;
     responded_at: Date | null;
+    retried_at: Date | null;
     viz_config_output: object | null;
     filters_output: object | null;
     human_score: number | null;
@@ -82,7 +347,15 @@ export type DbAiPrompt = {
     metric_query: object | null;
     saved_query_uuid: string | null;
     model_config: { modelName: string; modelProvider: string } | null;
-    token_usage: { totalTokens: number } | null;
+    token_usage: AiPromptTokenUsage | null;
+    response_timing: AiPromptResponseTiming | null;
+    execution_mode: 'standard' | 'deep_research' | null;
+    needs_user_input: boolean | null;
+    needs_user_input_metadata: AiPromptNeedsUserInputMetadata | null;
+    // Hidden turn: the agent receives and responds to the prompt, but the UI
+    // doesn't render the user bubble (e.g. the post-merge migration prompt).
+    hidden: boolean;
+    loadout_base: AiAgentLoadoutBase | null;
 };
 
 export type AiPromptTable = Knex.CompositeTableType<
@@ -90,7 +363,7 @@ export type AiPromptTable = Knex.CompositeTableType<
     DbAiPrompt,
     // insert
     Pick<DbAiPrompt, 'ai_thread_uuid' | 'created_by_user_uuid' | 'prompt'> &
-        Partial<Pick<DbAiPrompt, 'model_config'>>,
+        Partial<Pick<DbAiPrompt, 'model_config' | 'hidden' | 'execution_mode'>>,
     // update
     Partial<
         Pick<
@@ -105,10 +378,56 @@ export type AiPromptTable = Knex.CompositeTableType<
             | 'saved_query_uuid'
             | 'model_config'
             | 'token_usage'
+            | 'response_timing'
+            | 'execution_mode'
+            | 'needs_user_input'
+            | 'needs_user_input_metadata'
+            | 'loadout_base'
         > & {
             responded_at: Knex.Raw;
+            retried_at?: Date | Knex.Raw;
         }
     >
+>;
+
+export const AiPromptInterruptTableName = 'ai_prompt_interrupt';
+
+export type DbAiPromptInterrupt = {
+    ai_prompt_interrupt_uuid: string;
+    ai_prompt_uuid: string;
+    created_by_user_uuid: string | null;
+    created_at: Date;
+};
+
+export type AiPromptInterruptTable = Knex.CompositeTableType<
+    DbAiPromptInterrupt,
+    Pick<DbAiPromptInterrupt, 'ai_prompt_uuid'> & {
+        created_by_user_uuid: string;
+    },
+    never
+>;
+
+export const AiPromptSteerTableName = 'ai_prompt_steer';
+
+export type DbAiPromptSteer = {
+    ai_prompt_steer_uuid: string;
+    ai_prompt_uuid: string;
+    created_by_user_uuid: string;
+    message: string;
+    created_at: Date;
+    consumed_at: Date | null;
+    consumed_step: number | null;
+};
+
+export type AiPromptSteerTable = Knex.CompositeTableType<
+    DbAiPromptSteer,
+    Pick<
+        DbAiPromptSteer,
+        'ai_prompt_uuid' | 'created_by_user_uuid' | 'message'
+    >,
+    Partial<Pick<DbAiPromptSteer, 'consumed_step'>> & {
+        consumed_at?: Date | Knex.Raw;
+    }
 >;
 
 export const AiThreadCompactionTableName = 'ai_thread_compaction';
@@ -152,6 +471,7 @@ export type DbAiWebAppPrompt = {
     ai_slack_prompt_uuid: string;
     ai_prompt_uuid: string;
     user_uuid: string;
+    external_user_id: string | null;
 };
 
 export type AiSlackPromptTable = Knex.CompositeTableType<
@@ -168,7 +488,8 @@ export type AiSlackPromptTable = Knex.CompositeTableType<
 
 export type AiWebAppPromptTable = Knex.CompositeTableType<
     DbAiWebAppPrompt,
-    Pick<DbAiWebAppPrompt, 'ai_prompt_uuid' | 'user_uuid'>,
+    Pick<DbAiWebAppPrompt, 'ai_prompt_uuid' | 'user_uuid'> &
+        Partial<Pick<DbAiWebAppPrompt, 'external_user_id'>>,
     Pick<DbAiWebAppPrompt, 'user_uuid'>
 >;
 
@@ -199,6 +520,34 @@ export type AiAgentToolCallTable = Knex.CompositeTableType<
     never
 >;
 
+export const AiAgentToolCallErrorTableName = 'ai_agent_tool_call_error';
+
+// Debugging aid: schema-invalid tool-call attempts dropped by the AI SDK before
+// execution. Kept separate from ai_agent_tool_call, whose rows are replayed
+// into UI/history reconstruction.
+export type DbAiAgentToolCallError = {
+    ai_agent_tool_call_error_uuid: string;
+    ai_prompt_uuid: string;
+    tool_call_id: string;
+    tool_name: string;
+    error_message: string;
+    raw_args: string | null;
+    created_at: Date;
+};
+
+export type AiAgentToolCallErrorTable = Knex.CompositeTableType<
+    DbAiAgentToolCallError,
+    Pick<
+        DbAiAgentToolCallError,
+        | 'ai_prompt_uuid'
+        | 'tool_call_id'
+        | 'tool_name'
+        | 'error_message'
+        | 'raw_args'
+    >,
+    never
+>;
+
 export const AiAgentToolResultTableName = 'ai_agent_tool_result';
 
 export type DbAiAgentToolResult = {
@@ -218,32 +567,97 @@ export type AiAgentToolResultTable = Knex.CompositeTableType<
         DbAiAgentToolResult,
         'ai_prompt_uuid' | 'tool_call_id' | 'tool_name' | 'result'
     > &
-        Partial<Pick<DbAiAgentToolResult, 'metadata'>>,
-    Partial<Pick<DbAiAgentToolResult, 'metadata'>>
+        Partial<Pick<DbAiAgentToolResult, 'metadata' | 'created_at'>>,
+    Partial<Pick<DbAiAgentToolResult, 'metadata' | 'result'>>
 >;
 
 export const AiPromptContextTableName = 'ai_prompt_context';
 
-export type AiPromptContextEntityType = 'chart' | 'dashboard';
+export type AiPromptContextEntityType =
+    | 'chart'
+    | 'dashboard'
+    | 'thread'
+    | 'file'
+    | 'repository'
+    | 'external_source'
+    | 'thread_file'
+    | 'pull_request'
+    | 'proposed_change'
+    | 'review_finding'
+    | 'preview_environment'
+    | 'data_app_element'
+    | 'data_app_restore'
+    | 'data_app'
+    | 'document'
+    | 'design'
+    | 'skill';
+
+// Slash-command snapshot stored in runtime_overrides; entity_ref holds the
+// skill name, entity_uuid the skill row (null for a built-in).
+export type AiPromptSkillSnapshot = {
+    arguments: string;
+    versionNumber: number | null;
+    builtIn: boolean;
+};
+
+// Element reference snapshot stored in runtime_overrides; entity_ref holds the
+// natural key so one prompt can reference several elements of the same app.
+export type AiPromptDataAppElementSnapshot = {
+    appUuid: string;
+    version: number;
+    tag: string;
+    text: string;
+    loc: string;
+};
+
+// Restore snapshot stored in runtime_overrides; entity_uuid holds the app uuid.
+export type AiPromptDataAppRestoreSnapshot = {
+    version: number;
+    restoredFromVersion: number;
+};
+
+// Latest ready version number at attach time; app versions are integers, so
+// pinned_version_uuid stays null.
+export type AiPromptDataAppSnapshot = {
+    version: number | null;
+};
 
 export type DbAiPromptContext = {
     ai_prompt_context_uuid: string;
     ai_prompt_uuid: string;
     entity_type: AiPromptContextEntityType;
-    entity_uuid: string;
+    // UUID-keyed entities (chart/dashboard/thread) store their uuid here;
+    // string-keyed entities (file/repository) leave it null and use entity_ref.
+    entity_uuid: string | null;
+    // Natural-key reference for entities without a uuid: a file path or a
+    // repository `owner/repo`. Null for uuid-keyed entities.
+    entity_ref: string | null;
     pinned_version_uuid: string | null;
     display_name: string | null;
-    runtime_overrides: AiChartRuntimeOverrides | null;
+    runtime_overrides:
+        | AiChartRuntimeOverrides
+        | AiDashboardRuntimeOverrides
+        | AiPromptExternalSourceSnapshot
+        | AiPromptThreadFileSnapshot
+        | AiPromptDataAppElementSnapshot
+        | AiPromptDataAppRestoreSnapshot
+        | AiPromptDataAppSnapshot
+        | AiPromptSkillSnapshot
+        | null;
     created_at: Date;
 };
 
 export type AiPromptContextTable = Knex.CompositeTableType<
     DbAiPromptContext,
-    Pick<DbAiPromptContext, 'ai_prompt_uuid' | 'entity_type' | 'entity_uuid'> &
+    Pick<DbAiPromptContext, 'ai_prompt_uuid' | 'entity_type'> &
         Partial<
             Pick<
                 DbAiPromptContext,
-                'pinned_version_uuid' | 'display_name' | 'runtime_overrides'
+                | 'entity_uuid'
+                | 'entity_ref'
+                | 'pinned_version_uuid'
+                | 'display_name'
+                | 'runtime_overrides'
             >
         >,
     never
@@ -254,14 +668,150 @@ export const AiOrganizationSettingsTableName = 'ai_organization_settings';
 export type DbAiOrganizationSettings = {
     organization_uuid: string;
     ai_agents_visible: boolean;
+    ai_agent_reviews_enabled: boolean;
+    deep_research_limits: AiDeepResearchLimits;
+    deep_research_raw_sql_enabled: boolean;
+    mcp_enabled: boolean;
+    mcp_content_writes_enabled: boolean;
+    mcp_agents_enabled: boolean;
+    data_app_runtime_ai_enabled: boolean;
+    data_app_continue_in_ask_ai_enabled: boolean;
+    data_app_auto_analysis_enabled: boolean;
+    data_app_analysis_limits: DataAppAnalysisLimits | null;
+    data_app_analysis_default_instructions: string | null;
+    require_explicit_slack_channel_linking: boolean;
+    default_ai_agent_model_config: AiAgentModelConfig | null;
+    model_visibility: AiOrgModelVisibility | null;
+    data_app_model_visibility: DataAppModelVisibility | null;
+    encrypted_provider_api_keys: Buffer | null;
+    provider_api_key_hints: Partial<AiProviderApiKeyHints> | null;
+    // Gateway base URL per key provider; not secret, so stored beside the blob.
+    provider_base_urls: Partial<AiProviderBaseUrls> | null;
+    thread_retention_hours: number | null;
     created_at: Date;
     updated_at: Date;
 };
 
 export type AiOrganizationSettingsTable = Knex.CompositeTableType<
     DbAiOrganizationSettings,
-    Pick<DbAiOrganizationSettings, 'organization_uuid' | 'ai_agents_visible'>,
-    Partial<Pick<DbAiOrganizationSettings, 'ai_agents_visible'>>
+    Pick<DbAiOrganizationSettings, 'organization_uuid'> &
+        Partial<
+            Pick<
+                DbAiOrganizationSettings,
+                | 'ai_agents_visible'
+                | 'ai_agent_reviews_enabled'
+                | 'deep_research_limits'
+                | 'deep_research_raw_sql_enabled'
+                | 'mcp_enabled'
+                | 'mcp_content_writes_enabled'
+                | 'mcp_agents_enabled'
+                | 'data_app_runtime_ai_enabled'
+                | 'data_app_continue_in_ask_ai_enabled'
+                | 'data_app_auto_analysis_enabled'
+                | 'data_app_analysis_limits'
+                | 'data_app_analysis_default_instructions'
+                | 'require_explicit_slack_channel_linking'
+                | 'default_ai_agent_model_config'
+                | 'model_visibility'
+                | 'data_app_model_visibility'
+                | 'encrypted_provider_api_keys'
+                | 'provider_api_key_hints'
+                | 'provider_base_urls'
+                | 'thread_retention_hours'
+            >
+        >,
+    Partial<
+        Pick<
+            DbAiOrganizationSettings,
+            | 'ai_agents_visible'
+            | 'ai_agent_reviews_enabled'
+            | 'deep_research_limits'
+            | 'deep_research_raw_sql_enabled'
+            | 'mcp_enabled'
+            | 'mcp_content_writes_enabled'
+            | 'mcp_agents_enabled'
+            | 'data_app_runtime_ai_enabled'
+            | 'data_app_continue_in_ask_ai_enabled'
+            | 'data_app_auto_analysis_enabled'
+            | 'data_app_analysis_limits'
+            | 'data_app_analysis_default_instructions'
+            | 'require_explicit_slack_channel_linking'
+            | 'default_ai_agent_model_config'
+            | 'model_visibility'
+            | 'data_app_model_visibility'
+            | 'encrypted_provider_api_keys'
+            | 'provider_api_key_hints'
+            | 'provider_base_urls'
+            | 'thread_retention_hours'
+            | 'updated_at'
+        >
+    >
+>;
+
+export const AiOrganizationProviderCredentialTableName =
+    'ai_organization_provider_credential';
+
+/**
+ * A named AI provider credential an organization owns. Unlike the single
+ * `encrypted_provider_api_keys` blob on `ai_organization_settings`, there may
+ * be several per organization — one per region — so projects and agents can
+ * each be pinned to one.
+ */
+export type DbAiOrganizationProviderCredential = {
+    ai_organization_provider_credential_uuid: string;
+    organization_uuid: string;
+    provider: string;
+    label: string;
+    encrypted_config: Buffer;
+    /** Serves AI paths with no project or agent in scope. At most one per org. */
+    is_default: boolean;
+    created_by_user_uuid: string | null;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type AiOrganizationProviderCredentialTable = Knex.CompositeTableType<
+    DbAiOrganizationProviderCredential,
+    Omit<
+        DbAiOrganizationProviderCredential,
+        | 'ai_organization_provider_credential_uuid'
+        | 'is_default'
+        | 'created_at'
+        | 'updated_at'
+    > &
+        Partial<Pick<DbAiOrganizationProviderCredential, 'is_default'>>,
+    Partial<
+        Pick<
+            DbAiOrganizationProviderCredential,
+            'label' | 'encrypted_config' | 'is_default'
+        >
+    > & {
+        updated_at: Knex.Raw;
+    }
+>;
+
+export const ProjectAiSettingsTableName = 'project_ai_settings';
+
+/**
+ * Per-project AI settings. A project with no row, or a null credential uuid,
+ * resolves the organization's default credential.
+ */
+export type DbProjectAiSettings = {
+    project_uuid: string;
+    ai_organization_provider_credential_uuid: string | null;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type ProjectAiSettingsTable = Knex.CompositeTableType<
+    DbProjectAiSettings,
+    Pick<
+        DbProjectAiSettings,
+        'project_uuid' | 'ai_organization_provider_credential_uuid'
+    >,
+    Pick<DbProjectAiSettings, 'ai_organization_provider_credential_uuid'> & {
+        updated_at: Knex.Raw;
+    }
 >;
 
 export const AiSqlApprovalTableName = 'ai_sql_approval';

@@ -1,140 +1,39 @@
 import {
     ChartType,
-    FilterOperator,
     getDimensions,
-    getFieldsFromMetricQuery,
     getItemId,
     hashFieldReference,
     isField,
-    normalizeCellRawForFilter,
     type CompiledDimension,
     type CreateSavedChartVersion,
-    type DashboardFilters,
     type Explore,
     type FieldId,
-    type FilterGroupItem,
-    type FilterRule,
     type Filters,
     type MetricQuery,
+    type ParametersValuesMap,
     type PivotReference,
     type ResultValue,
+    type UUID,
 } from '@lightdash/common';
-import { Button } from '@mantine-8/core';
+import { Button } from '@mantine/core';
 import { IconArrowBarToDown, IconExternalLink } from '@tabler/icons-react';
 import { useCallback, useMemo, useState, type FC } from 'react';
-import { useParams } from 'react-router';
-import { v4 as uuidv4 } from 'uuid';
+import useEmbedDrillDownExplore from '../../ee/providers/Embed/useEmbedDrillDownExplore';
+import useIsEmbedded from '../../ee/providers/Embed/useIsEmbedded';
+import { MERGE_URL_PARAM } from '../../features/mergeQuery/context/mergeUrlState';
+import { useMergeSafe } from '../../features/mergeQuery/context/useMerge';
+import { useMergeDrillDownConfig } from '../../features/mergeQuery/hooks/useMergeUnderlyingDataConfig';
+import { useExplore } from '../../hooks/useExplore';
 import { getExplorerUrlFromCreateSavedChartVersion } from '../../hooks/useExplorerRoute';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import FieldSelect from '../common/FieldSelect';
 import MantineIcon from '../common/MantineIcon';
 import MantineModal from '../common/MantineModal';
+import { combineFilters } from './combineFilters';
+import { type DrillDownConfig } from './types';
 import { useMetricQueryDataContext } from './useMetricQueryDataContext';
 
-type CombineFiltersArgs = {
-    fieldValues: Record<string, ResultValue>;
-    metricQuery: MetricQuery;
-    pivotReference?: PivotReference;
-    dashboardFilters?: DashboardFilters;
-    extraFilters?: Filters;
-    explore?: Explore;
-    timezone?: string;
-};
-
-// eslint-disable-next-line react-refresh/only-export-components
-export const combineFilters = ({
-    fieldValues,
-    metricQuery,
-    pivotReference,
-    dashboardFilters,
-    extraFilters,
-    explore,
-    timezone,
-}: CombineFiltersArgs): Filters => {
-    const combinedDimensionFilters: Array<FilterGroupItem> = [];
-    const combinedMetricFilters: Array<FilterGroupItem> = [];
-
-    if (metricQuery.filters.dimensions) {
-        combinedDimensionFilters.push(metricQuery.filters.dimensions);
-    }
-    if (metricQuery.filters.metrics) {
-        combinedMetricFilters.push(metricQuery.filters.metrics);
-    }
-    if (dashboardFilters) {
-        combinedDimensionFilters.push(...dashboardFilters.dimensions);
-        if (dashboardFilters.metrics?.length) {
-            combinedMetricFilters.push(...dashboardFilters.metrics);
-        }
-    }
-    if (pivotReference?.pivotValues) {
-        const pivotFilter: FilterRule[] = pivotReference.pivotValues.map(
-            (pivot) => ({
-                id: uuidv4(),
-                target: {
-                    fieldId: pivot.field,
-                },
-                operator: FilterOperator.EQUALS,
-                values: [pivot.value],
-            }),
-        );
-        combinedDimensionFilters.push(...pivotFilter);
-    }
-    if (extraFilters?.dimensions) {
-        combinedDimensionFilters.push(extraFilters.dimensions);
-    }
-    if (extraFilters?.metrics) {
-        combinedMetricFilters.push(extraFilters.metrics);
-    }
-
-    const itemsMap = explore
-        ? getFieldsFromMetricQuery(metricQuery, explore)
-        : undefined;
-
-    const dimensionFilters: FilterRule[] = metricQuery.dimensions.reduce<
-        FilterRule[]
-    >((acc, dimension) => {
-        const rowValue = fieldValues[dimension];
-        if (!rowValue) {
-            return acc;
-        }
-        const dimensionFilter: FilterRule = {
-            id: uuidv4(),
-            target: {
-                fieldId: dimension,
-            },
-            operator:
-                rowValue.raw === null
-                    ? FilterOperator.NULL
-                    : FilterOperator.EQUALS,
-            values:
-                rowValue.raw === null
-                    ? undefined
-                    : [
-                          normalizeCellRawForFilter(
-                              rowValue.raw,
-                              itemsMap?.[dimension],
-                              timezone,
-                          ),
-                      ],
-        };
-        return [...acc, dimensionFilter];
-    }, []);
-    combinedDimensionFilters.push(...dimensionFilters);
-
-    return {
-        dimensions: {
-            id: uuidv4(),
-            and: combinedDimensionFilters,
-        },
-        ...(combinedMetricFilters.length > 0 && {
-            metrics: {
-                id: uuidv4(),
-                and: combinedMetricFilters,
-            },
-        }),
-    };
-};
-
-type DrillDownExploreUrlArgs = {
+type DrillDownExploreArgs = {
     fieldValues: Record<string, ResultValue>;
     projectUuid: string;
     tableName: string;
@@ -145,9 +44,10 @@ type DrillDownExploreUrlArgs = {
     pivotReference?: PivotReference;
     explore?: Explore;
     timezone?: string;
+    parameters: ParametersValuesMap | undefined;
 };
 
-const drillDownExploreUrl = ({
+const getDrillDownExplore = ({
     fieldValues,
     projectUuid,
     tableName,
@@ -158,7 +58,8 @@ const drillDownExploreUrl = ({
     pivotReference,
     explore,
     timezone,
-}: DrillDownExploreUrlArgs) => {
+    parameters,
+}: DrillDownExploreArgs) => {
     const createSavedChartVersion: CreateSavedChartVersion = {
         tableName,
         metricQuery: {
@@ -192,16 +93,41 @@ const drillDownExploreUrl = ({
             type: ChartType.CARTESIAN,
             config: { layout: {}, eChartsConfig: {} },
         },
+        parameters,
     };
     const { pathname, search } = getExplorerUrlFromCreateSavedChartVersion(
         projectUuid,
         createSavedChartVersion,
     );
-    return `${pathname}?${search}`;
+    // The drill is a new single-source chart, not the merge open on this page
+    const params = new URLSearchParams(search);
+    params.delete(MERGE_URL_PARAM);
+    return {
+        chart: createSavedChartVersion,
+        url: `${pathname}?${params}`,
+    };
 };
 
-export const DrillDownModal: FC = () => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+type DrillDownModalProps = {
+    // Overrides the embed default, which drills in place inside an embed
+    onExplore?: (options: { chart: CreateSavedChartVersion }) => void;
+    // The saved chart the drilled query derives from, for embed drills
+    customSqlProvenanceChartUuid?: UUID;
+};
+
+const DrillDownModalContent: FC<
+    DrillDownModalProps & { drillDownConfig: DrillDownConfig | undefined }
+> = ({
+    onExplore: onExploreOverride,
+    customSqlProvenanceChartUuid,
+    drillDownConfig,
+}) => {
+    const projectUuid = useProjectUuid();
+    const isEmbedded = useIsEmbedded();
+    const onEmbedExplore = useEmbedDrillDownExplore(
+        customSqlProvenanceChartUuid,
+    );
+    const onExplore = onExploreOverride ?? onEmbedExplore;
 
     const [selectedDimension, setSelectedDimension] =
         useState<CompiledDimension>();
@@ -209,11 +135,18 @@ export const DrillDownModal: FC = () => {
     const {
         isDrillDownModalOpen,
         closeDrillDownModal,
-        explore,
-        metricQuery,
-        drillDownConfig,
+        explore: contextExplore,
+        metricQuery: contextMetricQuery,
+        tableName,
         resolvedTimezone,
+        parameters,
     } = useMetricQueryDataContext();
+    const source = drillDownConfig?.source;
+    const metricQuery = source?.metricQuery ?? contextMetricQuery;
+    const { data: sourceExplore } = useExplore(source?.tableName ?? tableName, {
+        refetchOnMount: false,
+    });
+    const explore = source ? sourceExplore : contextExplore;
 
     const dimensionsAvailable = useMemo(() => {
         if (!explore) return [];
@@ -227,11 +160,14 @@ export const DrillDownModal: FC = () => {
                 drillDownConfig.pivotReference !== undefined
                     ? hashFieldReference(drillDownConfig.pivotReference)
                     : getItemId(drillDownConfig.item);
-            return drillDownConfig.fieldValues[fieldId]?.formatted;
+            return (
+                drillDownConfig.fieldValues[fieldId]?.formatted ??
+                drillDownConfig.valueLabel
+            );
         }
     }, [drillDownConfig]);
 
-    const url = useMemo(() => {
+    const drillDownExplore = useMemo(() => {
         if (
             selectedDimension &&
             metricQuery &&
@@ -239,7 +175,7 @@ export const DrillDownModal: FC = () => {
             drillDownConfig &&
             projectUuid
         ) {
-            return drillDownExploreUrl({
+            return getDrillDownExplore({
                 projectUuid,
                 tableName: explore.name,
                 metricQuery,
@@ -249,6 +185,7 @@ export const DrillDownModal: FC = () => {
                 pivotReference: drillDownConfig.pivotReference,
                 explore,
                 timezone: resolvedTimezone,
+                parameters,
             });
         }
     }, [
@@ -258,6 +195,7 @@ export const DrillDownModal: FC = () => {
         drillDownConfig,
         projectUuid,
         resolvedTimezone,
+        parameters,
     ]);
 
     const onClose = useCallback(() => {
@@ -273,16 +211,31 @@ export const DrillDownModal: FC = () => {
             size="md"
             icon={IconArrowBarToDown}
             actions={
-                <Button
-                    component="a"
-                    target="_blank"
-                    href={url}
-                    leftSection={<MantineIcon icon={IconExternalLink} />}
-                    disabled={!selectedDimension}
-                    onClick={() => setTimeout(onClose, 500)}
-                >
-                    Open in new tab
-                </Button>
+                onExplore ? (
+                    <Button
+                        leftSection={<MantineIcon icon={IconArrowBarToDown} />}
+                        disabled={!drillDownExplore}
+                        onClick={() => {
+                            if (drillDownExplore) {
+                                onExplore({ chart: drillDownExplore.chart });
+                                onClose();
+                            }
+                        }}
+                    >
+                        Drill down
+                    </Button>
+                ) : isEmbedded ? undefined : (
+                    <Button
+                        component="a"
+                        target="_blank"
+                        href={drillDownExplore?.url}
+                        leftSection={<MantineIcon icon={IconExternalLink} />}
+                        disabled={!drillDownExplore}
+                        onClick={() => setTimeout(onClose, 500)}
+                    >
+                        Open in new tab
+                    </Button>
+                )
             }
         >
             <FieldSelect
@@ -294,5 +247,24 @@ export const DrillDownModal: FC = () => {
                 hasGrouping
             />
         </MantineModal>
+    );
+};
+
+const MergedDrillDownModal: FC<DrillDownModalProps> = (props) => {
+    const { drillDownConfig } = useMetricQueryDataContext();
+    const sourceConfig = useMergeDrillDownConfig(drillDownConfig);
+    // Drill menus are hidden for columns no source owns, so this stays closed
+    if (drillDownConfig && !sourceConfig) return null;
+    return <DrillDownModalContent {...props} drillDownConfig={sourceConfig} />;
+};
+
+export const DrillDownModal: FC<DrillDownModalProps> = (props) => {
+    const { drillDownConfig } = useMetricQueryDataContext();
+    const isMerged = !!useMergeSafe()?.mergeResults;
+
+    return isMerged ? (
+        <MergedDrillDownModal {...props} />
+    ) : (
+        <DrillDownModalContent {...props} drillDownConfig={drillDownConfig} />
     );
 };

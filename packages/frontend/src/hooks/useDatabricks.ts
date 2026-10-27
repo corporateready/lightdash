@@ -1,7 +1,8 @@
 import { type ApiError, type ApiSuccessEmpty } from '@lightdash/common';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import useHealth from './health/useHealth';
 import useToaster from './toaster/useToaster';
 
@@ -60,6 +61,11 @@ const triggerDatabricksLogin = async (
     });
 };
 
+export const useIsDatabricksSsoEnabled = () => {
+    const health = useHealth();
+    return !!health.data?.auth.databricks.enabled;
+};
+
 export function useDatabricksLoginPopup({
     onLogin: _onLogin,
     projectUuid,
@@ -107,6 +113,7 @@ export function useDatabricksLoginPopup({
 }
 
 const getIsAuthenticatedForProject = async (
+    lightdashApi: LightdashApi,
     projectUuid?: string,
     serverHostName?: string,
 ) =>
@@ -129,6 +136,7 @@ export const useIsDatabricksAuthenticated = ({
     projectUuid?: string;
     serverHostName?: string;
 }) => {
+    const lightdashApi = useLightdashApi();
     return useQuery<ApiSuccessEmpty['results'], ApiError>({
         queryKey: [
             'databricks-sso-is-authenticated',
@@ -136,7 +144,11 @@ export const useIsDatabricksAuthenticated = ({
             serverHostName,
         ],
         queryFn: () =>
-            getIsAuthenticatedForProject(projectUuid, serverHostName),
+            getIsAuthenticatedForProject(
+                lightdashApi,
+                projectUuid,
+                serverHostName,
+            ),
         enabled: !!projectUuid || !!serverHostName,
     });
 };

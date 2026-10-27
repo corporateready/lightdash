@@ -1,0 +1,628 @@
+import { Ability } from '@casl/ability';
+import { ProjectType } from '@lightdash/common';
+import { MantineProvider } from '@mantine/core';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, useLocation } from 'react-router';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventName } from '../../types/Events';
+import { buildLearnCatalogue } from './catalogue';
+import LearnPage from './LearnPage';
+
+const {
+    track,
+    projectState,
+    startFresh,
+    availabilityState,
+    accessState,
+    progressState,
+    learnActions,
+    learnPermission,
+} = vi.hoisted(() => ({
+    startFresh: vi.fn(),
+    track: vi.fn(),
+    learnPermission: { granted: true },
+    projectState: { current: [] as unknown[] },
+    availabilityState: {
+        current: { isSettled: true, closed: [] as string[] },
+    },
+    // Everything the learner can do, anywhere.
+    accessState: { current: [] as string[] },
+    // What the instance holds for the learner.
+    progressState: {
+        current: {
+            completed: [] as string[],
+            started: [] as string[],
+            lastStarted: null as string | null,
+        },
+    },
+    learnActions: {
+        markScopeStarted: vi.fn(),
+        markScopeCompleted: vi.fn(),
+    },
+}));
+
+vi.mock('../../providers/Tracking/useTracking', () => ({
+    default: () => ({ track }),
+}));
+
+vi.mock('../../providers/App/useApp', () => ({
+    default: () => ({
+        user: {
+            data: {
+                organizationUuid: 'org-1',
+                userUuid: 'user-1',
+                role: 'admin',
+                ability: new Ability([
+                    { action: 'manage', subject: 'Organization' },
+                    ...(learnPermission.granted
+                        ? [
+                              {
+                                  action: 'view',
+                                  subject: 'Learn',
+                                  conditions: { organizationUuid: 'org-1' },
+                              },
+                          ]
+                        : []),
+                ]),
+            },
+        },
+    }),
+}));
+
+vi.mock('../../hooks/organization/useOrganization', () => ({
+    useOrganization: () => ({
+        data: { needsProject: false },
+        isInitialLoading: false,
+    }),
+}));
+
+beforeEach(() => {
+    learnPermission.granted = true;
+});
+
+// The learner's access comes from the instance; how the library reads a
+// scope set is the real thing.
+vi.mock('./useLearnAccess', async () => {
+    const { heldScopes } = await import('./access');
+    return {
+        useLearnAccess: () => ({
+            held: heldScopes(accessState.current, true),
+            isSettled: true,
+        }),
+    };
+});
+
+// Progress comes from the instance; the tests set what it answers.
+vi.mock('./progress', () => ({
+    useLearnProgress: () => ({ ...progressState.current, isSettled: true }),
+    useLearnProgressActions: () => learnActions,
+}));
+
+vi.mock('../../hooks/useProjects', () => ({
+    useProjects: () => ({ data: projectState.current }),
+}));
+
+vi.mock('../../hooks/useProjectRoute', () => ({
+    useOptionalProjectRoute: () => undefined,
+}));
+
+// The real gates ask the licence and the AI settings; the library's own
+// counting is what is under test, so every module is open here, and the
+// tests decide whether the gates have answered yet.
+vi.mock('./availability', () => ({
+    useLearnAvailability: () => ({
+        isOpen: (module: { gate: string | null }) =>
+            module.gate === null ||
+            !availabilityState.current.closed.includes(module.gate),
+        isSettled: availabilityState.current.isSettled,
+    }),
+}));
+
+vi.mock('./useStartFresh', () => ({
+    useStartFresh: () => ({ mutate: startFresh, isLoading: false }),
+}));
+
+vi.mock('./useEnableLearn', () => ({
+    useEnableLearn: () => ({ mutate: vi.fn(), isLoading: false, error: null }),
+}));
+
+vi.mock('./useStartWalkthrough', () => ({
+    useStartWalkthrough: () => ({ start: vi.fn(), opening: null }),
+}));
+
+vi.mock('./thumbnails', () => ({
+    thumbnailFor: () => undefined,
+}));
+
+const catalogue = buildLearnCatalogue();
+const scopes = catalogue.map((module) => module.scope);
+
+const CurrentLocation = () => {
+    const { search, pathname } = useLocation();
+    return (
+        <>
+            <output data-testid="location">{search}</output>
+            <output data-testid="pathname">{pathname}</output>
+        </>
+    );
+};
+
+const renderPage = (query = '') =>
+    render(
+        <MemoryRouter initialEntries={[`/learn${query}`]}>
+            <MantineProvider env="test">
+                <LearnPage />
+                <CurrentLocation />
+            </MantineProvider>
+        </MemoryRouter>,
+    );
+
+const viewEvents = () =>
+    track.mock.calls
+        .map(([event]) => event)
+        .filter((event) => event.name === EventName.LEARN_LIBRARY_VIEWED);
+
+describe('LearnPage analytics', () => {
+    beforeEach(() => {
+        progressState.current = {
+            completed: [],
+            started: [],
+            lastStarted: null,
+        };
+        track.mockClear();
+        availabilityState.current = { isSettled: true, closed: [] };
+        accessState.current = scopes;
+        projectState.current = [
+            { projectUuid: 'training-1', type: ProjectType.TRAINING },
+        ];
+    });
+
+    it('finds date zoom from a natural-language query and restores the library on clear', async () => {
+        const { container } = renderPage();
+        const cards = () =>
+            Array.from(container.querySelectorAll('[data-learn-module]')).map(
+                (card) => card.getAttribute('data-learn-module'),
+            );
+        const initial = cards();
+        const input = screen.getByRole('textbox', {
+            name: 'Search the library',
+        });
+        await userEvent.type(input, 'change from day to month');
+        expect(cards()[0]).toBe('view:Dashboard');
+        expect(cards()).not.toContain('manage:Space');
+        await userEvent.clear(input);
+        expect(cards()).toEqual(initial);
+    });
+
+    it('records one view per mount, with the progress the learner is looking at', () => {
+        progressState.current = {
+            started: [catalogue[0].scope, catalogue[1].scope],
+            completed: [catalogue[0].scope],
+            lastStarted: catalogue[1].scope,
+        };
+
+        const { rerender } = renderPage();
+        rerender(
+            <MemoryRouter>
+                <MantineProvider env="test">
+                    <LearnPage />
+                    <CurrentLocation />
+                </MantineProvider>
+            </MemoryRouter>,
+        );
+
+        expect(viewEvents()).toEqual([
+            {
+                name: EventName.LEARN_LIBRARY_VIEWED,
+                properties: {
+                    organizationUuid: 'org-1',
+                    trainingProjectUuid: 'training-1',
+                    hasTrainingProject: true,
+                    moduleCount: catalogue.filter((module) => module.available)
+                        .length,
+                    startedCount: 2,
+                    completedCount: 1,
+                },
+            },
+        ]);
+    });
+
+    it('counts only the scopes this instance has modules for', () => {
+        progressState.current = {
+            started: [catalogue[0].scope, 'manage:SomethingRetired'],
+            completed: [catalogue[0].scope, 'manage:SomethingRetired'],
+            lastStarted: null,
+        };
+
+        renderPage();
+
+        expect(viewEvents()[0].properties).toMatchObject({
+            completedCount: 1,
+        });
+    });
+
+    it('matches the progress fraction and ignores unsupported-module progress', () => {
+        const supported = catalogue.find((module) => module.available)!;
+        const unsupported = catalogue.find((module) => !module.available)!;
+        progressState.current = {
+            started: [supported.scope, unsupported.scope],
+            completed: [supported.scope, unsupported.scope],
+            lastStarted: null,
+        };
+        const { container } = renderPage();
+        const { moduleCount, startedCount, completedCount } =
+            viewEvents()[0].properties;
+        expect(moduleCount).toBe(48);
+        expect(startedCount).toBe(1);
+        expect(completedCount).toBe(1);
+        expect(
+            container
+                .querySelector('[data-learn-progress]')
+                ?.getAttribute('data-learn-progress'),
+        ).toBe(`${completedCount}/${moduleCount}`);
+    });
+
+    it('records the call to action before an admin has enabled Learn', () => {
+        projectState.current = [
+            { projectUuid: 'other-1', type: ProjectType.DEFAULT },
+        ];
+
+        renderPage();
+
+        expect(viewEvents()[0].properties).toMatchObject({
+            trainingProjectUuid: null,
+            hasTrainingProject: false,
+        });
+    });
+
+    it('waits for the catalogue gates to answer before counting', () => {
+        availabilityState.current = { isSettled: false, closed: [] };
+        const { rerender } = renderPage();
+        expect(viewEvents()).toEqual([]);
+
+        availabilityState.current = { isSettled: true, closed: [] };
+        rerender(
+            <MemoryRouter>
+                <MantineProvider env="test">
+                    <LearnPage />
+                    <CurrentLocation />
+                </MantineProvider>
+            </MemoryRouter>,
+        );
+
+        expect(viewEvents()).toHaveLength(1);
+    });
+
+    // No feature flag is mocked in this file: Learn is on for every
+    // instance, so the library renders where it is opened.
+    it('shows the library with no feature flag and records the view', () => {
+        renderPage();
+
+        expect(screen.getByTestId('pathname')).toHaveTextContent('/learn');
+        expect(
+            screen.getByRole('textbox', { name: 'Search the library' }),
+        ).toBeInTheDocument();
+        expect(viewEvents()).toHaveLength(1);
+    });
+});
+
+describe('LearnPage access', () => {
+    const catalogueScopes = catalogue.map((module) => module.scope);
+    const sorted = (scopes: (string | null)[]) =>
+        [...scopes].sort((a, b) => (a ?? '').localeCompare(b ?? ''));
+
+    beforeEach(() => {
+        progressState.current = {
+            completed: [],
+            started: [],
+            lastStarted: null,
+        };
+        track.mockClear();
+        availabilityState.current = { isSettled: true, closed: [] };
+        accessState.current = ['view:Dashboard', 'manage:Validation'];
+        projectState.current = [
+            { projectUuid: 'training-1', type: ProjectType.TRAINING },
+        ];
+    });
+
+    const shown = (container: HTMLElement) =>
+        [...container.querySelectorAll('[data-learn-module]')].map((card) =>
+            card.getAttribute('data-learn-module'),
+        );
+    const toggleExtra = async () => {
+        await userEvent.click(screen.getByLabelText('Filter'));
+        await userEvent.click(
+            screen.getByRole('menuitem', { name: 'Show extra modules' }),
+        );
+    };
+
+    it('offers Start fresh to a learner with a copy, and removes it once confirmed', async () => {
+        projectState.current = [
+            { projectUuid: 'training-1', type: ProjectType.TRAINING },
+            {
+                projectUuid: 'copy-1',
+                type: ProjectType.PREVIEW,
+                provisioningSource: 'training',
+                upstreamProjectUuid: 'training-1',
+                createdByUserUuid: 'user-1',
+            },
+        ];
+        renderPage();
+        await userEvent.click(
+            screen.getByRole('button', { name: 'Start fresh' }),
+        );
+        const warning = await screen.findByText(
+            'Your copy and everything you built in it will be removed.',
+        );
+        const dialog = warning.closest(
+            '[role="dialog"], [role="alertdialog"]',
+        ) as HTMLElement;
+        await userEvent.click(
+            within(dialog).getByRole('button', { name: 'Start fresh' }),
+        );
+        expect(startFresh).toHaveBeenCalledWith(
+            { trainingProjectUuid: 'training-1' },
+            expect.anything(),
+        );
+    });
+
+    it('opens the copy from Continue exploring', async () => {
+        projectState.current = [
+            { projectUuid: 'training-1', type: ProjectType.TRAINING },
+            {
+                projectUuid: 'copy-1',
+                type: ProjectType.PREVIEW,
+                provisioningSource: 'training',
+                upstreamProjectUuid: 'training-1',
+                createdByUserUuid: 'user-1',
+            },
+        ];
+        renderPage();
+        await userEvent.click(
+            screen.getByRole('button', { name: 'Continue exploring' }),
+        );
+        expect(screen.getByTestId('pathname')).toHaveTextContent(
+            '/projects/copy-1/home',
+        );
+    });
+
+    it('offers no Start fresh to a learner without a copy', () => {
+        renderPage();
+        expect(
+            screen.queryByRole('button', { name: 'Start fresh' }),
+        ).not.toBeInTheDocument();
+        expect(
+            screen.queryByRole('button', { name: 'Continue exploring' }),
+        ).not.toBeInTheDocument();
+    });
+
+    it('shows the forbidden state without Learn access and records no library view', () => {
+        learnPermission.granted = false;
+        renderPage();
+        expect(screen.getByText("You don't have access")).toBeInTheDocument();
+        expect(
+            screen.queryByRole('textbox', { name: 'Search the library' }),
+        ).not.toBeInTheDocument();
+        expect(viewEvents()).toEqual([]);
+    });
+
+    it('shows what the learner can do, and nothing else', () => {
+        const { container } = renderPage();
+
+        expect(sorted(shown(container))).toEqual(
+            sorted(['manage:Validation', 'view:Dashboard']),
+        );
+    });
+
+    it('reads their access however they came by it', () => {
+        // A viewer at organization level who edits in one project holds the
+        // editor features, wherever the grant came from.
+        accessState.current = ['view:Dashboard', 'manage:Dashboard@space'];
+
+        const { container } = renderPage();
+
+        expect(shown(container)).toContain('manage:Dashboard');
+    });
+
+    it('keeps the rest behind the extra modules toggle', async () => {
+        const { container } = renderPage();
+
+        await toggleExtra();
+
+        expect(shown(container).length).toBe(catalogueScopes.length);
+        expect(
+            container.querySelector('[data-learn-module="manage:PinnedItems"]')
+                ?.textContent,
+        ).toContain('Editor and above');
+        expect(
+            container.querySelector('[data-learn-module="view:Dashboard"]')
+                ?.textContent,
+        ).not.toContain('and above');
+    });
+
+    it('says what the shelf is showing', async () => {
+        renderPage();
+        expect(screen.getByText('What you can do')).toBeTruthy();
+
+        await toggleExtra();
+        expect(screen.getByText('Every module')).toBeTruthy();
+    });
+
+    it('keeps the Metrics lesson behind Extra modules for a learner who cannot change source code', async () => {
+        accessState.current = [];
+
+        const { container } = renderPage();
+
+        expect(
+            container.querySelector(
+                '[data-learn-module="docs:semantic-layer/metrics"]',
+            ),
+        ).toBeNull();
+        expect(
+            container.querySelector('[data-learn-group="developer"]'),
+        ).toBeNull();
+
+        await toggleExtra();
+
+        const extra = container.querySelector(
+            '[data-learn-module="docs:semantic-layer/metrics"]',
+        );
+        expect(extra).not.toBeNull();
+        expect(extra!.textContent).toContain('Developer and above');
+    });
+
+    it('lists the Metrics lesson under Developer for a learner who can change source code', () => {
+        accessState.current = ['manage:SourceCode'];
+
+        const { container } = renderPage();
+
+        const card = container.querySelector(
+            '[data-learn-module="docs:semantic-layer/metrics"]',
+        );
+        expect(card).not.toBeNull();
+        expect(card!.textContent).toContain('Metrics');
+        expect(card!.textContent).toContain('13 steps');
+        expect(
+            container.querySelector('[data-learn-group="developer"]'),
+        ).not.toBeNull();
+    });
+
+    it('hides the Developer section while the sandbox gate is closed', () => {
+        availabilityState.current.closed = ['sandbox'];
+
+        const { container } = renderPage();
+
+        expect(
+            container.querySelector(
+                '[data-learn-module="docs:semantic-layer/metrics"]',
+            ),
+        ).toBeNull();
+        expect(
+            container.querySelector('[data-learn-group="developer"]'),
+        ).toBeNull();
+    });
+
+    it('keeps the access filter when searching and clearing', async () => {
+        const { container } = renderPage();
+        const input = screen.getByRole('textbox', {
+            name: 'Search the library',
+        });
+        await userEvent.type(input, 'validator');
+        expect(shown(container)).toEqual(['manage:Validation']);
+        await userEvent.clear(input);
+        expect(sorted(shown(container))).toEqual(
+            sorted(['manage:Validation', 'view:Dashboard']),
+        );
+    });
+});
+
+describe('LearnPage filters', () => {
+    const location = () => screen.getByTestId('location').textContent;
+    const shown = (container: HTMLElement) =>
+        [...container.querySelectorAll('[data-learn-module]')].map((card) =>
+            card.getAttribute('data-learn-module'),
+        );
+
+    beforeEach(() => {
+        sessionStorage.clear();
+        progressState.current = {
+            completed: [],
+            started: [],
+            lastStarted: null,
+        };
+        availabilityState.current = { isSettled: true, closed: [] };
+        accessState.current = ['view:Dashboard', 'manage:Validation'];
+        projectState.current = [
+            { projectUuid: 'training-1', type: ProjectType.TRAINING },
+        ];
+    });
+
+    it('opens with the filters in the address', () => {
+        const { container } = renderPage('?extra=1&q=pin');
+
+        expect(shown(container)).toContain('manage:PinnedItems');
+        expect(
+            screen.getByRole('textbox', { name: 'Search the library' }),
+        ).toHaveValue('pin');
+    });
+
+    it('writes the Extra modules toggle to the address, and remembers it for the way back', async () => {
+        renderPage();
+
+        await userEvent.click(screen.getByLabelText('Filter'));
+        await userEvent.click(
+            screen.getByRole('menuitem', { name: 'Show extra modules' }),
+        );
+
+        expect(location()).toBe('?extra=1');
+        expect(sessionStorage.getItem('lightdash.learn.librarySearch')).toBe(
+            '?extra=1',
+        );
+    });
+
+    it('writes the group tab to the address', async () => {
+        renderPage('?extra=1');
+
+        await userEvent.click(
+            screen.getByRole('button', { name: /Developer/, pressed: false }),
+        );
+
+        expect(location()).toBe('?extra=1&group=developer');
+    });
+
+    it('takes the group out of the address on All', async () => {
+        renderPage('?extra=1&group=developer');
+
+        await userEvent.click(screen.getByRole('button', { name: 'All' }));
+
+        expect(location()).toBe('?extra=1');
+    });
+
+    it('shows All for a group the library does not have', () => {
+        renderPage('?group=nonsense');
+
+        expect(
+            screen.getByRole('button', { name: 'All', pressed: true }),
+        ).toBeInTheDocument();
+    });
+});
+
+describe('LearnPage unsupported modules', () => {
+    beforeEach(() => {
+        progressState.current = {
+            completed: [],
+            started: [],
+            lastStarted: null,
+        };
+        track.mockClear();
+        availabilityState.current = { isSettled: true, closed: [] };
+        accessState.current = scopes;
+        projectState.current = [
+            { projectUuid: 'training-1', type: ProjectType.TRAINING },
+        ];
+    });
+
+    it('ignores old reading links and leaves progress unchanged', () => {
+        progressState.current = {
+            completed: ['concept:view:Analytics'],
+            started: ['concept:view:Analytics'],
+            lastStarted: null,
+        };
+        const { container } = renderPage('?lesson=view%3AAnalytics');
+        expect(screen.queryByRole('dialog')).toBeNull();
+        expect(
+            screen.queryByRole('button', {
+                name: /Read lesson|Read again|I have read/i,
+            }),
+        ).toBeNull();
+        const card = container.querySelector(
+            '[data-learn-module="view:Analytics"]',
+        )!;
+        expect(card.textContent).toContain('Coming Soon');
+        expect(card.querySelector('button')).toBeDisabled();
+        expect(card.textContent).not.toContain('Complete');
+        expect(learnActions.markScopeStarted).not.toHaveBeenCalled();
+        expect(learnActions.markScopeCompleted).not.toHaveBeenCalled();
+    });
+});

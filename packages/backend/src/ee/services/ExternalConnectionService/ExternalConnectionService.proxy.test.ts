@@ -1,0 +1,1250 @@
+import {
+    ForbiddenError,
+    ParameterError,
+    ProjectType,
+    type ExternalConnection,
+} from '@lightdash/common';
+import {
+    fromJwt,
+    fromServiceAccount,
+    fromSession,
+} from '../../../auth/account';
+import {
+    buildAccount,
+    defaultSessionUser,
+} from '../../../auth/account/account.mock';
+import {
+    SecureFetchError,
+    type AllowedPrivateHostCidrs,
+} from '../../../utils/secureFetch/secureFetch';
+import * as secureFetchModule from '../../../utils/secureFetch/secureFetch';
+import { ExternalConnectionService } from './ExternalConnectionService';
+
+// Keep SecureFetchError real: auto-mocking the class would stub its
+// constructor and drop the reason/message the service forwards.
+vi.mock('../../../utils/secureFetch/secureFetch', async (importOriginal) => {
+    const actual =
+        await importOriginal<
+            typeof import('../../../utils/secureFetch/secureFetch')
+        >();
+    return { ...actual, secureFetch: vi.fn() };
+});
+
+const mockSecureFetch = vi.mocked(secureFetchModule.secureFetch);
+
+const baseConnection = (
+    overrides: Partial<ExternalConnection> = {},
+): ExternalConnection => ({
+    externalConnectionUuid: 'conn-1',
+    projectUuid: 'proj-1',
+    organizationUuid: 'org-1',
+    name: 'Weather API',
+    slug: 'weather-api',
+    type: 'none',
+    origin: 'https://api.example.com',
+    instructions: null,
+    allowedPathPrefixes: ['/v1/'],
+    allowedMethods: ['GET', 'POST'],
+    allowedContentTypes: ['application/json'],
+    responseMaxBytes: 1_000_000,
+    requestMaxBytes: 10_000,
+    timeoutMs: 5_000,
+    rateLimitPerMinute: null,
+    apiKeyName: null,
+    apiKeyLocation: null,
+    oauthScopes: null,
+    customHeaders: null,
+    hasSecret: false,
+    createdByUserUuid: 'user-1',
+    updatedByUserUuid: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+    allowBrowserImages: overrides.allowBrowserImages ?? false,
+});
+
+const baseApp = () => ({
+    app_id: 'app-1',
+    project_uuid: 'proj-1',
+    space_uuid: null,
+    created_by_user_uuid: 'user-1',
+    organization_uuid: 'org-1',
+});
+
+const user = buildAccount();
+
+const buildEmbeddedDashboardUser = (allowAllDashboards = false) => {
+    const base = buildAccount({ accountType: 'jwt' });
+    return fromJwt({
+        decodedToken: {
+            user: { externalId: 'dashboard-viewer' },
+            content: {
+                type: 'dashboard',
+                dashboardUuid: 'test-dashboard-uuid',
+                canViewDataApps: true,
+            },
+        },
+        embed: { ...base.embed, allowAllDashboards },
+        source: 'dashboard-embed-token',
+        content: {
+            type: 'dashboard',
+            dashboardUuid: 'test-dashboard-uuid',
+            chartUuids: [],
+            explores: [],
+        },
+        userAttributes: base.access.controls!,
+    });
+};
+
+const buildEmbeddedDataAppUser = (appUuid = 'app-1', email?: string) => {
+    const base = buildAccount({ accountType: 'jwt' });
+    return fromJwt({
+        decodedToken: {
+            user: { externalId: 'data-app-viewer', email },
+            content: { type: 'dataApp', appUuid },
+        },
+        embed: { ...base.embed, allowAllApps: true, appUuids: [appUuid] },
+        source: 'data-app-embed-token',
+        content: {
+            type: 'dataApp',
+            appUuid,
+            chartUuids: [],
+            explores: [],
+        },
+        userAttributes: base.access.controls!,
+    });
+};
+
+const embeddedDashboardUser = buildEmbeddedDashboardUser();
+const embeddedDataAppUser = buildEmbeddedDataAppUser();
+
+function buildService(opts: {
+    allowedPrivateHostCidrs?: AllowedPrivateHostCidrs;
+    connection?: ExternalConnection | undefined;
+    secret?: string | null;
+    canView?: boolean;
+    rateCount?: number;
+    googleToken?: string;
+    dashboardsContainingApp?: string[];
+    appExists?: boolean;
+}) {
+    const externalConnectionModel = {
+        findByUuid: vi.fn().mockResolvedValue(opts.connection),
+        getProjectOrganizationUuid: vi.fn().mockResolvedValue('org-1'),
+        resolveAppAlias: vi.fn().mockResolvedValue(opts.connection),
+        getDecryptedSecret: vi.fn().mockResolvedValue(opts.secret ?? null),
+        incrementRateCounter: vi.fn().mockResolvedValue(opts.rateCount ?? 1),
+        findProjectAbilityContext: vi.fn().mockResolvedValue({
+            organizationUuid: 'org-1',
+            projectType: ProjectType.DEFAULT,
+            projectCreatedByUserUuid: null,
+            upstreamProjectUuid: null,
+        }),
+    };
+    const googleTokenProvider = {
+        getAccessToken: vi
+            .fn()
+            .mockResolvedValue(opts.googleToken ?? 'test-access-token'),
+    };
+    const oauthClientCredentialsTokenProvider = {
+        getAccessToken: vi.fn().mockResolvedValue('test-oauth-access-token'),
+        invalidateAccessToken: vi.fn(),
+    };
+    const appModel = {
+        getApp: vi.fn().mockResolvedValue(baseApp()),
+        findApp: vi
+            .fn()
+            .mockResolvedValue(
+                opts.appExists === false ? undefined : baseApp(),
+            ),
+        findDashboardsContainingApp: vi
+            .fn()
+            .mockResolvedValue(opts.dashboardsContainingApp ?? []),
+    };
+    const projectModel = {
+        getSummary: vi.fn().mockResolvedValue({ organizationUuid: 'org-1' }),
+    };
+    const spacePermissionService = {
+        resolveAccess: vi.fn().mockResolvedValue({}),
+    };
+    const analytics = { track: vi.fn(), trackAccount: vi.fn() };
+
+    const service = new ExternalConnectionService({
+        allowedPrivateHostCidrs: opts.allowedPrivateHostCidrs ?? {},
+        externalConnectionModel,
+        appModel,
+        projectModel,
+        spacePermissionService,
+        analytics,
+        googleTokenProvider,
+        oauthClientCredentialsTokenProvider,
+    } as never);
+
+    // Force the CASL view decision deterministically.
+    vi.spyOn(
+        service as unknown as { createAuditedAbility: () => unknown },
+        'createAuditedAbility',
+    ).mockReturnValue({
+        can: () => opts.canView ?? true,
+        cannot: () => !(opts.canView ?? true),
+    });
+
+    return {
+        service,
+        externalConnectionModel,
+        appModel,
+        analytics,
+        googleTokenProvider,
+        oauthClientCredentialsTokenProvider,
+    };
+}
+
+beforeEach(() => {
+    mockSecureFetch.mockReset();
+    mockSecureFetch.mockResolvedValue({
+        status: 200,
+        contentType: 'application/json',
+        headers: {},
+        bodyText: '{"ok":true}',
+        truncated: false,
+    });
+});
+
+describe('ExternalConnectionService.proxyFetch', () => {
+    it.each([undefined, false])(
+        'does not forward identity when the setting is %s',
+        async (forwardUserIdentity) => {
+            const { service } = buildService({
+                connection: baseConnection({ forwardUserIdentity }),
+            });
+
+            await service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/today',
+            });
+
+            expect(mockSecureFetch.mock.calls[0][1].headers).toEqual({});
+        },
+    );
+
+    it('forwards each requesting viewer alongside connection auth, ignoring app-supplied identity', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                forwardUserIdentity: true,
+                type: 'bearer_token',
+            }),
+            secret: 'connection-token',
+        });
+        const request = {
+            connectionAlias: 'weather',
+            path: '/v1/today',
+            headers: { 'X-Lightdash-User-Email': 'spoofed@example.com' },
+            userUuid: 'spoofed-user',
+        };
+        const secondViewer = fromSession(
+            {
+                ...defaultSessionUser,
+                userUuid: 'viewer-2',
+                email: 'viewer-2@example.com',
+            },
+            'session',
+        );
+
+        await service.proxyFetch(user, 'proj-1', 'app-1', request);
+        await service.proxyFetch(secondViewer, 'proj-1', 'app-1', request);
+
+        expect(
+            mockSecureFetch.mock.calls.map(([, options]) => options.headers),
+        ).toEqual([
+            {
+                Authorization: 'Bearer connection-token',
+                'X-Lightdash-User-Id': user.user.userUuid,
+                'X-Lightdash-User-Email': user.user.email,
+                'X-Lightdash-App-Id': 'app-1',
+                'X-Lightdash-Organization-Id': 'org-1',
+                'X-Lightdash-Project-Id': 'proj-1',
+            },
+            {
+                Authorization: 'Bearer connection-token',
+                'X-Lightdash-User-Id': 'viewer-2',
+                'X-Lightdash-User-Email': 'viewer-2@example.com',
+                'X-Lightdash-App-Id': 'app-1',
+                'X-Lightdash-Organization-Id': 'org-1',
+                'X-Lightdash-Project-Id': 'proj-1',
+            },
+        ]);
+    });
+
+    it.each([undefined, 'embed-viewer@example.com'])(
+        'forwards available embed claims without inventing a Lightdash user UUID (email: %s)',
+        async (email) => {
+            const { service } = buildService({
+                connection: baseConnection({ forwardUserIdentity: true }),
+            });
+
+            await service.proxyFetch(
+                buildEmbeddedDataAppUser('app-1', email),
+                'proj-1',
+                'app-1',
+                {
+                    connectionAlias: 'weather',
+                    path: '/v1/today',
+                },
+            );
+
+            expect(mockSecureFetch.mock.calls[0][1].headers).toEqual({
+                'X-Lightdash-App-Id': 'app-1',
+                'X-Lightdash-Organization-Id': 'org-1',
+                'X-Lightdash-Project-Id': 'proj-1',
+                ...(email ? { 'X-Lightdash-User-Email': email } : {}),
+            });
+        },
+    );
+
+    it('forwards a service account principal without requiring an email or substituting its owner', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ forwardUserIdentity: true }),
+        });
+        const serviceAccount = fromServiceAccount(
+            {
+                ...defaultSessionUser,
+                userUuid: 'service-principal',
+                email: undefined,
+                serviceAccount: {
+                    uuid: 'service-account',
+                    description: 'Test',
+                },
+            },
+            'service-token',
+        );
+
+        await service.proxyFetch(serviceAccount, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/today',
+        });
+
+        expect(mockSecureFetch.mock.calls[0][1].headers).toEqual({
+            'X-Lightdash-User-Id': 'service-principal',
+            'X-Lightdash-App-Id': 'app-1',
+            'X-Lightdash-Organization-Id': 'org-1',
+            'X-Lightdash-Project-Id': 'proj-1',
+        });
+    });
+
+    it.each([
+        {
+            forwardUserIdentity: false,
+            customHeaders: { 'x-LIGHTDASH-user-email': 'spoofed@example.com' },
+        },
+        {
+            forwardUserIdentity: true,
+            type: 'api_key' as const,
+            apiKeyLocation: 'header' as const,
+            apiKeyName: 'x-lightdash-USER-id',
+        },
+    ])('blocks stored identity-header collisions: %j', async (config) => {
+        const { service } = buildService({
+            connection: baseConnection(config),
+            secret: 'spoofed-identity',
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/today',
+            }),
+        ).rejects.toThrow(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, false])(
+        'respects an omitted or disabled draft forwarding setting (%s)',
+        async (forwardUserIdentity) => {
+            const { service } = buildService({
+                connection: baseConnection({ forwardUserIdentity: true }),
+            });
+            await service.testConnection(user, 'proj-1', 'conn-1', {
+                path: '/v1/today',
+                config: { forwardUserIdentity },
+            });
+
+            const { headers } = mockSecureFetch.mock.calls[0][1];
+            if (forwardUserIdentity === false) {
+                expect(headers).toEqual({});
+            } else {
+                expect(headers).toHaveProperty(
+                    'X-Lightdash-User-Id',
+                    user.user.userUuid,
+                );
+            }
+        },
+    );
+
+    it('uses the testing admin and unsaved toggle for both test endpoints, without an app ID', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+        await service.testConnection(user, 'proj-1', 'conn-1', {
+            path: '/v1/today',
+            config: { forwardUserIdentity: true },
+        });
+        await service.testConfig(
+            user,
+            'proj-1',
+            baseConnection({ forwardUserIdentity: true }),
+            {
+                path: '/v1/today',
+            },
+        );
+        for (const [, options] of mockSecureFetch.mock.calls) {
+            expect(options.headers).toEqual({
+                'X-Lightdash-User-Id': user.user.userUuid,
+                'X-Lightdash-User-Email': user.user.email,
+                'X-Lightdash-Organization-Id': 'org-1',
+                'X-Lightdash-Project-Id': 'proj-1',
+            });
+        }
+        expect(mockSecureFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('allows a standalone embed JWT to use a connection linked to its app', async () => {
+        const { service, appModel, analytics } = buildService({
+            connection: baseConnection(),
+        });
+
+        await service.proxyFetch(embeddedDataAppUser, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/today',
+        });
+
+        expect(mockSecureFetch).toHaveBeenCalledTimes(1);
+        expect(appModel.findDashboardsContainingApp).not.toHaveBeenCalled();
+        expect(analytics.trackAccount).toHaveBeenCalledWith(
+            embeddedDataAppUser,
+            expect.not.objectContaining({ userId: expect.anything() }),
+        );
+    });
+
+    it('rejects a standalone embed JWT for a different app', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+
+        await expect(
+            service.proxyFetch(
+                buildEmbeddedDataAppUser('another-app'),
+                'proj-1',
+                'app-1',
+                {
+                    connectionAlias: 'weather',
+                    path: '/v1/today',
+                },
+            ),
+        ).rejects.toThrow('This embed is not authorized for this data app');
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('allows a dashboard embed JWT only when the app is on an allowed dashboard', async () => {
+        const allowedDashboardUuid =
+            embeddedDashboardUser.access.content.dashboardUuid!;
+        const { service, appModel } = buildService({
+            connection: baseConnection(),
+            dashboardsContainingApp: [allowedDashboardUuid],
+        });
+
+        await service.proxyFetch(embeddedDashboardUser, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/today',
+        });
+
+        expect(appModel.findDashboardsContainingApp).toHaveBeenCalledWith(
+            'app-1',
+            'proj-1',
+            [allowedDashboardUuid],
+        );
+        expect(mockSecureFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a dashboard embed JWT when the app is not on an allowed dashboard', async () => {
+        const { service } = buildService({
+            connection: baseConnection(),
+            dashboardsContainingApp: ['another-dashboard'],
+        });
+
+        await expect(
+            service.proxyFetch(embeddedDashboardUser, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/today',
+            }),
+        ).rejects.toThrow('Data app is not authorized by this embed');
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not authorize an app outside the JWT dashboard when all dashboards are embeddable', async () => {
+        const allowAllDashboardUser = buildEmbeddedDashboardUser(true);
+        const { service, appModel } = buildService({
+            connection: baseConnection(),
+            dashboardsContainingApp: ['another-dashboard'],
+        });
+
+        await expect(
+            service.proxyFetch(allowAllDashboardUser, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/today',
+            }),
+        ).rejects.toThrow('Data app is not authorized by this embed');
+        expect(appModel.findDashboardsContainingApp).toHaveBeenCalledWith(
+            'app-1',
+            'proj-1',
+            ['test-dashboard-uuid'],
+        );
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an embed JWT denied by the DataApp ability', async () => {
+        const { service, appModel } = buildService({
+            connection: baseConnection(),
+            canView: false,
+        });
+
+        await expect(
+            service.proxyFetch(embeddedDashboardUser, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/today',
+            }),
+        ).rejects.toThrow('Insufficient permissions to access this data app');
+        expect(appModel.findDashboardsContainingApp).not.toHaveBeenCalled();
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not reveal whether an app exists to an embed JWT', async () => {
+        const { service, externalConnectionModel } = buildService({
+            connection: baseConnection(),
+            appExists: false,
+        });
+
+        await expect(
+            service.proxyFetch(embeddedDashboardUser, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/today',
+            }),
+        ).rejects.toBeInstanceOf(ForbiddenError);
+        expect(externalConnectionModel.resolveAppAlias).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the alias is not linked to the app', async () => {
+        const { service } = buildService({ connection: undefined });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ForbiddenError);
+    });
+
+    it('throws ForbiddenError when the user cannot view the app', async () => {
+        const { service } = buildService({
+            connection: baseConnection(),
+            canView: false,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ForbiddenError);
+    });
+
+    it('rejects a method not in the connection allowlist', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ allowedMethods: ['GET'] }),
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method: 'POST',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+    });
+
+    it('rejects an absolute URL in path', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: 'https://evil.com/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+    });
+
+    it('rejects .. traversal in path', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/../admin',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+    });
+
+    it('rejects encoded-host //evil.com', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '//evil.com/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+    });
+
+    it('rejects a path matching no allowed prefix', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ allowedPathPrefixes: ['/v1/'] }),
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/admin/secrets',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+    });
+
+    it('happy GET: calls secureFetch with the server-built URL and no body', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+        const res = await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/today',
+            query: { city: 'oslo' },
+        });
+        expect(mockSecureFetch).toHaveBeenCalledTimes(1);
+        const [url, opts] = mockSecureFetch.mock.calls[0];
+        expect(url).toBe('https://api.example.com/v1/today?city=oslo');
+        expect(opts.method).toBe('GET');
+        expect(opts.body).toBeUndefined();
+        expect(opts.timeoutMs).toBe(5_000);
+        expect(opts.maxResponseBytes).toBe(1_000_000);
+        expect(opts.allowedContentTypes).toEqual(['application/json']);
+        expect(opts.allowedPrivateHostCidrs).toEqual({});
+        expect(res).toEqual({
+            status: 200,
+            contentType: 'application/json',
+            headers: {},
+            body: { ok: true },
+            truncated: false,
+        });
+    });
+
+    it('applies the instance private host policy to the resource request', async () => {
+        const allowedPrivateHostCidrs = { 'api.internal': ['10.20.0.0/16'] };
+        const { service } = buildService({
+            allowedPrivateHostCidrs,
+            connection: baseConnection({ origin: 'https://api.internal' }),
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'internal',
+            path: '/v1/status',
+        });
+        expect(mockSecureFetch).toHaveBeenCalledWith(
+            'https://api.internal/v1/status',
+            expect.objectContaining({ allowedPrivateHostCidrs }),
+        );
+    });
+
+    it('GET is rate-limited like every other method', async () => {
+        const { service, externalConnectionModel } = buildService({
+            connection: baseConnection({ rateLimitPerMinute: 5 }),
+            rateCount: 1,
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(externalConnectionModel.incrementRateCounter).toHaveBeenCalled();
+    });
+
+    it('rejects a GET over the rate limit with a 429-class error', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ rateLimitPerMinute: 1 }),
+            rateCount: 2,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toMatchObject({ statusCode: 429 });
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('happy POST: server sets Content-Type and serializes the body', async () => {
+        const { service } = buildService({ connection: baseConnection() });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            method: 'POST',
+            path: '/v1/echo',
+            body: { hello: 'world' },
+        });
+        const [, opts] = mockSecureFetch.mock.calls[0];
+        expect(opts.method).toBe('POST');
+        expect(opts.body).toBe('{"hello":"world"}');
+        expect(opts.headers!['Content-Type']).toBe('application/json');
+    });
+
+    it.each(['PUT', 'PATCH', 'DELETE'] as const)(
+        'happy %s: forwards the method and serializes the body when allowed',
+        async (method) => {
+            const { service } = buildService({
+                connection: baseConnection({
+                    allowedMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+                }),
+            });
+            await service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method,
+                path: '/v1/echo',
+                body: { hello: 'world' },
+            });
+            const [, opts] = mockSecureFetch.mock.calls[0];
+            expect(opts.method).toBe(method);
+            expect(opts.body).toBe('{"hello":"world"}');
+            expect(opts.headers!['Content-Type']).toBe('application/json');
+        },
+    );
+
+    it('POST over requestMaxBytes is rejected', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ requestMaxBytes: 5 }),
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method: 'POST',
+                path: '/v1/echo',
+                body: { hello: 'world' },
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('injects a bearer token into the Authorization header', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ type: 'bearer_token' }),
+            secret: 'tok_abc',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        const [, opts] = mockSecureFetch.mock.calls[0];
+        expect(opts.headers!.Authorization).toBe('Bearer tok_abc');
+    });
+
+    it('injects an api_key into a header', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'api_key',
+                apiKeyName: 'X-Api-Key',
+                apiKeyLocation: 'header',
+            }),
+            secret: 'sec_123',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        const [url, opts] = mockSecureFetch.mock.calls[0];
+        expect(opts.headers!['X-Api-Key']).toBe('sec_123');
+        expect(url).not.toContain('sec_123');
+    });
+
+    it('injects an api_key into the query string', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'api_key',
+                apiKeyName: 'apikey',
+                apiKeyLocation: 'query',
+            }),
+            secret: 'sec_q',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+            query: { a: '1' },
+        });
+        const [url, opts] = mockSecureFetch.mock.calls[0];
+        expect(new URL(url).searchParams.get('apikey')).toBe('sec_q');
+        expect(opts.headers!.Authorization).toBeUndefined();
+    });
+
+    it('fails closed when a bearer_token connection has no stored secret', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ type: 'bearer_token' }),
+            secret: null,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when an api_key connection has no stored secret', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'api_key',
+                apiKeyName: 'X-Api-Key',
+                apiKeyLocation: 'header',
+            }),
+            secret: null,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    const KEYFILE_SECRET =
+        '{"type":"service_account","client_email":"a@b.iam.gserviceaccount.com","private_key":"k"}';
+
+    it('mints and injects a Google service account access token as a bearer token', async () => {
+        const { service, googleTokenProvider } = buildService({
+            connection: baseConnection({
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+            secret: KEYFILE_SECRET,
+            googleToken: 'minted-access-token',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(googleTokenProvider.getAccessToken).toHaveBeenCalledWith(
+            KEYFILE_SECRET,
+            ['https://www.googleapis.com/auth/bigquery'],
+        );
+        const [, opts] = mockSecureFetch.mock.calls[0];
+        expect(opts.headers!.Authorization).toBe('Bearer minted-access-token');
+    });
+
+    it('fails closed when a google_service_account connection has no stored secret', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+            secret: null,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when Google token minting fails', async () => {
+        const { service, googleTokenProvider } = buildService({
+            connection: baseConnection({
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+            secret: KEYFILE_SECRET,
+        });
+        googleTokenProvider.getAccessToken.mockRejectedValueOnce(
+            new Error('token endpoint unreachable'),
+        );
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    const OAUTH_CONNECTION = baseConnection({
+        type: 'oauth_client_credentials',
+        oauthTokenUrl: 'https://auth.example.com/oauth/token',
+        oauthClientId: 'client-1',
+        oauthClientAuthMethod: 'basic',
+        oauthScopes: ['read:data'],
+    });
+
+    it('mints and injects an OAuth client-credentials access token', async () => {
+        const { service, oauthClientCredentialsTokenProvider } = buildService({
+            connection: OAUTH_CONNECTION,
+            secret: 'client-secret',
+        });
+
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+
+        expect(
+            oauthClientCredentialsTokenProvider.getAccessToken,
+        ).toHaveBeenCalledWith(
+            {
+                tokenUrl: 'https://auth.example.com/oauth/token',
+                clientId: 'client-1',
+                clientAuthMethod: 'basic',
+                scopes: ['read:data'],
+            },
+            'client-secret',
+        );
+        expect(mockSecureFetch.mock.calls[0][1].headers!.Authorization).toBe(
+            'Bearer test-oauth-access-token',
+        );
+    });
+
+    it('redacts an OAuth access token echoed by the resource server', async () => {
+        mockSecureFetch.mockResolvedValue({
+            status: 200,
+            contentType: 'application/json',
+            headers: {},
+            bodyText:
+                '{"authenticated":true,"token":"test-oauth-access-token"}',
+            truncated: false,
+        });
+        const { service } = buildService({
+            connection: OAUTH_CONNECTION,
+            secret: 'client-secret',
+        });
+
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).resolves.toMatchObject({
+            body: { authenticated: true, token: '[REDACTED]' },
+        });
+    });
+
+    it('refreshes a rejected OAuth token and retries the resource request once', async () => {
+        const authorizations: Array<string | undefined> = [];
+        mockSecureFetch.mockImplementation(async (_url, options) => {
+            authorizations.push(options.headers?.Authorization);
+            expect(options.headers?.['X-Lightdash-User-Id']).toBe(
+                user.user.userUuid,
+            );
+            expect(options.headers?.['X-Lightdash-User-Email']).toBe(
+                user.user.email,
+            );
+            return {
+                status: authorizations.length === 1 ? 401 : 200,
+                contentType: 'application/json',
+                headers: {},
+                bodyText: '{}',
+                truncated: false,
+            };
+        });
+        const { service, oauthClientCredentialsTokenProvider } = buildService({
+            connection: { ...OAUTH_CONNECTION, forwardUserIdentity: true },
+            secret: 'client-secret',
+        });
+        oauthClientCredentialsTokenProvider.getAccessToken
+            .mockResolvedValueOnce('expired-token')
+            .mockResolvedValueOnce('fresh-token');
+
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).resolves.toMatchObject({ status: 200 });
+
+        expect(authorizations).toEqual([
+            'Bearer expired-token',
+            'Bearer fresh-token',
+        ]);
+        expect(
+            oauthClientCredentialsTokenProvider.invalidateAccessToken,
+        ).toHaveBeenCalledWith(
+            expect.objectContaining({ clientId: 'client-1' }),
+            'client-secret',
+            'expired-token',
+        );
+        expect(mockSecureFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry a persistent OAuth 401 more than once', async () => {
+        mockSecureFetch.mockResolvedValue({
+            status: 401,
+            contentType: 'application/json',
+            headers: {},
+            bodyText: '{}',
+            truncated: false,
+        });
+        const { service } = buildService({
+            connection: OAUTH_CONNECTION,
+            secret: 'client-secret',
+        });
+
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).resolves.toMatchObject({ status: 401 });
+        expect(mockSecureFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('sends the connection custom headers alongside the injected auth', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'bearer_token',
+                customHeaders: {
+                    'anthropic-version': '2023-06-01',
+                    Accept: 'application/json',
+                },
+            }),
+            secret: 'tok_abc',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        const [, opts] = mockSecureFetch.mock.calls[0];
+        expect(opts.headers!['anthropic-version']).toBe('2023-06-01');
+        expect(opts.headers!.Accept).toBe('application/json');
+        expect(opts.headers!.Authorization).toBe('Bearer tok_abc');
+    });
+
+    it('fails closed on a stored forbidden custom header (Content-Type)', async () => {
+        // Belt-and-braces: content-type is rejected at write time, but even a
+        // row that bypassed validation must fail closed rather than override.
+        const { service } = buildService({
+            connection: baseConnection({
+                customHeaders: { 'Content-Type': 'text/evil' },
+            }),
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method: 'POST',
+                path: '/v1/echo',
+                body: {},
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an api_key configured to inject a forbidden header (Host)', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'api_key',
+                apiKeyName: 'Host',
+                apiKeyLocation: 'header',
+            }),
+            secret: 'sec',
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it.each([['blocked_ip'], ['redirect'], ['too_large'], ['timeout']])(
+        'maps SecureFetchError(%s) to a ParameterError with no raw detail',
+        async (reason) => {
+            const { service } = buildService({ connection: baseConnection() });
+            mockSecureFetch.mockRejectedValueOnce(
+                new SecureFetchError(
+                    reason as never,
+                    `internal: connect to 10.0.0.1`,
+                ),
+            );
+            const promise = service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            });
+            await expect(promise).rejects.toBeInstanceOf(ParameterError);
+            const err = await promise.catch((e) => e);
+            expect(err.message).toBe(
+                `Upstream request was blocked (${reason})`,
+            );
+        },
+    );
+
+    it('forwards an upstream error response (status + body) instead of throwing', async () => {
+        mockSecureFetch.mockResolvedValueOnce({
+            status: 400,
+            contentType: 'application/json',
+            headers: { 'retry-after': '5' },
+            bodyText: '{"error":"anthropic-version header is required"}',
+            truncated: false,
+        });
+        const { service, analytics } = buildService({
+            connection: baseConnection(),
+        });
+        const res = await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({
+            error: 'anthropic-version header is required',
+        });
+        expect(res.headers).toEqual({ 'retry-after': '5' });
+        expect(analytics.trackAccount).toHaveBeenCalledWith(
+            user,
+            expect.objectContaining({
+                properties: expect.objectContaining({
+                    status: 400,
+                    outcome: 'upstream_error',
+                }),
+            }),
+        );
+    });
+
+    it('rate-limits the 2nd POST over the limit with a 429-class error', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ rateLimitPerMinute: 1 }),
+            rateCount: 2,
+        });
+        const promise = service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            method: 'POST',
+            path: '/v1/x',
+            body: {},
+        });
+        await expect(promise).rejects.toMatchObject({ statusCode: 429 });
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('uses DEFAULT 60/min when rateLimitPerMinute is null', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ rateLimitPerMinute: null }),
+            rateCount: 61,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method: 'POST',
+                path: '/v1/x',
+                body: {},
+            }),
+        ).rejects.toMatchObject({ statusCode: 429 });
+    });
+
+    it('parses non-JSON content type as a raw string', async () => {
+        mockSecureFetch.mockResolvedValueOnce({
+            status: 200,
+            contentType: 'text/plain',
+            headers: {},
+            bodyText: 'plain text',
+            truncated: false,
+        });
+        const { service } = buildService({
+            connection: baseConnection({
+                allowedContentTypes: ['text/plain'],
+            }),
+        });
+        const res = await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(res.body).toBe('plain text');
+    });
+
+    it('falls back to raw string when JSON content fails to parse', async () => {
+        mockSecureFetch.mockResolvedValueOnce({
+            status: 200,
+            contentType: 'application/json',
+            headers: {},
+            bodyText: 'not json{',
+            truncated: false,
+        });
+        const { service } = buildService({ connection: baseConnection() });
+        const res = await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(res.body).toBe('not json{');
+    });
+
+    it('parses a structured-syntax +json content type (e.g. geo+json, with charset) as JSON', async () => {
+        mockSecureFetch.mockResolvedValueOnce({
+            status: 200,
+            contentType: 'application/geo+json; charset=utf-8',
+            headers: {},
+            bodyText: '{"type":"FeatureCollection","features":[]}',
+            truncated: false,
+        });
+        const { service } = buildService({
+            connection: baseConnection({
+                allowedContentTypes: ['application/geo+json'],
+            }),
+        });
+        const res = await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(res.body).toEqual({ type: 'FeatureCollection', features: [] });
+    });
+
+    it('rejects a GET when the serialized query string exceeds requestMaxBytes', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ requestMaxBytes: 10 }),
+        });
+        // A query string longer than 10 bytes should be rejected before secureFetch.
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method: 'GET',
+                path: '/v1/today',
+                query: { city: 'this-is-a-very-long-city-name' },
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('maps a malformed connection origin to a generic ParameterError (no stack exposed)', async () => {
+        const { service } = buildService({
+            connection: baseConnection({ origin: 'not-a-valid-url' }),
+        });
+        const promise = service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        await expect(promise).rejects.toBeInstanceOf(ParameterError);
+        // The raw TypeError from new URL() must not reach the client.
+        const err = await promise.catch((e) => e);
+        expect(err.message).not.toMatch(/Invalid URL/i);
+    });
+
+    it('emits an audit event without bodies or secrets', async () => {
+        const { service, analytics } = buildService({
+            connection: baseConnection({ type: 'bearer_token' }),
+            secret: 'tok_secret',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            method: 'POST',
+            path: '/v1/x',
+            body: { secret_payload: 'do-not-log' },
+        });
+        expect(analytics.trackAccount).toHaveBeenCalledWith(
+            user,
+            expect.objectContaining({
+                event: 'external_connection.fetch',
+                properties: expect.objectContaining({
+                    method: 'POST',
+                    path: '/v1/x',
+                    status: 200,
+                    outcome: 'ok',
+                }),
+            }),
+        );
+        const tracked = JSON.stringify(analytics.trackAccount.mock.calls);
+        expect(tracked).not.toContain('tok_secret');
+        expect(tracked).not.toContain('do-not-log');
+    });
+});

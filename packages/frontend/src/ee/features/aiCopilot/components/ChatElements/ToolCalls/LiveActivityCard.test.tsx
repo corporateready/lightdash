@@ -1,0 +1,375 @@
+import { QuerySourceType } from '@lightdash/common';
+import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { Provider } from 'react-redux';
+import { describe, expect, it } from 'vitest';
+import { renderWithProviders } from '../../../../../../testing/testUtils';
+import { store } from '../../../store';
+import {
+    LiveActivityCard,
+    type LiveActivityToolGroup,
+} from './LiveActivityCard';
+
+const buildComposerToolGroups = (
+    toolName: 'query' | 'runComposerQueries',
+): LiveActivityToolGroup[] => [
+    {
+        keyId: 'composer-call',
+        toolName,
+        calls: [
+            {
+                toolCallId: 'composer-call',
+                toolName,
+                toolArgs: {
+                    title: 'Compare targets',
+                    description: null,
+                    terminalNodeId: null,
+                    queries: [
+                        {
+                            sourceType: QuerySourceType.EXTERNAL,
+                            nodeId: 'targets',
+                            title: 'Revenue targets',
+                            description: null,
+                            sql: 'select * from targets_csv',
+                            tables: ['targets_csv'],
+                            limit: 500,
+                        },
+                    ],
+                },
+            },
+        ],
+    },
+];
+
+const composerToolGroups = buildComposerToolGroups('runComposerQueries');
+
+describe.each(['query', 'runComposerQueries'] as const)(
+    'LiveActivityCard composer queries (%s)',
+    (toolName) => {
+        const composerToolGroups = buildComposerToolGroups(toolName);
+        const runningTargets = [
+            {
+                message: 'Running "targets"',
+                toolName,
+                progressId: 'composer-call:targets',
+                progressStatus: 'in_progress' as const,
+            },
+        ];
+
+        it('shows the running node SQL by default while the query is running', async () => {
+            renderWithProviders(
+                <LiveActivityCard
+                    isLive
+                    toolGroups={composerToolGroups}
+                    stepProgressMessages={runningTargets}
+                />,
+            );
+
+            await waitFor(() =>
+                expect(screen.getByText('External data')).toBeVisible(),
+            );
+            expect(screen.getByRole('button', { name: 'Copy' })).toBeVisible();
+        });
+
+        it('collapses the steps once the run finishes', async () => {
+            const { rerender } = renderWithProviders(
+                <LiveActivityCard
+                    isLive
+                    toolGroups={composerToolGroups}
+                    stepProgressMessages={runningTargets}
+                />,
+            );
+            await waitFor(() =>
+                expect(screen.getByText('External data')).toBeVisible(),
+            );
+
+            rerender(
+                <LiveActivityCard
+                    isLive={false}
+                    toolGroups={composerToolGroups}
+                />,
+            );
+
+            await waitFor(() =>
+                expect(
+                    screen.getByRole('button', { expanded: false }),
+                ).toBeVisible(),
+            );
+            expect(screen.queryByText('External data')).not.toBeVisible();
+        });
+
+        it('starts collapsed for a finished run', () => {
+            renderWithProviders(
+                <LiveActivityCard
+                    isLive={false}
+                    toolGroups={composerToolGroups}
+                />,
+            );
+            expect(
+                screen.getByRole('button', { expanded: false }),
+            ).toBeVisible();
+            expect(screen.queryByText('External data')).not.toBeVisible();
+        });
+    },
+);
+
+describe('LiveActivityCard composer failure', () => {
+    it('marks a node failed when the call errors while it was running', () => {
+        const failedGroups: LiveActivityToolGroup[] = [
+            {
+                ...composerToolGroups[0],
+                calls: [
+                    {
+                        ...composerToolGroups[0].calls[0],
+                        isPreliminary: false,
+                        toolOutput: {
+                            result: 'Composer query failed: missing column',
+                            metadata: { status: 'error' },
+                        },
+                    },
+                ],
+            },
+        ];
+        renderWithProviders(
+            <LiveActivityCard
+                isLive
+                toolGroups={failedGroups}
+                stepProgressMessages={[
+                    {
+                        message: 'Running query "targets"...',
+                        toolName: 'runComposerQueries',
+                        progressId: 'composer-call:targets',
+                        progressStatus: 'in_progress',
+                    },
+                ]}
+            />,
+        );
+
+        expect(screen.getByLabelText('Failed')).toBeInTheDocument();
+        const failedRow = screen
+            .getAllByRole('button', { expanded: false })
+            .find((row) => row.textContent?.includes('Revenue targets'));
+        expect(failedRow).toBeDefined();
+    });
+});
+
+describe('LiveActivityCard composer submission failure', () => {
+    it('marks every node failed when the call errors before any node starts', () => {
+        const failedGroups: LiveActivityToolGroup[] = [
+            {
+                ...composerToolGroups[0],
+                calls: [
+                    {
+                        ...composerToolGroups[0].calls[0],
+                        isPreliminary: false,
+                        toolOutput: {
+                            result: 'Error running composer queries.',
+                            metadata: { status: 'error' },
+                        },
+                    },
+                ],
+            },
+        ];
+        renderWithProviders(
+            <LiveActivityCard isLive toolGroups={failedGroups} />,
+        );
+
+        expect(screen.getByLabelText('Failed')).toBeInTheDocument();
+    });
+});
+
+describe('LiveActivityCard composer approval', () => {
+    const sqlPipeline: LiveActivityToolGroup[] = [
+        {
+            keyId: 'composer-approval',
+            toolName: 'runComposerQueries',
+            calls: [
+                {
+                    toolCallId: 'composer-approval',
+                    toolName: 'runComposerQueries',
+                    toolArgs: {
+                        title: 'Payments',
+                        description: null,
+                        terminalNodeId: null,
+                        queries: [
+                            {
+                                sourceType: QuerySourceType.SQL,
+                                nodeId: 'payments',
+                                title: 'Average payments',
+                                description: null,
+                                sql: 'select avg(amount) from payments',
+                                limit: 500,
+                            },
+                        ],
+                    },
+                },
+            ],
+        },
+    ];
+
+    it('shows inline approval even when the card is not live', () => {
+        renderWithProviders(
+            <Provider store={store}>
+                <LiveActivityCard
+                    isLive={false}
+                    toolGroups={sqlPipeline}
+                    approval={{
+                        projectUuid: 'project',
+                        agentUuid: 'agent',
+                        threadUuid: 'thread',
+                        pendingToolCallIds: ['composer-approval'],
+                        decidedToolCallIds: [],
+                    }}
+                />
+            </Provider>,
+        );
+
+        expect(screen.getByLabelText('Awaiting approval')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Approve' })).toBeVisible();
+    });
+});
+
+describe('LiveActivityCard runSql', () => {
+    const sqlToolGroups: LiveActivityToolGroup[] = [
+        {
+            keyId: 'sql-call',
+            toolName: 'runSql',
+            calls: [
+                {
+                    toolCallId: 'sql-call',
+                    toolName: 'runSql',
+                    toolArgs: { sql: 'select 1 as one', limit: 10 },
+                },
+            ],
+        },
+    ];
+
+    it('stays expanded after the run finishes', () => {
+        renderWithProviders(
+            <LiveActivityCard isLive={false} toolGroups={sqlToolGroups} />,
+        );
+        expect(screen.getByRole('button', { expanded: true })).toBeVisible();
+    });
+
+    it('renders the approval inline under the SQL with an awaiting status', () => {
+        renderWithProviders(
+            <Provider store={store}>
+                <LiveActivityCard
+                    isLive={false}
+                    toolGroups={sqlToolGroups}
+                    approval={{
+                        projectUuid: 'project',
+                        agentUuid: 'agent',
+                        threadUuid: 'thread',
+                        pendingToolCallIds: ['sql-call'],
+                        decidedToolCallIds: [],
+                    }}
+                />
+            </Provider>,
+        );
+        expect(screen.getByText('awaiting approval')).toBeVisible();
+        expect(screen.getByRole('button', { name: 'Approve' })).toBeVisible();
+        expect(screen.getByRole('button', { name: 'Reject' })).toBeVisible();
+    });
+
+    it('collapses once the approval is decided', () => {
+        const approval = {
+            projectUuid: 'project',
+            agentUuid: 'agent',
+            threadUuid: 'thread',
+        };
+        const { rerender } = renderWithProviders(
+            <Provider store={store}>
+                <LiveActivityCard
+                    isLive
+                    toolGroups={sqlToolGroups}
+                    approval={{
+                        ...approval,
+                        pendingToolCallIds: ['sql-call'],
+                        decidedToolCallIds: [],
+                    }}
+                />
+            </Provider>,
+        );
+        expect(screen.getByRole('button', { name: 'Approve' })).toBeVisible();
+
+        rerender(
+            <Provider store={store}>
+                <LiveActivityCard
+                    isLive
+                    toolGroups={sqlToolGroups}
+                    approval={{
+                        ...approval,
+                        pendingToolCallIds: [],
+                        decidedToolCallIds: ['sql-call'],
+                    }}
+                />
+            </Provider>,
+        );
+        expect(
+            screen.getByRole('button', { name: /Running SQL query/ }),
+        ).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('keeps a group that streams in as the approval clears expanded', () => {
+        const approval = {
+            projectUuid: 'project',
+            agentUuid: 'agent',
+            threadUuid: 'thread',
+        };
+        const nextGroup: LiveActivityToolGroup = {
+            keyId: 'sql-call-2',
+            toolName: 'runSql',
+            calls: [
+                {
+                    toolCallId: 'sql-call-2',
+                    toolName: 'runSql',
+                    toolArgs: { sql: 'select 2 as two', limit: 10 },
+                },
+            ],
+        };
+        const { rerender } = renderWithProviders(
+            <Provider store={store}>
+                <LiveActivityCard
+                    isLive
+                    toolGroups={sqlToolGroups}
+                    approval={{
+                        ...approval,
+                        pendingToolCallIds: ['sql-call'],
+                        decidedToolCallIds: [],
+                    }}
+                />
+            </Provider>,
+        );
+
+        rerender(
+            <Provider store={store}>
+                <LiveActivityCard
+                    isLive
+                    toolGroups={[...sqlToolGroups, nextGroup]}
+                    approval={{
+                        ...approval,
+                        pendingToolCallIds: [],
+                        decidedToolCallIds: ['sql-call'],
+                    }}
+                />
+            </Provider>,
+        );
+        expect(
+            screen.getByRole('button', { name: /Running SQL query/ }),
+        ).toHaveAttribute('aria-expanded', 'true');
+    });
+
+    it('keeps a user collapse when the stream ends', async () => {
+        const { rerender } = renderWithProviders(
+            <LiveActivityCard isLive toolGroups={sqlToolGroups} />,
+        );
+        await userEvent.click(screen.getByRole('button', { expanded: true }));
+        expect(screen.getByRole('button', { expanded: false })).toBeVisible();
+
+        rerender(
+            <LiveActivityCard isLive={false} toolGroups={sqlToolGroups} />,
+        );
+        expect(screen.getByRole('button', { expanded: false })).toBeVisible();
+    });
+});

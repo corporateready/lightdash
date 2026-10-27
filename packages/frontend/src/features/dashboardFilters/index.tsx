@@ -5,12 +5,18 @@ import {
     type FilterOperator,
 } from '@lightdash/common';
 import { useCallback, useState, type FC } from 'react';
-import { useParams } from 'react-router';
 import FiltersProvider from '../../components/common/Filters/FiltersProvider';
 import { useProject } from '../../hooks/useProject';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
+import {
+    selectDashboardTiles,
+    selectParameterValues,
+    useDashboardAllFilters,
+    useDashboardSelector,
+} from '../dashboard/store';
 import ActiveFilters from './ActiveFilters';
 import AddFilterButton from './AddFilterButton';
 
@@ -21,12 +27,12 @@ interface Props {
 
 const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
     const { track } = useTracking();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const [openPopoverId, setPopoverId] = useState<string>();
 
     const project = useProject(projectUuid);
 
-    const allFilters = useDashboardContext((c) => c.allFilters);
+    const allFilters = useDashboardAllFilters();
     const resetDashboardFilters = useDashboardContext(
         (c) => c.resetDashboardFilters,
     );
@@ -42,7 +48,8 @@ const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
     const allFilterableMetrics = useDashboardContext(
         (c) => c.allFilterableMetrics,
     );
-    const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
+    const dashboardTiles = useDashboardSelector(selectDashboardTiles);
+    const parameterValues = useDashboardSelector(selectParameterValues);
     const filterableFieldsByTileUuid = useDashboardContext(
         (c) => c.filterableFieldsByTileUuid,
     );
@@ -100,6 +107,7 @@ const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
             dashboardTiles={dashboardTiles}
             filterableFieldsByTileUuid={filterableFieldsByTileUuid}
             activeTabUuid={activeTabUuid}
+            parameterValues={parameterValues}
         >
             <AddFilterButton
                 isEditMode={isEditMode}

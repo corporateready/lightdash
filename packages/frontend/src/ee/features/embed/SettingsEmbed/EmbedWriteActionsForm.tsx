@@ -1,0 +1,760 @@
+import {
+    EMBED_MAX_SOURCE_SPACE_UUIDS,
+    EMBED_MAX_WRITE_SPACE_UUIDS,
+    getEmbedWriteSpaceUuids,
+    ProjectMemberRole,
+    ServiceAccountScope,
+    type CreateEmbedJwt,
+    type ServiceAccount,
+} from '@lightdash/common';
+import {
+    Anchor,
+    Badge,
+    Button,
+    Code,
+    Divider,
+    Group,
+    Menu,
+    MultiSelect,
+    ScrollArea,
+    SegmentedControl,
+    Select,
+    Stack,
+    Switch,
+    Text,
+    TextInput,
+    Title,
+} from '@mantine/core';
+import {
+    IconChevronDown,
+    IconFolder,
+    IconKey,
+    IconPlus,
+} from '@tabler/icons-react';
+import { useEffect, useMemo, useState, type FC } from 'react';
+import Callout from '../../../../components/common/Callout';
+import MantineIcon from '../../../../components/common/MantineIcon';
+import MantineModal from '../../../../components/common/MantineModal';
+import {
+    useCreateMutation,
+    useSpaceSummaries,
+} from '../../../../hooks/useSpaces';
+import { useCustomRoles } from '../../customRoles/useCustomRoles';
+import { useServiceAccounts } from '../../serviceAccounts/useServiceAccounts';
+import styles from './EmbedWriteActionsForm.module.css';
+
+const SYSTEM_ROLE_OPTIONS = [
+    { value: ServiceAccountScope.SYSTEM_ADMIN, label: 'Admin' },
+    { value: ServiceAccountScope.SYSTEM_DEVELOPER, label: 'Developer' },
+    { value: ServiceAccountScope.SYSTEM_EDITOR, label: 'Editor' },
+    {
+        value: ServiceAccountScope.SYSTEM_INTERACTIVE_VIEWER,
+        label: 'Interactive viewer',
+    },
+    { value: ServiceAccountScope.SYSTEM_VIEWER, label: 'Viewer' },
+];
+
+const AI_AGENT_SYSTEM_ROLE_OPTIONS = SYSTEM_ROLE_OPTIONS.filter(
+    (option) =>
+        ![
+            ServiceAccountScope.SYSTEM_INTERACTIVE_VIEWER,
+            ServiceAccountScope.SYSTEM_VIEWER,
+        ].includes(option.value),
+);
+
+const SCOPE_LABEL: Partial<Record<ServiceAccountScope, string>> = {
+    [ServiceAccountScope.SYSTEM_ADMIN]: 'Admin',
+    [ServiceAccountScope.SYSTEM_DEVELOPER]: 'Developer',
+    [ServiceAccountScope.SYSTEM_EDITOR]: 'Editor',
+    [ServiceAccountScope.SYSTEM_INTERACTIVE_VIEWER]: 'Interactive viewer',
+    [ServiceAccountScope.SYSTEM_VIEWER]: 'Viewer',
+    [ServiceAccountScope.SYSTEM_MEMBER]: 'Member',
+    [ServiceAccountScope.ORG_ADMIN]: 'Admin',
+    [ServiceAccountScope.ORG_EDIT]: 'Editor',
+    [ServiceAccountScope.ORG_READ]: 'Viewer',
+    [ServiceAccountScope.SCIM_MANAGE]: 'SCIM',
+};
+
+const WRITABLE_SERVICE_ACCOUNT_SCOPES = [
+    ServiceAccountScope.SYSTEM_ADMIN,
+    ServiceAccountScope.SYSTEM_DEVELOPER,
+    ServiceAccountScope.SYSTEM_EDITOR,
+    ServiceAccountScope.ORG_ADMIN,
+    ServiceAccountScope.ORG_EDIT,
+];
+
+const SERVICE_ACCOUNT_SCOPE_PROJECT_ROLE_MAP: Partial<
+    Record<ServiceAccountScope, ProjectMemberRole>
+> = {
+    [ServiceAccountScope.SYSTEM_ADMIN]: ProjectMemberRole.ADMIN,
+    [ServiceAccountScope.SYSTEM_DEVELOPER]: ProjectMemberRole.DEVELOPER,
+    [ServiceAccountScope.SYSTEM_EDITOR]: ProjectMemberRole.EDITOR,
+};
+
+type Props = {
+    projectUuid: string;
+    value: CreateEmbedJwt['writeActions'] | undefined;
+    onChange: (value: CreateEmbedJwt['writeActions'] | undefined) => void;
+    required?: boolean;
+    fixedWriteSpaceUuid?: string;
+    // Dashboard and AI agent tokens can read existing content from other spaces.
+    sourceSpacesTarget?: SourceSpacesTarget;
+};
+
+type SourceSpacesTarget = 'dashboard' | 'aiAgent';
+
+const SOURCE_SPACES_COPY: Record<
+    SourceSpacesTarget,
+    { label: string; description: string }
+> = {
+    dashboard: {
+        label: 'Spaces to add charts from',
+        description:
+            "Dashboard editors can add existing charts from these spaces. Charts stay in their space and can't be edited from the dashboard. The service account must be able to view them.",
+    },
+    aiAgent: {
+        label: 'Extra spaces the agent can use',
+        description:
+            'The agent can find and read charts and dashboards in these spaces, in addition to the write spaces. The service account must be able to view them.',
+    },
+};
+
+const EmbedWriteActionsForm: FC<Props> = ({
+    projectUuid,
+    value,
+    onChange,
+    required = false,
+    fixedWriteSpaceUuid,
+    sourceSpacesTarget,
+}) => {
+    const { listAccounts, createAccount } = useServiceAccounts();
+    const { listRoles } = useCustomRoles();
+    const createSpaceMutation = useCreateMutation(projectUuid);
+    const { data: spaces = [], isLoading: isLoadingSpaces } = useSpaceSummaries(
+        projectUuid,
+        true,
+    );
+    const [isEnabled, setIsEnabled] = useState(required || !!value);
+    const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+    const [isCreateSpaceModalOpen, setIsCreateSpaceModalOpen] = useState(false);
+    const [selectedServiceAccountUuid, setSelectedServiceAccountUuid] =
+        useState<string | undefined>();
+    const [selectedSpaceUuid, setSelectedSpaceUuid] = useState<string>();
+    const [additionalWriteSpaceUuids, setAdditionalWriteSpaceUuids] = useState<
+        string[]
+    >(() => getEmbedWriteSpaceUuids(value).slice(1));
+    const [sourceSpaceUuids, setSourceSpaceUuids] = useState<string[]>(
+        value?.sourceSpaceUuids ?? [],
+    );
+    const [newServiceAccountDescription, setNewServiceAccountDescription] =
+        useState('Embedded customer actions');
+    const [newSpaceName, setNewSpaceName] = useState(
+        'Embedded customer content',
+    );
+    const [roleType, setRoleType] = useState<'system' | 'custom'>('system');
+    const [systemRole, setSystemRole] = useState(
+        required
+            ? ServiceAccountScope.SYSTEM_EDITOR
+            : SYSTEM_ROLE_OPTIONS[1].value,
+    );
+    const [customRole, setCustomRole] = useState<string | null>(null);
+
+    const serviceAccounts = useMemo(
+        () => listAccounts.data ?? [],
+        [listAccounts.data],
+    );
+
+    const customRoleOptions = useMemo(
+        () =>
+            (listRoles.data ?? []).map((role) => ({
+                value: role.roleUuid,
+                label: role.name,
+            })),
+        [listRoles.data],
+    );
+
+    const rolesByUuid = useMemo(() => {
+        const map = new Map<string, string>();
+        customRoleOptions.forEach((role) => map.set(role.value, role.label));
+        return map;
+    }, [customRoleOptions]);
+
+    const systemRoleOptions = required
+        ? AI_AGENT_SYSTEM_ROLE_OPTIONS
+        : SYSTEM_ROLE_OPTIONS;
+    const selectedRole = roleType === 'system' ? systemRole : customRole;
+    const canCreateServiceAccount = roleType === 'system' || !!customRole;
+
+    const selectableServiceAccounts = useMemo(
+        () =>
+            required
+                ? serviceAccounts.filter(
+                      (account) =>
+                          account.roleUuid ||
+                          ('projectAccessCount' in account &&
+                              account.projectAccessCount > 0) ||
+                          account.scopes.some((scope) =>
+                              WRITABLE_SERVICE_ACCOUNT_SCOPES.includes(scope),
+                          ),
+                  )
+                : serviceAccounts,
+        [required, serviceAccounts],
+    );
+
+    const selectedServiceAccount = useMemo(
+        () =>
+            selectableServiceAccounts.find(
+                (account) => account.uuid === selectedServiceAccountUuid,
+            ),
+        [selectableServiceAccounts, selectedServiceAccountUuid],
+    );
+    const selectedSpace = useMemo(
+        () => spaces.find((space) => space.uuid === selectedSpaceUuid),
+        [selectedSpaceUuid, spaces],
+    );
+    const additionalWriteSpaceOptions = useMemo(
+        () =>
+            spaces
+                .filter((space) => space.uuid !== selectedSpaceUuid)
+                .map((space) => ({ value: space.uuid, label: space.name })),
+        [selectedSpaceUuid, spaces],
+    );
+    const selectedAdditionalWriteSpaceUuids = useMemo(
+        () =>
+            additionalWriteSpaceUuids.filter((uuid) =>
+                additionalWriteSpaceOptions.some(
+                    (option) => option.value === uuid,
+                ),
+            ),
+        [additionalWriteSpaceOptions, additionalWriteSpaceUuids],
+    );
+    const sourceSpaceOptions = useMemo(
+        () =>
+            additionalWriteSpaceOptions.filter(
+                (option) =>
+                    !selectedAdditionalWriteSpaceUuids.includes(option.value),
+            ),
+        [additionalWriteSpaceOptions, selectedAdditionalWriteSpaceUuids],
+    );
+    const selectedSourceSpaceUuids = useMemo(
+        () =>
+            sourceSpacesTarget
+                ? sourceSpaceUuids.filter((uuid) =>
+                      sourceSpaceOptions.some(
+                          (option) => option.value === uuid,
+                      ),
+                  )
+                : [],
+        [sourceSpacesTarget, sourceSpaceOptions, sourceSpaceUuids],
+    );
+
+    useEffect(() => {
+        if (required) {
+            setIsEnabled(true);
+            if (
+                !AI_AGENT_SYSTEM_ROLE_OPTIONS.some(
+                    (option) => option.value === systemRole,
+                )
+            ) {
+                setSystemRole(ServiceAccountScope.SYSTEM_EDITOR);
+            }
+        }
+    }, [required, systemRole]);
+
+    useEffect(() => {
+        const matchingAccount = selectableServiceAccounts.find(
+            (account) => account.userUuid === value?.serviceAccountUserUuid,
+        );
+        const defaultAccount =
+            selectableServiceAccounts.find(
+                (account) =>
+                    account.roleUuid ||
+                    ('projectAccessCount' in account &&
+                        account.projectAccessCount > 0) ||
+                    account.scopes.some((scope) =>
+                        WRITABLE_SERVICE_ACCOUNT_SCOPES.includes(scope),
+                    ),
+            ) ?? selectableServiceAccounts[0];
+        const nextServiceAccountUuid =
+            matchingAccount?.uuid ?? defaultAccount?.uuid;
+
+        setSelectedServiceAccountUuid((currentUuid) => {
+            if (
+                currentUuid &&
+                selectableServiceAccounts.some(
+                    (account) => account.uuid === currentUuid,
+                )
+            ) {
+                return currentUuid;
+            }
+            return nextServiceAccountUuid;
+        });
+    }, [selectableServiceAccounts, value?.serviceAccountUserUuid]);
+
+    const valueDefaultSpaceUuid = getEmbedWriteSpaceUuids(value)[0];
+    useEffect(() => {
+        const nextSpaceUuid =
+            fixedWriteSpaceUuid &&
+            spaces.some((space) => space.uuid === fixedWriteSpaceUuid)
+                ? fixedWriteSpaceUuid
+                : valueDefaultSpaceUuid &&
+                    spaces.some((space) => space.uuid === valueDefaultSpaceUuid)
+                  ? valueDefaultSpaceUuid
+                  : spaces[0]?.uuid;
+
+        setSelectedSpaceUuid((currentUuid) => {
+            if (
+                fixedWriteSpaceUuid &&
+                spaces.some((space) => space.uuid === fixedWriteSpaceUuid)
+            ) {
+                return fixedWriteSpaceUuid;
+            }
+            if (
+                currentUuid &&
+                spaces.some((space) => space.uuid === currentUuid)
+            ) {
+                return currentUuid;
+            }
+            return nextSpaceUuid;
+        });
+    }, [fixedWriteSpaceUuid, spaces, valueDefaultSpaceUuid]);
+
+    useEffect(() => {
+        if (!isEnabled || !selectedServiceAccount || !selectedSpace) {
+            onChange(undefined);
+            return;
+        }
+
+        onChange({
+            serviceAccountUserUuid: selectedServiceAccount.userUuid,
+            writeSpaceUuids: [
+                selectedSpace.uuid,
+                ...selectedAdditionalWriteSpaceUuids,
+            ],
+            ...(selectedSourceSpaceUuids.length > 0
+                ? { sourceSpaceUuids: selectedSourceSpaceUuids }
+                : {}),
+        });
+    }, [
+        isEnabled,
+        onChange,
+        selectedServiceAccount,
+        selectedSpace,
+        selectedAdditionalWriteSpaceUuids,
+        selectedSourceSpaceUuids,
+    ]);
+
+    const getServiceAccountRoleLabel = (account: ServiceAccount) => {
+        if (account.roleUuid) {
+            return rolesByUuid.get(account.roleUuid) ?? 'Custom role';
+        }
+        if (account.scopes.length === 1) {
+            return SCOPE_LABEL[account.scopes[0]] ?? account.scopes[0];
+        }
+        if (account.scopes.length === 0) {
+            return 'Custom role';
+        }
+        return `${account.scopes.length} permissions`;
+    };
+
+    const handleCreateServiceAccount = async () => {
+        const label =
+            newServiceAccountDescription.trim() || 'Embedded customer actions';
+        const projectRole =
+            roleType === 'system'
+                ? SERVICE_ACCOUNT_SCOPE_PROJECT_ROLE_MAP[
+                      systemRole as ServiceAccountScope
+                  ]
+                : undefined;
+        if (required && roleType === 'system' && !projectRole) {
+            return;
+        }
+        const newAccount = await createAccount.mutateAsync({
+            description: label,
+            expiresAt: null,
+            ...(required
+                ? {
+                      scopes: [ServiceAccountScope.SYSTEM_MEMBER],
+                      projectAccess:
+                          roleType === 'system'
+                              ? [{ projectUuid, role: projectRole }]
+                              : [
+                                    {
+                                        projectUuid,
+                                        roleUuid: customRole ?? undefined,
+                                    },
+                                ],
+                  }
+                : roleType === 'system'
+                  ? { scopes: [systemRole as ServiceAccountScope] }
+                  : { roleUuid: customRole ?? undefined }),
+        });
+
+        setSelectedServiceAccountUuid(newAccount.uuid);
+        setIsCreateModalOpen(false);
+    };
+
+    const handleCreateSpace = async () => {
+        const label = newSpaceName.trim() || 'Embedded customer content';
+        const newSpace = await createSpaceMutation.mutateAsync({
+            name: label,
+        });
+
+        setSelectedSpaceUuid(newSpace.uuid);
+        setIsCreateSpaceModalOpen(false);
+    };
+
+    return (
+        <Stack gap="md">
+            {!required && (
+                <Switch
+                    checked={isEnabled}
+                    onChange={(event) =>
+                        setIsEnabled(event.currentTarget.checked)
+                    }
+                    label="Enable write actions"
+                    description="Allow embedded users to perform actions that create or update Lightdash resources."
+                />
+            )}
+
+            {isEnabled && (
+                <Stack gap="md">
+                    {!required && <Divider />}
+
+                    <Stack gap="xs">
+                        <Title order={6}>Run actions as</Title>
+                        <Text c="dimmed" fz="sm">
+                            Select the service account Lightdash should use when
+                            an embed action needs read or write permissions.
+                        </Text>
+                    </Stack>
+
+                    <Stack gap="xs">
+                        <Text size="sm" fw={500}>
+                            Service account
+                        </Text>
+                        <Menu
+                            width="target"
+                            position="bottom-start"
+                            middlewares={{ flip: true, shift: true }}
+                        >
+                            <Menu.Target>
+                                <Button
+                                    variant="default"
+                                    fullWidth
+                                    justify="space-between"
+                                    loading={listAccounts.isLoading}
+                                    rightSection={
+                                        <MantineIcon icon={IconChevronDown} />
+                                    }
+                                >
+                                    {selectedServiceAccount
+                                        ? `${selectedServiceAccount.description} - ${getServiceAccountRoleLabel(selectedServiceAccount)}`
+                                        : 'Select service account'}
+                                </Button>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                                <ScrollArea.Autosize
+                                    className={styles.dropdownScrollArea}
+                                    type="auto"
+                                >
+                                    {selectableServiceAccounts.map(
+                                        (account) => (
+                                            <Menu.Item
+                                                key={account.uuid}
+                                                onClick={() =>
+                                                    setSelectedServiceAccountUuid(
+                                                        account.uuid,
+                                                    )
+                                                }
+                                            >
+                                                <Stack gap={0}>
+                                                    <Text fz="sm">
+                                                        {account.description}
+                                                    </Text>
+                                                    <Text fz="xs" c="dimmed">
+                                                        {getServiceAccountRoleLabel(
+                                                            account,
+                                                        )}
+                                                    </Text>
+                                                </Stack>
+                                            </Menu.Item>
+                                        ),
+                                    )}
+                                    {selectableServiceAccounts.length === 0 && (
+                                        <Menu.Label>
+                                            No compatible service accounts
+                                        </Menu.Label>
+                                    )}
+                                </ScrollArea.Autosize>
+                                <Menu.Divider />
+                                <Menu.Item
+                                    leftSection={
+                                        <MantineIcon icon={IconPlus} />
+                                    }
+                                    onClick={() => setIsCreateModalOpen(true)}
+                                >
+                                    Create new service account
+                                </Menu.Item>
+                            </Menu.Dropdown>
+                        </Menu>
+                        <Text c="dimmed" fz="xs">
+                            Required before write actions can be enabled.
+                        </Text>
+                    </Stack>
+
+                    {selectedServiceAccount && (
+                        <Group gap="xs">
+                            <Badge leftSection={<MantineIcon icon={IconKey} />}>
+                                {getServiceAccountRoleLabel(
+                                    selectedServiceAccount,
+                                )}
+                            </Badge>
+                            <Text c="dimmed" fz="xs">
+                                Service account user:{' '}
+                                <Code>{selectedServiceAccount.userUuid}</Code>
+                            </Text>
+                        </Group>
+                    )}
+
+                    <Stack gap="xs">
+                        <Text size="sm" fw={500}>
+                            Default space for created content
+                        </Text>
+                        <Menu
+                            width="target"
+                            position="bottom-start"
+                            middlewares={{ flip: true, shift: true }}
+                        >
+                            <Menu.Target>
+                                <Button
+                                    variant="default"
+                                    fullWidth
+                                    justify="space-between"
+                                    loading={isLoadingSpaces}
+                                    disabled={fixedWriteSpaceUuid !== undefined}
+                                    rightSection={
+                                        <MantineIcon icon={IconChevronDown} />
+                                    }
+                                >
+                                    {selectedSpace
+                                        ? selectedSpace.name
+                                        : 'Select space'}
+                                </Button>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                                <ScrollArea.Autosize
+                                    className={styles.dropdownScrollArea}
+                                    type="auto"
+                                >
+                                    {spaces.map((space) => (
+                                        <Menu.Item
+                                            key={space.uuid}
+                                            onClick={() =>
+                                                setSelectedSpaceUuid(space.uuid)
+                                            }
+                                        >
+                                            <Stack gap={0}>
+                                                <Text fz="sm">
+                                                    {space.name}
+                                                </Text>
+                                                <Text fz="xs" c="dimmed">
+                                                    {space.parentSpaceUuid
+                                                        ? 'Nested space'
+                                                        : 'Top-level space'}
+                                                </Text>
+                                            </Stack>
+                                        </Menu.Item>
+                                    ))}
+                                </ScrollArea.Autosize>
+                                <Menu.Divider />
+                                <Menu.Item
+                                    leftSection={
+                                        <MantineIcon icon={IconPlus} />
+                                    }
+                                    onClick={() =>
+                                        setIsCreateSpaceModalOpen(true)
+                                    }
+                                >
+                                    Create new space
+                                </Menu.Item>
+                            </Menu.Dropdown>
+                        </Menu>
+                        <Text c="dimmed" fz="xs">
+                            {fixedWriteSpaceUuid
+                                ? "This is the selected dashboard's space. New content is saved here unless the embedded user picks one of the additional write spaces."
+                                : 'New content is saved here unless the embedded user picks one of the additional write spaces.'}
+                        </Text>
+                    </Stack>
+
+                    {selectedSpace && (
+                        <Group gap="xs">
+                            <Badge
+                                leftSection={<MantineIcon icon={IconFolder} />}
+                            >
+                                Default space
+                            </Badge>
+                            <Text c="dimmed" fz="xs">
+                                Space UUID: <Code>{selectedSpace.uuid}</Code>
+                            </Text>
+                        </Group>
+                    )}
+
+                    <MultiSelect
+                        label="Additional write spaces"
+                        description="Embedded users can also edit content in these spaces and choose them when saving. The service account needs edit access to each one."
+                        placeholder={
+                            selectedAdditionalWriteSpaceUuids.length === 0
+                                ? 'Only the default space'
+                                : undefined
+                        }
+                        data={additionalWriteSpaceOptions}
+                        value={selectedAdditionalWriteSpaceUuids}
+                        onChange={setAdditionalWriteSpaceUuids}
+                        maxValues={EMBED_MAX_WRITE_SPACE_UUIDS - 1}
+                        searchable
+                        clearable
+                        disabled={isLoadingSpaces}
+                    />
+
+                    {sourceSpacesTarget && (
+                        <MultiSelect
+                            label={SOURCE_SPACES_COPY[sourceSpacesTarget].label}
+                            description={
+                                SOURCE_SPACES_COPY[sourceSpacesTarget]
+                                    .description
+                            }
+                            placeholder={
+                                selectedSourceSpaceUuids.length === 0
+                                    ? 'Only the write spaces'
+                                    : undefined
+                            }
+                            data={sourceSpaceOptions}
+                            value={selectedSourceSpaceUuids}
+                            onChange={setSourceSpaceUuids}
+                            maxValues={EMBED_MAX_SOURCE_SPACE_UUIDS}
+                            searchable
+                            clearable
+                            disabled={isLoadingSpaces}
+                        />
+                    )}
+
+                    <Callout variant="info" title="JWT user override">
+                        <Text fz="sm">
+                            By default, write actions run as the selected
+                            service account user. To run them as a specific
+                            Lightdash user instead, include a proposed{' '}
+                            <Code>userUuid</Code> claim in the embed JWT. You
+                            can find user UUIDs from{' '}
+                            <Anchor href="/api/v1/org/users" target="_blank">
+                                <Code>/api/v1/org/users</Code>
+                            </Anchor>
+                            .
+                        </Text>
+                    </Callout>
+                </Stack>
+            )}
+
+            <MantineModal
+                opened={isCreateModalOpen}
+                onClose={() => setIsCreateModalOpen(false)}
+                title="Create service account"
+                icon={IconKey}
+                size="md"
+                actions={
+                    <Button
+                        leftSection={<MantineIcon icon={IconPlus} />}
+                        onClick={handleCreateServiceAccount}
+                        loading={createAccount.isLoading}
+                        disabled={!canCreateServiceAccount}
+                    >
+                        Create and use
+                    </Button>
+                }
+            >
+                <Stack gap="md">
+                    <TextInput
+                        label="Description"
+                        description="Service accounts created here do not expire."
+                        value={newServiceAccountDescription}
+                        onChange={(event) =>
+                            setNewServiceAccountDescription(
+                                event.currentTarget.value,
+                            )
+                        }
+                    />
+                    <Stack gap="xs">
+                        <Text size="sm" fw={500}>
+                            Role type
+                        </Text>
+                        <SegmentedControl
+                            fullWidth
+                            data={[
+                                { label: 'System role', value: 'system' },
+                                { label: 'Custom role', value: 'custom' },
+                            ]}
+                            value={roleType}
+                            onChange={(value) =>
+                                setRoleType(value as 'system' | 'custom')
+                            }
+                        />
+                    </Stack>
+                    <Select
+                        label={roleType === 'system' ? 'System role' : 'Role'}
+                        description={
+                            roleType === 'system'
+                                ? 'Use an existing Lightdash system role for this service account.'
+                                : 'Use one of the existing custom roles for this service account.'
+                        }
+                        data={
+                            roleType === 'system'
+                                ? systemRoleOptions
+                                : customRoleOptions
+                        }
+                        value={selectedRole}
+                        onChange={(value) => {
+                            if (!value) {
+                                return;
+                            }
+                            if (roleType === 'system') {
+                                setSystemRole(value as ServiceAccountScope);
+                            } else {
+                                setCustomRole(value);
+                            }
+                        }}
+                        searchable
+                        disabled={roleType === 'custom' && listRoles.isLoading}
+                    />
+                </Stack>
+            </MantineModal>
+            <MantineModal
+                opened={isCreateSpaceModalOpen}
+                onClose={() => setIsCreateSpaceModalOpen(false)}
+                title="Create space"
+                icon={IconFolder}
+                size="md"
+                actions={
+                    <Button
+                        leftSection={<MantineIcon icon={IconPlus} />}
+                        onClick={handleCreateSpace}
+                        loading={createSpaceMutation.isLoading}
+                    >
+                        Create and use
+                    </Button>
+                }
+            >
+                <Stack gap="md">
+                    <TextInput
+                        label="Space name"
+                        value={newSpaceName}
+                        onChange={(event) =>
+                            setNewSpaceName(event.currentTarget.value)
+                        }
+                    />
+                </Stack>
+            </MantineModal>
+        </Stack>
+    );
+};
+
+export default EmbedWriteActionsForm;

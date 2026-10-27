@@ -1,5 +1,5 @@
 import { type ResultRow, type ResultValue } from '@lightdash/common';
-import { Box, Menu, Portal, type MenuProps } from '@mantine-8/core';
+import { Box, Menu, Portal, type MenuProps } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconCopy } from '@tabler/icons-react';
 import { type FC } from 'react';
@@ -7,7 +7,7 @@ import useToaster from '../../hooks/toaster/useToaster';
 import MantineIcon from '../common/MantineIcon';
 import { UnderlyingDataMenuItem } from '../DashboardTiles/UnderlyingDataMenuItem';
 import { isFunnelVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import { useVisualizationConfig } from '../LightdashVisualization/useVisualizationContext';
 import { useMetricQueryDataContext } from '../MetricQueryData/useMetricQueryDataContext';
 
 export type FunnelChartContextMenuProps = {
@@ -29,7 +29,7 @@ const FunnelChartContextMenu: FC<FunnelChartContextMenuProps> = ({
     onClose,
     canViewUnderlyingData,
 }) => {
-    const { visualizationConfig } = useVisualizationContext();
+    const visualizationConfig = useVisualizationConfig();
 
     const { showToastSuccess } = useToaster();
     const clipboard = useClipboard({ timeout: 200 });
@@ -75,8 +75,6 @@ const FunnelChartContextMenu: FC<FunnelChartContextMenuProps> = ({
             opened={opened}
             onOpen={onOpen}
             onClose={onClose}
-            withinPortal
-            shadow="md"
             closeOnItemClick
             closeOnEscape
             radius={0}

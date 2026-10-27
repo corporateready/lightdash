@@ -1,0 +1,324 @@
+import { WarehouseTypes } from '@lightdash/common';
+import fs from 'fs';
+import path from 'path';
+import { ApiClient, Body } from './api-client';
+
+export const BIGQUERY_CREDENTIALS_PATH = path.resolve(
+    __dirname,
+    '../../e2e/cypress/fixtures/credentials.json',
+);
+
+/**
+ * The BigQuery staging dataset (`e2e_jaffle_shop`) holds the same jaffle +
+ * `timezone_test` rows as the local Postgres seed, so warehouse-parity tests
+ * can assert the same expected counts against it.
+ */
+export function bigqueryWarehouseConfig(): Record<string, unknown> {
+    const keyfileContents = JSON.parse(
+        fs.readFileSync(BIGQUERY_CREDENTIALS_PATH, 'utf-8'),
+    );
+    return {
+        project: 'lightdash-database-staging',
+        location: 'europe-west1',
+        dataset: 'e2e_jaffle_shop',
+        keyfileContents,
+        type: WarehouseTypes.BIGQUERY,
+    };
+}
+
+/**
+ * True when a BigQuery service-account keyfile is available. CI writes the
+ * `GCP_CREDENTIALS` secret to this path; locally it is usually absent, so
+ * BigQuery-only suites should `describe.skipIf(!hasBigqueryCredentials())`.
+ */
+export function hasBigqueryCredentials(): boolean {
+    if (!fs.existsSync(BIGQUERY_CREDENTIALS_PATH)) return false;
+    try {
+        const creds = JSON.parse(
+            fs.readFileSync(BIGQUERY_CREDENTIALS_PATH, 'utf-8'),
+        ) as { private_key?: string };
+        return Boolean(creds.private_key);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Warehouse connection builders + availability predicates, shared across
+ * warehouse-parity suites. Each builder targets the jaffle dataset that mirrors
+ * the local Postgres seed, so the same queries assert the same expectations
+ * across dialects. Predicates report whether the matching credentials are
+ * present (CI provides them; locally most are absent, so suites should skip).
+ */
+export function postgresWarehouseConfig(): Record<string, unknown> {
+    return {
+        host: process.env.PGHOST || 'db-dev',
+        user: process.env.PGUSER || 'postgres',
+        password: process.env.PGPASSWORD || 'password',
+        dbname: process.env.PGDATABASE || 'postgres',
+        schema: 'jaffle',
+        port: Number(process.env.PGPORT) || 5432,
+        sslmode: 'disable',
+        type: WarehouseTypes.POSTGRES,
+    };
+}
+
+export function hasSnowflakeCredentials(): boolean {
+    return Boolean(
+        process.env.SNOWFLAKE_ACCOUNT &&
+        process.env.SNOWFLAKE_USER &&
+        process.env.SNOWFLAKE_PASSWORD,
+    );
+}
+
+export function snowflakeWarehouseConfig(): Record<string, unknown> {
+    return {
+        account: process.env.SNOWFLAKE_ACCOUNT,
+        user: process.env.SNOWFLAKE_USER,
+        password: process.env.SNOWFLAKE_PASSWORD,
+        role: 'SYSADMIN',
+        database: 'SNOWFLAKE_DATABASE_STAGING',
+        warehouse: 'TESTING',
+        schema: 'JAFFLE',
+        type: WarehouseTypes.SNOWFLAKE,
+    };
+}
+
+export function hasDatabricksCredentials(): boolean {
+    return Boolean(
+        process.env.DATABRICKS_HOST &&
+        process.env.DATABRICKS_PATH &&
+        process.env.DATABRICKS_TOKEN,
+    );
+}
+
+export function databricksWarehouseConfig(): Record<string, unknown> {
+    return {
+        type: WarehouseTypes.DATABRICKS,
+        serverHostName: process.env.DATABRICKS_HOST,
+        httpPath: process.env.DATABRICKS_PATH,
+        personalAccessToken: process.env.DATABRICKS_TOKEN,
+        database: 'jaffle',
+    };
+}
+
+export function hasTrinoCredentials(): boolean {
+    return Boolean(
+        process.env.TRINO_HOST &&
+        process.env.TRINO_PORT &&
+        process.env.TRINO_USER &&
+        process.env.TRINO_PASSWORD,
+    );
+}
+
+export function trinoWarehouseConfig(): Record<string, unknown> {
+    return {
+        type: WarehouseTypes.TRINO,
+        host: process.env.TRINO_HOST,
+        port: Number(process.env.TRINO_PORT),
+        user: process.env.TRINO_USER,
+        password: process.env.TRINO_PASSWORD,
+        dbname: 'staging_postgres_trino',
+        schema: 'jaffle',
+        http_scheme: 'https',
+    };
+}
+
+export type WarehouseTestEntry = {
+    name: string;
+    config: Record<string, unknown>;
+};
+
+const WAREHOUSE_NAMES = [
+    'postgres',
+    'snowflake',
+    'bigquery',
+    'databricks',
+    'trino',
+] as const;
+
+type WarehouseName = (typeof WAREHOUSE_NAMES)[number];
+
+const isWarehouseName = (name: string): name is WarehouseName =>
+    (WAREHOUSE_NAMES as readonly string[]).includes(name);
+
+const hasWarehouseCredentials: Record<WarehouseName, () => boolean> = {
+    postgres: () => true,
+    snowflake: hasSnowflakeCredentials,
+    bigquery: hasBigqueryCredentials,
+    databricks: hasDatabricksCredentials,
+    trino: hasTrinoCredentials,
+};
+
+/**
+ * `REQUIRED_WAREHOUSES` (comma-separated names) turns a credential-less skip
+ * into a failure naming the warehouse; unset, nothing is required.
+ */
+function assertRequiredWarehousesAvailable(): void {
+    const required = (process.env.REQUIRED_WAREHOUSES ?? '')
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0);
+    required.forEach((name) => {
+        if (!isWarehouseName(name)) {
+            throw new Error(
+                `REQUIRED_WAREHOUSES names "${name}", which is not a warehouse these suites know. Known: ${WAREHOUSE_NAMES.join(', ')}.`,
+            );
+        }
+        if (!hasWarehouseCredentials[name]()) {
+            throw new Error(
+                `REQUIRED_WAREHOUSES requires ${name}, but its credentials are not available, so every warehouse-parameterized suite would silently skip it.`,
+            );
+        }
+    });
+}
+
+/**
+ * The warehouses whose credentials are currently available, ready to drive a
+ * parameterized suite. Postgres and Databricks are included by default and can
+ * be excluded per suite through options. Throws when a warehouse named in
+ * `REQUIRED_WAREHOUSES` has no credentials.
+ */
+export function getAvailableWarehouseConfigs(
+    options: {
+        includePostgres?: boolean;
+        includeDatabricks?: boolean;
+    } = {},
+): WarehouseTestEntry[] {
+    assertRequiredWarehousesAvailable();
+    const { includePostgres = true, includeDatabricks = true } = options;
+    const entries: WarehouseTestEntry[] = [];
+    if (includePostgres) {
+        entries.push({ name: 'postgres', config: postgresWarehouseConfig() });
+    }
+    if (hasSnowflakeCredentials()) {
+        entries.push({ name: 'snowflake', config: snowflakeWarehouseConfig() });
+    }
+    if (hasBigqueryCredentials()) {
+        entries.push({ name: 'bigquery', config: bigqueryWarehouseConfig() });
+    }
+    if (includeDatabricks && hasDatabricksCredentials()) {
+        entries.push({
+            name: 'databricks',
+            config: databricksWarehouseConfig(),
+        });
+    }
+    if (hasTrinoCredentials()) {
+        entries.push({ name: 'trino', config: trinoWarehouseConfig() });
+    }
+    return entries;
+}
+
+export async function createProject(
+    client: ApiClient,
+    projectName: string,
+    warehouseConnection: Record<string, unknown>,
+): Promise<string> {
+    const resp = await client.post<{
+        results: { project: { projectUuid: string } };
+    }>('/api/v1/org/projects', {
+        name: projectName,
+        type: 'DEFAULT',
+        dbtConnection: {
+            target: '',
+            environment: [],
+            type: 'dbt',
+            project_dir: process.env.DBT_PROJECT_DIR || '/usr/app/dbt',
+        },
+        dbtVersion: 'v1.12',
+        warehouseConnection,
+    });
+    return resp.body.results.project.projectUuid;
+}
+
+async function waitForV1JobCompletion(
+    client: ApiClient,
+    jobUuid: string,
+    maxRetries = 300,
+): Promise<'DONE' | 'ERROR' | 'TIMEOUT'> {
+    for (let i = 0; i < maxRetries; i++) {
+        const resp = await client.get<
+            Body<{ jobStatus: 'STARTED' | 'RUNNING' | 'DONE' | 'ERROR' }>
+        >(`/api/v1/jobs/${jobUuid}`);
+        const { jobStatus } = resp.body.results;
+        if (jobStatus === 'ERROR') return 'ERROR';
+        if (jobStatus === 'DONE') return 'DONE';
+        await new Promise((r) => setTimeout(r, 1000));
+    }
+    return 'TIMEOUT';
+}
+
+/**
+ * Kick off a full refresh (dbt compile + warehouse catalog) and return the job
+ * to wait on, so callers can overlap the compile with other work.
+ */
+export async function startProjectRefresh(
+    client: ApiClient,
+    projectUuid: string,
+): Promise<string> {
+    const refreshResp = await client.post<Body<{ jobUuid: string }>>(
+        `/api/v1/projects/${projectUuid}/refresh`,
+    );
+    return refreshResp.body.results.jobUuid;
+}
+
+/**
+ * Block until a refresh job finishes. Throws if it fails so callers fail
+ * loudly instead of querying an empty project.
+ */
+export async function waitForProjectRefresh(
+    client: ApiClient,
+    projectName: string,
+    jobUuid: string,
+): Promise<void> {
+    const outcome = await waitForV1JobCompletion(client, jobUuid);
+    if (outcome === 'ERROR') {
+        const jobResp = await client.get<
+            Body<{ steps: { stepError?: string }[] }>
+        >(`/api/v1/jobs/${jobUuid}`);
+        const stepErrors = jobResp.body.results.steps
+            .map((step) => step.stepError)
+            .filter(Boolean)
+            .join('; ');
+        throw new Error(
+            `Project refresh errored for "${projectName}" (job ${jobUuid}): ${stepErrors}`,
+        );
+    }
+    if (outcome === 'TIMEOUT') {
+        throw new Error(
+            `Project refresh timed out for "${projectName}" (job ${jobUuid} still running after poll window)`,
+        );
+    }
+}
+
+/**
+ * Create a project, run a full refresh, and return its UUID once compiled.
+ */
+export async function createAndRefreshProject(
+    client: ApiClient,
+    projectName: string,
+    warehouseConnection: Record<string, unknown>,
+): Promise<string> {
+    const projectUuid = await createProject(
+        client,
+        projectName,
+        warehouseConnection,
+    );
+    const jobUuid = await startProjectRefresh(client, projectUuid);
+    await waitForProjectRefresh(client, projectName, jobUuid);
+    return projectUuid;
+}
+
+export async function deleteProjectsByName(
+    client: ApiClient,
+    names: string[],
+): Promise<void> {
+    const resp = await client.get<
+        Body<{ projectUuid: string; name: string }[]>
+    >('/api/v1/org/projects');
+    for (const project of resp.body.results) {
+        if (names.includes(project.name)) {
+            await client.delete(`/api/v1/org/projects/${project.projectUuid}`);
+        }
+    }
+}

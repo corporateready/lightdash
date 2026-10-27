@@ -1,8 +1,13 @@
+import { ConditionalFormattingColorApplyTo } from '../types/conditionalFormatting';
 import { DimensionType, FieldType } from '../types/field';
 import { FilterOperator } from '../types/filter';
 import {
     createConditionalFormattingConfigWithSingleColor,
     createConditionalFormattingRuleWithValues,
+    getConditionalFormattingConfig,
+    getConditionalFormattingTextStyle,
+    getPivotRowContextKey,
+    getRowConditionalFormattingColor,
     hasMatchingConditionalRules,
 } from './conditionalFormatting';
 
@@ -169,5 +174,379 @@ describe('hasMatchingConditionalRules', () => {
 
             expect(result).toBe(true);
         });
+    });
+});
+
+describe('Boolean fields', () => {
+    const mockBooleanField = {
+        name: 'is_completed',
+        table: 'orders',
+        type: DimensionType.BOOLEAN,
+        fieldType: FieldType.DIMENSION,
+        sql: 'is_completed',
+        tableLabel: 'Orders',
+        label: 'Is completed',
+        hidden: false,
+    };
+
+    const makeConfig = (
+        operator: FilterOperator,
+        values: (number | string | boolean)[],
+    ) => {
+        const config =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        const rule = createConditionalFormattingRuleWithValues();
+        rule.operator = operator;
+        rule.values = values;
+        config.rules = [rule];
+        return config;
+    };
+
+    it('matches EQUALS when boolean value equals rule value', () => {
+        const config = makeConfig(FilterOperator.EQUALS, [true]);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, true, {}, config),
+        ).toBe(true);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, false, {}, config),
+        ).toBe(false);
+    });
+
+    it('matches EQUALS false', () => {
+        const config = makeConfig(FilterOperator.EQUALS, [false]);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, false, {}, config),
+        ).toBe(true);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, true, {}, config),
+        ).toBe(false);
+    });
+
+    it('matches NOT_EQUALS', () => {
+        const config = makeConfig(FilterOperator.NOT_EQUALS, [true]);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, false, {}, config),
+        ).toBe(true);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, true, {}, config),
+        ).toBe(false);
+    });
+
+    it('matches string-encoded boolean cell values', () => {
+        const config = makeConfig(FilterOperator.EQUALS, [true]);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, 'true', {}, config),
+        ).toBe(true);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, 'false', {}, config),
+        ).toBe(false);
+    });
+
+    it('does not match EQUALS false for null values', () => {
+        const config = makeConfig(FilterOperator.EQUALS, [false]);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, null, {}, config),
+        ).toBe(false);
+    });
+
+    it('matches NULL and NOT_NULL operators', () => {
+        const nullConfig = makeConfig(FilterOperator.NULL, []);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, null, {}, nullConfig),
+        ).toBe(true);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, true, {}, nullConfig),
+        ).toBe(false);
+
+        const notNullConfig = makeConfig(FilterOperator.NOT_NULL, []);
+        expect(
+            hasMatchingConditionalRules(
+                mockBooleanField,
+                false,
+                {},
+                notNullConfig,
+            ),
+        ).toBe(true);
+    });
+
+    it('compares boolean field to another boolean field via compare target', () => {
+        const otherBooleanField = {
+            ...mockBooleanField,
+            name: 'is_paid',
+            label: 'Is paid',
+        };
+        const config =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        config.rules = [
+            {
+                id: 'rule-1',
+                operator: FilterOperator.EQUALS,
+                compareTarget: { fieldId: 'orders_is_paid' },
+            },
+        ];
+
+        const rowFields = {
+            orders_is_paid: { field: otherBooleanField, value: true },
+        };
+
+        expect(
+            hasMatchingConditionalRules(
+                mockBooleanField,
+                true,
+                {},
+                config,
+                rowFields,
+            ),
+        ).toBe(true);
+        expect(
+            hasMatchingConditionalRules(
+                mockBooleanField,
+                false,
+                {},
+                config,
+                rowFields,
+            ),
+        ).toBe(false);
+    });
+
+    it('does not match numeric operators for boolean fields', () => {
+        const config = makeConfig(FilterOperator.GREATER_THAN, [0]);
+        expect(
+            hasMatchingConditionalRules(mockBooleanField, true, {}, config),
+        ).toBe(false);
+    });
+
+    it('is eligible in getConditionalFormattingConfig', () => {
+        const config = makeConfig(FilterOperator.EQUALS, [false]);
+        expect(
+            getConditionalFormattingConfig({
+                field: mockBooleanField,
+                value: false,
+                minMaxMap: {},
+                conditionalFormattings: [config],
+            }),
+        ).toBe(config);
+    });
+});
+
+describe('getConditionalFormattingConfig', () => {
+    it('selects the last matching rule for a specific apply target', () => {
+        const cellConfig =
+            createConditionalFormattingConfigWithSingleColor('#00ff00');
+        cellConfig.rules[0].operator = FilterOperator.GREATER_THAN_OR_EQUAL;
+        cellConfig.rules[0].values = [0];
+
+        const textConfig =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        textConfig.applyTo = ConditionalFormattingColorApplyTo.TEXT;
+        textConfig.rules[0].operator = FilterOperator.LESS_THAN_OR_EQUAL;
+        textConfig.rules[0].values = [10];
+
+        const conditionalFormattings = [cellConfig, textConfig];
+
+        expect(
+            getConditionalFormattingConfig({
+                field: mockNumericField,
+                value: 5,
+                minMaxMap: {},
+                conditionalFormattings,
+                applyTo: ConditionalFormattingColorApplyTo.CELL,
+            }),
+        ).toBe(cellConfig);
+
+        expect(
+            getConditionalFormattingConfig({
+                field: mockNumericField,
+                value: 5,
+                minMaxMap: {},
+                conditionalFormattings,
+                applyTo: ConditionalFormattingColorApplyTo.TEXT,
+            }),
+        ).toBe(textConfig);
+
+        expect(
+            getConditionalFormattingConfig({
+                field: mockNumericField,
+                value: 5,
+                minMaxMap: {},
+                conditionalFormattings,
+            }),
+        ).toBe(textConfig);
+    });
+});
+
+describe('getPivotRowContextKey', () => {
+    it('is stable regardless of key insertion order', () => {
+        const a = getPivotRowContextKey({ dim_b: 'y', dim_a: 'x' });
+        const b = getPivotRowContextKey({ dim_a: 'x', dim_b: 'y' });
+        expect(a).toEqual(b);
+    });
+
+    it('distinguishes different values', () => {
+        expect(getPivotRowContextKey({ dim_a: 'x' })).not.toEqual(
+            getPivotRowContextKey({ dim_a: 'z' }),
+        );
+    });
+
+    it('distinguishes different fields with equal values', () => {
+        expect(getPivotRowContextKey({ dim_a: 'x' })).not.toEqual(
+            getPivotRowContextKey({ dim_b: 'x' }),
+        );
+    });
+
+    it('normalizes null/undefined consistently', () => {
+        expect(getPivotRowContextKey({ dim_a: null })).toEqual(
+            getPivotRowContextKey({ dim_a: undefined }),
+        );
+    });
+});
+
+describe('getRowConditionalFormattingColor', () => {
+    // Reuse the same numeric field fixture used by hasMatchingConditionalRules tests
+    const triggerField = {
+        name: 'status',
+        table: 'orders',
+        type: DimensionType.NUMBER,
+        fieldType: FieldType.DIMENSION,
+        sql: 'status',
+        tableLabel: 'Orders',
+        label: 'Status',
+        hidden: false,
+    };
+    const fieldId = 'orders_status';
+    const target = { fieldId };
+
+    const makeMatchingConfig = (color: string) => {
+        const config = createConditionalFormattingConfigWithSingleColor(
+            color,
+            target,
+        );
+        const rule = createConditionalFormattingRuleWithValues();
+        rule.operator = FilterOperator.EQUALS;
+        rule.values = [42];
+        config.rules = [rule];
+        config.applyTo = ConditionalFormattingColorApplyTo.ROW;
+        return config;
+    };
+
+    const rowFields = {
+        [fieldId]: { field: triggerField, value: 42 },
+    };
+
+    it('returns the configured color when trigger field matches', () => {
+        const config = makeMatchingConfig('#ff0000');
+        const result = getRowConditionalFormattingColor({
+            conditionalFormattings: [config],
+            rowFields,
+            minMaxMap: {},
+        });
+        expect(result).toBe('#ff0000');
+    });
+
+    it('returns null when trigger field value does not match', () => {
+        const config = makeMatchingConfig('#ff0000');
+        const nonMatchingRowFields = {
+            [fieldId]: { field: triggerField, value: 99 },
+        };
+        const result = getRowConditionalFormattingColor({
+            conditionalFormattings: [config],
+            rowFields: nonMatchingRowFields,
+            minMaxMap: {},
+        });
+        expect(result).toBeNull();
+    });
+
+    it('ignores configs with applyTo: CELL even when rule would match', () => {
+        const config = makeMatchingConfig('#00ff00');
+        config.applyTo = ConditionalFormattingColorApplyTo.CELL;
+        const result = getRowConditionalFormattingColor({
+            conditionalFormattings: [config],
+            rowFields,
+            minMaxMap: {},
+        });
+        expect(result).toBeNull();
+    });
+
+    it('returns null when config target is null', () => {
+        const config = createConditionalFormattingConfigWithSingleColor(
+            '#0000ff',
+            null,
+        );
+        const rule = createConditionalFormattingRuleWithValues();
+        rule.operator = FilterOperator.EQUALS;
+        rule.values = [42];
+        config.rules = [rule];
+        config.applyTo = ConditionalFormattingColorApplyTo.ROW;
+        const result = getRowConditionalFormattingColor({
+            conditionalFormattings: [config],
+            rowFields,
+            minMaxMap: {},
+        });
+        expect(result).toBeNull();
+    });
+
+    it('returns null when conditionalFormattings is undefined', () => {
+        const result = getRowConditionalFormattingColor({
+            conditionalFormattings: undefined,
+            rowFields,
+            minMaxMap: {},
+        });
+        expect(result).toBeNull();
+    });
+
+    it('returns color of first matching ROW config when multiple exist', () => {
+        const first = makeMatchingConfig('#aaaaaa');
+        const second = makeMatchingConfig('#bbbbbb');
+        const result = getRowConditionalFormattingColor({
+            conditionalFormattings: [first, second],
+            rowFields,
+            minMaxMap: {},
+        });
+        expect(result).toBe('#aaaaaa');
+    });
+});
+
+describe('getConditionalFormattingTextStyle', () => {
+    it('returns undefined when no configs have text styling', () => {
+        const config =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        expect(
+            getConditionalFormattingTextStyle([config, undefined]),
+        ).toBeUndefined();
+    });
+
+    it('returns the text style of a single matching config', () => {
+        const config =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        config.textStyle = { bold: true };
+        expect(getConditionalFormattingTextStyle([config])).toEqual({
+            bold: true,
+            italic: false,
+            underline: false,
+        });
+    });
+
+    it('unions text styles across multiple matching configs', () => {
+        const boldConfig =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        boldConfig.textStyle = { bold: true };
+        const underlineConfig =
+            createConditionalFormattingConfigWithSingleColor('#00ff00');
+        underlineConfig.textStyle = { underline: true };
+
+        expect(
+            getConditionalFormattingTextStyle([
+                boldConfig,
+                undefined,
+                underlineConfig,
+            ]),
+        ).toEqual({ bold: true, italic: false, underline: true });
+    });
+
+    it('ignores a config whose text style has all toggles off', () => {
+        const config =
+            createConditionalFormattingConfigWithSingleColor('#ff0000');
+        config.textStyle = { bold: false, italic: false, underline: false };
+        expect(getConditionalFormattingTextStyle([config])).toBeUndefined();
     });
 });

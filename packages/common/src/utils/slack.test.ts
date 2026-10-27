@@ -1,5 +1,8 @@
 import {
     getSlackErrorCode,
+    getSlackErrorMessages,
+    getSlackInvalidBlockIndices,
+    isSlackMessageTooLongError,
     isSlackRateLimitedError,
     isUnrecoverableSlackError,
     SLACK_USER_FACING_ERROR_MESSAGES,
@@ -22,6 +25,67 @@ describe('getSlackErrorCode', () => {
     });
 });
 
+describe('getSlackErrorMessages', () => {
+    it('surfaces the detail Slack attaches to a terse error code', () => {
+        const error = {
+            data: {
+                error: 'invalid_arguments',
+                response_metadata: {
+                    messages: ['[ERROR] invalid `icon_url`', 42],
+                },
+            },
+        };
+        expect(getSlackErrorMessages(error)).toEqual([
+            '[ERROR] invalid `icon_url`',
+        ]);
+    });
+
+    it('returns nothing for errors without Slack metadata', () => {
+        expect(getSlackErrorMessages(new Error('boom'))).toEqual([]);
+        expect(
+            getSlackErrorMessages({ data: { error: 'invalid_arguments' } }),
+        ).toEqual([]);
+    });
+});
+
+describe('getSlackInvalidBlockIndices', () => {
+    it('identifies the blocks Slack rejected so only those get dropped from a delivery', () => {
+        const error = {
+            data: {
+                error: 'invalid_blocks',
+                response_metadata: {
+                    messages: [
+                        '[ERROR] downloading image failed [json-pointer:/blocks/3/image_url]',
+                        '[ERROR] failed to match all allowed schemas [json-pointer:/blocks/5]',
+                    ],
+                },
+            },
+        };
+        expect(getSlackInvalidBlockIndices(error)).toEqual([3, 5]);
+    });
+
+    it('never attributes blame to blocks Slack did not point at', () => {
+        expect(
+            getSlackInvalidBlockIndices({ data: { error: 'invalid_blocks' } }),
+        ).toEqual([]);
+    });
+
+    it('ignores [WARN] messages — warnings are non-fatal and did not cause the rejection', () => {
+        const error = {
+            data: {
+                error: 'invalid_blocks',
+                response_metadata: {
+                    messages: [
+                        '[WARN] text object is deprecated [json-pointer:/blocks/0/text]',
+                        '[ERROR] downloading image failed [json-pointer:/blocks/3/image_url]',
+                    ],
+                },
+            },
+        };
+        expect(getSlackInvalidBlockIndices(error)).toEqual([3]);
+    });
+});
+
 describe('isUnrecoverableSlackError', () => {
     it('returns true for known unrecoverable codes', () => {
         expect(
@@ -37,6 +101,27 @@ describe('isUnrecoverableSlackError', () => {
             isUnrecoverableSlackError({ data: { error: 'invalid_blocks' } }),
         ).toBe(false);
         expect(isUnrecoverableSlackError(new Error('boom'))).toBe(false);
+    });
+});
+
+describe('isSlackMessageTooLongError', () => {
+    it('returns true for oversized-message codes', () => {
+        expect(
+            isSlackMessageTooLongError({ data: { error: 'msg_too_long' } }),
+        ).toBe(true);
+        expect(
+            isSlackMessageTooLongError({
+                data: { error: 'msg_blocks_too_long' },
+            }),
+        ).toBe(true);
+    });
+
+    it('returns false for other Slack errors and non-Slack errors', () => {
+        expect(
+            isSlackMessageTooLongError({ data: { error: 'invalid_blocks' } }),
+        ).toBe(false);
+        expect(isSlackMessageTooLongError(new Error('boom'))).toBe(false);
+        expect(isSlackMessageTooLongError(undefined)).toBe(false);
     });
 });
 

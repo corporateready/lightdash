@@ -13,6 +13,7 @@ import {
     validConfigWithCustomGranularities,
     validConfigWithDateParameter,
     validConfigWithDateParameterFromDimension,
+    validConfigWithLabeledOptions,
     validConfigWithMixedArrayTypes,
     validConfigWithNumberArrayParameter,
     validConfigWithNumberParameter,
@@ -29,6 +30,18 @@ describe('loadLightdashProjectConfig', () => {
             spotlight: {
                 default_visibility: 'show',
             },
+        });
+    });
+
+    it('should load content_as_code sync and path', async () => {
+        const config = await loadLightdashProjectConfig(`
+content_as_code:
+  sync: true
+  path: analytics/content
+`);
+        expect(config.content_as_code).toEqual({
+            sync: true,
+            path: 'analytics/content',
         });
     });
 
@@ -267,5 +280,25 @@ describe('loadLightdashProjectConfig', () => {
             validConfigWithoutCustomGranularities,
         );
         expect(config.custom_granularities).toBeUndefined();
+    });
+
+    it('should load a valid config with labeled options (label+value pairs)', async () => {
+        const config = await loadLightdashProjectConfig(
+            validConfigWithLabeledOptions,
+        );
+        expect(config).toEqual({
+            spotlight: {
+                default_visibility: 'show',
+            },
+            parameters: {
+                status: {
+                    label: 'Status',
+                    options: [
+                        { label: 'Active', value: 'active_id_1' },
+                        { label: 'Inactive', value: 'inactive_id_2' },
+                    ],
+                },
+            },
+        });
     });
 });

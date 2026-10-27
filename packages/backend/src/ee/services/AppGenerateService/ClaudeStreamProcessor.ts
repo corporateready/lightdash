@@ -8,12 +8,168 @@
  * focused on orchestration: spawn the sandbox command, forward stdout chunks,
  * react to events.
  */
+import { parseCodingAgentSessionInit } from './codingAgentSession';
+
+/**
+ * Usage summary for a single `claude` run, extracted from the stream-json
+ * `result` event. Token counts, turn count, API time, and cost — the pieces
+ * needed to decompose `generateMs` into "too much output" vs "too many turns"
+ * and to confirm prompt caching is landing (`cacheReadInputTokens > 0`).
+ */
+export type ClaudeModelUsage = {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+};
+
+export type ClaudeGenerationUsage = {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    // `cacheCreationInputTokens` split by TTL; both 0 for Codex.
+    cacheCreation1hInputTokens: number;
+    cacheCreation5mInputTokens: number;
+    numTurns: number;
+    durationApiMs: number;
+    costUsd: number;
+    /**
+     * Per-model split of the token counts, keyed by the concrete model id the
+     * CLI actually called (e.g. `claude-opus-4-8`), from the result event's
+     * `modelUsage`. The run is launched with a tier alias (`--model opus`)
+     * that the CLI resolves itself, and a run can fan out to a second model
+     * for subagents, so this is the only place the real model is known.
+     * Absent on CLI versions that don't report it.
+     */
+    modelUsage?: Record<string, ClaudeModelUsage>;
+};
+
+export const ZERO_CLAUDE_USAGE: ClaudeGenerationUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheCreation1hInputTokens: 0,
+    cacheCreation5mInputTokens: 0,
+    numTurns: 0,
+    durationApiMs: 0,
+    costUsd: 0,
+};
+
+export type ClaudeGenerationTelemetry = {
+    usage: ClaudeGenerationUsage;
+    toolCallCount: number;
+    timeToFirstTokenMs: number | null;
+    turnDurationsMs: number[];
+    attemptCount: number;
+};
+
+export const ZERO_CLAUDE_GENERATION_TELEMETRY: ClaudeGenerationTelemetry = {
+    usage: ZERO_CLAUDE_USAGE,
+    toolCallCount: 0,
+    timeToFirstTokenMs: null,
+    turnDurationsMs: [],
+    attemptCount: 0,
+};
+
+function addClaudeModelUsage(
+    a: Record<string, ClaudeModelUsage> | undefined,
+    b: Record<string, ClaudeModelUsage> | undefined,
+): Record<string, ClaudeModelUsage> | undefined {
+    if (!a && !b) return undefined;
+    const merged: Record<string, ClaudeModelUsage> = {};
+    for (const source of [a, b]) {
+        for (const [modelId, usage] of Object.entries(source ?? {})) {
+            const current = merged[modelId] ?? {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadInputTokens: 0,
+                cacheCreationInputTokens: 0,
+            };
+            merged[modelId] = {
+                inputTokens: current.inputTokens + usage.inputTokens,
+                outputTokens: current.outputTokens + usage.outputTokens,
+                cacheReadInputTokens:
+                    current.cacheReadInputTokens + usage.cacheReadInputTokens,
+                cacheCreationInputTokens:
+                    current.cacheCreationInputTokens +
+                    usage.cacheCreationInputTokens,
+            };
+        }
+    }
+    return merged;
+}
+
+/**
+ * Sum two usage records field-by-field. One build can invoke `claude` several
+ * times (main generation, build-fix re-runs, metadata), so the pipeline totals
+ * them. Treats `null` as all-zero.
+ */
+export function addClaudeUsage(
+    a: ClaudeGenerationUsage,
+    b: ClaudeGenerationUsage | null,
+): ClaudeGenerationUsage {
+    if (!b) return a;
+    const modelUsage = addClaudeModelUsage(a.modelUsage, b.modelUsage);
+    return {
+        inputTokens: a.inputTokens + b.inputTokens,
+        outputTokens: a.outputTokens + b.outputTokens,
+        cacheReadInputTokens: a.cacheReadInputTokens + b.cacheReadInputTokens,
+        cacheCreationInputTokens:
+            a.cacheCreationInputTokens + b.cacheCreationInputTokens,
+        cacheCreation1hInputTokens:
+            a.cacheCreation1hInputTokens + b.cacheCreation1hInputTokens,
+        cacheCreation5mInputTokens:
+            a.cacheCreation5mInputTokens + b.cacheCreation5mInputTokens,
+        numTurns: a.numTurns + b.numTurns,
+        durationApiMs: a.durationApiMs + b.durationApiMs,
+        costUsd: a.costUsd + b.costUsd,
+        ...(modelUsage ? { modelUsage } : {}),
+    };
+}
+
+/**
+ * Add one CLI attempt to the telemetry for a logical Claude invocation.
+ *
+ * A generation can retry the CLI while continuing the same session. Keeping
+ * the aggregation here ensures successful builds include the cost of failed
+ * attempts, and lets the caller retain partial usage when every attempt fails.
+ */
+export function addClaudeGenerationAttempt(
+    aggregate: ClaudeGenerationTelemetry,
+    attempt: {
+        usage: ClaudeGenerationUsage | null;
+        toolCallCount: number;
+        timeToFirstTokenMs: number | null;
+        turnDurationsMs: number[];
+    },
+    attemptStartedAfterMs: number,
+): ClaudeGenerationTelemetry {
+    const attemptTimeToFirstTokenMs =
+        attempt.timeToFirstTokenMs === null
+            ? null
+            : attemptStartedAfterMs + attempt.timeToFirstTokenMs;
+
+    return {
+        usage: addClaudeUsage(aggregate.usage, attempt.usage),
+        toolCallCount: aggregate.toolCallCount + attempt.toolCallCount,
+        timeToFirstTokenMs:
+            aggregate.timeToFirstTokenMs ?? attemptTimeToFirstTokenMs,
+        turnDurationsMs: [
+            ...aggregate.turnDurationsMs,
+            ...attempt.turnDurationsMs,
+        ],
+        attemptCount: aggregate.attemptCount + 1,
+    };
+}
 
 export type ClaudeStreamEvent =
+    | { kind: 'session_started'; sessionId: string; cliVersion: string | null }
     | { kind: 'thinking_started'; turn: number }
     | { kind: 'thinking_snippet'; snippet: string }
     | { kind: 'tool_use'; index: number; description: string }
-    | { kind: 'result_text'; text: string };
+    | { kind: 'result'; text: string; structuredOutput: unknown };
 
 const STATUS_THROTTLE_MS = 3000;
 const SNIPPET_SENTENCES = 1;
@@ -22,22 +178,14 @@ const SNIPPET_SENTENCES = 1;
 
 /**
  * Return the most recent `n` complete sentences from `buf` as a single
- * paragraph: whitespace collapsed to single spaces, trailing periods
- * stripped (so they don't visually merge with the UI's animated "..."
- * indicator — `!` and `?` stay since they read distinctly), text-in-progress
- * after the last terminator dropped. Returns `''` while no complete sentence
+ * paragraph: whitespace collapsed to single spaces, text-in-progress after
+ * the last terminator dropped. Returns `''` while no complete sentence
  * exists yet — the caller skips empty updates so the status holds at
  * "Thinking".
  *
  * A sentence terminator is `[.!?]` followed by either whitespace + a capital
  * letter (which skips abbreviations like "e.g." that are followed by a
  * lowercase word) or end-of-string.
- *
- * Invariant for the frontend: the snippet collapses whitespace to a single
- * space, so it is always a single paragraph. The chat UI's `<p>` override
- * that injects `<LoadingDots />` inside the rendered paragraph relies on
- * this — if you change the snippet to preserve `\n\n`, the override needs
- * to learn about "last paragraph only".
  */
 function lastSentencesSnippet(buf: string, n: number): string {
     const flat = buf.replace(/\s+/g, ' ').trim();
@@ -52,10 +200,7 @@ function lastSentencesSnippet(buf: string, n: number): string {
     const end = positions[positions.length - 1];
     const sliceStart =
         positions.length > n ? positions[positions.length - n - 1] + 1 : 0;
-    return flat
-        .slice(sliceStart, end + 1)
-        .trim()
-        .replace(/\.+$/, '');
+    return flat.slice(sliceStart, end + 1).trim();
 }
 
 /**
@@ -151,10 +296,54 @@ function parsePartialDeltaText(
     return undefined;
 }
 
+function asFiniteNumber(value: unknown): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
 /**
- * Parse a stream-json `result` event and return the final response text.
+ * Parse the result event's `modelUsage` map (`{ [modelId]: { inputTokens,
+ * outputTokens, cacheReadInputTokens, cacheCreationInputTokens, ... } }`).
+ * Returns `undefined` when the CLI didn't report it or reported nothing usable,
+ * so callers fall back to the alias the run was launched with.
  */
-function parseResultText(line: string): string | undefined {
+function parseModelUsage(
+    raw: unknown,
+): Record<string, ClaudeModelUsage> | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const parsed: Record<string, ClaudeModelUsage> = {};
+    Object.entries(raw as Record<string, unknown>).forEach(
+        ([modelId, value]) => {
+            if (!modelId || !value || typeof value !== 'object') return;
+            const fields = value as Record<string, unknown>;
+            parsed[modelId] = {
+                inputTokens: asFiniteNumber(fields.inputTokens),
+                outputTokens: asFiniteNumber(fields.outputTokens),
+                cacheReadInputTokens: asFiniteNumber(
+                    fields.cacheReadInputTokens,
+                ),
+                cacheCreationInputTokens: asFiniteNumber(
+                    fields.cacheCreationInputTokens,
+                ),
+            };
+        },
+    );
+    return Object.keys(parsed).length > 0 ? parsed : undefined;
+}
+
+/**
+ * Parse a stream-json `result` event: the final response text plus the run's
+ * usage summary (token counts, turn count, API time, cost). Returns
+ * `undefined` for non-result lines. Missing numeric fields default to 0 —
+ * the `result` event is emitted once per run and always carries usage, but
+ * we parse defensively in case a field is absent on older CLI versions.
+ */
+function parseResult(line: string):
+    | {
+          text: string | null;
+          usage: ClaudeGenerationUsage;
+          structuredOutput: unknown;
+      }
+    | undefined {
     let event: Record<string, unknown>;
     try {
         event = JSON.parse(line);
@@ -162,7 +351,49 @@ function parseResultText(line: string): string | undefined {
         return undefined;
     }
     if (event.type !== 'result') return undefined;
-    return typeof event.result === 'string' ? event.result : undefined;
+    const usage = (event.usage ?? {}) as Record<string, unknown>;
+    const cacheCreation = (usage.cache_creation ?? {}) as Record<
+        string,
+        unknown
+    >;
+    const modelUsage = parseModelUsage(event.modelUsage);
+    return {
+        text: typeof event.result === 'string' ? event.result : null,
+        // Populated only when the run was invoked with `--json-schema`; the CLI
+        // validates the final output against that schema and emits the parsed
+        // object here. `null`/absent otherwise.
+        structuredOutput: event.structured_output ?? null,
+        usage: {
+            inputTokens: asFiniteNumber(usage.input_tokens),
+            outputTokens: asFiniteNumber(usage.output_tokens),
+            cacheReadInputTokens: asFiniteNumber(usage.cache_read_input_tokens),
+            cacheCreationInputTokens: asFiniteNumber(
+                usage.cache_creation_input_tokens,
+            ),
+            cacheCreation1hInputTokens: asFiniteNumber(
+                cacheCreation.ephemeral_1h_input_tokens,
+            ),
+            cacheCreation5mInputTokens: asFiniteNumber(
+                cacheCreation.ephemeral_5m_input_tokens,
+            ),
+            numTurns: asFiniteNumber(event.num_turns),
+            durationApiMs: asFiniteNumber(event.duration_api_ms),
+            costUsd: asFiniteNumber(event.total_cost_usd),
+            ...(modelUsage ? { modelUsage } : {}),
+        },
+    };
+}
+
+// Usage of a one-shot CLI run captured whole, e.g. `/compact`; null when no
+// `result` event was emitted.
+export function findClaudeResultUsage(
+    stdout: string,
+): ClaudeGenerationUsage | null {
+    for (const line of stdout.split('\n')) {
+        const result = parseResult(line);
+        if (result !== undefined) return result.usage;
+    }
+    return null;
 }
 
 export class ClaudeStreamProcessor {
@@ -180,14 +411,26 @@ export class ClaudeStreamProcessor {
 
     private lastEmittedSnippet = '';
 
+    private lastUsageValue: ClaudeGenerationUsage | null = null;
+
+    private firstMessageStartAt: number | null = null;
+
+    private lastTurnStartAt: number | null = null;
+
+    private readonly turnDurations: number[] = [];
+
     private readonly now: () => number;
 
+    private readonly createdAt: number;
+
     /**
-     * `now` is injectable purely for future testability — defaults to
-     * `Date.now`. Not used in production code paths.
+     * `now` is injectable for testing the time-based outputs (snippet
+     * throttling, time-to-first-token, per-turn durations) — defaults to
+     * `Date.now`.
      */
     constructor(now: () => number = () => Date.now()) {
         this.now = now;
+        this.createdAt = now();
     }
 
     /**
@@ -196,6 +439,35 @@ export class ClaudeStreamProcessor {
      */
     get totalToolCalls(): number {
         return this.toolCallCount;
+    }
+
+    /**
+     * Usage summary from the run's `result` event, or `null` if no result
+     * event was seen (e.g. the CLI died before finishing). Read after the
+     * run completes — same pattern as `totalToolCalls`.
+     */
+    get lastUsage(): ClaudeGenerationUsage | null {
+        return this.lastUsageValue;
+    }
+
+    /**
+     * Wall-clock ms from processor creation to the first assistant turn — a
+     * proxy for time-to-first-token (how long Claude took to start
+     * responding). `null` if the model never produced a turn.
+     */
+    get timeToFirstTokenMs(): number | null {
+        return this.firstMessageStartAt === null
+            ? null
+            : this.firstMessageStartAt - this.createdAt;
+    }
+
+    /**
+     * Per-turn wall-clock durations in ms, in turn order. A turn spans from
+     * its `message_start` to the next turn's start (or to the final `result`
+     * event for the last turn).
+     */
+    get turnDurationsMs(): number[] {
+        return [...this.turnDurations];
     }
 
     /**
@@ -216,8 +488,22 @@ export class ClaudeStreamProcessor {
     }
 
     private consumeLine(line: string, events: ClaudeStreamEvent[]): void {
+        const init = parseCodingAgentSessionInit(line);
+        if (init !== null) {
+            events.push({ kind: 'session_started', ...init });
+            return;
+        }
+
         const partialKind = parsePartialStreamEventKind(line);
         if (partialKind === 'message_start') {
+            const turnStart = this.now();
+            if (this.firstMessageStartAt === null) {
+                this.firstMessageStartAt = turnStart;
+            }
+            if (this.lastTurnStartAt !== null) {
+                this.turnDurations.push(turnStart - this.lastTurnStartAt);
+            }
+            this.lastTurnStartAt = turnStart;
             this.turnCount += 1;
             this.thinkingStartedThisTurn = false;
             this.thinkingTextBuffer = '';
@@ -263,9 +549,18 @@ export class ClaudeStreamProcessor {
             return;
         }
 
-        const resultText = parseResultText(line);
-        if (resultText) {
-            events.push({ kind: 'result_text', text: resultText });
+        const result = parseResult(line);
+        if (result) {
+            if (this.lastTurnStartAt !== null) {
+                this.turnDurations.push(this.now() - this.lastTurnStartAt);
+                this.lastTurnStartAt = null;
+            }
+            this.lastUsageValue = result.usage;
+            events.push({
+                kind: 'result',
+                text: result.text ?? '',
+                structuredOutput: result.structuredOutput,
+            });
         }
     }
 }

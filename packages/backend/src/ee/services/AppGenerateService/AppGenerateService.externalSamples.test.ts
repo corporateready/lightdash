@@ -1,0 +1,588 @@
+// Stub the e2b/ai SDKs before importing AppGenerateService so the tests never
+// reach the real sandbox or model client.
+import {
+    FeatureFlags,
+    ForbiddenError,
+    ParameterError,
+    type ExternalConnectionSample,
+} from '@lightdash/common';
+import { buildAppThumbnailClientMock } from '../../clients/AppThumbnailClient.mock';
+import { AppGenerateService } from './AppGenerateService';
+
+vi.mock('e2b', () => ({
+    Sandbox: class {},
+    CommandExitError: class extends Error {},
+    ALL_TRAFFIC: '*',
+}));
+vi.mock('ai', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('ai')>()),
+    generateText: vi.fn(),
+}));
+
+type AppExternalConnectionDoc = {
+    alias: string;
+    origin: string;
+    instructions?: string | null;
+    allowedMethods: string[];
+    allowedPathPrefixes: string[];
+    samples: ExternalConnectionSample[];
+};
+
+type PrivateWithSamples = {
+    writeExternalConnectionSamples: (
+        sandbox: unknown,
+        appUuid: string,
+        docs: AppExternalConnectionDoc[],
+    ) => Promise<string>;
+    resolveExternalConnectionSamples: (
+        appId: string,
+    ) => Promise<AppExternalConnectionDoc[]>;
+    logger: { info: import('vitest').Mock };
+};
+
+type ExternalConnectionRefs =
+    | Array<{ externalConnectionUuid: string; alias: string }>
+    | undefined;
+
+type PrivateWithLink = {
+    resolveExternalConnectionResources: (
+        user: unknown,
+        projectUuid: string,
+        appId: string,
+        externalConnections: ExternalConnectionRefs,
+    ) => Promise<unknown[]>;
+    linkResolvedExternalConnections: (
+        appId: string,
+        connections: unknown[],
+    ) => Promise<void>;
+};
+
+function buildService() {
+    // Build a minimal AppGenerateService with only the deps needed for the
+    // private writeExternalConnectionSamples method (which uses only
+    // this.logger and the sandbox argument). All other deps are stubbed out.
+    const featureFlagModel = {
+        get: vi.fn().mockResolvedValue({ enabled: true }),
+    };
+    return {
+        service: new AppGenerateService({
+            agentActionLogModel: {
+                insert: vi.fn().mockResolvedValue(undefined),
+            },
+            aiCreditService: {
+                assertAiCreditsAvailable: async () => undefined,
+            },
+            lightdashConfig: {} as never,
+            analytics: {} as never,
+            analyticsModel: {} as never,
+            catalogModel: {
+                getChartUsageByTable: async () => new Map<string, number>(),
+            } as never,
+            userModel: {} as never,
+            appModel: {} as never,
+            featureFlagModel: featureFlagModel as never,
+            organizationDesignModel: {} as never,
+            pinnedListModel: {} as never,
+            projectModel: {} as never,
+            projectParametersModel: {} as never,
+            spaceModel: {} as never,
+            savedChartModel: {} as never,
+            schedulerClient: {} as never,
+            savedChartService: {} as never,
+            spacePermissionService: {} as never,
+            coderService: {} as never,
+            documentService: {} as never,
+            dashboardService: {} as never,
+            projectService: {} as never,
+            promoteService: {} as never,
+            externalConnectionModel: {} as never,
+            sandboxRegistryModel: {} as never,
+            orgAiCopilotConfigResolver: {} as never,
+            sandboxManager: null,
+            appRuntimeS3: null,
+            appThumbnailClient: buildAppThumbnailClientMock(),
+            chartRegistryClient: {} as never,
+            contentVerificationModel: {
+                getByContent: async () => null,
+                verify: async () => undefined,
+                unverify: async () => undefined,
+            } as never,
+        }) as unknown as PrivateWithSamples,
+        featureFlagModel,
+    };
+}
+
+const makeSandbox = () => ({
+    commands: {
+        run: vi.fn().mockResolvedValue({ exitCode: 0 }),
+    },
+    files: {
+        write: vi.fn().mockResolvedValue(undefined),
+    },
+});
+
+const makeSample = (alias: string, n: number): ExternalConnectionSample => ({
+    sampleUuid: `${alias}-sample-${n}`,
+    externalConnectionUuid: `conn-${alias}`,
+    label: `${alias} example ${n}`,
+    request: { method: 'GET', path: `/v1/${alias}` },
+    response: { result: alias, n },
+    createdAt: new Date('2024-01-01'),
+});
+
+describe('AppGenerateService.writeExternalConnectionSamples', () => {
+    it('writes a JSON API-doc per connection and builds a prompt block', async () => {
+        const sandbox = makeSandbox();
+        const docs: AppExternalConnectionDoc[] = [
+            {
+                alias: 'weather',
+                origin: 'https://api.weather.test',
+                allowedMethods: ['GET'],
+                allowedPathPrefixes: ['/v1/'],
+                samples: [makeSample('weather', 1)],
+            },
+            {
+                alias: 'crm',
+                origin: 'https://api.crm.test',
+                allowedMethods: ['GET', 'POST'],
+                allowedPathPrefixes: ['/api/'],
+                samples: [makeSample('crm', 1), makeSample('crm', 2)],
+            },
+        ];
+        const { service } = buildService();
+
+        const block = await service.writeExternalConnectionSamples(
+            sandbox,
+            'app-1',
+            docs,
+        );
+
+        // Both files written
+        expect(sandbox.files.write).toHaveBeenCalledWith(
+            '/tmp/external-data/weather.json',
+            expect.any(String),
+        );
+        expect(sandbox.files.write).toHaveBeenCalledWith(
+            '/tmp/external-data/crm.json',
+            expect.any(String),
+        );
+
+        // Weather file contains expected fields
+        const weatherCall = (
+            sandbox.files.write as import('vitest').Mock
+        ).mock.calls.find(
+            ([path]) => path === '/tmp/external-data/weather.json',
+        );
+        if (!weatherCall) throw new Error('Expected weather sample write');
+        const weatherDoc = JSON.parse(weatherCall[1]);
+        expect(weatherDoc.howToCall).toContain('weather');
+        expect(weatherDoc.howToCall).toContain('externalFetch');
+        // The doc must spell out origin + the full request URL so the agent
+        // never guesses that the path is relative to the prefix.
+        expect(weatherDoc.origin).toBe('https://api.weather.test');
+        expect(weatherDoc.requestUrl).toContain('https://api.weather.test');
+        expect(weatherDoc.allowedMethods).toEqual(['GET']);
+        expect(weatherDoc.allowedPathPrefixes).toEqual(['/v1/']);
+        expect(weatherDoc.samples).toHaveLength(1);
+        expect(weatherDoc.samples[0].request.method).toBe('GET');
+
+        // CRM file has 2 samples
+        const crmCall = (
+            sandbox.files.write as import('vitest').Mock
+        ).mock.calls.find(([path]) => path === '/tmp/external-data/crm.json');
+        if (!crmCall) throw new Error('Expected CRM sample write');
+        const crmDoc = JSON.parse(crmCall[1]);
+        expect(crmDoc.allowedMethods).toEqual(['GET', 'POST']);
+        expect(crmDoc.samples).toHaveLength(2);
+
+        // Prompt block mentions both aliases and method info
+        expect(block).toContain('/tmp/external-data/weather.json');
+        expect(block).toContain('/tmp/external-data/crm.json');
+        expect(block).toContain('weather');
+        expect(block).toContain('crm');
+        expect(block).toContain('GET');
+    });
+
+    it('writes a file even for connections with no samples', async () => {
+        const sandbox = makeSandbox();
+        const docs: AppExternalConnectionDoc[] = [
+            {
+                alias: 'weather',
+                origin: 'https://api.weather.test',
+                allowedMethods: ['GET'],
+                allowedPathPrefixes: ['/v1/'],
+                samples: [],
+            },
+        ];
+        const { service } = buildService();
+
+        const block = await service.writeExternalConnectionSamples(
+            sandbox,
+            'app-1',
+            docs,
+        );
+
+        expect(sandbox.files.write).toHaveBeenCalledWith(
+            '/tmp/external-data/weather.json',
+            expect.any(String),
+        );
+        const call = (sandbox.files.write as import('vitest').Mock).mock
+            .calls[0];
+        const written = JSON.parse(call[1]);
+        expect(written.howToCall).toContain('externalFetch');
+        expect(written.allowedMethods).toEqual(['GET']);
+        expect(written.samples).toEqual([]);
+        expect(block).toContain('/tmp/external-data/weather.json');
+    });
+
+    it('embeds admin instructions in the doc and prompt block when set, omits when absent', async () => {
+        const sandbox = makeSandbox();
+        const docs: AppExternalConnectionDoc[] = [
+            {
+                alias: 'withdocs',
+                origin: 'https://api.docs.test',
+                instructions: 'Paginate with ?page=. Rates are in USD.',
+                allowedMethods: ['GET'],
+                allowedPathPrefixes: ['/v1/'],
+                samples: [],
+            },
+            {
+                alias: 'blank',
+                origin: 'https://api.blank.test',
+                instructions: '   ',
+                allowedMethods: ['GET'],
+                allowedPathPrefixes: ['/v1/'],
+                samples: [],
+            },
+        ];
+        const { service } = buildService();
+
+        const block = await service.writeExternalConnectionSamples(
+            sandbox,
+            'app-1',
+            docs,
+        );
+
+        const writeMock = sandbox.files.write as import('vitest').Mock;
+        const withDocsDoc = JSON.parse(
+            writeMock.mock.calls.find(
+                ([path]) => path === '/tmp/external-data/withdocs.json',
+            )![1],
+        );
+        expect(withDocsDoc.instructions).toBe(
+            'Paginate with ?page=. Rates are in USD.',
+        );
+
+        const blankDoc = JSON.parse(
+            writeMock.mock.calls.find(
+                ([path]) => path === '/tmp/external-data/blank.json',
+            )![1],
+        );
+        expect(blankDoc).not.toHaveProperty('instructions');
+
+        expect(block).toContain('instructions');
+    });
+
+    it('does not mkdir or write when there are no linked connections', async () => {
+        const sandbox = makeSandbox();
+        const { service } = buildService();
+
+        const block = await service.writeExternalConnectionSamples(
+            sandbox,
+            'app-1',
+            [],
+        );
+
+        expect(sandbox.commands.run).not.toHaveBeenCalled();
+        expect(sandbox.files.write).not.toHaveBeenCalled();
+        expect(block).toBe('');
+    });
+});
+
+describe('AppGenerateService pipeline external connection samples', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('calls resolveExternalConnectionSamples during the catalog stage', async () => {
+        const sandbox = makeSandbox();
+        const { service } = buildService();
+
+        const resolveSpy = vi
+            .spyOn(
+                service as unknown as PrivateWithSamples,
+                'resolveExternalConnectionSamples',
+            )
+            .mockResolvedValue([]);
+
+        const privateService = service as unknown as {
+            writeCatalogAndPrompt: (
+                sandbox: unknown,
+                appUuid: string,
+                projectUuid: string,
+                prompt: string,
+                imageIds: undefined,
+                s3Client: unknown,
+                bucket: string,
+                chartReferences: undefined,
+                template: undefined,
+            ) => Promise<unknown>;
+            projectModel: { getAllExploresFromCache: import('vitest').Mock };
+            projectParametersModel: { find: import('vitest').Mock };
+        };
+        privateService.projectModel = {
+            getAllExploresFromCache: vi.fn().mockResolvedValue({}),
+        };
+        privateService.projectParametersModel = {
+            find: vi.fn().mockResolvedValue([]),
+        };
+
+        await privateService.writeCatalogAndPrompt(
+            sandbox,
+            'app-1',
+            'project-1',
+            'build me an app',
+            undefined,
+            {} as never,
+            'bucket',
+            undefined,
+            undefined,
+        );
+
+        expect(resolveSpy).toHaveBeenCalledWith('app-1');
+    });
+
+    const assembleWith = async (opts: {
+        flagEnabled: boolean;
+        isDataAppViz?: boolean;
+        builder?: { userUuid: string; organizationUuid: string };
+    }) => {
+        const sandbox = makeSandbox();
+        const { service, featureFlagModel } = buildService();
+        featureFlagModel.get.mockResolvedValue({ enabled: opts.flagEnabled });
+        vi.spyOn(
+            service as unknown as PrivateWithSamples,
+            'resolveExternalConnectionSamples',
+        ).mockResolvedValue([]);
+        const privateService = service as unknown as {
+            writeCatalogAndPrompt: (...args: unknown[]) => Promise<unknown>;
+            projectModel: { getAllExploresFromCache: import('vitest').Mock };
+            projectParametersModel: { find: import('vitest').Mock };
+        };
+        privateService.projectModel = {
+            getAllExploresFromCache: vi.fn().mockResolvedValue({}),
+        };
+        privateService.projectParametersModel = {
+            find: vi.fn().mockResolvedValue([]),
+        };
+        await privateService.writeCatalogAndPrompt(
+            sandbox,
+            'app-1',
+            'project-1',
+            'build me an app',
+            undefined,
+            {} as never,
+            'bucket',
+            undefined,
+            undefined,
+            undefined,
+            opts.isDataAppViz ?? false,
+            opts.builder,
+        );
+        const promptWrite = sandbox.files.write.mock.calls.find(
+            ([path]) => path === '/tmp/prompt.txt',
+        );
+        return { prompt: String(promptWrite?.[1] ?? ''), featureFlagModel };
+    };
+
+    it('tells the agent about saved app state only when the builder has the flag', async () => {
+        const builder = { userUuid: 'user-1', organizationUuid: 'org-1' };
+        const on = await assembleWith({ flagEnabled: true, builder });
+        expect(on.prompt).toContain('Saved app state is available');
+        expect(on.prompt).toContain('/app/references/app-state.md');
+        expect(on.featureFlagModel.get).toHaveBeenCalledWith({
+            user: builder,
+            featureFlagId: FeatureFlags.EnableDataAppState,
+        });
+
+        const off = await assembleWith({ flagEnabled: false, builder });
+        expect(off.prompt).not.toContain('Saved app state');
+
+        const viz = await assembleWith({
+            flagEnabled: true,
+            isDataAppViz: true,
+            builder,
+        });
+        expect(viz.prompt).not.toContain('Saved app state');
+
+        const noBuilder = await assembleWith({ flagEnabled: true });
+        expect(noBuilder.prompt).not.toContain('Saved app state');
+    });
+
+    it('omits the explores catalog and stale model files for chart types', async () => {
+        const sandbox = makeSandbox();
+        const { service } = buildService();
+        vi.spyOn(
+            service as unknown as PrivateWithSamples,
+            'resolveExternalConnectionSamples',
+        ).mockResolvedValue([]);
+        const getAllExploresFromCache = vi.fn();
+        const find = vi.fn();
+        const privateService = service as unknown as {
+            writeCatalogAndPrompt: (...args: unknown[]) => Promise<{
+                tableCount: number;
+                dimensionCount: number;
+                metricCount: number;
+            }>;
+            projectModel: { getAllExploresFromCache: import('vitest').Mock };
+            projectParametersModel: { find: import('vitest').Mock };
+        };
+        privateService.projectModel = { getAllExploresFromCache };
+        privateService.projectParametersModel = { find };
+
+        const result = await privateService.writeCatalogAndPrompt(
+            sandbox,
+            'app-1',
+            'project-1',
+            'build a chart type',
+            undefined,
+            {} as never,
+            'bucket',
+            undefined,
+            undefined,
+            undefined,
+            true,
+        );
+
+        expect(result).toMatchObject({
+            tableCount: 0,
+            dimensionCount: 0,
+            metricCount: 0,
+        });
+        expect(getAllExploresFromCache).not.toHaveBeenCalled();
+        expect(find).not.toHaveBeenCalled();
+        expect(sandbox.commands.run).toHaveBeenCalledWith(
+            expect.stringContaining('rm -f /tmp/dbt-repo/models.tar'),
+            expect.anything(),
+        );
+        expect(sandbox.files.write).not.toHaveBeenCalledWith(
+            expect.stringMatching(/^\/tmp\/dbt-repo\//),
+            expect.anything(),
+        );
+    });
+});
+
+describe('AppGenerateService external connection linking', () => {
+    const sameProjectConn = {
+        projectUuid: 'proj-1',
+        organizationUuid: 'org-1',
+        name: 'Weather API',
+        allowDataAppBuilderLinking: true,
+    };
+    const ref = [{ externalConnectionUuid: 'c1', alias: 'weather' }];
+    const user = { userUuid: 'u1', organizationUuid: 'org-1' };
+
+    function setup(opts: {
+        connection?: unknown;
+        canManage: boolean;
+        canViewEnabled?: boolean;
+    }) {
+        const { service } = buildService();
+        const linkToApp = vi.fn().mockResolvedValue(undefined);
+        (
+            service as unknown as { externalConnectionModel: unknown }
+        ).externalConnectionModel = {
+            findByUuid: vi
+                .fn()
+                .mockResolvedValue(opts.connection ?? sameProjectConn),
+            linkToApp,
+        };
+        const can = (action: string, value: unknown) => {
+            if (opts.canManage) return true;
+            if (action !== 'view' || opts.canViewEnabled === false)
+                return false;
+            return (
+                (value as { allowDataAppBuilderLinking?: boolean })
+                    .allowDataAppBuilderLinking === true
+            );
+        };
+        vi.spyOn(
+            service as unknown as { createAuditedAbility: () => unknown },
+            'createAuditedAbility',
+        ).mockReturnValue({
+            can,
+            cannot: (action: string, value: unknown) => !can(action, value),
+        });
+        const privateService = service as unknown as PrivateWithLink;
+        const linkExternalConnections = async (
+            projectUuid: string,
+            appId: string,
+            refs: ExternalConnectionRefs,
+        ) =>
+            privateService.linkResolvedExternalConnections(
+                appId,
+                await privateService.resolveExternalConnectionResources(
+                    user,
+                    projectUuid,
+                    appId,
+                    refs,
+                ),
+            );
+        return { linkExternalConnections, linkToApp };
+    }
+
+    it('throws ForbiddenError and does not link an admin-only connection for a builder', async () => {
+        const { linkExternalConnections, linkToApp } = setup({
+            canManage: false,
+            connection: {
+                ...sameProjectConn,
+                allowDataAppBuilderLinking: false,
+            },
+        });
+        await expect(
+            linkExternalConnections('proj-1', 'app-1', ref),
+        ).rejects.toThrow(ForbiddenError);
+        expect(linkToApp).not.toHaveBeenCalled();
+    });
+
+    it('links an admin-enabled connection for a builder', async () => {
+        const { linkExternalConnections, linkToApp } = setup({
+            canManage: false,
+        });
+        await linkExternalConnections('proj-1', 'app-1', ref);
+        expect(linkToApp).toHaveBeenCalledWith('app-1', 'c1', 'weather');
+    });
+
+    it('rejects an alias outside the safe charset before persisting', async () => {
+        const { linkExternalConnections, linkToApp } = setup({
+            canManage: true,
+        });
+        await expect(
+            linkExternalConnections('proj-1', 'app-1', [
+                { externalConnectionUuid: 'c1', alias: '../../etc/passwd' },
+            ]),
+        ).rejects.toThrow(ParameterError);
+        expect(linkToApp).not.toHaveBeenCalled();
+    });
+
+    it('links an admin-only connection when the user can manage connections', async () => {
+        const { linkExternalConnections, linkToApp } = setup({
+            canManage: true,
+            connection: {
+                ...sameProjectConn,
+                allowDataAppBuilderLinking: false,
+            },
+        });
+        await linkExternalConnections('proj-1', 'app-1', ref);
+        expect(linkToApp).toHaveBeenCalledWith('app-1', 'c1', 'weather');
+    });
+
+    it('skips (does not link) a connection from another project', async () => {
+        const { linkExternalConnections, linkToApp } = setup({
+            canManage: true,
+            connection: { projectUuid: 'other', organizationUuid: 'org-1' },
+        });
+        await linkExternalConnections('proj-1', 'app-1', ref);
+        expect(linkToApp).not.toHaveBeenCalled();
+    });
+});

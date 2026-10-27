@@ -1,0 +1,182 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+    SDK_FEATURE_KEYS,
+    SDK_FEATURE_TARGETS,
+    SDK_FEATURES,
+    SDK_FIX_KEYS,
+    SDK_FIXES,
+    SDK_MANIFEST_MESSAGE_TYPE,
+} from './features';
+import { SDK_VERSION } from './generated/sdkVersion';
+import { announceSdkManifest } from './manifest';
+
+// Capability-announcement message literals → the registry key that must
+// declare them. Extend this map when adding a new `*:available` message.
+const AVAILABLE_MESSAGE_TO_FEATURE: Record<string, string> = {
+    'lightdash:inspect:available': 'inspect',
+    'lightdash:lineage:available': 'lineage',
+    'lightdash:sdk:screenshot-available': 'screenshot',
+};
+
+describe('SDK_FEATURES registry', () => {
+    it('has unique keys and non-empty prose', () => {
+        const keys = SDK_FEATURES.map((f) => f.key);
+        expect(new Set(keys).size).toEqual(keys.length);
+        for (const feature of SDK_FEATURES) {
+            expect(feature.key).toMatch(/^[a-z][a-z-]*$/);
+            expect(feature.label.trim().length).toBeGreaterThan(0);
+            expect(feature.description.trim().length).toBeGreaterThan(0);
+        }
+        expect(SDK_FEATURE_KEYS).toEqual(keys);
+    });
+
+    it('declares at least one known target per feature, without duplicates', () => {
+        for (const feature of SDK_FEATURES) {
+            expect(
+                feature.appliesTo.length,
+                `${feature.key} must apply to at least one target`,
+            ).toBeGreaterThan(0);
+            expect(new Set(feature.appliesTo).size).toEqual(
+                feature.appliesTo.length,
+            );
+            for (const target of feature.appliesTo) {
+                expect(SDK_FEATURE_TARGETS).toContain(target);
+            }
+        }
+    });
+
+    it('offers external fetch to both kinds, since both can link external connections', () => {
+        const externalFetch = SDK_FEATURES.find(
+            (f) => f.key === 'external-fetch',
+        );
+        expect(externalFetch?.appliesTo).toEqual(['data_app', 'chart_type']);
+    });
+
+    it('covers every *:available message literal in the SDK source (drift guard)', () => {
+        const srcDir = dirname(fileURLToPath(import.meta.url));
+        const sources = readdirSync(srcDir)
+            .filter(
+                (f: string) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f),
+            )
+            .map((f: string) => readFileSync(join(srcDir, f), 'utf-8'))
+            .join('\n');
+        const found = new Set<string>(
+            sources.match(/lightdash:[a-z-]+:[a-z-]*available/g) ?? [],
+        );
+        expect(found.size).toBeGreaterThan(0);
+        for (const literal of found) {
+            const featureKey = AVAILABLE_MESSAGE_TO_FEATURE[literal];
+            expect(
+                featureKey,
+                `Unmapped capability message "${literal}" — add it to AVAILABLE_MESSAGE_TO_FEATURE and (if new) to SDK_FEATURES`,
+            ).toBeDefined();
+            expect(SDK_FEATURE_KEYS).toContain(featureKey);
+        }
+    });
+
+    it('SDK_VERSION matches package.json (regenerate via pnpm -F @lightdash/query-sdk prebuild)', () => {
+        const pkg = JSON.parse(
+            readFileSync(
+                join(
+                    dirname(fileURLToPath(import.meta.url)),
+                    '..',
+                    'package.json',
+                ),
+                'utf-8',
+            ),
+        ) as { version: string };
+        expect(SDK_VERSION).toEqual(pkg.version);
+    });
+});
+
+describe('SDK_FIXES registry', () => {
+    it('has unique keys and non-empty prose', () => {
+        const keys = SDK_FIXES.map((fix) => fix.key);
+        expect(new Set(keys).size).toEqual(keys.length);
+        for (const fix of SDK_FIXES) {
+            expect(fix.key).toMatch(/^[a-z][a-z-]*$/);
+            expect(fix.label.trim().length).toBeGreaterThan(0);
+            expect(fix.description.trim().length).toBeGreaterThan(0);
+            expect(fix.appliesTo.length).toBeGreaterThan(0);
+            expect(new Set(fix.appliesTo).size).toEqual(fix.appliesTo.length);
+            for (const target of fix.appliesTo) {
+                expect(SDK_FEATURE_TARGETS).toContain(target);
+            }
+        }
+        expect(SDK_FIX_KEYS).toEqual(keys);
+    });
+});
+
+describe('registry mirror in @lightdash/common', () => {
+    it('matches packages/common/src/ee/apps/sdkFeatures.ts exactly', async () => {
+        // devDependency, test-only: the deployed frontend/backend build from
+        // common's copy because deployment images don't include this package.
+        // When this fails, update BOTH files with the same change.
+        const common = await import('@lightdash/common');
+        expect(common.SDK_FEATURES).toEqual(SDK_FEATURES);
+        expect(common.SDK_FIXES).toEqual(SDK_FIXES);
+    });
+});
+
+describe('announceSdkManifest', () => {
+    const expectedMessage = {
+        type: SDK_MANIFEST_MESSAGE_TYPE,
+        sdkVersion: SDK_VERSION,
+        features: SDK_FEATURE_KEYS,
+        fixes: SDK_FIX_KEYS,
+    };
+
+    let cleanup: () => void = () => {};
+    afterEach(() => cleanup());
+
+    const sendReady = (source: MessageEventSource | null) =>
+        window.dispatchEvent(
+            new MessageEvent('message', {
+                data: { type: 'lightdash:sdk:ready' },
+                source,
+            }),
+        );
+
+    it('posts the manifest immediately with a wildcard target (cloud serves bundles cross-origin)', () => {
+        const targetWindow = { postMessage: vi.fn() } as unknown as Window;
+        cleanup = announceSdkManifest(targetWindow);
+        expect(targetWindow.postMessage).toHaveBeenCalledWith(
+            expectedMessage,
+            '*',
+        );
+    });
+
+    it('re-posts when the host announces sdk:ready', () => {
+        const targetWindow = { postMessage: vi.fn() } as unknown as Window;
+        cleanup = announceSdkManifest(targetWindow);
+        sendReady(targetWindow as unknown as MessageEventSource);
+        expect(targetWindow.postMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('ignores sdk:ready from other windows', () => {
+        const targetWindow = { postMessage: vi.fn() } as unknown as Window;
+        cleanup = announceSdkManifest(targetWindow);
+        sendReady(null);
+        expect(targetWindow.postMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not stack listeners when announced repeatedly', () => {
+        const targetWindow = { postMessage: vi.fn() } as unknown as Window;
+        announceSdkManifest(targetWindow);
+        cleanup = announceSdkManifest(targetWindow);
+        sendReady(targetWindow as unknown as MessageEventSource);
+        // 2 immediate posts + exactly 1 ready re-post (not one per announce)
+        expect(targetWindow.postMessage).toHaveBeenCalledTimes(3);
+    });
+
+    it('stops re-posting after cleanup', () => {
+        const targetWindow = { postMessage: vi.fn() } as unknown as Window;
+        cleanup = announceSdkManifest(targetWindow);
+        cleanup();
+        sendReady(targetWindow as unknown as MessageEventSource);
+        expect(targetWindow.postMessage).toHaveBeenCalledTimes(1);
+    });
+});

@@ -72,6 +72,8 @@ node ./packages/cli/dist/index.js preview --project-dir ./examples/full-jaffle-s
 
 **Main Commands:**
 - `login` - Authenticate with Lightdash instance
+- `agent connect` - Connect your agent to the warehouse through browser sign-in
+- `agent status` without a name or selected connection - Show warehouse sign-in status
 - `compile` - Compile dbt models and generate Lightdash config
 - `generate` - Generate Lightdash YAML files
 - `validate` - Validate dbt project structure
@@ -92,12 +94,20 @@ Each command has a corresponding handler in `src/handlers/` that:
 **Key Config Files:**
 - `lightdash.yml` - Project configuration
 - `profiles.yml` - dbt profiles (warehouse connections)
-- `.lightdash/` - Local CLI state and auth tokens
+- `~/.config/lightdash/config.yaml` - CLI configuration and saved personal API key
+- `~/.config/lightdash/agent-connections.yaml` - Saved agent connections and tokens
 
 **Environment Variables:**
 - `LIGHTDASH_API_KEY` - API authentication
 - `DBT_PROJECT_DIR` - Default dbt project directory
 - `DBT_PROFILES_DIR` - Default dbt profiles directory
+
+### Agent connection credentials
+
+A selected agent connection supplies the credential for CLI API requests, with
+no personal-key fallback if that connection is missing or invalid. Programs the
+CLI starts still run as the same computer user. For environment filtering and
+credential file access, read [Scoped CLI credentials](README.md#scoped-cli-credentials).
 
 ## dbt Integration & Warehouse Support
 
@@ -173,9 +183,9 @@ The CLI is installed globally by end users (`npm i -g @lightdash/cli`), so trans
    ```bash
    tmp=$(mktemp -d) && cd "$tmp" && npm init -y --silent && sfw npm install @lightdash/cli --package-lock-only && cat package-lock.json | python3 -c "import sys,json; [print(f'{k}: {v[\"version\"]}') for k,v in json.load(sys.stdin).get('packages',{}).items() if k.endswith('/<suspect-package>')]" && rm -rf "$tmp"
    ```
-5. Pin the dependency to a known-good exact version using a pnpm override in the root `package.json` (no caret, no tilde).
+5. Pin the dependency to a known-good exact version using a pnpm override in the `overrides:` block of `pnpm-workspace.yaml` (no caret, no tilde).
 
-**Limitation of pnpm overrides:** Overrides in the root `package.json` only affect the monorepo lockfile. They do **not** change what end users get when they `npm install -g @lightdash/cli` — published packages only carry their `package.json` dependency ranges, not pnpm overrides. The override protects our own builds and deployments, but CLI users depend on the upstream package (e.g., `snowflake-sdk`) fixing or the compromised version being unpublished from npm.
+**Limitation of pnpm overrides:** Overrides in `pnpm-workspace.yaml` only affect the monorepo lockfile. They do **not** change what end users get when they `npm install -g @lightdash/cli` — published packages only carry their `package.json` dependency ranges, not pnpm overrides. The override protects our own builds and deployments, but CLI users depend on the upstream package (e.g., `snowflake-sdk`) fixing or the compromised version being unpublished from npm.
 
 **Example — axios compromise (2026-03-31):**
 - Malicious `axios@1.14.1` was published to npm for a few hours
@@ -192,6 +202,6 @@ The CLI is installed globally by end users (`npm i -g @lightdash/cli`), so trans
 - Version detection in `src/handlers/dbt/getDbtVersion.ts`
 
 **Authentication:**
-- Tokens stored in `~/.lightdash/`
+- Credentials use the files listed under Configuration
 - Login required before most operations
 - API key can be set via environment variable

@@ -3,6 +3,7 @@ import {
     ApiErrorPayload,
     assertRegisteredAccount,
     MetricTotalComparisonType,
+    type ApiMetricsExplorerQueryResults,
     type ApiMetricsExplorerTotalResults,
     type TimeFrames,
 } from '@lightdash/common';
@@ -21,6 +22,7 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import { allowApiKeyAuthentication, isAuthenticated } from './authentication';
 import { BaseController } from './baseController';
 
@@ -32,7 +34,11 @@ export class MetricsExplorerController extends BaseController {
      * Run a metric total query with comparison
      * @summary Run metric total query
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('MetricsExplorerController.runMetricTotal'),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/{explore}/{metric}/runMetricTotal')
     @OperationId('runMetricTotal')
@@ -76,10 +82,58 @@ export class MetricsExplorerController extends BaseController {
     }
 
     /**
+     * Run a metric time series query for a sparkline
+     * @summary Run metric series query
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('MetricsExplorerController.runMetricSeries'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/{explore}/{metric}/runMetricSeries')
+    @OperationId('runMetricSeries')
+    async runMetricSeries(
+        @Path() projectUuid: string,
+        @Path() explore: string,
+        @Path() metric: string,
+        @Request() req: express.Request,
+        @Query() granularity: TimeFrames,
+        @Query() startDate: string,
+        @Query() endDate: string,
+    ): Promise<ApiMetricsExplorerQueryResults> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+
+        const results = await this.services
+            .getMetricsExplorerService()
+            .getMetricSeries(
+                toSessionUser(req.account),
+                projectUuid,
+                explore,
+                metric,
+                granularity,
+                startDate,
+                endDate,
+            );
+
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
      * Compile the metric total query SQL
      * @summary Compile metric total query
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'MetricsExplorerController.compileMetricTotalQuery',
+        ),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('/{explore}/{metric}/compileMetricTotalQuery')
     @OperationId('compileMetricTotalQuery')

@@ -1,5 +1,5 @@
 import { subject } from '@casl/ability';
-import { formatTimestamp, TimeFrames } from '@lightdash/common';
+import { FeatureFlags, formatTimestamp, TimeFrames } from '@lightdash/common';
 import {
     ActionIcon,
     Badge,
@@ -10,7 +10,7 @@ import {
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconDots,
     IconHistory,
@@ -18,6 +18,7 @@ import {
 } from '@tabler/icons-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
+import AgentAttribution from '../components/common/AgentAttribution/AgentAttribution';
 import Callout from '../components/common/Callout';
 import { EmptyState } from '../components/common/EmptyState';
 import ErrorState from '../components/common/ErrorState';
@@ -31,23 +32,34 @@ import {
     useDashboardQuery,
     useDashboardVersionRollbackMutation,
 } from '../hooks/dashboard/useDashboard';
+import { useContentAuthoringEnabled } from '../hooks/useContentAuthoringEnabled';
+import { useProjectUrlIdentifier } from '../hooks/useProjectRoute';
+import { useProjectUuid } from '../hooks/useProjectUuid';
+import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 import { Can } from '../providers/Ability';
 import NoTableIcon from '../svgs/emptystate-no-table.svg?react';
 import DashboardVersionComparison from './DashboardVersionComparison';
 
 const DashboardHistory = () => {
+    const agentIdentityEnabled =
+        useServerFeatureFlag(FeatureFlags.AgentIdentity).data?.enabled === true;
+    const authoringEnabled = useContentAuthoringEnabled();
     const navigate = useNavigate();
-    const { dashboardUuid, projectUuid } = useParams<{
+    const projectUuid = useProjectUuid();
+    const projectUrlIdentifier = useProjectUrlIdentifier();
+    const { dashboardUuid: routeDashboardIdentifier } = useParams<{
         dashboardUuid: string;
-        projectUuid: string;
     }>();
     const [isRollbackModalOpen, setIsRollbackModalOpen] = useState(false);
     const [selectedVersionUuid, setSelectedVersionUuid] = useState<string>();
 
     const dashboardQuery = useDashboardQuery({
-        uuidOrSlug: dashboardUuid,
+        uuidOrSlug: routeDashboardIdentifier,
         projectUuid,
     });
+    const dashboardUuid = dashboardQuery.data?.uuid;
+    const dashboardIdentifier =
+        dashboardQuery.data?.slug ?? routeDashboardIdentifier;
     const historyQuery = useDashboardHistory(dashboardUuid);
 
     const rollbackMutation = useDashboardVersionRollbackMutation(dashboardUuid);
@@ -72,6 +84,7 @@ const DashboardHistory = () => {
     return (
         <Page
             title="Dashboard version history"
+            sidebarTitle="Versions"
             withSidebarFooter
             withFullHeight
             withPaddedContent
@@ -86,7 +99,7 @@ const DashboardHistory = () => {
                             items={[
                                 {
                                     title: 'Dashboard',
-                                    to: `/projects/${projectUuid}/dashboards/${dashboardUuid}`,
+                                    to: `/projects/${projectUrlIdentifier}/dashboards/${dashboardIdentifier}`,
                                 },
                                 { title: 'Version history', active: true },
                             ]}
@@ -107,19 +120,23 @@ const DashboardHistory = () => {
                                     TimeFrames.SECOND,
                                 )}
                                 description={
-                                    version.createdBy
-                                        ? `Updated by: ${version.createdBy.firstName} ${version.createdBy.lastName}`
-                                        : 'Updated by: unknown'
+                                    agentIdentityEnabled &&
+                                    version.agentIdentity ? (
+                                        <AgentAttribution
+                                            claim={version.agentIdentity}
+                                            createdBy={version.createdBy}
+                                        />
+                                    ) : version.createdBy ? (
+                                        `Updated by: ${version.createdBy.firstName} ${version.createdBy.lastName}`
+                                    ) : (
+                                        'Updated by: unknown'
+                                    )
                                 }
                                 rightSection={
                                     <>
                                         {index === 0 && (
                                             <Tooltip label="This is the current version.">
-                                                <Badge
-                                                    size="xs"
-                                                    variant="light"
-                                                    color="green"
-                                                >
+                                                <Badge size="xs" color="green">
                                                     current
                                                 </Badge>
                                             </Tooltip>
@@ -134,17 +151,21 @@ const DashboardHistory = () => {
                                                     })}
                                                 >
                                                     <Menu
-                                                        withinPortal
                                                         position="bottom-start"
                                                         withArrow
                                                         arrowPosition="center"
-                                                        shadow="md"
                                                         offset={-4}
                                                         closeOnItemClick
                                                         closeOnClickOutside
                                                     >
                                                         <Menu.Target>
-                                                            <ActionIcon variant="subtle">
+                                                            <ActionIcon
+                                                                display={
+                                                                    authoringEnabled
+                                                                        ? undefined
+                                                                        : 'none'
+                                                                }
+                                                            >
                                                                 <IconDots
                                                                     size={16}
                                                                 />
@@ -190,6 +211,7 @@ const DashboardHistory = () => {
         >
             {selectedVersionUuid ? (
                 <DashboardVersionComparison
+                    dashboard={dashboardQuery.data}
                     dashboardUuid={dashboardUuid}
                     projectUuid={projectUuid}
                     versionUuid={selectedVersionUuid}
@@ -217,7 +239,7 @@ const DashboardHistory = () => {
                                     onSuccess: () => {
                                         setIsRollbackModalOpen(false);
                                         void navigate(
-                                            `/projects/${projectUuid}/dashboards/${dashboardUuid}`,
+                                            `/projects/${projectUrlIdentifier}/dashboards/${dashboardIdentifier}`,
                                         );
                                     },
                                 });

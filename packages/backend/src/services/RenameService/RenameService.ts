@@ -101,6 +101,11 @@ export class RenameService extends BaseService {
                 subject('Project', {
                     organizationUuid: chart.organizationUuid,
                     projectUuid: chart.projectUuid,
+                    metadata: {
+                        chartUuid,
+                        chartName: chart.name,
+                        tableName: chart.tableName,
+                    },
                 }),
             )
         ) {
@@ -180,10 +185,10 @@ export class RenameService extends BaseService {
             name: chartName,
         } = chart;
         const { inheritsFromOrgOrProject, access } =
-            await this.spacePermissionService.getSpaceAccessContext(
-                user.userUuid,
+            await this.spacePermissionService.resolveAccess(user.userUuid, {
+                type: 'space',
                 spaceUuid,
-            );
+            });
 
         const auditedAbility = this.createAuditedAbility(user);
         if (
@@ -216,6 +221,7 @@ export class RenameService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid: chartProjectUuid,
+                    metadata: { chartUuid, chartName, from, to, type },
                 }),
             )
         ) {
@@ -299,6 +305,18 @@ export class RenameService extends BaseService {
                 updatedChart,
                 undefined,
             );
+
+            if (type === RenameType.MODEL) {
+                this.analytics.track({
+                    event: 'saved_chart.explore_changed',
+                    userId: user.userUuid,
+                    properties: {
+                        organizationId: organizationUuid,
+                        projectId: chartProjectUuid,
+                        savedChartId: chart.uuid,
+                    },
+                });
+            }
         }
 
         this.analytics.track({
@@ -362,6 +380,11 @@ export class RenameService extends BaseService {
                 subject('Project', {
                     organizationUuid: dashboard.organizationUuid,
                     projectUuid: dashboard.projectUuid,
+                    metadata: {
+                        dashboardUuid,
+                        dashboardName: dashboard.name,
+                        tableName,
+                    },
                 }),
             )
         ) {
@@ -465,6 +488,7 @@ export class RenameService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: { dashboardUuid, from, to, type, fixAll },
                 }),
             )
         ) {
@@ -612,6 +636,12 @@ export class RenameService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: {
+                        from: renameBody.from,
+                        to: renameBody.to,
+                        type: renameBody.type,
+                        model: renameBody.model,
+                    },
                 }),
             )
         ) {
@@ -653,6 +683,12 @@ export class RenameService extends BaseService {
                 subject('Project', {
                     organizationUuid,
                     projectUuid,
+                    metadata: {
+                        from: renameBody.from,
+                        to: renameBody.to,
+                        type: renameBody.type,
+                        model: renameBody.model,
+                    },
                 }),
             )
         ) {
@@ -775,7 +811,12 @@ export class RenameService extends BaseService {
             let exploreName: string;
             let nameChanges: NameChanges;
 
-            if (fromReference && toReference && model) {
+            if (
+                type === RenameType.FIELD &&
+                fromReference &&
+                toReference &&
+                model
+            ) {
                 exploreName = model;
                 this.logger.debug(
                     `Rename resources: Got references for field id "${fromReference}" to "${toReference}"`,
@@ -791,30 +832,7 @@ export class RenameService extends BaseService {
             } else {
                 switch (type) {
                     case RenameType.MODEL:
-                        // This will throw error if explore does not exist
-                        // When filtering explores, we need to check if the explore exists on from, or to
-                        // since people might be running this rename method before or after dbt is updated
-
-                        let useFromExplore = true;
-                        try {
-                            await this.projectModel.getExploreFromCache(
-                                projectUuid,
-                                from,
-                            );
-                        } catch (error) {
-                            try {
-                                await this.projectModel.getExploreFromCache(
-                                    projectUuid,
-                                    to,
-                                );
-                                useFromExplore = false;
-                            } catch (err) {
-                                throw new NotFoundError(
-                                    `Neither "${from}" nor "${to}" explores exist in the project.`,
-                                );
-                            }
-                        }
-                        exploreName = useFromExplore ? from : to;
+                        exploreName = from;
 
                         nameChanges = {
                             from, // this is just the  table prefix
@@ -915,33 +933,30 @@ export class RenameService extends BaseService {
                 }
             }
 
-            this.logger.debug(
-                `Rename resources: Filtering charts by explore ${exploreName}`,
-            );
-
-            // We get all explores and their joins, because the model/field change might
-            // happen on a join, not the main chart explore name
-            // For example, if we want to rename "orders" model,
-            // and "payments" contains a join to "orders", we also want to rename all "charts"
-            // with exploreName "payments", since they can contain a join to "orders"
-            const explores =
-                await this.projectModel.getAllExploresFromCache(projectUuid);
-            // Do not filter explore errors, since the explore might be failing already, because of some renames
-            const exploreJoins: string[] = Object.values(explores)
-                .filter((e) =>
-                    e.joinedTables?.some((j) => j.table === exploreName),
-                )
-                .map((e) => e.name);
-            const exploreNames = new Set([exploreName, ...exploreJoins]);
-            this.logger.info(
-                `Rename resources: Filtering chart for explore "${exploreName}" and joins: ${exploreJoins.join(
-                    ',',
-                )}`,
-            );
-            // Note: filtering on explore name might return charts where the explore name is from a previous version
+            // Model references live in saved content even when cached explores or joins disappear.
+            // Only field renames retain explore-scoped discovery.
+            let exploreNames: string[] | undefined;
+            if (type === RenameType.FIELD) {
+                const explores =
+                    await this.projectModel.getAllExploresFromCache(
+                        projectUuid,
+                    );
+                // Include explore errors: a rename may already have broken the explore.
+                const exploreJoins = Object.values(explores)
+                    .filter((e) =>
+                        e.joinedTables?.some((j) => j.table === exploreName),
+                    )
+                    .map((e) => e.name);
+                exploreNames = Array.from(
+                    new Set([exploreName, ...exploreJoins]),
+                );
+                this.logger.info(
+                    `Rename resources: Filtering chart for explore "${exploreName}" and joins: ${exploreJoins.join(',')}`,
+                );
+            }
             const chartSummaries = await this.savedChartModel.find({
                 projectUuid,
-                exploreNames: Array.from(exploreNames),
+                ...(exploreNames && { exploreNames }),
             });
 
             this.logger.debug(
@@ -955,6 +970,7 @@ export class RenameService extends BaseService {
             );
 
             const charts = await Promise.all(chartPromises);
+            const chartsByUuid = new Map(charts.map((c) => [c.uuid, c]));
             const chartChanges = charts.reduce<SavedChartDAO[]>((acc, c) => {
                 const { updatedChart, hasChanges } = renameSavedChart({
                     type,
@@ -1017,6 +1033,10 @@ export class RenameService extends BaseService {
                         type,
                         d,
                         nameChanges,
+                        false,
+                        d.savedChartUuid
+                            ? (chartsByUuid.get(d.savedChartUuid) ?? null)
+                            : null,
                     );
 
                     if (hasChanges) {

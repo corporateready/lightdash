@@ -1,23 +1,35 @@
 import {
     Account,
+    AgentIdentityConnectFailureReason,
     Project,
     ServiceAccount,
     SessionUser,
 } from '@lightdash/common';
 import { ClientRepository } from '../clients/ClientRepository';
+import { type AgentConnectAttempt } from '../services/AiAccessService/AiAccessService';
 import { ServiceRepository } from '../services/ServiceRepository';
 
 declare global {
     namespace Express {
         interface Request {
             services: ServiceRepository;
-            serviceAccount?: Pick<ServiceAccount, 'organizationUuid'>;
+            agentConnectAttempt?: AgentConnectAttempt | null;
+            agentConnectVerification?: {
+                failureReason: AgentIdentityConnectFailureReason | null;
+            };
+            serviceAccount?: Pick<ServiceAccount, 'organizationUuid' | 'uuid'>;
+            // SCIM request-log attribution when auth resolved a token but rejected it
+            scimLogAttribution?: {
+                organizationUuid: string;
+                serviceAccountUuid: string;
+            };
             project?: Pick<Project, 'projectUuid'>;
             /**
              * @deprecated Clients should be used inside services. This will be removed soon.
              */
             clients: ClientRepository;
             account?: Account;
+            rawBody?: Buffer;
         }
 
         interface User extends SessionUser {}

@@ -1,6 +1,8 @@
 import {
     defineUserAbility,
     OrganizationMemberRole,
+    ParameterError,
+    SEED_ORG_1,
     SEED_ORG_1_EDITOR,
     SEED_ORG_1_EDITOR_EMAIL,
     SEED_ORG_1_VIEWER,
@@ -15,12 +17,15 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { AppsTableName } from '../../../database/entities/apps';
 import {
     getModels,
     getServices,
     getTestContext,
     type IntegrationTestContext,
 } from '../../../vitest.setup.integration';
+import { AiThreadTableName } from '../../database/entities/ai';
+import { AiAgentTableName } from '../../database/entities/aiAgent';
 
 type RuntimeClientSpies = {
     startOAuthConnection: (...args: unknown[]) => Promise<string>;
@@ -51,6 +56,8 @@ const getProjectUser = (
     organizationCreatedAt: context.testUser.organizationCreatedAt,
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     userId: context.testUser.userId,
@@ -77,7 +84,7 @@ describe('AiAgentService MCP support', () => {
         name: string;
         title: string;
         description: string;
-        inputSchema: Record<string, z.ZodTypeAny>;
+        inputSchema: Record<string, z.ZodType>;
     }[];
 
     beforeAll(async () => {
@@ -497,11 +504,157 @@ describe('AiAgentService MCP support', () => {
         expect(updatedAgentMcpServers).toEqual([]);
     });
 
+    it('preserves Slack channel integrations when updating an agent without an integrations field', async () => {
+        const services = getServices(context.app);
+        const suffix = crypto.randomUUID().slice(0, 8);
+        const slackChannelId = `C_TEST_${suffix}`;
+
+        const agent = await services.aiAgentService.createAgent(
+            context.testUser,
+            {
+                name: `Slack Integration Agent ${suffix}`,
+                description: null,
+                projectUuid: SEED_PROJECT.project_uuid,
+                tags: null,
+                integrations: [{ type: 'slack', channelId: slackChannelId }],
+                instruction: '',
+                groupAccess: [],
+                userAccess: [],
+                spaceAccess: [],
+                mcpServerUuids: [],
+                imageUrl: null,
+                enableDataAccess: true,
+                enableSelfImprovement: false,
+                version: 2,
+            },
+        );
+
+        expect(agent.integrations).toEqual([
+            { type: 'slack', channelId: slackChannelId },
+        ]);
+
+        // A partial update (e.g. changing MCP servers) omits `integrations`.
+        // It must NOT wipe the agent's Slack channel assignments.
+        const updatedAgent = await services.aiAgentService.updateAgent(
+            context.testUser,
+            agent.uuid,
+            {
+                uuid: agent.uuid,
+                projectUuid: SEED_PROJECT.project_uuid,
+                mcpServerUuids: [],
+            },
+        );
+
+        expect(updatedAgent.integrations).toEqual([
+            { type: 'slack', channelId: slackChannelId },
+        ]);
+
+        const refetchedAgent = await services.aiAgentService.getAgent(
+            context.testUser,
+            agent.uuid,
+        );
+
+        expect(refetchedAgent.integrations).toEqual([
+            { type: 'slack', channelId: slackChannelId },
+        ]);
+
+        // Explicitly providing `integrations` still replaces them.
+        const clearedAgent = await services.aiAgentService.updateAgent(
+            context.testUser,
+            agent.uuid,
+            {
+                uuid: agent.uuid,
+                projectUuid: SEED_PROJECT.project_uuid,
+                integrations: [],
+            },
+        );
+
+        expect(clearedAgent.integrations).toEqual([]);
+    });
+
+    it('defaults SQL mode on and persists updates', async () => {
+        const services = getServices(context.app);
+        const agent = await services.aiAgentService.createAgent(
+            context.testUser,
+            {
+                name: `SQL default agent ${crypto.randomUUID().slice(0, 8)}`,
+                description: null,
+                projectUuid: SEED_PROJECT.project_uuid,
+                tags: null,
+                integrations: [],
+                instruction: '',
+                groupAccess: [],
+                userAccess: [],
+                spaceAccess: [],
+                imageUrl: null,
+                enableDataAccess: true,
+                enableSelfImprovement: false,
+                version: 2,
+            },
+        );
+
+        expect(agent.enableSqlMode).toBe(true);
+
+        const updatedAgent = await services.aiAgentService.updateAgent(
+            context.testUser,
+            agent.uuid,
+            {
+                uuid: agent.uuid,
+                enableSqlMode: false,
+            },
+        );
+        const refetchedAgent = await services.aiAgentService.getAgent(
+            context.testUser,
+            agent.uuid,
+        );
+
+        expect(updatedAgent.enableSqlMode).toBe(false);
+        expect(refetchedAgent.enableSqlMode).toBe(false);
+    });
+
+    it('defaults SQL auto-approval off and persists opt-in', async () => {
+        const services = getServices(context.app);
+        const agent = await services.aiAgentService.createAgent(
+            context.testUser,
+            {
+                name: `SQL auto-approve agent ${crypto.randomUUID().slice(0, 8)}`,
+                description: null,
+                projectUuid: SEED_PROJECT.project_uuid,
+                tags: null,
+                integrations: [],
+                instruction: '',
+                groupAccess: [],
+                userAccess: [],
+                spaceAccess: [],
+                imageUrl: null,
+                enableDataAccess: true,
+                enableSelfImprovement: false,
+                version: 2,
+            },
+        );
+
+        expect(agent.enableSqlAutoApproval).toBe(false);
+
+        await services.aiAgentService.updateAgent(
+            context.testUser,
+            agent.uuid,
+            {
+                uuid: agent.uuid,
+                enableSqlAutoApproval: true,
+            },
+        );
+        const refetchedAgent = await services.aiAgentService.getAgent(
+            context.testUser,
+            agent.uuid,
+        );
+
+        expect(refetchedAgent.enableSqlAutoApproval).toBe(true);
+    });
+
     it('creates OAuth MCP servers without credentials and disables sharing by default', async () => {
         const services = getServices(context.app);
         const models = getModels(context.app);
         const suffix = crypto.randomUUID().slice(0, 8);
-
         const mcpServer = await services.aiAgentService.createMcpServer(
             context.testUser,
             SEED_PROJECT.project_uuid,
@@ -556,7 +709,6 @@ describe('AiAgentService MCP support', () => {
         const services = getServices(context.app);
         const models = getModels(context.app);
         const suffix = crypto.randomUUID().slice(0, 8);
-
         const mcpServer = await services.aiAgentService.createMcpServer(
             context.testUser,
             SEED_PROJECT.project_uuid,
@@ -566,7 +718,6 @@ describe('AiAgentService MCP support', () => {
                 authType: 'oauth',
             },
         );
-
         await models.aiAgentModel.upsertCredential({
             serverUuid: mcpServer.uuid,
             scope: 'shared',
@@ -777,6 +928,9 @@ describe('AiAgentService MCP support', () => {
                 userUuid: viewerUser.userUuid,
             }),
         );
+        expect(startOAuthConnectionSpy.mock.calls[0][0]).not.toHaveProperty(
+            'connectionStatusOnAuthorization',
+        );
 
         await expect(
             services.aiAgentService.disconnectMcpOAuthConnection(
@@ -864,6 +1018,19 @@ describe('AiAgentService MCP support', () => {
         const services = getServices(context.app);
         const models = getModels(context.app);
         const suffix = crypto.randomUUID().slice(0, 8);
+        const getOauthCredentialByStateSpy = vi.spyOn(
+            models.aiAgentModel,
+            'getOauthCredentialByState',
+        );
+
+        await expect(
+            services.aiAgentService.completeMcpOAuthConnection({
+                code: 'oauth-code',
+                state: 'unscoped-state',
+            }),
+        ).rejects.toThrow('Invalid OAuth state');
+
+        expect(getOauthCredentialByStateSpy).not.toHaveBeenCalled();
 
         const mcpServer = await services.aiAgentService.createMcpServer(
             context.testUser,
@@ -874,6 +1041,7 @@ describe('AiAgentService MCP support', () => {
                 authType: 'oauth',
             },
         );
+        const oauthState = `${mcpServer.uuid}.user-oauth-state`;
 
         await models.aiAgentModel.upsertCredential({
             serverUuid: mcpServer.uuid,
@@ -883,7 +1051,7 @@ describe('AiAgentService MCP support', () => {
                 type: 'oauth',
                 credentialScope: 'user',
                 connectionStatus: 'connecting',
-                state: 'user-oauth-state',
+                state: oauthState,
             },
             actorUserUuid: context.testUser.userUuid,
         });
@@ -892,9 +1060,14 @@ describe('AiAgentService MCP support', () => {
             services.aiAgentService.completeMcpOAuthConnection({
                 projectUuid: SEED_PROJECT.project_uuid,
                 mcpServerUuid: mcpServer.uuid,
-                state: 'user-oauth-state',
+                state: oauthState,
             }),
         ).rejects.toThrow('OAuth callback is missing code or state');
+
+        expect(getOauthCredentialByStateSpy).toHaveBeenCalledWith({
+            serverUuid: mcpServer.uuid,
+            state: oauthState,
+        });
 
         await expect(
             models.aiAgentModel.getCredential(mcpServer.uuid, 'user', {
@@ -923,14 +1096,13 @@ describe('AiAgentService MCP support', () => {
             .mockResolvedValue([]);
 
         await services.aiAgentService.completeMcpOAuthConnection({
-            projectUuid: SEED_PROJECT.project_uuid,
-            mcpServerUuid: mcpServer.uuid,
             code: 'oauth-code',
-            state: 'user-oauth-state',
+            state: oauthState,
         });
 
         expect(completeOAuthConnectionSpy).toHaveBeenCalledWith(
             expect.objectContaining({
+                projectUuid: SEED_PROJECT.project_uuid,
                 mcpServerUuid: mcpServer.uuid,
                 credential: expect.objectContaining({
                     credentialScope: 'user',
@@ -941,5 +1113,173 @@ describe('AiAgentService MCP support', () => {
 
         completeOAuthConnectionSpy.mockRestore();
         discoverMcpServerToolsSpy.mockRestore();
+        getOauthCredentialByStateSpy.mockRestore();
+    });
+});
+
+describe('AiAgentService thread data app restore', () => {
+    let context: IntegrationTestContext;
+    let agentUuid: string;
+    const threadUuids = new Set<string>();
+    const appUuids = new Set<string>();
+
+    beforeAll(async () => {
+        context = getTestContext();
+        const agent = await getServices(context.app).aiAgentService.createAgent(
+            context.testUser,
+            {
+                name: `Restore Agent ${crypto.randomUUID().slice(0, 8)}`,
+                description: null,
+                projectUuid: SEED_PROJECT.project_uuid,
+                tags: null,
+                integrations: [],
+                instruction: '',
+                groupAccess: [],
+                userAccess: [],
+                spaceAccess: [],
+                mcpServerUuids: [],
+                imageUrl: null,
+                enableDataAccess: true,
+                enableSelfImprovement: false,
+                version: 2,
+            },
+        );
+        agentUuid = agent.uuid;
+    });
+
+    afterAll(async () => {
+        await context
+            .db(AiThreadTableName)
+            .whereIn('ai_thread_uuid', [...threadUuids])
+            .delete();
+        await context
+            .db(AppsTableName)
+            .whereIn('app_id', [...appUuids])
+            .delete();
+        await context
+            .db(AiAgentTableName)
+            .where('ai_agent_uuid', agentUuid)
+            .delete();
+    });
+
+    const createAppWithVersions = async (latestStatus: 'ready' | 'pending') => {
+        const appModel = context.app.getModels().getAppModel();
+        const { app } = await appModel.createWithVersion(
+            {
+                project_uuid: SEED_PROJECT.project_uuid,
+                created_by_user_uuid: context.testUser.userUuid,
+                name: 'Revenue app',
+            },
+            { version: 1, prompt: 'Build a revenue app' },
+            'ready',
+        );
+        appUuids.add(app.app_id);
+        await appModel.createVersion(
+            app.app_id,
+            { version: 2, prompt: 'Add a chart' },
+            latestStatus,
+            context.testUser.userUuid,
+        );
+        // Threads are only listed once they hold a first prompt.
+        const { aiAgentModel } = getModels(context.app);
+        const threadUuid = await aiAgentModel.createWebAppThread({
+            organizationUuid: SEED_ORG_1.organization_uuid,
+            projectUuid: SEED_PROJECT.project_uuid,
+            userUuid: context.testUser.userUuid,
+            createdFrom: 'web_app',
+            agentUuid,
+        });
+        threadUuids.add(threadUuid);
+        const firstPromptUuid = await aiAgentModel.createWebAppPrompt({
+            threadUuid,
+            createdByUserUuid: context.testUser.userUuid,
+            prompt: 'Build me a revenue app',
+            modelConfig: null,
+        });
+        await aiAgentModel.updateModelResponse({
+            promptUuid: firstPromptUuid,
+            response: 'Started the data app build.',
+        });
+        return { app, threadUuid };
+    };
+
+    it('restores the version and records a hidden, answered turn in the thread', async () => {
+        const { app, threadUuid } = await createAppWithVersions('ready');
+        const { aiAgentService } = getServices(context.app);
+        const { aiAgentModel } = getModels(context.app);
+
+        const result = await aiAgentService.restoreDataAppVersionForThread(
+            context.testUser,
+            agentUuid,
+            threadUuid,
+            { appUuid: app.app_id, version: 1 },
+        );
+
+        expect(result).toEqual({
+            appUuid: app.app_id,
+            version: 3,
+            restoredFromVersion: 1,
+            promptUuid: expect.any(String),
+        });
+        const latest = await context.app
+            .getModels()
+            .getAppModel()
+            .getLatestVersion(app.app_id);
+        expect(latest).toMatchObject({ version: 3, status: 'ready' });
+
+        const messages = await aiAgentModel.findThreadMessages({
+            organizationUuid: SEED_ORG_1.organization_uuid,
+            threadUuid,
+        });
+        expect(messages).toHaveLength(4);
+        expect(messages[2]).toMatchObject({
+            role: 'user',
+            uuid: result.promptUuid,
+            hidden: true,
+            message: 'Restore version 1 of Revenue app',
+            context: [
+                {
+                    type: 'data_app_restore',
+                    appUuid: app.app_id,
+                    version: 3,
+                    restoredFromVersion: 1,
+                    appSlug: app.slug,
+                    displayName: 'Revenue app',
+                },
+            ],
+        });
+        expect(messages[3]).toMatchObject({
+            role: 'assistant',
+            uuid: result.promptUuid,
+            status: 'idle',
+            message: 'Restored version 1 as version 3.',
+        });
+    });
+
+    it('writes nothing to the thread when the restore is refused', async () => {
+        const { app, threadUuid } = await createAppWithVersions('pending');
+        const { aiAgentService } = getServices(context.app);
+        const { aiAgentModel } = getModels(context.app);
+
+        await expect(
+            aiAgentService.restoreDataAppVersionForThread(
+                context.testUser,
+                agentUuid,
+                threadUuid,
+                { appUuid: app.app_id, version: 1 },
+            ),
+        ).rejects.toThrow(ParameterError);
+
+        const latest = await context.app
+            .getModels()
+            .getAppModel()
+            .getLatestVersion(app.app_id);
+        expect(latest).toMatchObject({ version: 2, status: 'pending' });
+        const messages = await aiAgentModel.findThreadMessages({
+            organizationUuid: SEED_ORG_1.organization_uuid,
+            threadUuid,
+        });
+        expect(messages).toHaveLength(2);
+        expect(messages.some((m) => m.role === 'user' && m.hidden)).toBe(false);
     });
 });

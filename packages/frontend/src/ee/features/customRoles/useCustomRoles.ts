@@ -7,14 +7,15 @@ import {
 } from '@lightdash/common';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
-import { lightdashApi } from '../../../api';
 import { useOrganization } from '../../../hooks/organization/useOrganization';
 import useToaster from '../../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 
 const CACHE_KEY = 'custom-roles';
 const ALL_ROLES_CACHE_KEY = 'all-roles';
 
 export const useCustomRoles = () => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { showToastApiError, showToastSuccess } = useToaster();
     const { data: organization } = useOrganization();
@@ -122,59 +123,18 @@ export const useCustomRoles = () => {
         enabled: !!organization?.organizationUuid,
     });
 
-    const duplicateRole = useMutation<
-        RoleWithScopes,
-        ApiError,
-        { roleId: string; name: string; description: string }
-    >({
-        mutationFn: async ({ roleId, name, description }) => {
-            if (!organization?.organizationUuid) {
-                throw new Error('Organization UUID not available');
-            }
-
-            const body: { name: string; description?: string } = { name };
-            if (description) {
-                body.description = description;
-            }
-
-            return lightdashApi<RoleWithScopes>({
-                method: 'POST',
-                url: `/orgs/${organization.organizationUuid}/roles/${roleId}/duplicate`,
-                version: 'v2',
-                body: JSON.stringify(body),
-            });
-        },
-        onSuccess: async () => {
-            await queryClient.invalidateQueries({
-                queryKey: [CACHE_KEY, organization?.organizationUuid],
-            });
-            await queryClient.invalidateQueries({
-                queryKey: [ALL_ROLES_CACHE_KEY, organization?.organizationUuid],
-            });
-            showToastSuccess({
-                title: `Role duplicated successfully`,
-            });
-        },
-        onError: ({ error }) => {
-            showToastApiError({
-                title: `Failed to duplicate role`,
-                apiError: error,
-            });
-        },
-    });
-
     return useMemo(() => {
         return {
             listRoles,
             createRole,
             deleteRole,
             getAllRoles,
-            duplicateRole,
         };
-    }, [listRoles, createRole, deleteRole, getAllRoles, duplicateRole]);
+    }, [listRoles, createRole, deleteRole, getAllRoles]);
 };
 
 export const useRoleAssignees = (roleUuid: string | undefined) => {
+    const lightdashApi = useLightdashApi();
     const { data: organization } = useOrganization();
 
     return useQuery<RoleAssignee[], ApiError>({

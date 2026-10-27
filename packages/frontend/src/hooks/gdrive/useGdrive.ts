@@ -6,19 +6,21 @@ import {
 } from '@lightdash/common';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
-import { lightdashApi } from '../../api';
+import { type LightdashApi } from '../../api';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
 import { convertDateFilters } from '../../utils/dateFilter';
 import useHealth from '../health/useHealth';
 import useToaster from '../toaster/useToaster';
 
-const getGdriveAccessToken = async () =>
+export const getGdriveAccessToken = async (lightdashApi: LightdashApi) =>
     lightdashApi<ApiGdriveAccessTokenResponse['results']>({
         url: `/gdrive/get-access-token`,
         method: 'GET',
         body: undefined,
+        sensitive: true,
     });
 
-const triggerGdriveLogin = async (
+export const triggerGdriveLogin = async (
     loginPath: 'gdrive' | 'bigquery',
     siteUrl: string,
 ) => {
@@ -98,6 +100,7 @@ export const useGoogleLoginPopup = (
 };
 
 export const useGdriveAccessToken = () => {
+    const lightdashApi = useLightdashApi();
     const { showToastError } = useToaster();
     const isAuthConcludedWithSuccess = useRef(false);
     const health = useHealth();
@@ -106,7 +109,7 @@ export const useGdriveAccessToken = () => {
         ApiGdriveAccessTokenResponse['results'],
         ApiError
     >({
-        mutationFn: getGdriveAccessToken,
+        mutationFn: () => getGdriveAccessToken(lightdashApi),
     });
     const { mutate: openLoginPopup } = useGoogleLoginPopup('gdrive', () => {
         isAuthConcludedWithSuccess.current = true;
@@ -138,7 +141,10 @@ export const useGdriveAccessToken = () => {
     };
 };
 
-export const uploadGsheet = async (gsheetMetric: UploadMetricGsheet) => {
+export const uploadGsheet = async (
+    lightdashApi: LightdashApi,
+    gsheetMetric: UploadMetricGsheet,
+) => {
     const timezoneFixQuery = {
         ...gsheetMetric.metricQuery,
         filters: convertDateFilters(gsheetMetric.metricQuery.filters),

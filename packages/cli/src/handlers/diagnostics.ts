@@ -2,6 +2,7 @@ import { getErrorMessage } from '@lightdash/common';
 import execa from 'execa';
 import { LightdashAnalytics } from '../analytics/analytics';
 import { getConfig } from '../config';
+import { refuseAgentConnection } from '../credentials';
 import {
     CLI_VERSION,
     DEFAULT_DBT_PROFILES_DIR,
@@ -15,6 +16,7 @@ import { checkLightdashVersion, getUserContext } from './dbt/apiClient';
 import { getDbtVersion } from './dbt/getDbtVersion';
 
 type DiagnosticsOptions = {
+    auth?: boolean;
     dbt?: boolean;
     projectDir?: string;
     profilesDir?: string;
@@ -36,6 +38,25 @@ const getEnvSourceSuffix = (
 
 const formatConfiguredProject = (projectName: string, projectUuid: string) =>
     projectUuid === 'Not set' ? projectName : `${projectName} (${projectUuid})`;
+
+const printAuthDetails = async (configuredProjectUuid?: string) => {
+    const user = await getUserContext();
+
+    console.log(
+        JSON.stringify(
+            {
+                email: user.email,
+                userUuid: user.userUuid,
+                organizationUuid: user.organizationUuid,
+                organizationRole: user.role,
+                configuredProjectUuid,
+                abilityRules: user.abilityRules,
+            },
+            null,
+            2,
+        ),
+    );
+};
 
 const getAuthStatus = async () => {
     try {
@@ -126,11 +147,19 @@ const runDbtDebug = async (
 };
 
 export const diagnosticsHandler = async (options: DiagnosticsOptions) => {
+    refuseAgentConnection();
     const startTime = Date.now();
     let success = true;
-    GlobalState.setVerbose(true); // Always verbose for diagnostics
 
     try {
+        if (options.auth) {
+            const config = await getConfig();
+            await printAuthDetails(config.context?.project);
+            return;
+        }
+
+        GlobalState.setVerbose(true); // Always verbose for diagnostics
+
         console.log(styles.title('⚡️ Lightdash CLI Diagnostics'));
         console.log('');
 
@@ -246,13 +275,15 @@ export const diagnosticsHandler = async (options: DiagnosticsOptions) => {
         success = false;
         throw e;
     } finally {
-        await LightdashAnalytics.track({
-            event: 'command.executed',
-            properties: {
-                command: 'diagnostics',
-                durationMs: Date.now() - startTime,
-                success,
-            },
-        });
+        if (!options.auth) {
+            await LightdashAnalytics.track({
+                event: 'command.executed',
+                properties: {
+                    command: 'diagnostics',
+                    durationMs: Date.now() - startTime,
+                    success,
+                },
+            });
+        }
     }
 };

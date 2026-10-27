@@ -1,29 +1,46 @@
-import { type AiWebAppPrompt } from '@lightdash/common';
+import {
+    toolRunSqlOutputSchema,
+    type AiWebAppPrompt,
+    type SlackPrompt,
+} from '@lightdash/common';
+import { asSchema } from 'ai';
+import { EMPTY_QUERY_GUIDANCE } from '../decisions/queryReview';
+import type { QueryReviewer } from '../decisions/queryReview';
 import { getRunSql } from './runSql';
 
 type RunSqlTool = ReturnType<typeof getRunSql>;
-type RunSqlOutput = {
-    result: string;
-    metadata?: { status: string };
-};
 type MakeToolOptions = {
+    reviewQuery?: QueryReviewer;
     autoApproveSql?: boolean;
     autoApproveSqlUserUuid?: string | null;
-    waitForSqlApproval?: jest.Mock;
-    recordSqlApproval?: jest.Mock;
+    waitForSqlApproval?: import('vitest').Mock;
+    recordSqlApproval?: import('vitest').Mock;
+    isThreadSqlAutoApproved?: import('vitest').Mock;
+    maxQueryLimit?: number;
+    enableDataAccess?: boolean;
+    slackLinksOnly?: boolean;
 };
 
-const executeRunSql = (tool: RunSqlTool, toolCallId: string = 'tool-call-1') =>
-    tool.execute!(
-        {
-            sql: 'select 1 as answer',
-            limit: 500,
-        },
-        {
-            messages: [],
-            toolCallId,
-        },
-    ) as Promise<RunSqlOutput>;
+// execute() is typed as value-or-stream; runSql never streams, so every path
+// is narrowed (and asserted) through the tool's own output schema.
+const executeRunSql = async (
+    tool: RunSqlTool,
+    toolCallId: string = 'tool-call-1',
+    sql: string = 'select 1 as answer',
+) =>
+    toolRunSqlOutputSchema.parse(
+        await tool.execute!(
+            {
+                sql,
+                limit: 500,
+            },
+            {
+                messages: [],
+                toolCallId,
+                context: {},
+            },
+        ),
+    );
 
 const makePrompt = (): AiWebAppPrompt => ({
     organizationUuid: 'org-uuid',
@@ -31,6 +48,9 @@ const makePrompt = (): AiWebAppPrompt => ({
     agentUuid: 'agent-uuid',
     promptUuid: 'prompt-uuid',
     threadUuid: 'thread-uuid',
+    threadCreatedFrom: 'web_app',
+    threadEmbedSpaceUuid: null,
+    externalUserId: null,
     createdByUserUuid: 'user-uuid',
     userUuid: 'user-uuid',
     prompt: 'How many users do we have?',
@@ -39,29 +59,64 @@ const makePrompt = (): AiWebAppPrompt => ({
     errorMessage: null,
     humanScore: null,
     modelConfig: null,
+    battleProfile: null,
+});
+
+const makeSlackPrompt = (): SlackPrompt => ({
+    ...makePrompt(),
+    response_slack_ts: 'response-ts',
+    slackUserId: 'slack-user',
+    slackChannelId: 'slack-channel',
+    promptSlackTs: 'prompt-ts',
+    slackThreadTs: 'thread-ts',
 });
 
 const makeTool = ({
+    reviewQuery,
     autoApproveSql = false,
     autoApproveSqlUserUuid = null,
-    waitForSqlApproval = jest.fn().mockResolvedValue('approved'),
-    recordSqlApproval = jest.fn().mockResolvedValue(true),
-}: MakeToolOptions = {}) => {
+    waitForSqlApproval = vi.fn().mockResolvedValue('approved'),
+    recordSqlApproval = vi.fn().mockResolvedValue(true),
+    isThreadSqlAutoApproved = vi.fn().mockResolvedValue(false),
+    maxQueryLimit = 5000,
+    enableDataAccess = true,
+    slackLinksOnly = false,
+    useSlackStreamCard = false,
+    prompt = makePrompt(),
+    sqlScope = null,
+}: MakeToolOptions & {
+    useSlackStreamCard?: boolean;
+    prompt?: AiWebAppPrompt | SlackPrompt;
+    sqlScope?: { schemas: string[]; catalogs?: string[] } | null;
+} = {}) => {
     const dependencies = {
-        updateProgress: jest.fn().mockResolvedValue(undefined),
-        runSqlJob: jest.fn().mockResolvedValue({
+        reviewQuery,
+        updateProgress: vi.fn().mockResolvedValue(undefined),
+        runSqlJob: vi.fn().mockResolvedValue({
+            queryUuid: 'query-uuid',
             rows: [{ answer: 1 }],
             columns: ['answer'],
             rowCount: 1,
+            executionStats: null,
         }),
-        getPrompt: jest.fn().mockResolvedValue(makePrompt()),
-        sendFile: jest.fn().mockResolvedValue(undefined),
-        updateSlackMessage: jest.fn().mockResolvedValue(undefined),
+        getPrompt: vi.fn().mockResolvedValue(prompt),
+        sendFile: vi.fn().mockResolvedValue(undefined),
+        updateSlackMessage: vi.fn().mockResolvedValue(undefined),
         siteUrl: 'https://lightdash.example',
         waitForSqlApproval,
         recordSqlApproval,
+        isThreadSqlAutoApproved,
+        listSqlApprovalDecisions: vi.fn().mockResolvedValue([]),
+        trackSqlApprovalTimeout: vi.fn(),
+        storeToolResults: vi.fn().mockResolvedValue(undefined),
+        createOrUpdateArtifact: vi.fn().mockResolvedValue(undefined),
         autoApproveSql,
         autoApproveSqlUserUuid,
+        maxQueryLimit,
+        enableDataAccess,
+        slackLinksOnly,
+        useSlackStreamCard,
+        sqlScope,
     };
 
     return {
@@ -71,6 +126,27 @@ const makeTool = ({
 };
 
 describe('getRunSql', () => {
+    it.each([
+        { maxQueryLimit: 5000, defaultLimit: 500 },
+        { maxQueryLimit: 100, defaultLimit: 100 },
+    ])(
+        'describes the row limits it enforces: max $maxQueryLimit',
+        ({ maxQueryLimit, defaultLimit }) => {
+            const { tool } = makeTool({ maxQueryLimit });
+            const { properties } = asSchema(tool.inputSchema).jsonSchema as {
+                properties: { limit: { default: number; maximum: number } };
+            };
+
+            expect(properties.limit).toMatchObject({
+                default: defaultLimit,
+                maximum: maxQueryLimit,
+            });
+            expect(tool.description).toContain(
+                `The row limit defaults to ${defaultLimit}, max ${maxQueryLimit}.`,
+            );
+        },
+    );
+
     it('auto-approves SQL without waiting for human approval', async () => {
         const { tool, dependencies } = makeTool({
             autoApproveSql: true,
@@ -79,11 +155,12 @@ describe('getRunSql', () => {
 
         const output = await executeRunSql(tool);
 
-        expect(dependencies.recordSqlApproval).toHaveBeenCalledWith(
-            'tool-call-1',
-            'approved',
-            'user-uuid',
-        );
+        expect(dependencies.recordSqlApproval).toHaveBeenCalledWith({
+            toolCallId: 'tool-call-1',
+            toolName: 'runSql',
+            decidedByUserUuid: 'user-uuid',
+            source: 'auto_approve',
+        });
         expect(dependencies.waitForSqlApproval).not.toHaveBeenCalled();
         expect(dependencies.runSqlJob).toHaveBeenCalledWith({
             sql: 'select 1 as answer',
@@ -92,6 +169,52 @@ describe('getRunSql', () => {
         expect(dependencies.updateProgress).not.toHaveBeenCalledWith(
             'Awaiting approval to run SQL...',
         );
+        expect(output.metadata?.status).toBe('success');
+    });
+
+    it('skips the Slack approval card when the agent auto-approves SQL', async () => {
+        const { tool, dependencies } = makeTool({
+            prompt: makeSlackPrompt(),
+            useSlackStreamCard: true,
+            autoApproveSql: true,
+        });
+
+        const needsApproval =
+            typeof tool.needsApproval === 'function'
+                ? await tool.needsApproval(
+                      { sql: 'select 1 as answer', limit: 500 },
+                      { toolCallId: 'tool-call-1', messages: [], context: {} },
+                  )
+                : tool.needsApproval;
+        const output = await executeRunSql(tool);
+
+        expect(needsApproval).toBe(false);
+        expect(dependencies.recordSqlApproval).toHaveBeenCalledWith({
+            toolCallId: 'tool-call-1',
+            toolName: 'runSql',
+            decidedByUserUuid: null,
+            source: 'auto_approve',
+        });
+        expect(dependencies.updateSlackMessage).not.toHaveBeenCalled();
+        expect(dependencies.waitForSqlApproval).not.toHaveBeenCalled();
+        expect(output.metadata?.status).toBe('success');
+    });
+
+    it('records a thread auto-approval once a Slack thread chose "don\'t ask again"', async () => {
+        const { tool, dependencies } = makeTool({
+            prompt: makeSlackPrompt(),
+            isThreadSqlAutoApproved: vi.fn().mockResolvedValue(true),
+        });
+
+        const output = await executeRunSql(tool);
+
+        expect(dependencies.recordSqlApproval).toHaveBeenCalledWith({
+            toolCallId: 'tool-call-1',
+            toolName: 'runSql',
+            decidedByUserUuid: null,
+            source: 'thread_auto_approve',
+        });
+        expect(dependencies.waitForSqlApproval).not.toHaveBeenCalled();
         expect(output.metadata?.status).toBe('success');
     });
 
@@ -109,4 +232,591 @@ describe('getRunSql', () => {
         );
         expect(output.metadata?.status).toBe('success');
     });
+
+    it('creates a SQL-backed chart artifact for web results', async () => {
+        const { tool, dependencies } = makeTool({
+            autoApproveSql: true,
+        });
+
+        await executeRunSql(tool);
+
+        expect(dependencies.createOrUpdateArtifact).toHaveBeenCalledWith({
+            threadUuid: 'thread-uuid',
+            promptUuid: 'prompt-uuid',
+            artifactType: 'chart',
+            title: 'SQL query results',
+            vizConfig: {
+                source: 'sql',
+                sql: 'select 1 as answer',
+                limit: 500,
+            },
+        });
+    });
+
+    it('creates an artifact even when the SQL result has no rows', async () => {
+        const { tool, dependencies } = makeTool({
+            autoApproveSql: true,
+        });
+        dependencies.runSqlJob.mockResolvedValueOnce({
+            queryUuid: 'empty-query-uuid',
+            rows: [],
+            columns: ['answer'],
+            rowCount: 0,
+        });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.metadata?.status).toBe('success');
+        expect(dependencies.createOrUpdateArtifact).toHaveBeenCalledWith(
+            expect.objectContaining({
+                vizConfig: {
+                    source: 'sql',
+                    sql: 'select 1 as answer',
+                    limit: 500,
+                },
+            }),
+        );
+    });
+
+    it('does not create a web artifact for Slack results', async () => {
+        const { tool, dependencies } = makeTool({
+            autoApproveSql: true,
+            prompt: makeSlackPrompt(),
+        });
+
+        await executeRunSql(tool);
+
+        expect(dependencies.createOrUpdateArtifact).not.toHaveBeenCalled();
+    });
+
+    it('clamps a requested limit above maxQueryLimit when calling runSqlJob', async () => {
+        const { tool, dependencies } = makeTool({
+            autoApproveSql: true,
+            autoApproveSqlUserUuid: 'user-uuid',
+            maxQueryLimit: 2000,
+        });
+
+        await tool.execute!(
+            {
+                sql: 'select 1 as answer',
+                limit: 5000,
+            },
+            {
+                messages: [],
+                toolCallId: 'tool-call-1',
+                context: {},
+            },
+        );
+
+        expect(dependencies.runSqlJob).toHaveBeenCalledWith({
+            sql: 'select 1 as answer',
+            limit: 2000,
+        });
+    });
+
+    it('tracks a timed-out approval against the prompted Slack user', async () => {
+        const waitForSqlApproval = vi.fn().mockResolvedValue('timeout');
+        const { tool, dependencies } = makeTool({
+            waitForSqlApproval,
+            prompt: makeSlackPrompt(),
+        });
+
+        await executeRunSql(tool);
+
+        expect(
+            dependencies.trackSqlApprovalTimeout,
+        ).toHaveBeenCalledExactlyOnceWith({
+            toolCallId: 'tool-call-1',
+            toolName: 'runSql',
+            promptedUserUuid: 'user-uuid',
+            source: 'slack',
+        });
+        expect(dependencies.recordSqlApproval).not.toHaveBeenCalled();
+    });
+
+    it('does not open another approval wait after approval times out', async () => {
+        const waitForSqlApproval = vi.fn().mockResolvedValue('timeout');
+        const { tool, dependencies } = makeTool({ waitForSqlApproval });
+
+        const firstOutput = await executeRunSql(tool, 'tool-call-1');
+        const secondOutput = await executeRunSql(tool, 'tool-call-2');
+
+        expect(firstOutput.metadata?.status).toBe('timeout');
+        expect(secondOutput.metadata?.status).toBe('timeout');
+        expect(secondOutput.result).toContain(
+            'Do not call runSql again in this response',
+        );
+        expect(firstOutput.structuredContent).toEqual({
+            error: firstOutput.result,
+        });
+        expect(secondOutput.structuredContent).toEqual({
+            error: secondOutput.result,
+        });
+        expect(dependencies.waitForSqlApproval).toHaveBeenCalledTimes(1);
+        expect(dependencies.waitForSqlApproval).toHaveBeenCalledWith(
+            'tool-call-1',
+        );
+        expect(dependencies.runSqlJob).not.toHaveBeenCalled();
+    });
+
+    it('includes a CSV preview in the result when data access is enabled', async () => {
+        const { tool } = makeTool({ autoApproveSql: true });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.metadata?.status).toBe('success');
+        expect(output.result).toContain('1 rows. Columns: answer.');
+        expect(output.result).toContain('```csv');
+        expect(output.result).toContain('answer');
+        expect(output.structuredContent).toEqual({
+            rowCount: 1,
+            columns: ['answer'],
+            rows: [{ answer: 1 }],
+            truncated: false,
+            review: null,
+            executionStats: null,
+        });
+    });
+
+    it('states the warehouse execution stats in the result and structured content', async () => {
+        const { tool, dependencies } = makeTool({ autoApproveSql: true });
+        const executionStats = {
+            jobId: 'job-123',
+            bytesProcessed: 2048,
+            bytesBilled: 10485760,
+            executionTimeMs: 900,
+            cacheHit: false,
+        };
+        dependencies.runSqlJob.mockResolvedValueOnce({
+            queryUuid: 'query-uuid',
+            rows: [{ answer: 1 }],
+            columns: ['answer'],
+            rowCount: 1,
+            executionStats,
+        });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.result).toContain(
+            "1 rows. Columns: answer. Warehouse execution stats: 2048 bytes (2.0 KiB) processed, 10485760 bytes (10.0 MiB) billed, ran for 900 ms, served from the warehouse's own result cache: no, warehouse job ID job-123.",
+        );
+        expect(output.structuredContent).toMatchObject({ executionStats });
+        expect(toolRunSqlOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('returns only a summary when data access is disabled', async () => {
+        const { tool } = makeTool({
+            autoApproveSql: true,
+            enableDataAccess: false,
+        });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.metadata?.status).toBe('success');
+        expect(output.result).toBe('1 rows. Columns: answer.');
+        expect(output.result).not.toContain('```csv');
+        expect(output.structuredContent).toEqual({
+            rowCount: 1,
+            columns: ['answer'],
+            rows: null,
+            truncated: false,
+            review: null,
+            executionStats: null,
+        });
+    });
+
+    it('mirrors a truncated preview in the structured content', async () => {
+        const { tool, dependencies } = makeTool({ autoApproveSql: true });
+        dependencies.runSqlJob.mockResolvedValueOnce({
+            queryUuid: 'query-uuid',
+            rows: Array.from({ length: 60 }, (_, index) => ({
+                answer: index,
+                extra: 'not selected',
+            })),
+            columns: ['answer'],
+            rowCount: 60,
+        });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.result).toContain('60 rows. Columns: answer.');
+        expect(output.result).toContain('(Showing first 50 of 60 rows.)');
+        expect(output.structuredContent).toEqual({
+            rowCount: 60,
+            columns: ['answer'],
+            rows: Array.from({ length: 50 }, (_, index) => ({
+                answer: index,
+            })),
+            truncated: true,
+            review: null,
+        });
+    });
+
+    it('reports an empty result in the structured content', async () => {
+        const { tool, dependencies } = makeTool({ autoApproveSql: true });
+        dependencies.runSqlJob.mockResolvedValueOnce({
+            queryUuid: 'query-uuid',
+            rows: [],
+            columns: ['answer'],
+            rowCount: 0,
+        });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.result).toBe('Query returned 0 rows. Columns: answer');
+        expect(output.structuredContent).toEqual({
+            rowCount: 0,
+            columns: ['answer'],
+            rows: [],
+            truncated: false,
+            review: null,
+        });
+    });
+
+    it('mirrors a query execution error in the structured content', async () => {
+        const { tool, dependencies } = makeTool({ autoApproveSql: true });
+        dependencies.runSqlJob.mockRejectedValueOnce(
+            new Error('relation "missing" does not exist'),
+        );
+
+        const output = await executeRunSql(tool);
+
+        expect(output.metadata?.status).toBe('error');
+        expect(output.result).toContain('relation "missing" does not exist');
+        expect(output.structuredContent).toEqual({ error: output.result });
+    });
+
+    it('mirrors a rejected approval in the structured content', async () => {
+        const waitForSqlApproval = vi.fn().mockResolvedValue('rejected');
+        const { tool } = makeTool({ waitForSqlApproval });
+
+        const output = await executeRunSql(tool);
+
+        expect(output.metadata?.status).toBe('rejected');
+        expect(output.structuredContent).toEqual({ error: output.result });
+    });
+
+    it('returns output that parses with the tool output schema on success', async () => {
+        const { tool } = makeTool({ autoApproveSql: true });
+
+        const raw = await tool.execute!(
+            { sql: 'select 1 as answer', limit: 500 },
+            { messages: [], toolCallId: 'tool-call-1', context: {} },
+        );
+
+        expect(toolRunSqlOutputSchema.safeParse(raw).success).toBe(true);
+    });
+
+    it('returns output that parses with the tool output schema on error', async () => {
+        const { tool, dependencies } = makeTool({ autoApproveSql: true });
+        dependencies.runSqlJob.mockRejectedValueOnce(new Error('boom'));
+
+        const raw = await tool.execute!(
+            { sql: 'select 1 as answer', limit: 500 },
+            { messages: [], toolCallId: 'tool-call-1', context: {} },
+        );
+
+        expect(toolRunSqlOutputSchema.safeParse(raw).success).toBe(true);
+    });
+
+    it('rejects nested SQL execution functions before approval', async () => {
+        const { tool, dependencies } = makeTool();
+
+        const output = await executeRunSql(
+            tool,
+            'tool-call-1',
+            "SELECT * FROM query('INSTALL shellfs')",
+        );
+
+        expect(output.metadata?.status).toBe('error');
+        expect(output.result).toContain('forbidden functions');
+        expect(output.structuredContent).toEqual({ error: output.result });
+        expect(dependencies.waitForSqlApproval).not.toHaveBeenCalled();
+        expect(dependencies.runSqlJob).not.toHaveBeenCalled();
+    });
+
+    // On the native-approval (modern Slack) path, execute only runs as a resume
+    // of a previously-approved call, so it must persist its own result — even
+    // when the SQL is blocked/rejected. Otherwise the tool_use is left with no
+    // tool_result and the resumed request 400s. (ZAP-601)
+    describe('native-approval resume persists a result for every outcome', () => {
+        const runNativeResume = (sql: string, toolCallId = 'tool-call-1') => {
+            const { tool, dependencies } = makeTool({
+                useSlackStreamCard: true,
+                prompt: makeSlackPrompt(),
+            });
+            return {
+                dependencies,
+                output: executeRunSql(tool, toolCallId, sql),
+            };
+        };
+
+        it('persists an error result for a guardrail-blocked query', async () => {
+            const { dependencies, output } = runNativeResume(
+                'SELECT * FROM INFORMATION_SCHEMA.COLUMNS',
+            );
+
+            const resolved = await output;
+            expect(resolved.metadata?.status).toBe('error');
+            expect(resolved.result).toContain('information_schema');
+            expect(dependencies.storeToolResults).toHaveBeenCalledWith([
+                expect.objectContaining({
+                    promptUuid: 'prompt-uuid',
+                    toolCallId: 'tool-call-1',
+                    toolName: 'runSql',
+                    result: resolved.result,
+                }),
+            ]);
+        });
+
+        it('persists a success result for an approved query', async () => {
+            const { dependencies, output } =
+                runNativeResume('select 1 as answer');
+
+            const resolved = await output;
+            expect(resolved.metadata?.status).toBe('success');
+            expect(dependencies.storeToolResults).toHaveBeenCalledWith([
+                expect.objectContaining({
+                    toolCallId: 'tool-call-1',
+                    result: resolved.result,
+                }),
+            ]);
+        });
+    });
+});
+
+describe('getRunSql agent SQL scope', () => {
+    it('runs a query against a schema inside the scope', async () => {
+        const { tool, dependencies } = makeTool({
+            autoApproveSql: true,
+            sqlScope: { schemas: ['jaffle'] },
+        });
+
+        const output = await executeRunSql(
+            tool,
+            'tool-call-1',
+            'SELECT id FROM jaffle.orders',
+        );
+
+        expect(dependencies.runSqlJob).toHaveBeenCalled();
+        expect(output.metadata?.status).toBe('success');
+    });
+
+    it('refuses a query against a schema outside the scope', async () => {
+        const { tool, dependencies } = makeTool({
+            autoApproveSql: true,
+            sqlScope: { schemas: ['jaffle'] },
+        });
+
+        const output = await executeRunSql(
+            tool,
+            'tool-call-1',
+            'SELECT id FROM jaffle_old.stale_orders',
+        );
+
+        expect(dependencies.runSqlJob).not.toHaveBeenCalled();
+        expect(output.metadata?.status).toBe('error');
+        expect(output.result).toContain('jaffle_old');
+        expect(output.structuredContent).toEqual({ error: output.result });
+    });
+
+    it('refuses before asking the user to approve, so a blocked query costs no approval click', async () => {
+        const waitForSqlApproval = vi.fn().mockResolvedValue('approved');
+        const { tool, dependencies } = makeTool({
+            waitForSqlApproval,
+            sqlScope: { schemas: ['jaffle'] },
+        });
+
+        await executeRunSql(
+            tool,
+            'tool-call-1',
+            'SELECT id FROM jaffle_old.stale_orders',
+        );
+
+        expect(waitForSqlApproval).not.toHaveBeenCalled();
+        expect(dependencies.updateProgress).not.toHaveBeenCalledWith(
+            'Awaiting approval to run SQL...',
+        );
+    });
+
+    it('leaves queries unrestricted when no scope is configured', async () => {
+        const { tool, dependencies } = makeTool({ autoApproveSql: true });
+
+        const output = await executeRunSql(
+            tool,
+            'tool-call-1',
+            'SELECT id FROM anything.at.all',
+        );
+
+        expect(dependencies.runSqlJob).toHaveBeenCalled();
+        expect(output.metadata?.status).toBe('success');
+    });
+});
+
+describe('getRunSql Slack links only', () => {
+    const largeResult = {
+        queryUuid: 'query-uuid',
+        rows: Array.from({ length: 30 }, (_, index) => ({ answer: index })),
+        columns: ['answer'],
+        rowCount: 30,
+    };
+
+    it('does not upload the full CSV into the Slack thread', async () => {
+        const { tool, dependencies } = makeTool({
+            prompt: makeSlackPrompt(),
+            slackLinksOnly: true,
+        });
+        dependencies.runSqlJob.mockResolvedValue(largeResult);
+
+        const output = await executeRunSql(tool);
+
+        expect(output.metadata?.status).toBe('success');
+        expect(dependencies.sendFile).not.toHaveBeenCalled();
+    });
+
+    it('keeps large query rows in the answer without uploading a CSV when the setting is off', async () => {
+        const { tool, dependencies } = makeTool({
+            prompt: makeSlackPrompt(),
+        });
+        dependencies.runSqlJob.mockResolvedValue(largeResult);
+
+        const output = await executeRunSql(tool);
+
+        expect(dependencies.sendFile).not.toHaveBeenCalled();
+        expect(output.metadata?.status).toBe('success');
+        expect(output.result).toContain('```csv');
+        expect(output.result).toContain('answer');
+    });
+});
+
+describe('SQL query review', () => {
+    it.each([0, 1])(
+        'reviews SQL and conditionally diagnoses its %s-row result',
+        async (rowCount) => {
+            const reviewQuery = vi
+                .fn()
+                .mockImplementation(async (_plan, result) =>
+                    result?.emptyResult
+                        ? EMPTY_QUERY_GUIDANCE + result.review
+                        : ' Query/question review: requested top-N differs.',
+                );
+            const { tool, dependencies } = makeTool({
+                reviewQuery,
+                maxQueryLimit: 20,
+            });
+            dependencies.runSqlJob.mockResolvedValue({
+                queryUuid: 'query',
+                rows: rowCount ? [{ answer: 1 }] : [],
+                columns: ['answer'],
+                rowCount,
+            });
+            const output = await executeRunSql(tool);
+            expect(output.metadata?.status).toBe('success');
+            expect(output.result).toContain('requested top-N differs');
+            expect(reviewQuery).toHaveBeenNthCalledWith(1, {
+                kind: 'sql',
+                sql: 'select 1 as answer',
+                limit: 20,
+            });
+            expect(reviewQuery).toHaveBeenCalledTimes(rowCount ? 1 : 2);
+            if (!rowCount)
+                expect(reviewQuery).toHaveBeenNthCalledWith(
+                    2,
+                    { kind: 'sql', sql: 'select 1 as answer', limit: 20 },
+                    {
+                        emptyResult: true,
+                        review: ' Query/question review: requested top-N differs.',
+                    },
+                );
+            expect(dependencies.runSqlJob).toHaveBeenCalledExactlyOnceWith({
+                sql: 'select 1 as answer',
+                limit: 20,
+            });
+            if (!rowCount)
+                expect(output.result).toContain('Preserve the user’s scope');
+        },
+    );
+    it.each(['disabled', 'rejected', 'scope'] as const)(
+        'does not review SQL when %s',
+        async (reason) => {
+            const reviewQuery = vi.fn().mockResolvedValue('advice');
+            const { tool } = makeTool({
+                reviewQuery,
+                enableDataAccess: reason !== 'disabled',
+                waitForSqlApproval: vi
+                    .fn()
+                    .mockResolvedValue(
+                        reason === 'rejected' ? 'rejected' : 'approved',
+                    ),
+                sqlScope: reason === 'scope' ? { schemas: ['allowed'] } : null,
+            });
+            await executeRunSql(
+                tool,
+                'call',
+                reason === 'scope'
+                    ? 'SELECT * FROM forbidden.orders'
+                    : 'SELECT 1',
+            );
+            expect(reviewQuery).not.toHaveBeenCalled();
+        },
+    );
+    it('starts review while the approved warehouse query is still running', async () => {
+        const reviewQuery = vi.fn().mockResolvedValue('advice');
+        const { tool, dependencies } = makeTool({ reviewQuery });
+        let resolveQuery!: (value: {
+            queryUuid: string;
+            rows: { answer: number }[];
+            columns: string[];
+            rowCount: number;
+        }) => void;
+        dependencies.runSqlJob.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    resolveQuery = resolve;
+                }),
+        );
+        const output = executeRunSql(tool);
+        await vi.waitFor(() => expect(reviewQuery).toHaveBeenCalledOnce());
+        resolveQuery({
+            queryUuid: 'query',
+            rows: [{ answer: 1 }],
+            columns: ['answer'],
+            rowCount: 1,
+        });
+        expect((await output).result).toContain('advice');
+    });
+});
+
+const expectNoWarehouseIdentifiers = (value: unknown): void => {
+    if (value === null || typeof value !== 'object') return;
+    for (const [key, nested] of Object.entries(value)) {
+        expect([
+            'queryId',
+            'queryMetadata',
+            'warehouseQueryId',
+            'jobLocation',
+        ]).not.toContain(key);
+        expectNoWarehouseIdentifiers(nested);
+    }
+};
+
+it('keeps warehouse identifiers out of raw successful SQL structured content at every depth', async () => {
+    const { tool, dependencies } = makeTool({ autoApproveSql: true });
+    dependencies.runSqlJob.mockResolvedValue({
+        queryUuid: 'query',
+        rows: [{ answer: 1 }],
+        columns: ['answer'],
+        rowCount: 1,
+        queryId: 'warehouse-query',
+        warehouseQueryId: 'warehouse-query',
+        queryMetadata: { jobLocation: 'region' },
+    });
+    const output = await tool.execute!(
+        { sql: 'select 1 as answer', limit: 500 },
+        { messages: [], toolCallId: 'call', context: {} },
+    );
+    if (Symbol.asyncIterator in output)
+        throw new Error('Expected non-streaming result');
+    expect(output.metadata.status).toBe('success');
+    expectNoWarehouseIdentifiers(output.structuredContent);
 });

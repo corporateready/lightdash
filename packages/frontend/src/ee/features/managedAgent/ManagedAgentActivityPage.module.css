@@ -32,36 +32,15 @@
     flex-direction: column;
     align-items: center;
     padding: var(--mantine-spacing-3xl) 0;
-    animation: fadeIn 500ms var(--ease-out-quart) both;
-    animation-delay: 200ms;
 }
 
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-    }
-}
-
-/* Table container — slides in */
+/* Table container, same surface as ContentTable. */
 .tableWrapper {
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    border: 1px solid var(--mantine-color-ldGray-3);
     border-radius: var(--mantine-radius-md);
+    box-shadow: var(--mantine-shadow-xs);
     overflow: hidden;
-    background-color: transparent;
-    box-shadow: light-dark(
-        0 1px 3px rgba(0, 0, 0, 0.04),
-        0 1px 3px rgba(0, 0, 0, 0.4)
-    );
-    animation: tableIn 400ms var(--ease-out-quart) both;
-    animation-delay: 100ms;
-}
-
-@keyframes tableIn {
-    from {
-        opacity: 0;
-        transform: translateY(8px);
-    }
+    background-color: var(--mantine-color-body);
 }
 
 .table {
@@ -71,75 +50,22 @@
 }
 
 .table thead th {
-    font-size: 11px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    color: light-dark(var(--mantine-color-gray-5), var(--mantine-color-dark-2));
-    background-color: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--mantine-color-ldGray-7);
+    background-color: var(--mantine-color-ldGray-0);
     padding: 7px 12px;
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    border-bottom: 1px solid var(--mantine-color-ldGray-2);
 }
 
-/* Row — staggered entrance + smooth hover */
 .row {
-    background-color: light-dark(
-        var(--mantine-color-white),
-        var(--mantine-color-dark-7)
-    );
+    background-color: var(--mantine-color-body);
     transition: background-color 120ms var(--ease-out-quart);
-    animation: rowIn 300ms var(--ease-out-quart) both;
     cursor: pointer;
 }
 
-@keyframes rowIn {
-    from {
-        opacity: 0;
-        transform: translateX(-4px);
-    }
-}
-
-/* Stagger rows — CSS counters via nth-child */
-.row:nth-child(1) {
-    animation-delay: 40ms;
-}
-.row:nth-child(2) {
-    animation-delay: 60ms;
-}
-.row:nth-child(3) {
-    animation-delay: 80ms;
-}
-.row:nth-child(4) {
-    animation-delay: 100ms;
-}
-.row:nth-child(5) {
-    animation-delay: 120ms;
-}
-.row:nth-child(6) {
-    animation-delay: 140ms;
-}
-.row:nth-child(7) {
-    animation-delay: 160ms;
-}
-.row:nth-child(8) {
-    animation-delay: 180ms;
-}
-.row:nth-child(9) {
-    animation-delay: 200ms;
-}
-.row:nth-child(10) {
-    animation-delay: 220ms;
-}
-.row:nth-child(n + 11) {
-    animation-delay: 240ms;
-}
-
 .row:hover {
-    background-color: light-dark(
-        var(--mantine-color-gray-0),
-        var(--mantine-color-dark-6)
-    );
+    background-color: var(--mantine-color-ldGray-0);
 }
 
 .row td {
@@ -147,12 +73,16 @@
     font-size: 13px;
     line-height: 1.5;
     vertical-align: middle;
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+    border-bottom: 1px solid var(--mantine-color-ldGray-2);
+}
+
+.row td:first-child,
+.table thead th:first-child {
+    padding-left: 34px;
 }
 
 .row:last-child td {
-    border-bottom: none;
+    border-bottom: 1px solid var(--mantine-color-ldGray-3);
 }
 
 /* Heartbeat status */
@@ -162,12 +92,8 @@
     gap: 6px;
     padding: 2px 10px;
     border-radius: 8px;
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
-    background-color: light-dark(
-        var(--mantine-color-white),
-        var(--mantine-color-dark-6)
-    );
+    border: 1px solid var(--mantine-color-default-border);
+    background-color: var(--mantine-color-body);
 }
 
 .statusDot {
@@ -210,49 +136,18 @@
     overflow: hidden;
 }
 
-.messageCell p {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
-}
-
-/* Action pill — shadcn style */
 .actionPill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    font-weight: 500;
-    color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-4));
-    white-space: nowrap;
-    padding: 2px 10px;
-    border-radius: 8px;
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
-    background-color: light-dark(
-        var(--mantine-color-white),
-        var(--mantine-color-dark-6)
-    );
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-    transition: box-shadow 150ms var(--ease-out-quart);
-}
-
-.row:hover .actionPill {
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    font-size: 12px;
+    color: var(--mantine-color-text);
 }
 
 .rowSelected,
 .rowSelected:hover {
-    background-color: light-dark(
-        var(--mantine-color-gray-1),
-        var(--mantine-color-dark-5)
-    );
+    background-color: var(--mantine-color-default-hover);
 }
 
 .rowSelected td:first-child {
-    box-shadow: inset 2px 0 0
-        light-dark(var(--mantine-color-gray-5), var(--mantine-color-gray-6));
+    box-shadow: inset 2px 0 0 var(--mantine-color-placeholder);
 }
 
 .rowReversed {
@@ -261,10 +156,7 @@
 
 .rowReversed .actionPill {
     text-decoration: line-through;
-    text-decoration-color: light-dark(
-        var(--mantine-color-gray-5),
-        var(--mantine-color-gray-6)
-    );
+    text-decoration-color: var(--mantine-color-placeholder);
 }
 
 /* Resize handle */
@@ -274,17 +166,13 @@
 }
 
 .resizeHandle:hover,
-.resizeHandle[data-resize-handle-state='drag'] {
-    background-color: light-dark(
-        var(--mantine-color-gray-3),
-        var(--mantine-color-dark-4)
-    );
+.resizeHandle[data-active] {
+    background-color: var(--mantine-color-ldGray-3);
 }
 
 /* Sidebar */
 .sidebar {
-    border-left: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    border-left: 1px solid var(--mantine-color-default-border);
     background-color: light-dark(
         var(--mantine-color-white),
         var(--mantine-color-dark-7)
@@ -293,8 +181,7 @@
 
 .sidebarHeader {
     padding: 12px 16px;
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    border-bottom: 1px solid var(--mantine-color-default-border);
 }
 
 .reversedBanner {
@@ -303,8 +190,7 @@
         var(--mantine-color-gray-0),
         var(--mantine-color-dark-6)
     );
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    border-bottom: 1px solid var(--mantine-color-default-border);
 }
 
 .deletedBanner {
@@ -339,10 +225,7 @@
 }
 
 .closeBtn:hover {
-    background-color: light-dark(
-        var(--mantine-color-gray-1),
-        var(--mantine-color-dark-5)
-    );
+    background-color: var(--mantine-color-default-hover);
 }
 
 .titleAction {
@@ -352,12 +235,8 @@
 .fieldPill {
     padding: 2px 8px;
     border-radius: 4px;
-    background-color: light-dark(
-        var(--mantine-color-gray-1),
-        var(--mantine-color-dark-5)
-    );
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    background-color: var(--mantine-color-default-hover);
+    border: 1px solid var(--mantine-color-default-border);
 }
 
 .fieldPillRemoved {
@@ -411,7 +290,7 @@
 }
 
 .metaToggle:hover {
-    color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-3));
+    color: var(--mantine-color-ldGray-7);
 }
 
 .metaBlock {
@@ -435,48 +314,45 @@
 
 .slackBadge {
     border-radius: 8px;
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+    border: 1px solid var(--mantine-color-ldGray-3);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
 /* Page header */
 .headerDivider {
     height: 1px;
-    background-color: light-dark(
-        var(--mantine-color-gray-2),
-        var(--mantine-color-dark-4)
-    );
+    background-color: var(--mantine-color-default-border);
 }
 
 .setupOrb {
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     border-radius: 10px;
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: light-dark(
-        var(--mantine-color-violet-0),
-        var(--mantine-color-violet-9)
-    );
-    border: 1px solid
-        light-dark(var(--mantine-color-violet-1), var(--mantine-color-violet-7));
-    color: var(--mantine-color-violet-5);
+    background-color: var(--mantine-primary-color-filled);
+    color: light-dark(var(--mantine-color-white), var(--mantine-color-dark-8));
+    transition: background-color 150ms var(--ease-out-quart);
+}
+
+.setupOrb[data-state='disabled'] {
+    background-color: var(--mantine-color-ldGray-2);
+    color: var(--mantine-color-ldGray-6);
 }
 
 .activeBadge {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
-    padding: 2px 10px;
+    padding: 3px 10px;
     border-radius: 8px;
-    color: light-dark(var(--mantine-color-gray-6), var(--mantine-color-gray-4));
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    color: var(--mantine-color-ldGray-7);
+    background-color: var(--mantine-color-body);
+    border: 1px solid var(--mantine-color-default-border);
 }
 
 .activeDotInline {
@@ -484,6 +360,40 @@
     height: 5px;
     border-radius: 50%;
     background-color: var(--mantine-color-green-5);
+    flex-shrink: 0;
+}
+
+/* The status dot breathes while a run is in progress; nothing else moves. */
+.runningDotInline {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background-color: var(--mantine-primary-color-filled);
+    flex-shrink: 0;
+    animation: statusBreathe 2.4s ease-in-out infinite;
+}
+
+@keyframes statusBreathe {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.25;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .runningDotInline {
+        animation: none;
+    }
+}
+
+.failedDotInline {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background-color: var(--mantine-color-red-6);
     flex-shrink: 0;
 }
 
@@ -535,27 +445,61 @@
     flex-shrink: 0;
 }
 
+/* Quiet run grouping */
+/* Runs with nothing to show collapse into one labelled row, styled like a
+ * closed run header. */
+.quietGroupRow {
+    cursor: pointer;
+    user-select: none;
+}
+
+.quietGroupRow td {
+    padding: 12px 12px 6px;
+    border-top: 1px solid var(--mantine-color-default-border);
+}
+
+.quietRunRow td {
+    padding: 2px 12px 2px 34px;
+    background-color: light-dark(
+        var(--mantine-color-white),
+        var(--mantine-color-dark-7)
+    );
+    border-bottom: 1px solid
+        light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6));
+}
+
+.quietRunMeta {
+    opacity: 0.7;
+}
+
 /* Run grouping */
+/* Runs group by space and indentation, not by fills. Consecutive headers
+ * are siblings, so a hairline sits between them; the open run is the one
+ * in ink, with a rail down the left edge of its rows (not the header),
+ * while closed runs stay dimmed. */
 .runHeaderRow {
     cursor: pointer;
     user-select: none;
-    background-color: transparent;
-    transition: background-color 120ms var(--ease-out-quart);
-}
-
-.runHeaderRow:hover {
-    background-color: light-dark(
-        var(--mantine-color-gray-1),
-        var(--mantine-color-dark-5)
-    );
 }
 
 .runHeaderRow td {
-    padding: 8px 12px;
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
-    border-top: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    padding: 14px 12px 6px;
+}
+
+.table tbody + tbody .runHeaderRow td {
+    border-top: 1px solid var(--mantine-color-default-border);
+}
+
+/* The open run's header stays white and only switches to ink via props.
+ * The grey report band beneath it is the single cue that a run is open.
+ * Size and spacing never change between states, so opening moves nothing. */
+.runHeaderRow[data-open='true'] .runCountPill {
+    font-size: 13px;
+    color: var(--mantine-color-text);
+}
+
+.runHeaderRow[data-open='true'] .runChevronOpen {
+    color: var(--mantine-color-text);
 }
 
 .runChevron {
@@ -574,18 +518,11 @@
 .runCountPill {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
+    gap: 5px;
+    font-size: 12px;
     font-weight: 500;
-    color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-4));
-    padding: 1px 6px;
-    border-radius: 6px;
-    background-color: light-dark(
-        var(--mantine-color-white),
-        var(--mantine-color-dark-7)
-    );
-    border: 1px solid
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    color: var(--mantine-color-ldGray-7);
+    white-space: nowrap;
 }
 
 .showMoreRow {
@@ -595,8 +532,7 @@
 .showMoreRow td {
     padding: 10px 12px;
     text-align: center;
-    border-top: 1px dashed
-        light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+    border-top: 1px dashed var(--mantine-color-default-border);
 }
 
 .thinkingRow td {
@@ -605,72 +541,12 @@
         var(--mantine-color-dark-7)
     );
     padding: 8px 12px;
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
-}
-
-.liveActivityRow td {
-    padding: 8px 12px;
-    border-bottom: 1px solid
-        light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
-    background-color: light-dark(
-        var(--mantine-color-white),
-        var(--mantine-color-ldDark-1)
-    );
-}
-
-.activityText {
-    animation: activityFadeIn 180ms var(--ease-out-quart) both;
-}
-
-@keyframes activityFadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(2px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.boltPulseLoader {
-    display: inline-flex;
-    color: light-dark(
-        var(--mantine-color-yellow-7),
-        var(--mantine-color-yellow-4)
-    );
-    animation: boltPulse 1.4s ease-in-out infinite;
-    transform-origin: center;
-}
-
-@keyframes boltPulse {
-    0%,
-    100% {
-        transform: scale(1) rotate(0deg);
-        filter: drop-shadow(0 0 0 transparent);
-    }
-    40% {
-        transform: scale(1.18) rotate(-3deg);
-        filter: drop-shadow(0 0 4px var(--mantine-color-yellow-5));
-    }
-    60% {
-        transform: scale(1.18) rotate(3deg);
-        filter: drop-shadow(0 0 4px var(--mantine-color-yellow-5));
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .liveActivityRow td,
-    .activityText,
-    .boltPulseLoader {
-        animation: none;
-    }
+    border-bottom: 1px solid var(--mantine-color-default-hover);
 }
 
 .showMoreButton {
     display: inline-block;
-    color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-4));
+    color: var(--mantine-color-ldGray-7);
     font-size: 12px;
     font-weight: 500;
     padding: 4px 12px;
@@ -679,10 +555,7 @@
 }
 
 .showMoreButton:hover {
-    background-color: light-dark(
-        var(--mantine-color-gray-1),
-        var(--mantine-color-dark-5)
-    );
+    background-color: var(--mantine-color-default-hover);
 }
 
 /* Reduced motion */
@@ -702,4 +575,136 @@
     .runChevronOpen {
         transition: none;
     }
+}
+
+/* Agent reasoning markdown in the detail sidebar: match the dimmed 12px
+   metadata typography, and keep code fences (chart-as-code YAML) inside the
+   panel width. */
+.reasoningMarkdown {
+    --ai-markdown-font-size: 12px;
+    --ai-markdown-padding-left: 0;
+    min-width: 0;
+}
+
+.reasoningMarkdown p,
+.reasoningMarkdown li {
+    color: var(--mantine-color-dimmed);
+}
+
+.reasoningMarkdown [data-streamdown='code-block'] {
+    max-width: 100%;
+}
+
+.reasoningMarkdown [data-streamdown='code-block'] pre {
+    font-size: 11px;
+}
+
+.dayHeaderRow td {
+    padding: 12px 12px 4px;
+    border-bottom: none;
+    background-color: transparent;
+}
+
+.filterBar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--mantine-color-default-border);
+    background-color: light-dark(
+        var(--mantine-color-white),
+        var(--mantine-color-dark-7)
+    );
+}
+
+.filterSearch {
+    flex: 1;
+    min-width: 160px;
+    max-width: 320px;
+}
+
+.filterDivider {
+    align-self: stretch;
+    margin-block: 4px;
+    height: auto;
+}
+
+/* Omnibar-style filter chips: subtle buttons that summarize their state */
+.filterChip :global(.mantine-Button-section)[data-position='left'] {
+    margin-inline-end: 6px;
+}
+
+.filterChip :global(.mantine-Button-section)[data-position='right'] {
+    margin-inline-start: 4px;
+}
+
+.filterChip[data-expanded],
+.filterChip.filterChipActive {
+    background-color: var(--mantine-color-default-hover);
+    color: light-dark(
+        var(--mantine-color-ldGray-9),
+        var(--mantine-color-ldGray-9)
+    );
+}
+
+.filterChipClear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--mantine-radius-sm);
+    cursor: pointer;
+    color: light-dark(
+        var(--mantine-color-ldGray-6),
+        var(--mantine-color-ldGray-7)
+    );
+}
+
+.filterChipClear:hover {
+    color: light-dark(
+        var(--mantine-color-ldGray-9),
+        var(--mantine-color-ldGray-9)
+    );
+}
+
+.targetIcon {
+    flex-shrink: 0;
+}
+
+/* Report and actions share the run label's left edge: cell padding,
+ * chevron and gap. Line length is capped for reading. */
+/* The report is quoted content, not a row: a canvas-grey band edge to edge,
+ * with a hairline above and below. */
+.runSummaryRow td {
+    padding: 10px 16px 12px 34px;
+    background-color: var(--mantine-color-ldGray-0);
+    border-top: 1px solid var(--mantine-color-ldGray-2);
+    border-bottom: 1px solid var(--mantine-color-ldGray-2);
+}
+
+.runSummary {
+    overflow-wrap: anywhere;
+    max-width: 76ch;
+}
+
+.runSummaryMarkdown {
+    --ai-markdown-font-size: 13px;
+    --ai-markdown-padding-left: 0;
+    min-width: 0;
+}
+
+/* The shared markdown styles zero block margins; run reports need paragraphs. */
+.runSummaryMarkdown > div > :is(p, ul, ol, pre, blockquote) {
+    margin-bottom: var(--mantine-spacing-xs);
+}
+
+.runSummaryMarkdown > div > :last-child {
+    margin-bottom: 0;
+}
+
+.aiSettingsLink {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    vertical-align: bottom;
 }

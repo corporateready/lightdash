@@ -11,6 +11,7 @@ import {
     type DashboardChartTile,
     type DashboardTile,
     type DashboardVersionedFields,
+    type EmbedWritableSpace,
     type SavedChart,
 } from '@lightdash/common';
 import {
@@ -18,17 +19,21 @@ import {
     Group,
     LoadingOverlay,
     Radio,
+    Select,
     Stack,
     Text,
     Textarea,
     TextInput,
-} from '@mantine-8/core';
-import { useForm, zodResolver } from '@mantine/form';
+} from '@mantine/core';
+import { useForm } from '@mantine/form';
 import { IconPlus } from '@tabler/icons-react';
+import { zod4Resolver as zodResolver } from 'mantine-form-zod-resolver';
 import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
 import { useNavigate } from 'react-router';
 import { v4 as uuid4 } from 'uuid';
 import { z } from 'zod';
+import { useMergeSafe } from '../../../../features/mergeQuery/context/useMerge';
+import { getChartQueryDimensions } from '../../../../features/mergeQuery/utils/getChartQueryDimensions';
 import {
     appendNewTilesToBottom,
     useCreateMutation as useCreateDashboardMutation,
@@ -39,6 +44,7 @@ import {
 import { useDashboards } from '../../../../hooks/dashboard/useDashboards';
 import useDashboardStorage from '../../../../hooks/dashboard/useDashboardStorage';
 import useToaster from '../../../../hooks/toaster/useToaster';
+import { useOptionalProjectRoute } from '../../../../hooks/useProjectRoute';
 import { useCreateMutation } from '../../../../hooks/useSavedQuery';
 import { useSpaceManagement } from '../../../../hooks/useSpaceManagement';
 import {
@@ -46,6 +52,7 @@ import {
     useSpaceSummaries,
 } from '../../../../hooks/useSpaces';
 import useApp from '../../../../providers/App/useApp';
+import { useLightdashApi } from '../../../../providers/LightdashApi/useLightdashApi';
 import Callout from '../../Callout';
 import MantineIcon from '../../MantineIcon';
 import classes from './ChartCreateModal.module.css';
@@ -62,13 +69,16 @@ import {
 
 const saveToSpaceOrDashboardSchema = z
     .object({
-        name: z.string().min(1),
+        name: z.string().min(1, 'Name is required'),
         description: z.string().nullable(),
     })
     // for saving to the dashboard
     .merge(saveToDashboardSchema)
     // for saving to the space
     .merge(saveToSpaceSchema);
+const saveToSpaceOrDashboardResolver = zodResolver(
+    saveToSpaceOrDashboardSchema,
+);
 
 type FormValues = z.infer<typeof saveToSpaceOrDashboardSchema>;
 
@@ -91,27 +101,40 @@ type Props = {
         dashboardName: string;
     } | null;
     defaultSpaceUuid?: string | undefined;
+    /** Restricts saving to these spaces (embed write spaces); hides dashboard destinations. */
+    restrictedSpaces?: EmbedWritableSpace[];
     chartMetadata?: ChartMetadata;
     redirectOnSuccess?: boolean;
+    showViewChartAction?: boolean;
+    /** Chart-level palette chosen before the first save. */
+    colorPaletteUuid?: string | null;
 };
 
 export const SaveToSpaceOrDashboard: FC<Props> = ({
     projectUuid,
     savedData,
+    colorPaletteUuid,
     defaultSpaceUuid,
     onConfirm,
     onClose,
     dashboardInfoFromSavedData = { dashboardUuid: null, dashboardName: null },
     originatingDashboard = null,
+    restrictedSpaces,
     chartMetadata = DEFAULT_CHART_METADATA,
     redirectOnSuccess = true,
+    showViewChartAction = true,
 }) => {
+    const isRestrictedToSpaces = restrictedSpaces !== undefined;
+    const lightdashApi = useLightdashApi();
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
     const { user } = useApp();
     const navigate = useNavigate();
     const { showToastSuccess } = useToaster();
 
     const { mutateAsync: createChart, isLoading: isSavingChart } =
-        useCreateMutation({ redirectOnSuccess });
+        useCreateMutation({ redirectOnSuccess, showViewChartAction });
 
     const {
         clearIsEditingDashboardChart,
@@ -144,20 +167,26 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
     } = spaceManagement;
 
     const form = useForm<FormValues>({
-        validate: zodResolver(saveToSpaceOrDashboardSchema),
+        validate: saveToSpaceOrDashboardResolver,
     });
 
-    // Check if the chart has unused dimensions that may cause incorrect results
+    // Check if the chart has unused dimensions that may cause incorrect
+    // results. A merged chart's layout names merged fields, so it is checked
+    // against the merged result, as the visualization card does.
+    const mergeResults = useMergeSafe()?.mergeResults ?? null;
     const showUnusedDimensionsWarning = useMemo(() => {
         const pivotDimensions = savedData.pivotConfig?.columns ?? [];
-        const queryDimensions = savedData.metricQuery?.dimensions ?? [];
+        const queryDimensions = getChartQueryDimensions(
+            savedData.metricQuery,
+            mergeResults,
+        );
         return hasUnusedDimensions({
             chartType: savedData.chartConfig?.type,
             chartConfig: savedData.chartConfig?.config,
             pivotDimensions,
             queryDimensions,
         });
-    }, [savedData]);
+    }, [savedData, mergeResults]);
 
     const {
         data: dashboards,
@@ -166,9 +195,10 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
     } = useDashboards(
         projectUuid,
         {
+            enabled: !isRestrictedToSpaces,
             staleTime: 0,
         },
-        true,
+        !isRestrictedToSpaces,
     );
 
     const {
@@ -187,6 +217,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                     }),
                 ),
             ),
+        enabled: !isRestrictedToSpaces,
         staleTime: 0,
     });
 
@@ -194,14 +225,19 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
 
     useEffect(
         function initializeForm() {
-            if (!isSpacesSuccess || !isDashboardsSuccess) return;
+            if (
+                !isRestrictedToSpaces &&
+                (!isSpacesSuccess || !isDashboardsSuccess)
+            ) {
+                return;
+            }
             if (form.initialized) return;
 
             const initialValues: FormValues = {
                 ...chartMetadata,
                 newSpaceName: null,
                 dashboardUuid: dashboardInfoFromSavedData.dashboardUuid,
-                spaceUuid: null,
+                spaceUuid: restrictedSpaces?.[0]?.uuid ?? null,
                 newDashboardName: null,
                 newDashboardDescription: null,
             };
@@ -215,6 +251,8 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
             isDashboardsSuccess,
             isSpacesSuccess,
             chartMetadata,
+            isRestrictedToSpaces,
+            restrictedSpaces,
         ],
     );
 
@@ -282,6 +320,9 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
     const isFormReadyToSave = useMemo(() => {
         // OriginatingDashboard skips step 2 — it submits straight from
         // InitialInfo as soon as the chart has a name.
+        if (isRestrictedToSpaces) {
+            return !!form.values.name && !!form.values.spaceUuid;
+        }
         if (saveDestination === SaveDestination.OriginatingDashboard) {
             return !!form.values.name && !!originatingDashboard;
         }
@@ -321,6 +362,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
         originatingDashboard,
         isCreatingNewDashboard,
         isCreatingNewSpaceForDashboard,
+        isRestrictedToSpaces,
     ]);
 
     const handleOnSubmit = useCallback(
@@ -330,6 +372,17 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
             }
 
             let savedQuery: SavedChart | undefined;
+            if (isRestrictedToSpaces && values.spaceUuid) {
+                savedQuery = await createChart({
+                    ...savedData,
+                    name: values.name,
+                    description: values.description ?? undefined,
+                    colorPaletteUuid,
+                    spaceUuid: values.spaceUuid,
+                    dashboardUuid: undefined,
+                });
+            }
+
             /**
              * Save back to the dashboard the editor was opened from.
              * Mirrors `SaveToDashboard` — stages the new tile in
@@ -337,6 +390,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
              * user can review/save unsaved dashboard changes.
              */
             if (
+                !savedQuery &&
                 saveDestination === SaveDestination.OriginatingDashboard &&
                 originatingDashboard &&
                 projectUuid
@@ -345,6 +399,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                     ...savedData,
                     name: values.name,
                     description: values.description ?? undefined,
+                    colorPaletteUuid,
                     dashboardUuid: originatingDashboard.dashboardUuid,
                 };
                 savedQuery = await createChart(newChartInDashboard);
@@ -377,8 +432,8 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                 );
                 void navigate(
                     activeTabUuid
-                        ? `/projects/${projectUuid}/dashboards/${originatingDashboard.dashboardUuid}/edit/tabs/${activeTabUuid}`
-                        : `/projects/${projectUuid}/dashboards/${originatingDashboard.dashboardUuid}/edit`,
+                        ? `/projects/${projectUrlIdentifier}/dashboards/${originatingDashboardData?.slug ?? originatingDashboard.dashboardUuid}/edit/tabs/${activeTabUuid}`
+                        : `/projects/${projectUrlIdentifier}/dashboards/${originatingDashboardData?.slug ?? originatingDashboard.dashboardUuid}/edit`,
                 );
                 showToastSuccess({
                     title: `Success! ${values.name} was added to ${originatingDashboard.dashboardName}`,
@@ -429,6 +484,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                     ...savedData,
                     name: values.name,
                     description: values.description ?? undefined,
+                    colorPaletteUuid,
                     dashboardUuid: destinationDashboard.uuid,
                 });
                 const firstTab = destinationDashboard.tabs?.[0];
@@ -457,6 +513,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                 };
                 if (isCreatingNewDashboard && projectUuid) {
                     await updateDashboardApi(
+                        lightdashApi,
                         destinationDashboard.uuid,
                         updateFields,
                         projectUuid,
@@ -478,7 +535,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
              * Create space if user wants to create a new space
              * Save to space by creating a new chart
              */
-            if (saveDestination === SaveDestination.Space) {
+            if (!savedQuery && saveDestination === SaveDestination.Space) {
                 let newSpace = values.newSpaceName
                     ? await handleCreateNewSpace({
                           inheritParentPermissions: false,
@@ -492,6 +549,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                     ...savedData,
                     name: values.name,
                     description: values.description ?? undefined,
+                    colorPaletteUuid,
                     spaceUuid,
                     dashboardUuid: undefined,
                 });
@@ -515,6 +573,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
             selectedDashboard,
             createChart,
             savedData,
+            colorPaletteUuid,
             updateDashboard,
             handleCreateNewSpace,
             onConfirm,
@@ -523,6 +582,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
             originatingDashboard,
             originatingDashboardData,
             projectUuid,
+            projectUrlIdentifier,
             navigate,
             showToastSuccess,
             getUnsavedDashboardTiles,
@@ -532,13 +592,14 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
             isCreatingNewSpaceForDashboard,
             createDashboard,
             createSpace,
+            isRestrictedToSpaces,
+            lightdashApi,
         ],
     );
 
     const isLoading =
         !form.initialized ||
-        isLoadingDashboards ||
-        isLoadingSpaces ||
+        (!isRestrictedToSpaces && (isLoadingDashboards || isLoadingSpaces)) ||
         isSavingChart ||
         spaceManagement.createSpaceMutation.isLoading ||
         isCreatingDashboard ||
@@ -556,6 +617,7 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
     };
 
     const skipDestinationStep =
+        isRestrictedToSpaces ||
         saveDestination === SaveDestination.OriginatingDashboard;
 
     // Determine if we should show the "New Space" button
@@ -605,40 +667,62 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                             value={form.values.description ?? ''}
                         />
 
-                        <Stack gap="sm" mt="sm">
-                            <Text fw={500}>Save to</Text>
+                        {restrictedSpaces && restrictedSpaces.length > 1 && (
+                            <Select
+                                label="Space"
+                                required
+                                allowDeselect={false}
+                                data={restrictedSpaces.map((space) => ({
+                                    value: space.uuid,
+                                    label: space.name,
+                                }))}
+                                {...form.getInputProps('spaceUuid')}
+                            />
+                        )}
 
-                            <Radio.Group
-                                value={saveDestination}
-                                onChange={(value) =>
-                                    setSaveDestination(value as SaveDestination)
-                                }
-                            >
-                                <Stack gap="xs">
-                                    <Radio
-                                        value={SaveDestination.Space}
-                                        label="Space"
-                                        disabled={!spaces || isLoadingSpaces}
-                                    />
-                                    {originatingDashboard && (
+                        {!isRestrictedToSpaces && (
+                            <Stack gap="sm" mt="sm">
+                                <Text fw={500}>Save to</Text>
+
+                                <Radio.Group
+                                    value={saveDestination}
+                                    onChange={(value) =>
+                                        setSaveDestination(
+                                            value as SaveDestination,
+                                        )
+                                    }
+                                >
+                                    <Stack gap="xs">
                                         <Radio
-                                            value={
-                                                SaveDestination.OriginatingDashboard
+                                            value={SaveDestination.Space}
+                                            label="Space"
+                                            // Anchor for scope walkthroughs
+                                            data-tour-anchor="chart-save-to-space"
+                                            data-tour-hint="Choose to save it in a space"
+                                            disabled={
+                                                !spaces || isLoadingSpaces
                                             }
-                                            label={`"${originatingDashboard.dashboardName}" dashboard`}
                                         />
-                                    )}
-                                    <Radio
-                                        value={SaveDestination.Dashboard}
-                                        label={
-                                            originatingDashboard
-                                                ? 'Different dashboard'
-                                                : 'Dashboard'
-                                        }
-                                    />
-                                </Stack>
-                            </Radio.Group>
-                        </Stack>
+                                        {originatingDashboard && (
+                                            <Radio
+                                                value={
+                                                    SaveDestination.OriginatingDashboard
+                                                }
+                                                label={`"${originatingDashboard.dashboardName}" dashboard`}
+                                            />
+                                        )}
+                                        <Radio
+                                            value={SaveDestination.Dashboard}
+                                            label={
+                                                originatingDashboard
+                                                    ? 'Different dashboard'
+                                                    : 'Dashboard'
+                                            }
+                                        />
+                                    </Stack>
+                                </Radio.Group>
+                            </Stack>
+                        )}
 
                         {showUnusedDimensionsWarning && (
                             <Callout
@@ -779,6 +863,8 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                                     }}
                                     disabled={!form.values.name}
                                     type="button"
+                                    data-tour-anchor="chart-save-next"
+                                    data-tour-hint="Click Next to accept the suggested name"
                                 >
                                     Next
                                 </Button>
@@ -790,6 +876,8 @@ export const SaveToSpaceOrDashboard: FC<Props> = ({
                                 Back
                             </Button>
                             <Button
+                                data-tour-anchor="chart-save-submit"
+                                data-tour-hint="Save the chart"
                                 type="submit"
                                 loading={
                                     isSavingChart ||

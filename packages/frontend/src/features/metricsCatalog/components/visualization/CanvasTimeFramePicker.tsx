@@ -3,12 +3,13 @@ import {
     getDefaultMetricTreeNodeDateRange,
     getRollingPeriodDates,
 } from '@lightdash/common';
-import { Group, Select, Text } from '@mantine-8/core';
-import { clsx } from '@mantine/core';
+import { Group, Select, Text } from '@mantine/core';
 import { IconCalendar } from '@tabler/icons-react';
+import { clsx } from 'clsx';
 import dayjs from 'dayjs';
 import { useMemo, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 import styles from './CanvasTimeFramePicker.module.css';
 import {
     DEFAULT_CANVAS_TIME_OPTIONS,
@@ -58,6 +59,7 @@ export const CanvasTimeFramePicker: FC<Props> = ({
     onChange,
     options = DEFAULT_CANVAS_TIME_OPTIONS,
 }) => {
+    const getUiString = useUiStrings();
     const selectData = options.map((option) => ({
         value: serializeOption(option),
         label: option.label,
@@ -66,10 +68,18 @@ export const CanvasTimeFramePicker: FC<Props> = ({
     const dateRanges = useMemo(() => getDateRanges(value), [value]);
 
     return (
-        <Group gap="xs" wrap="nowrap">
-            <Group gap={0} wrap="nowrap">
+        <Group gap="xs" className={styles.root}>
+            <Group gap={0} className={styles.currentRange}>
                 <Select
                     size="xs"
+                    aria-label={getUiString('metrics.canvasPeriod')}
+                    className={styles.select}
+                    comboboxProps={{
+                        floatingStrategy: 'fixed',
+                        middlewares: {
+                            shift: { crossAxis: true, padding: 12 },
+                        },
+                    }}
                     data={selectData}
                     value={serializeOption(value)}
                     onChange={(val) => {
@@ -81,7 +91,7 @@ export const CanvasTimeFramePicker: FC<Props> = ({
                     leftSection={
                         <MantineIcon
                             icon={IconCalendar}
-                            color="ldGray.6"
+                            color="dimmed"
                             size={14}
                         />
                     }
@@ -105,7 +115,7 @@ export const CanvasTimeFramePicker: FC<Props> = ({
                     {dateRanges.currentRange}
                 </Text>
             </Group>
-            <Text c="ldGray.6" fz={14} fw={500}>
+            <Text c="dimmed" fz="sm" fw={500}>
                 compared to
             </Text>
             <Text

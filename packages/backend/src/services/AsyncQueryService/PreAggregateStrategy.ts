@@ -19,9 +19,13 @@ import {
     type KnexPaginatedData,
     type MetricQuery,
     type QueryExecutionContext,
+    type QueryResultProducer,
 } from '@lightdash/common';
 import { type S3ResultsFileStorageClient } from '../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient';
-import { type PreAggregationRoute } from './types';
+import {
+    type PreAggregateExecutionEngine,
+    type PreAggregationRoute,
+} from './types';
 
 export type PreAggregationRoutingDecision =
     | {
@@ -38,6 +42,15 @@ export type PreAggregationRoutingDecision =
           preAggregateMetadata?: CacheMetadata['preAggregate'];
       };
 
+// Stats context for a matched query whose pre-aggregate failed to serve
+export type PreAggregateExecutionFallbackParams = {
+    projectUuid: string;
+    exploreName: string;
+    chartUuid: string | null;
+    dashboardUuid: string | null;
+    queryContext: string;
+};
+
 export type PreAggregateStatsFilters = {
     exploreName?: string;
     queryType?: 'chart' | 'dashboard' | 'explorer';
@@ -45,10 +58,11 @@ export type PreAggregateStatsFilters = {
 
 export interface PreAggregateStrategy {
     getRoutingDecision(params: {
+        organizationUuid: string;
         metricQuery: MetricQuery;
         explore: Explore;
         context: QueryExecutionContext;
-    }): PreAggregationRoutingDecision;
+    }): Promise<PreAggregationRoutingDecision>;
 
     resolveExecution(params: {
         projectUuid: string;
@@ -58,7 +72,10 @@ export interface PreAggregateStrategy {
         resolveArgs: ResolveExecutionArgs;
     }): Promise<PreAggregateExecutionResolution>;
 
-    createExecutionWarehouseClient(): WarehouseClient;
+    // The DuckDB client that reads the project's managed materializations
+    createPreAggregateWarehouseClient(
+        projectUuid: string,
+    ): Promise<WarehouseClient>;
 
     recordStats(params: {
         projectUuid: string;
@@ -68,6 +85,10 @@ export interface PreAggregateStrategy {
         dashboardUuid: string | null;
         queryContext: string;
     }): void;
+
+    // Called at execution time when a matched pre-aggregate failed to serve
+    // and the query fell back to the source warehouse
+    recordExecutionFallback(params: PreAggregateExecutionFallbackParams): void;
 
     cleanupStats(retentionDays: number): Promise<number>;
 
@@ -89,6 +110,7 @@ export interface PreAggregateStrategy {
 }
 
 export type ResolveExecutionArgs = {
+    executionExplore?: (name: string) => Promise<Explore>;
     metricQuery: MetricQuery;
     timezone: string;
     dateZoom: DateZoom | undefined;
@@ -99,15 +121,16 @@ export type ResolveExecutionArgs = {
     userAccessControls?: UserAccessControls;
     availableParameterDefinitions?: ParameterDefinitions;
     useTimezoneAwareDateTrunc?: boolean;
+    resultProducer?: QueryResultProducer;
 };
 
 export type PreAggregateExecutionResolution =
-    | { resolved: true; query: string }
+    | { resolved: true; query: string; execution: PreAggregateExecutionEngine }
     | { resolved: false; reason: string; isFatal: boolean };
 
 /* eslint-disable class-methods-use-this */
 export class NoOpPreAggregateStrategy implements PreAggregateStrategy {
-    getRoutingDecision(): PreAggregationRoutingDecision {
+    async getRoutingDecision(): Promise<PreAggregationRoutingDecision> {
         return { target: 'warehouse' };
     }
 
@@ -115,13 +138,17 @@ export class NoOpPreAggregateStrategy implements PreAggregateStrategy {
         return { resolved: false, reason: 'not_available', isFatal: false };
     }
 
-    createExecutionWarehouseClient(): never {
-        throw new Error(
-            'Pre-aggregate execution is not available in this edition',
+    async createPreAggregateWarehouseClient(): Promise<never> {
+        throw new NotImplementedError(
+            'Managed pre-aggregate execution is not available in this edition',
         );
     }
 
     recordStats(): void {
+        // no-op
+    }
+
+    recordExecutionFallback(): void {
         // no-op
     }
 

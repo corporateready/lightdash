@@ -7,13 +7,14 @@ import {
     isSqlTableCalculation,
     isTemplateTableCalculation,
     NumberSeparator,
+    TableCalculationTotalMode,
     TableCalculationType,
     type CustomFormat,
     type GeneratedFormulaTableCalculation,
     type TableCalculation,
     type TableCalculationTemplate,
 } from '@lightdash/common';
-import { SUPPORTED_DIALECTS, type Dialect } from '@lightdash/formula';
+import { SUPPORTED_DIALECTS } from '@lightdash/formula';
 import {
     ActionIcon,
     Anchor,
@@ -25,11 +26,13 @@ import {
     HoverCard,
     Loader,
     Popover,
+    Select,
     Stack,
     Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
+    type ComboboxItem,
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import {
     IconAlertTriangle,
@@ -52,7 +55,6 @@ import {
     useState,
     type FC,
 } from 'react';
-import { useParams } from 'react-router';
 import { useToggle } from 'react-use';
 import { type ValueOf } from 'type-fest';
 import MantineIcon from '../../../components/common/MantineIcon';
@@ -68,9 +70,15 @@ import useHealth from '../../../hooks/health/useHealth';
 import useToaster from '../../../hooks/toaster/useToaster';
 import { useConvertSqlToFormula } from '../../../hooks/useConvertSqlToFormula';
 import { useExplore } from '../../../hooks/useExplore';
-import { useProject } from '../../../hooks/useProject';
+import {
+    useExploreWarehouseConnection,
+    useMixedWarehouseConnectionsEnabled,
+} from '../../../hooks/useExploreWarehouseConnection';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import { useCannotAuthorCustomSqlTableCalculations } from '../../../hooks/user/useCannotAuthorCustomSqlTableCalculations';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
+import { resolveNewCalculationEditMode } from '../../../utils/mixedWarehouseConnections';
+import { useAiAccessGate } from '../../aiAccess/useAiAccessGate';
 import { getUniqueTableCalculationName } from '../utils';
 import { FormatRow } from './FormatRow/FormatRow';
 import { FormulaForm, type FormulaFormHandle } from './FormulaForm/FormulaForm';
@@ -102,6 +110,54 @@ type TableCalculationFormInputs = {
     formula: string;
     format: CustomFormat;
     type?: TableCalculationType;
+    totalMode?: TableCalculationTotalMode;
+};
+
+const totalModeMeta: Record<
+    TableCalculationTotalMode,
+    { label: string; description: string }
+> = {
+    [TableCalculationTotalMode.FORMULA]: {
+        label: 'Apply calculation to the totals',
+        description:
+            'Runs the formula over the totals of the columns it references. Best for ratios and percentages.',
+    },
+    [TableCalculationTotalMode.SUM_OF_ROWS]: {
+        label: 'Sum of the row values',
+        description:
+            "Adds up the calculation's value from every row. Best for row-level transformations.",
+    },
+    [TableCalculationTotalMode.NONE]: {
+        label: 'No totals',
+        description: 'Shows no totals for this calculation.',
+    },
+};
+
+const totalModeOptions = Object.entries(totalModeMeta).map(
+    ([value, { label }]) => ({ value, label }),
+);
+
+// renderOption replaces Mantine's whole option node, including the built-in
+// selection check — render it manually from `checked`.
+const renderTotalModeOption = ({
+    option,
+    checked,
+}: {
+    option: ComboboxItem;
+    checked?: boolean;
+}) => {
+    const meta = totalModeMeta[option.value as TableCalculationTotalMode];
+    return (
+        <Group flex={1} justify="space-between" wrap="nowrap" gap="xs">
+            <Stack gap={0}>
+                <Text size="sm">{meta.label}</Text>
+                <Text size="xs" c="dimmed">
+                    {meta.description}
+                </Text>
+            </Stack>
+            {checked && <MantineIcon icon={IconCheck} size="sm" />}
+        </Group>
+    );
 };
 
 enum EditMode {
@@ -110,6 +166,21 @@ enum EditMode {
     FORMULA = 'formula',
 }
 
+/**
+ * Walkthrough action for manage:CustomSqlTableCalculations: creating a SQL
+ * table calculation on a saved chart being edited.
+ */
+const createTourAction = {
+    'data-tour-scope': 'manage:CustomSqlTableCalculations',
+    'data-tour-step': '2',
+    'data-tour-route': '/projects/:projectUuid/saved/:savedQueryUuid/edit',
+    'data-tour-label': 'Create the calculation',
+    'data-tour-title': 'Add a SQL table calculation',
+    'data-tour-interactive': 'true',
+    'data-tour-via':
+        '[data-tour-nav="browse"] >> [data-tour-nav="all-charts"] >> [data-tour-anchor="chart-row"][data-tour-value="Orders over time"] >> [data-tour-anchor="edit-chart"] >> [data-tour-anchor="results-heading"] >> [data-tour-anchor="add-table-calculation"] >> [data-tour-anchor="table-calc-sql-mode"] >> [data-tour-anchor="table-calc-sql"] >> [data-tour-anchor="table-calc-name"]',
+    'data-tour-docs': 'explore/table-calculations.mdx#intro:p3:2',
+};
 const TableCalculationModal: FC<Props> = ({
     opened,
     tableCalculation,
@@ -118,20 +189,24 @@ const TableCalculationModal: FC<Props> = ({
 }) => {
     const [isExpanded, toggleExpanded] = useToggle(false);
 
-    const { projectUuid } = useParams<{ projectUuid: string }>();
-    const { data: project } = useProject(projectUuid);
+    const projectUuid = useProjectUuid();
+    const tableName = useExplorerSelector(selectTableName);
+    const { warehouseType } = useExploreWarehouseConnection(
+        tableName,
+        projectUuid,
+    );
     const { data: health } = useHealth();
 
     // Formula support is pinned to what the formula package can compile for
     // this warehouse — `SUPPORTED_DIALECTS` is the single source of truth
     // shared with the backend mapper.
     const isFormulaSupported =
-        !!project?.warehouseConnection &&
-        (SUPPORTED_DIALECTS as readonly string[]).includes(
-            project.warehouseConnection.type as Dialect,
-        );
+        warehouseType !== null &&
+        (SUPPORTED_DIALECTS as readonly string[]).includes(warehouseType);
 
-    const isAmbientAiEnabled = health?.ai?.isAmbientAiEnabled === true;
+    const { disabled: accessDisabled } = useAiAccessGate(projectUuid);
+    const isAmbientAiEnabled =
+        !accessDisabled && health?.ai?.isAmbientAiEnabled === true;
     const { data: customRolesFlag } = useServerFeatureFlag(
         CommercialFeatureFlags.CustomRoles,
     );
@@ -178,7 +253,16 @@ const TableCalculationModal: FC<Props> = ({
         : isFormulaSupported
           ? EditMode.FORMULA
           : EditMode.SQL;
-    const [editMode, setEditMode] = useState<EditMode>(defaultMode);
+    const [preferredEditMode, setEditMode] = useState<EditMode>(defaultMode);
+    const mixedWarehouseConnectionsEnabled =
+        useMixedWarehouseConnectionsEnabled();
+    const editMode = resolveNewCalculationEditMode({
+        preferredMode: preferredEditMode,
+        sqlMode: EditMode.SQL,
+        isNewCalculation,
+        isFormulaSupported,
+        mixedWarehouseConnectionsEnabled,
+    });
 
     useEffect(() => {
         if (isNewCalculation && isFormulaSupported) {
@@ -188,7 +272,6 @@ const TableCalculationModal: FC<Props> = ({
 
     const { addToastError } = useToaster();
 
-    const tableName = useExplorerSelector(selectTableName);
     const metricQuery = useExplorerSelector(selectMetricQuery);
     const { data: explore } = useExplore(tableName);
     const tableCalculations = useExplorerSelector(selectTableCalculations);
@@ -206,6 +289,9 @@ const TableCalculationModal: FC<Props> = ({
                     ? tableCalculation.formula
                     : '',
             type: tableCalculation?.type || TableCalculationType.NUMBER,
+            totalMode:
+                tableCalculation?.totalMode ||
+                TableCalculationTotalMode.FORMULA,
             format: {
                 type:
                     tableCalculation?.format?.type || CustomFormatType.DEFAULT,
@@ -275,6 +361,7 @@ const TableCalculationModal: FC<Props> = ({
     const [formulaParseError, setFormulaParseError] = useState<string | null>(
         null,
     );
+    const [isValidatingFormula, setIsValidatingFormula] = useState(false);
     const formulaFormRef = useRef<FormulaFormHandle>(null);
     const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -385,7 +472,7 @@ const TableCalculationModal: FC<Props> = ({
             form.values.formula.trim().length === 0 ||
             formulaParseError !== null);
 
-    const handleConfirm = useCallback(() => {
+    const handleConfirm = useCallback(async () => {
         const validation = form.validate();
         if (validation.hasErrors) {
             // Name lives at the bottom of the modal body; on viewports
@@ -399,7 +486,19 @@ const TableCalculationModal: FC<Props> = ({
             return;
         }
 
-        const { name, sql, formula, format, type } = form.values;
+        if (editMode === EditMode.FORMULA) {
+            // Validation is a round trip. Without waiting for it, a click that
+            // lands before the answer saves a formula the parser rejects.
+            setIsValidatingFormula(true);
+            const parseError = await formulaFormRef.current?.validateNow();
+            setIsValidatingFormula(false);
+            if (parseError) {
+                setFormulaParseError(parseError);
+                return;
+            }
+        }
+
+        const { name, sql, formula, format, type, totalMode } = form.values;
         try {
             const isNewCalculation = !tableCalculation;
             const nameChanged =
@@ -427,6 +526,7 @@ const TableCalculationModal: FC<Props> = ({
                         displayName: name,
                         format,
                         type,
+                        totalMode,
                         template: editedTemplate ?? tableCalculation.template,
                     },
                     { mode: 'template', generatedByAi: false },
@@ -441,6 +541,7 @@ const TableCalculationModal: FC<Props> = ({
                         displayName: name,
                         format,
                         type,
+                        totalMode,
                         formula: normalizedFormula,
                     },
                     {
@@ -455,6 +556,7 @@ const TableCalculationModal: FC<Props> = ({
                         displayName: name,
                         format,
                         type,
+                        totalMode,
                         sql,
                     },
                     {
@@ -524,6 +626,17 @@ const TableCalculationModal: FC<Props> = ({
                     separator: NumberSeparator.DEFAULT,
                 });
             }
+            // Summing row values only makes sense for numeric results;
+            // 'none' stays valid for any type.
+            if (
+                next !== TableCalculationType.NUMBER &&
+                form.values.totalMode === TableCalculationTotalMode.SUM_OF_ROWS
+            ) {
+                form.setFieldValue(
+                    'totalMode',
+                    TableCalculationTotalMode.FORMULA,
+                );
+            }
             form.setFieldValue('type', next);
         },
         [form],
@@ -558,11 +671,7 @@ const TableCalculationModal: FC<Props> = ({
             size={isExpanded ? 'auto' : 'xl'}
             headerActions={
                 <Tooltip label={isExpanded ? 'Collapse' : 'Expand'}>
-                    <ActionIcon
-                        variant="subtle"
-                        onClick={toggleExpanded}
-                        color="gray"
-                    >
+                    <ActionIcon onClick={toggleExpanded}>
                         <MantineIcon
                             icon={isExpanded ? IconMinimize : IconMaximize}
                         />
@@ -571,8 +680,10 @@ const TableCalculationModal: FC<Props> = ({
             }
             actions={
                 <Button
-                    onClick={handleConfirm}
+                    onClick={() => void handleConfirm()}
                     data-testid="table-calculation-save-button"
+                    {...(isNewCalculation ? createTourAction : {})}
+                    loading={isValidatingFormula}
                     disabled={
                         (editMode === EditMode.SQL &&
                             form.values.sql.length === 0) ||
@@ -611,12 +722,11 @@ const TableCalculationModal: FC<Props> = ({
                                         withArrow
                                         width={320}
                                         position="bottom-start"
-                                        shadow="md"
                                         openDelay={100}
                                         closeDelay={150}
                                     >
                                         <HoverCard.Target>
-                                            <Box style={{ display: 'flex' }}>
+                                            <Box display="flex">
                                                 <MantineIcon
                                                     icon={IconAlertTriangle}
                                                     color="red.6"
@@ -670,6 +780,15 @@ const TableCalculationModal: FC<Props> = ({
                                 c="dimmed"
                                 onClick={handleSwitchEditMode}
                                 className={classes.switchEditModeLink}
+                                // Anchor for scope walkthroughs (data-tour-via),
+                                // read first as a look at the two modes.
+                                data-tour-anchor="table-calc-sql-mode"
+                                data-tour-hint="Switch to SQL"
+                                data-tour-scope="manage:CustomSqlTableCalculations"
+                                data-tour-look="1"
+                                data-tour-after='[data-tour-anchor="add-table-calculation"]'
+                                data-tour-label="Formula is the default, SQL is one click away"
+                                data-tour-docs="explore/table-calculations/formulas.mdx#intro:2-3"
                             >
                                 {switchEditModeLabel}
                             </Anchor>
@@ -677,8 +796,6 @@ const TableCalculationModal: FC<Props> = ({
                         {showConvertToFormulaButton && (
                             <Tooltip
                                 label="Use AI to suggest a formula equivalent of your SQL. You can review and edit it before saving."
-                                withArrow
-                                multiline
                                 w={260}
                                 disabled={showConversionPreview}
                             >
@@ -723,6 +840,7 @@ const TableCalculationModal: FC<Props> = ({
                         isTemplateTableCalculation(tableCalculation) ? (
                             <TemplateViewer
                                 template={editedTemplate ?? template}
+                                excludedFieldId={tableCalculation.name}
                                 readOnly={false}
                                 onTemplateChange={handleTemplateChange}
                             />
@@ -746,6 +864,17 @@ const TableCalculationModal: FC<Props> = ({
                             <Box
                                 className={classes.sqlEditorBorder}
                                 pos="relative"
+                                // Typed anchor for scope walkthroughs: the SQL
+                                // editor; the card suggests a running total.
+                                data-tour-anchor="table-calc-sql"
+                                data-tour-hint="Write the SQL"
+                                data-tour-input="true"
+                                data-tour-suggest="SUM(${orders.unique_order_count}) OVER (ORDER BY ${orders.order_date_month})"
+                                data-tour-scope="manage:CustomSqlTableCalculations"
+                                data-tour-look="2"
+                                data-tour-after='[data-tour-anchor="table-calc-sql-mode"]'
+                                data-tour-label="The calculation is raw SQL over the results"
+                                data-tour-docs="explore/table-calculations.mdx#write-the-sql-for-your-table-calculation-in-the-pop-up-box:p2:1"
                             >
                                 {sqlReadOnly && !showConversionPreview && (
                                     <Box
@@ -757,7 +886,6 @@ const TableCalculationModal: FC<Props> = ({
                                         <Popover
                                             position="bottom-end"
                                             withArrow
-                                            shadow="md"
                                             width={300}
                                         >
                                             <Popover.Target>
@@ -969,12 +1097,38 @@ const TableCalculationModal: FC<Props> = ({
                     onDataTypeChange={handleDataTypeChange}
                 />
 
+                {selectedTableCalculationType ===
+                    TableCalculationType.NUMBER && (
+                    <Select
+                        label="Totals"
+                        data={totalModeOptions}
+                        allowDeselect={false}
+                        renderOption={renderTotalModeOption}
+                        value={
+                            form.values.totalMode ??
+                            TableCalculationTotalMode.FORMULA
+                        }
+                        onChange={(value) =>
+                            value &&
+                            form.setFieldValue(
+                                'totalMode',
+                                value as TableCalculationTotalMode,
+                            )
+                        }
+                    />
+                )}
+
                 <TextInput
                     ref={nameInputRef}
                     label="Name"
                     required
                     placeholder="E.g. Cumulative order count"
                     data-testid="table-calculation-name-input"
+                    // Typed anchor for scope walkthroughs (data-tour-via)
+                    data-tour-anchor="table-calc-name"
+                    data-tour-hint="Name the calculation"
+                    data-tour-input="true"
+                    data-tour-suggest="Running order count"
                     {...form.getInputProps('name')}
                 />
             </Stack>

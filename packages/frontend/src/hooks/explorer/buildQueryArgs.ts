@@ -8,6 +8,7 @@ import {
     type ParametersValuesMap,
     type QueryExecutionContext,
     type SavedChartDAO,
+    type UUID,
 } from '@lightdash/common';
 import type { QueryResultsProps } from '../useQueryResults';
 
@@ -22,7 +23,6 @@ export function buildQueryArgs(options: {
     tableName: string | undefined;
     projectUuid: string | undefined;
     explore: Explore | undefined;
-    useSqlPivotResults: boolean;
     computedMetricQuery: MetricQuery;
     parameters: ParametersValuesMap | undefined;
     isEditMode: boolean;
@@ -32,6 +32,7 @@ export function buildQueryArgs(options: {
     dateZoomGranularity?: DateGranularity | string;
     minimal: boolean;
     usePreAggregateCache?: boolean;
+    customSqlProvenanceChartUuid?: UUID;
     savedChart: Pick<SavedChartDAO, 'chartConfig' | 'pivotConfig'>;
 }): QueryResultsProps | null {
     const {
@@ -39,7 +40,6 @@ export function buildQueryArgs(options: {
         tableName,
         projectUuid,
         explore,
-        useSqlPivotResults,
         computedMetricQuery,
         parameters,
         isEditMode,
@@ -54,16 +54,12 @@ export function buildQueryArgs(options: {
         return null;
     }
 
-    let pivotConfiguration = undefined;
-
-    if (useSqlPivotResults) {
-        const items = getFieldsFromMetricQuery(computedMetricQuery, explore);
-        pivotConfiguration = derivePivotConfigurationFromChart(
-            options.savedChart,
-            computedMetricQuery,
-            items,
-        );
-    }
+    const items = getFieldsFromMetricQuery(computedMetricQuery, explore);
+    const pivotConfiguration = derivePivotConfigurationFromChart(
+        options.savedChart,
+        computedMetricQuery,
+        items,
+    );
 
     const pivotDimensions = options.savedChart.pivotConfig?.columns;
 
@@ -83,6 +79,7 @@ export function buildQueryArgs(options: {
         dateZoomGranularity,
         invalidateCache: savedChartArgs ? minimal : true,
         usePreAggregateCache: options.usePreAggregateCache,
+        customSqlProvenanceChartUuid: options.customSqlProvenanceChartUuid,
         parameters: parameters || {},
         pivotConfiguration,
     };

@@ -1,15 +1,17 @@
 import {
     LightdashMode,
+    contentToResourceViewItem,
     ResourceItemCategory,
     ResourceViewItemType,
     wrapResource,
     type MostPopularAndRecentlyUpdated,
     type ResourceViewItem,
 } from '@lightdash/common';
-import { Button } from '@mantine-8/core';
+import { Button } from '@mantine/core';
 import { IconChartBar, IconPlus } from '@tabler/icons-react';
 import { useMemo, type FC } from 'react';
 import { useNavigate } from 'react-router';
+import { useContentAuthoringEnabled } from '../../../hooks/useContentAuthoringEnabled';
 import useCreateInAnySpaceAccess from '../../../hooks/user/useCreateInAnySpaceAccess';
 import { useVerifiedContentForHomepage } from '../../../hooks/useVerifiedContentList';
 import useApp from '../../../providers/App/useApp';
@@ -20,9 +22,15 @@ import ResourceView from '../../common/ResourceView';
 interface Props {
     data: MostPopularAndRecentlyUpdated | undefined;
     projectUuid: string;
+    projectUrlIdentifier: string;
 }
 
-export const HomepageContentPanel: FC<Props> = ({ data, projectUuid }) => {
+export const HomepageContentPanel: FC<Props> = ({
+    data,
+    projectUuid,
+    projectUrlIdentifier,
+}) => {
+    const authoringEnabled = useContentAuthoringEnabled();
     const MAX_NUMBER_OF_ITEMS_IN_PANEL = 10;
     const navigate = useNavigate();
     const { health } = useApp();
@@ -33,12 +41,14 @@ export const HomepageContentPanel: FC<Props> = ({ data, projectUuid }) => {
     const allItems = useMemo(() => {
         const mostPopularItems =
             data?.mostPopular.map((item) => ({
-                ...wrapResource(
-                    item,
-                    'chartType' in item
-                        ? ResourceViewItemType.CHART
-                        : ResourceViewItemType.DASHBOARD,
-                ),
+                ...('contentType' in item
+                    ? contentToResourceViewItem(item)
+                    : wrapResource(
+                          item,
+                          'chartType' in item
+                              ? ResourceViewItemType.CHART
+                              : ResourceViewItemType.DASHBOARD,
+                      )),
                 category: ResourceItemCategory.MOST_POPULAR,
             })) ?? [];
         const recentlyUpdatedItems =
@@ -65,7 +75,7 @@ export const HomepageContentPanel: FC<Props> = ({ data, projectUuid }) => {
     }, [data?.mostPopular, data?.recentlyUpdated, verifiedContentData]);
 
     const handleCreateChart = () => {
-        void navigate(`/projects/${projectUuid}/tables`);
+        void navigate(`/projects/${projectUrlIdentifier}/tables`);
     };
 
     const isDemo = health.data?.mode === LightdashMode.DEMO;
@@ -117,7 +127,6 @@ export const HomepageContentPanel: FC<Props> = ({ data, projectUuid }) => {
                           title: 'Charts and Dashboards',
                           action: (
                               <MantineLinkButton
-                                  color="ldGray.6"
                                   size="compact-sm"
                                   variant="subtle"
                                   target="_blank"
@@ -140,6 +149,7 @@ export const HomepageContentPanel: FC<Props> = ({ data, projectUuid }) => {
                 action:
                     !isDemo && userCanCreateCharts ? (
                         <Button
+                            display={authoringEnabled ? undefined : 'none'}
                             leftSection={
                                 <MantineIcon icon={IconPlus} size={18} />
                             }

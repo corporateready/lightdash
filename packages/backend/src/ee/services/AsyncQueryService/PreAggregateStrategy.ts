@@ -12,6 +12,7 @@ import {
     TileIneligibleReason,
     UnexpectedServerError,
     type Account,
+    type ActiveMaterializationDetails,
     type DashboardDAO,
     type DashboardFilters,
     type DashboardPreAggregateAudit,
@@ -33,6 +34,7 @@ import { type DashboardModel } from '../../../models/DashboardModel/DashboardMod
 import { type SavedChartModel } from '../../../models/SavedChartModel';
 import type {
     PreAggregateStrategy as IPreAggregateStrategy,
+    PreAggregateExecutionFallbackParams,
     PreAggregateExecutionResolution,
     PreAggregateStatsFilters,
     PreAggregationRoutingDecision,
@@ -40,17 +42,21 @@ import type {
 } from '../../../services/AsyncQueryService/PreAggregateStrategy';
 import { type PreAggregationRoute } from '../../../services/AsyncQueryService/types';
 import { type ProjectService } from '../../../services/ProjectService/ProjectService';
+import { isSameResultProducerOwner } from '../../../utils/queryResultProducer';
 import { type PreAggregateDailyStatsModel } from '../../models/PreAggregateDailyStatsModel';
+import { readMaterializationProducer } from './materializationProducer';
 import {
     PreAggregationDuckDbClient,
     PreAggregationDuckDbResolveReason,
 } from './PreAggregationDuckDbClient';
+import { type PreAggregationExternalResolver } from './PreAggregationExternalResolver';
 
 type EePreAggregateStrategyArgs = {
     preAggregationDuckDbClient: PreAggregationDuckDbClient;
+    preAggregationExternalResolver: PreAggregationExternalResolver;
     preAggregateDailyStatsModel: PreAggregateDailyStatsModel;
     preAggregateResultsStorageClient: S3ResultsFileStorageClient;
-    isEnabled: () => boolean;
+    isEnabled: (organizationUuid: string) => Promise<boolean>;
     dashboardModel: Pick<DashboardModel, 'getByIdOrSlug'>;
     savedChartModel: Pick<SavedChartModel, 'get'>;
     projectService: Pick<ProjectService, 'getExplore'>;
@@ -59,11 +65,13 @@ type EePreAggregateStrategyArgs = {
 export class PreAggregateStrategy implements IPreAggregateStrategy {
     private readonly duckDbClient: PreAggregationDuckDbClient;
 
+    private readonly externalResolver: PreAggregationExternalResolver;
+
     private readonly statsModel: PreAggregateDailyStatsModel;
 
     private readonly resultsStorageClient: S3ResultsFileStorageClient;
 
-    private readonly isEnabled: () => boolean;
+    private readonly isEnabled: (organizationUuid: string) => Promise<boolean>;
 
     private readonly dashboardModel: Pick<DashboardModel, 'getByIdOrSlug'>;
 
@@ -73,6 +81,7 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
 
     constructor(args: EePreAggregateStrategyArgs) {
         this.duckDbClient = args.preAggregationDuckDbClient;
+        this.externalResolver = args.preAggregationExternalResolver;
         this.statsModel = args.preAggregateDailyStatsModel;
         this.resultsStorageClient = args.preAggregateResultsStorageClient;
         this.isEnabled = args.isEnabled;
@@ -81,16 +90,18 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
         this.projectService = args.projectService;
     }
 
-    getRoutingDecision({
+    async getRoutingDecision({
+        organizationUuid,
         metricQuery,
         explore,
         context,
     }: {
+        organizationUuid: string;
         metricQuery: MetricQuery;
         explore: Explore;
         context: QueryExecutionContext;
-    }): PreAggregationRoutingDecision {
-        if (!this.isEnabled()) {
+    }): Promise<PreAggregationRoutingDecision> {
+        if (!(await this.isEnabled(organizationUuid))) {
             return { target: 'warehouse' };
         }
 
@@ -130,6 +141,9 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
         }
 
         if (matchResult.hit && matchResult.preAggregateName) {
+            const matchedDefinition = (explore.preAggregates || []).find(
+                (def) => def.name === matchResult.preAggregateName,
+            );
             return {
                 target: 'pre_aggregate',
                 preAggregateMetadata,
@@ -137,6 +151,9 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
                     sourceExploreName: metricQuery.exploreName,
                     preAggregateName: matchResult.preAggregateName,
                     mode: 'opportunistic',
+                    ...(matchedDefinition?.table
+                        ? { externalTable: matchedDefinition.table }
+                        : {}),
                 },
             };
         }
@@ -176,10 +193,17 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
             };
         }
 
-        const resolution = await this.duckDbClient.resolve({
+        const { resultProducer } = resolveArgs;
+        const resolverArgs = {
+            executionExplore: resolveArgs.executionExplore,
             projectUuid,
             queryUuid,
-            metricQuery: resolveArgs.metricQuery,
+            metricQuery: {
+                ...resolveArgs.metricQuery,
+                customDimensions: preAggregateUtils.getActiveCustomDimensions(
+                    resolveArgs.metricQuery,
+                ),
+            },
             timezone: resolveArgs.timezone,
             dateZoom: resolveArgs.dateZoom,
             parameters: resolveArgs.parameters,
@@ -191,10 +215,48 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
             availableParameterDefinitions:
                 resolveArgs.availableParameterDefinitions!,
             useTimezoneAwareDateTrunc: resolveArgs.useTimezoneAwareDateTrunc,
-        });
+            ...(resultProducer
+                ? {
+                      authorizeMaterialization: async (
+                          materialization: ActiveMaterializationDetails,
+                      ) => {
+                          const producer = await readMaterializationProducer(
+                              this.resultsStorageClient,
+                              {
+                                  projectUuid,
+                                  queryUuid: materialization.queryUuid,
+                                  materializationUri:
+                                      materialization.materializationUri,
+                              },
+                          );
+                          return (
+                              producer !== null &&
+                              resultProducer.agentIdentity === null &&
+                              resultProducer.credentialOwner.kind ===
+                                  'shared_connection' &&
+                              isSameResultProducerOwner(
+                                  producer,
+                                  resultProducer,
+                              )
+                          );
+                      },
+                  }
+                : {}),
+        };
+
+        // External pre-aggregates compile against the project warehouse; managed ones against DuckDB
+        const resolution = preAggregationRoute.externalTable
+            ? await this.externalResolver.resolve(resolverArgs)
+            : await this.duckDbClient.resolve(resolverArgs);
 
         if (resolution.resolved) {
-            return { resolved: true, query: resolution.query };
+            return {
+                resolved: true,
+                query: resolution.query,
+                execution: preAggregationRoute.externalTable
+                    ? 'project_warehouse'
+                    : 'duckdb',
+            };
         }
 
         const reason =
@@ -210,8 +272,10 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
         };
     }
 
-    createExecutionWarehouseClient(): WarehouseClient {
-        return this.duckDbClient.createExecutionWarehouseClient();
+    createPreAggregateWarehouseClient(
+        projectUuid: string,
+    ): Promise<WarehouseClient> {
+        return this.duckDbClient.createPreAggregateWarehouseClient(projectUuid);
     }
 
     recordStats(params: {
@@ -243,6 +307,17 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
             );
     }
 
+    recordExecutionFallback(params: PreAggregateExecutionFallbackParams): void {
+        void this.statsModel
+            .incrementFallback(params)
+            .catch((e) =>
+                Logger.error(
+                    'Failed to record pre-aggregate execution fallback',
+                    e,
+                ),
+            );
+    }
+
     async cleanupStats(retentionDays: number): Promise<number> {
         return this.statsModel.cleanup(retentionDays);
     }
@@ -269,9 +344,11 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
                     chartName: row.chartName,
                     dashboardUuid: row.dashboardUuid,
                     dashboardName: row.dashboardName,
+                    dashboardSlug: row.dashboardSlug,
                     queryContext: row.queryContext,
                     hitCount: row.hitCount,
                     missCount: row.missCount,
+                    fallbackCount: row.fallbackCount,
                     missReason: row.missReason,
                     preAggregateName: row.preAggregateName,
                     updatedAt: row.updatedAt.toISOString(),
@@ -460,7 +537,9 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
                         tileName,
                         tileType: DashboardTileTypes.SAVED_CHART,
                         savedChartUuid,
+                        chartName: savedChart.name,
                         exploreName: explore.name,
+                        exploreLabel: explore.label,
                         preAggregateName: matchResult.preAggregateName,
                     };
                 }
@@ -471,7 +550,9 @@ export class PreAggregateStrategy implements IPreAggregateStrategy {
                     tileName,
                     tileType: DashboardTileTypes.SAVED_CHART,
                     savedChartUuid,
+                    chartName: savedChart.name,
                     exploreName: explore.name,
+                    exploreLabel: explore.label,
                     miss: matchResult.miss,
                     missFieldLabel: PreAggregateStrategy.resolveMissFieldLabel(
                         matchResult.miss,

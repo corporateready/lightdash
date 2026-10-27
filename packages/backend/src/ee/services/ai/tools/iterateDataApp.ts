@@ -1,0 +1,92 @@
+import {
+    getErrorMessage,
+    iterateDataAppToolDefinition,
+    type ToolIterateDataAppOutput,
+    type ToolIterateDataAppStructuredContent,
+} from '@lightdash/common';
+import { tool } from 'ai';
+import type { IterateDataAppFn } from '../types/aiAgentDependencies';
+import type {
+    ExecuteStructuredToolResult,
+    ExecuteToolErrorResult,
+} from '../utils/structuredToolResult';
+import { toModelOutput } from '../utils/toModelOutput';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
+import { withBuildWarnings } from '../utils/withBuildWarnings';
+
+type Dependencies = {
+    iterateDataApp: IterateDataAppFn;
+};
+
+type PendingMetadata = Extract<
+    ToolIterateDataAppOutput['metadata'],
+    { status: 'pending' }
+>;
+type ErrorMetadata = Extract<
+    ToolIterateDataAppOutput['metadata'],
+    { status: 'error' }
+>;
+
+const toolDefinition = iterateDataAppToolDefinition.for('agent');
+
+export const getIterateDataApp = ({ iterateDataApp }: Dependencies) =>
+    tool({
+        ...toolDefinition,
+        execute: async (
+            {
+                appSlug,
+                prompt,
+                dashboardSlug,
+                chartSlugs,
+                themeSlug,
+                externalConnectionSlugs,
+            },
+            { toolCallId },
+        ): Promise<
+            | ExecuteStructuredToolResult<
+                  ToolIterateDataAppStructuredContent,
+                  PendingMetadata
+              >
+            | ExecuteToolErrorResult<ErrorMetadata>
+        > => {
+            try {
+                const { appUuid, version, warnings } = await iterateDataApp({
+                    appSlug,
+                    prompt,
+                    dashboardSlug,
+                    chartSlugs,
+                    themeSlug,
+                    externalConnectionSlugs,
+                    toolCallId,
+                });
+                const started = {
+                    status: 'pending' as const,
+                    appUuid,
+                    version,
+                };
+
+                return {
+                    result: withBuildWarnings(
+                        'Started the data app build. Tell the user it has started and will take a few minutes, then end your turn.',
+                        warnings,
+                    ),
+                    metadata: started,
+                    structuredContent: { status: 'pending', warnings },
+                };
+            } catch (error) {
+                return {
+                    ...toolErrorOutput(
+                        error,
+                        'Error starting the data app build. No new version was created.',
+                    ),
+                    metadata: {
+                        status: 'error',
+                        appUuid: null,
+                        reason: 'failed',
+                        message: getErrorMessage(error),
+                    },
+                };
+            }
+        },
+        toModelOutput: ({ output }) => toModelOutput(output),
+    });

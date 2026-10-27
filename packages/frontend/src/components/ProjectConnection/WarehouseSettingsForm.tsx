@@ -1,6 +1,10 @@
-import { WarehouseTypes } from '@lightdash/common';
-import { Select } from '@mantine/core';
-import { type FC } from 'react';
+import {
+    MIXED_TYPE_EXTRA_CONNECTION_WAREHOUSE_TYPES,
+    WarehouseTypes,
+} from '@lightdash/common';
+import { Select, Stack } from '@mantine/core';
+import { type FC, type ReactNode } from 'react';
+import { EgressIpNotice } from './EgressIpNotice';
 import { useFormContext } from './formContext';
 import AthenaForm from './WarehouseForms/AthenaForm';
 import BigQueryForm from './WarehouseForms/BigQueryForm';
@@ -10,6 +14,7 @@ import { warehouseDefaultValues } from './WarehouseForms/defaultValues';
 import DuckdbForm from './WarehouseForms/DuckdbForm';
 import PostgresForm from './WarehouseForms/PostgresForm';
 import RedshiftForm from './WarehouseForms/RedshiftForm';
+import { SnowflakeCliSsoModeProvider } from './WarehouseForms/SnowflakeCliSsoModeProvider';
 import SnowflakeForm from './WarehouseForms/SnowflakeForm';
 import TrinoForm from './WarehouseForms/TrinoForm';
 
@@ -22,7 +27,7 @@ const WarehouseTypeLabels = {
     [WarehouseTypes.TRINO]: 'Trino',
     [WarehouseTypes.CLICKHOUSE]: 'ClickHouse',
     [WarehouseTypes.ATHENA]: 'Athena',
-    [WarehouseTypes.DUCKDB]: 'MotherDuck',
+    [WarehouseTypes.DUCKDB]: 'DuckDB',
 };
 
 const WarehouseTypeForms = {
@@ -40,11 +45,15 @@ const WarehouseTypeForms = {
 interface WarehouseSettingsFormProps {
     disabled: boolean;
     isProjectUpdate?: boolean | undefined;
+    allowMixedWarehouseTypes: boolean;
+    children?: ReactNode;
 }
 
 const WarehouseSettingsForm: FC<WarehouseSettingsFormProps> = ({
     disabled,
     isProjectUpdate,
+    allowMixedWarehouseTypes,
+    children,
 }) => {
     const form = useFormContext();
 
@@ -54,34 +63,42 @@ const WarehouseSettingsForm: FC<WarehouseSettingsFormProps> = ({
     const WarehouseForm = WarehouseTypeForms[warehouseType];
 
     return (
-        <div
-            style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-        >
-            {isProjectUpdate && (
-                <Select
-                    defaultValue={WarehouseTypes.BIGQUERY}
-                    label="Type"
-                    data={Object.entries(WarehouseTypeLabels).map(
-                        ([value, label]) => ({
-                            value,
-                            label,
-                        }),
-                    )}
-                    required
-                    {...form.getInputProps('warehouse.type')}
-                    onChange={(value: WarehouseTypes) => {
-                        if (!value) return;
+        <SnowflakeCliSsoModeProvider>
+            <Stack h="100%" gap={0}>
+                {(isProjectUpdate || allowMixedWarehouseTypes) && (
+                    <Select
+                        allowDeselect={false}
+                        defaultValue={WarehouseTypes.BIGQUERY}
+                        label="Type"
+                        data={Object.entries(WarehouseTypeLabels)
+                            .filter(
+                                ([value]) =>
+                                    !allowMixedWarehouseTypes ||
+                                    MIXED_TYPE_EXTRA_CONNECTION_WAREHOUSE_TYPES.includes(
+                                        value as WarehouseTypes,
+                                    ),
+                            )
+                            .map(([value, label]) => ({ value, label }))}
+                        required
+                        {...form.getInputProps('warehouse.type')}
+                        onChange={(value) => {
+                            if (!value) return;
+                            const warehouseType = value as WarehouseTypes;
 
-                        form.setValues({
-                            warehouse: warehouseDefaultValues[value],
-                        });
-                    }}
-                    disabled={disabled}
-                />
-            )}
+                            form.setValues({
+                                warehouse:
+                                    warehouseDefaultValues[warehouseType],
+                            });
+                        }}
+                        disabled={disabled}
+                    />
+                )}
+                <EgressIpNotice />
 
-            <WarehouseForm disabled={disabled} />
-        </div>
+                <WarehouseForm disabled={disabled} />
+                {children}
+            </Stack>
+        </SnowflakeCliSsoModeProvider>
     );
 };
 

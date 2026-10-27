@@ -19,11 +19,8 @@ export class CommercialSlackClient extends SlackClient {
         this.slackAuthenticationModel = args.slackAuthenticationModel;
     }
 
-    public getRequiredScopes() {
-        return [
-            ...super.getRequiredScopes(),
-            'channels:history',
-            'groups:history',
-        ];
+    // eslint-disable-next-line class-methods-use-this
+    protected isCommercial(): boolean {
+        return true;
     }
 }

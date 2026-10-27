@@ -1,108 +1,42 @@
-import { isEmojiIcon, type CatalogField } from '@lightdash/common';
 import {
-    ActionIcon,
+    interpolateUiString,
+    isEmojiIcon,
+    type CatalogField,
+} from '@lightdash/common';
+import {
     Box,
-    Button,
-    getDefaultZIndex,
     Group,
+    Button,
+    ActionIcon,
     Highlight,
-    Paper,
-    Portal,
+    Popover,
+    CloseButton,
 } from '@mantine/core';
-import { useClickOutside } from '@mantine/hooks';
 import { IconTrash } from '@tabler/icons-react';
 import EmojiPicker, {
     Emoji,
     EmojiStyle,
     type EmojiClickData,
 } from 'emoji-picker-react';
-import { forwardRef, useCallback, useEffect, useState } from 'react';
+import { forwardRef, useState } from 'react';
 import {
-    type MRT_Row,
-    type MRT_TableInstance,
+    type ContentTableRow,
+    type ContentTableInstance,
 } from '../../../components/common/ContentTable';
 import MantineIcon from '../../../components/common/MantineIcon';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { MetricIconPlaceholder } from '../../../svgs/metricsCatalog';
 import { EventName } from '../../../types/Events';
 import { useAppSelector } from '../../sqlRunner/store/hooks';
 import { useUpdateCatalogItemIcon } from '../hooks/useCatalogItemIcon';
 import { MetricDetailPopover } from './MetricDetailPopover';
+import styles from './MetricsCatalogColumnName.module.css';
 import '../../../styles/emoji-picker-react.css';
 
-const PICKER_HEIGHT = 300;
-const PICKER_WIDTH = 350;
-
-const SharedEmojiPicker = forwardRef(
-    (
-        {
-            emoji,
-            position,
-            onClick,
-        }: {
-            emoji: CatalogField['icon'];
-            position: { top: number; left: number } | null;
-            onClick: (emoji: EmojiClickData | null) => void;
-        },
-        ref: React.ForwardedRef<HTMLDivElement>,
-    ) => {
-        if (!position) return null;
-
-        return (
-            <Portal>
-                <Box
-                    ref={ref}
-                    pos="fixed"
-                    top={position.top}
-                    left={position.left}
-                    sx={{
-                        zIndex: getDefaultZIndex('overlay'),
-                    }}
-                >
-                    <Paper
-                        shadow="xs"
-                        withBorder
-                        pt="xs"
-                        px="two"
-                        sx={(theme) => ({
-                            border: `1px solid ${theme.colors.ldGray[2]}`,
-                        })}
-                    >
-                        {emoji && (
-                            <Group position="right">
-                                <Button
-                                    variant="light"
-                                    size="xs"
-                                    compact
-                                    color="gray"
-                                    onClick={() => onClick(null)}
-                                    leftIcon={<MantineIcon icon={IconTrash} />}
-                                >
-                                    Remove
-                                </Button>
-                            </Group>
-                        )}
-                        {/* TODO: display loader on emoji picker loading */}
-                        <EmojiPicker
-                            height={PICKER_HEIGHT}
-                            width={PICKER_WIDTH}
-                            onEmojiClick={onClick}
-                            previewConfig={{
-                                showPreview: false,
-                            }}
-                            lazyLoadEmojis
-                            emojiStyle={EmojiStyle.NATIVE}
-                        />
-                    </Paper>
-                </Box>
-            </Portal>
-        );
-    },
-);
-
 type Props = {
-    row: MRT_Row<CatalogField>;
-    table: MRT_TableInstance<CatalogField>;
+    row: ContentTableRow<CatalogField>;
+    table: ContentTableInstance<CatalogField>;
 };
 
 export const MetricsCatalogColumnName = forwardRef<HTMLDivElement, Props>(
@@ -122,59 +56,8 @@ export const MetricsCatalogColumnName = forwardRef<HTMLDivElement, Props>(
         );
 
         const [isPickerOpen, setIsPickerOpen] = useState(false);
-        const [pickerPosition, setPickerPosition] = useState<{
-            top: number;
-            left: number;
-        } | null>(null);
-        const [iconRef, setIconRef] = useState<HTMLButtonElement | null>(null);
-        const [pickerRef, setPickerRef] = useState<HTMLDivElement | null>(null);
-
-        useEffect(
-            function lockScroll() {
-                const tableContainer = table.refs.tableContainerRef.current;
-                if (tableContainer && isPickerOpen) {
-                    tableContainer.style.overflow = 'hidden';
-                }
-                return () => {
-                    if (tableContainer) {
-                        tableContainer.style.overflow = 'auto';
-                    }
-                };
-            },
-            [isPickerOpen, table.refs.tableContainerRef],
-        );
-
-        const handleClosePicker = useCallback(() => {
-            setIsPickerOpen(false);
-            setPickerPosition(null);
-        }, []);
-
-        useClickOutside(handleClosePicker, null, [iconRef, pickerRef]);
-
+        const getUiString = useUiStrings();
         const { mutate: updateCatalogItemIcon } = useUpdateCatalogItemIcon();
-
-        const handleIconClick = (e: React.MouseEvent) => {
-            if (isPickerOpen) {
-                return handleClosePicker();
-            }
-            const rect = e.currentTarget.getBoundingClientRect();
-
-            // Get viewport height and picker approximate height (400px is typical for emoji picker)
-            const viewportHeight = window.innerHeight;
-            const pickerHeight = PICKER_HEIGHT;
-
-            // Check if there's enough space below
-            const spaceBelow = viewportHeight - rect.bottom;
-            const shouldShowAbove = spaceBelow < pickerHeight;
-
-            setPickerPosition({
-                top: shouldShowAbove
-                    ? rect.top - pickerHeight - 5
-                    : rect.bottom + 5,
-                left: rect.left,
-            });
-            setIsPickerOpen(true);
-        };
 
         const handleOnClick = (emoji: EmojiClickData | null) => {
             if (!projectUuid) return;
@@ -205,45 +88,108 @@ export const MetricsCatalogColumnName = forwardRef<HTMLDivElement, Props>(
                     },
                 });
             }
-            handleClosePicker();
+            setIsPickerOpen(false);
         };
 
         return (
             <Box ref={ref}>
-                <Group noWrap spacing="xs">
-                    <ActionIcon
-                        ref={setIconRef}
-                        variant="default"
-                        disabled={!canManageTags}
-                        onClick={handleIconClick}
-                        sx={(theme) => ({
-                            width: 28,
-                            height: 28,
-                            flexShrink: 0,
-                            borderRadius: '8px',
-                            border: `1px solid ${theme.colors.ldGray[3]}`,
-                            ...(!isEmojiIcon(row.original.icon) && {
-                                boxShadow: `0px -2px 0px 0px rgba(10, 13, 18, 0.07) inset, 0px 1px 2px 0px rgba(16, 24, 40, 0.05)`,
-                            }),
-                            '&:disabled': {
-                                backgroundColor: 'initial',
-                            },
-                        })}
+                <Group wrap="nowrap" gap="xs">
+                    <Popover
+                        opened={isPickerOpen}
+                        onChange={setIsPickerOpen}
+                        width="min(366px, calc(100vw - 24px))"
+                        floatingStrategy="fixed"
+                        middlewares={{
+                            shift: { crossAxis: true, padding: 12 },
+                        }}
+                        trapFocus
                     >
-                        {isEmojiIcon(row.original.icon) ? (
-                            <Emoji
-                                size={16}
-                                unified={row.original.icon.unicode}
-                            />
-                        ) : (
-                            <MetricIconPlaceholder width={12} height={12} />
-                        )}
-                    </ActionIcon>
+                        <Popover.Target>
+                            <ActionIcon
+                                variant="default"
+                                size={28}
+                                disabled={!canManageTags}
+                                aria-label={interpolateUiString(
+                                    getUiString('metrics.changeIcon'),
+                                    { metric: row.original.label },
+                                )}
+                                aria-expanded={isPickerOpen}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    setIsPickerOpen((value) => !value);
+                                }}
+                                className={styles.iconButton}
+                                data-placeholder={
+                                    !isEmojiIcon(row.original.icon) || undefined
+                                }
+                            >
+                                {isEmojiIcon(row.original.icon) ? (
+                                    <Emoji
+                                        size={16}
+                                        unified={row.original.icon.unicode}
+                                    />
+                                ) : (
+                                    <MetricIconPlaceholder
+                                        width={12}
+                                        height={12}
+                                    />
+                                )}
+                            </ActionIcon>
+                        </Popover.Target>
+                        <Popover.Dropdown
+                            p="xs"
+                            className={styles.iconDropdown}
+                        >
+                            <Group
+                                justify="space-between"
+                                mb="xs"
+                                className={styles.iconHeader}
+                                data-has-remove={
+                                    row.original.icon ? true : undefined
+                                }
+                            >
+                                {row.original.icon ? (
+                                    <Button
+                                        variant="light"
+                                        size="xs"
+                                        color="gray"
+                                        onClick={() => handleOnClick(null)}
+                                        leftSection={
+                                            <MantineIcon icon={IconTrash} />
+                                        }
+                                    >
+                                        {getUiString('metrics.removeIcon')}
+                                    </Button>
+                                ) : (
+                                    <span />
+                                )}
+                                <CloseButton
+                                    mod="touch-dismiss"
+                                    aria-label={getUiString(
+                                        'metrics.closeIconPicker',
+                                    )}
+                                    onClick={() => setIsPickerOpen(false)}
+                                />
+                            </Group>
+                            {isPickerOpen && (
+                                <EmojiPicker
+                                    height={300}
+                                    width="100%"
+                                    onEmojiClick={handleOnClick}
+                                    previewConfig={{ showPreview: false }}
+                                    lazyLoadEmojis
+                                    emojiStyle={EmojiStyle.NATIVE}
+                                />
+                            )}
+                        </Popover.Dropdown>
+                    </Popover>
                     {projectUuid && (
                         <MetricDetailPopover
                             tableName={row.original.tableName}
                             metricName={row.original.name}
+                            metricLabel={row.original.label}
                             projectUuid={projectUuid}
+                            showExploreButton={false}
                         >
                             <Highlight
                                 highlight={table.getState().globalFilter || ''}
@@ -256,12 +202,6 @@ export const MetricsCatalogColumnName = forwardRef<HTMLDivElement, Props>(
                         </MetricDetailPopover>
                     )}
                 </Group>
-                <SharedEmojiPicker
-                    emoji={row.original.icon}
-                    position={pickerPosition}
-                    ref={setPickerRef}
-                    onClick={handleOnClick}
-                />
             </Box>
         );
     },

@@ -1,26 +1,25 @@
 import {
-    AuthorizationError,
-    CreateWarehouseCredentials,
     DbtProjectEnvironmentVariable,
-    getErrorMessage,
-    NotFoundError,
+    ParameterError,
     SupportedDbtVersions,
-    UnexpectedGitError,
     UnexpectedServerError,
 } from '@lightdash/common';
 import { WarehouseClient } from '@lightdash/warehouses';
 import fs from 'fs';
 import * as fspromises from 'fs-extra';
 import * as path from 'path';
-import simpleGit, {
-    GitError,
-    SimpleGit,
-    SimpleGitProgressEvent,
-} from 'simple-git';
+import { SimpleGit, simpleGit, SimpleGitProgressEvent } from 'simple-git';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
 import Logger from '../logging/logger';
-import { CachedWarehouse, ProjectAdapter, type TrackingParams } from '../types';
+import type { DbtTargetResult } from '../services/WarehouseClientFactory/CredentialResolver';
+import {
+    CachedWarehouse,
+    DbtSourcePreparation,
+    ProjectAdapter,
+    type TrackingParams,
+} from '../types';
 import { DbtLocalCredentialsProjectAdapter } from './dbtLocalCredentialsProjectAdapter';
+import { GIT_REPOSITORY_ENVIRONMENT, GitRepository } from './gitRepository';
 
 export type DbtGitProjectAdapterArgs = {
     warehouseClient: WarehouseClient;
@@ -28,47 +27,18 @@ export type DbtGitProjectAdapterArgs = {
     repository: string;
     gitBranch: string;
     projectDirectorySubPath: string;
-    warehouseCredentials: CreateWarehouseCredentials;
+    dbtTarget: DbtTargetResult;
+    explicitCredentials: boolean;
     targetName: string | undefined;
     environment: DbtProjectEnvironmentVariable[] | undefined;
+    environmentVariableAllowlist: string[];
     cachedWarehouse: CachedWarehouse;
     dbtVersion: SupportedDbtVersions;
     selector?: string;
     analytics?: LightdashAnalytics;
-};
-
-const stripTokensFromUrls = (raw: string) => {
-    const pattern = /\/\/(.*)@/g;
-    return raw.replace(pattern, '//*****@');
-};
-
-const gitErrorHandler = (e: unknown, repository: string) => {
-    if (!(e instanceof Error)) {
-        throw new UnexpectedServerError(
-            `Unexpected git error: ${getErrorMessage(e)}`,
-        );
-    }
-    if (e.message.includes('Authentication failed')) {
-        throw new AuthorizationError(
-            'Git credentials not recognized for this repository',
-            { message: e.message },
-        );
-    }
-    if (e.message.includes('Repository not found')) {
-        throw new NotFoundError(
-            `Could not find git repository "${repository}". Check that your personal access token has access to the repository and that the repository name is correct.`,
-        );
-    }
-    if (e instanceof GitError) {
-        throw new UnexpectedGitError(
-            `Error while running "${
-                e.task?.commands[0]
-            }": ${stripTokensFromUrls(e.message)}`,
-        );
-    }
-    throw new UnexpectedGitError(
-        `Unexpected error while cloning git repository: ${e}`,
-    );
+    gitConfigGlobalPath?: string;
+    dbtDepsErrorHint?: string;
+    partialParseBaselinePath: string | null;
 };
 
 export class DbtGitProjectAdapter
@@ -87,20 +57,31 @@ export class DbtGitProjectAdapter
 
     git: SimpleGit;
 
+    private gitRefresh: Promise<number> | null = null;
+
+    private gitPreparation: Promise<DbtSourcePreparation> | null = null;
+
     constructor({
         warehouseClient,
         repository,
         remoteRepositoryUrl,
         gitBranch,
         projectDirectorySubPath,
-        warehouseCredentials,
+        dbtTarget,
+        explicitCredentials,
         targetName,
         environment,
+        environmentVariableAllowlist,
         cachedWarehouse,
         dbtVersion,
         selector,
         analytics,
+        gitConfigGlobalPath,
+        dbtDepsErrorHint,
+        partialParseBaselinePath,
     }: DbtGitProjectAdapterArgs) {
+        if (dbtTarget.kind === 'none')
+            throw new ParameterError(dbtTarget.reason);
         const localRepositoryDir = fs.mkdtempSync('/tmp/git_');
         const projectDir = path.join(
             localRepositoryDir,
@@ -109,13 +90,18 @@ export class DbtGitProjectAdapter
         super({
             warehouseClient,
             projectDir,
-            warehouseCredentials,
+            dbtTarget,
+            explicitCredentials,
             targetName,
             environment,
+            environmentVariableAllowlist,
             cachedWarehouse,
             dbtVersion,
             selector,
             analytics,
+            gitConfigGlobalPath,
+            dbtDepsErrorHint,
+            partialParseBaselinePath,
         });
         this.projectDirectorySubPath = projectDirectorySubPath;
         this.localRepositoryDir = localRepositoryDir;
@@ -123,6 +109,7 @@ export class DbtGitProjectAdapter
         this.branch = gitBranch;
         this.repository = repository;
         this.git = simpleGit({
+            allowEnvironment: GIT_REPOSITORY_ENVIRONMENT,
             progress({ method, stage, progress }: SimpleGitProgressEvent) {
                 Logger.debug(
                     `git.${method} ${stage} stage ${progress}% complete`,
@@ -133,8 +120,20 @@ export class DbtGitProjectAdapter
 
     async destroy(): Promise<void> {
         Logger.debug(`Destroy git project adapter`);
-        await this._destroyLocal();
         await super.destroy();
+    }
+
+    async releaseDisk(options?: { keepProject?: boolean }): Promise<void> {
+        await Promise.allSettled([
+            ...(this.gitRefresh ? [this.gitRefresh] : []),
+            ...(this.gitPreparation ? [this.gitPreparation] : []),
+        ]);
+        await super.releaseDisk(options);
+        if (!options?.keepProject) {
+            await this._destroyLocal();
+            this.gitRefresh = null;
+            this.gitPreparation = null;
+        }
     }
 
     private async _destroyLocal() {
@@ -151,91 +150,72 @@ export class DbtGitProjectAdapter
         }
     }
 
-    private async _cleanLocal() {
-        try {
-            Logger.debug(`Clean ${this.localRepositoryDir}`);
-            await fspromises.emptyDir(this.localRepositoryDir);
-        } catch (e) {
-            throw new UnexpectedServerError(
-                `Unexpected error while cleaning local git directory: ${e}`,
-            );
-        }
+    private async _refreshRepo(signal?: AbortSignal) {
+        signal?.throwIfAborted();
+        await new GitRepository(
+            this.git,
+            this.localRepositoryDir,
+            this.remoteRepositoryUrl,
+            this.repository,
+            this.branch,
+        ).refresh(signal);
     }
 
-    private async _clone() {
-        try {
-            const defaultCloneOptions = {
-                '--single-branch': null,
-                '--depth': 1,
-                '--branch': this.branch,
-                '--no-tags': null,
-                '--progress': null,
-            };
-
-            const startTime = Date.now();
-            Logger.debug(`Git clone to ${this.localRepositoryDir}`);
-            await this.git
-                .env('GIT_TERMINAL_PROMPT', '0')
-                .clone(
-                    this.remoteRepositoryUrl,
-                    this.localRepositoryDir,
-                    defaultCloneOptions,
-                );
-            Logger.info(`Git clone completed in ${Date.now() - startTime}ms`);
-        } catch (e) {
-            gitErrorHandler(e, this.repository);
-        }
-    }
-
-    private async _pull() {
-        try {
-            const startTime = Date.now();
-            Logger.debug(`Git pull to ${this.localRepositoryDir}`);
-            await fspromises.access(this.localRepositoryDir);
-            await this.git
-                .env('GIT_TERMINAL_PROMPT', '0')
-                .cwd(this.localRepositoryDir)
-                .pull(this.remoteRepositoryUrl, this.branch, {
-                    '--ff-only': null,
-                    '--depth': 1,
-                    '--no-tags': null,
-                    '--progress': null,
-                });
-            Logger.info(`Git pull completed in ${Date.now() - startTime}ms`);
-        } catch (e) {
-            gitErrorHandler(e, this.repository);
-        }
-    }
-
-    private async _refreshRepo() {
-        const startTime = Date.now();
-        try {
-            await this._pull();
-        } catch (e) {
-            Logger.debug(`Failed git pull ${e}`);
-            await this._cleanLocal();
-            await this._clone();
-        }
-        Logger.info(
-            `Git repo refresh completed in ${Date.now() - startTime}ms`,
-        );
-    }
-
-    public async compileAllExplores(
+    public async prepareExploreStream(
         trackingParams?: TrackingParams,
         loadSources?: boolean,
         allowPartialCompilation?: boolean,
     ) {
-        await this._refreshRepo();
-        return super.compileAllExplores(
+        await this.prepareDbtSource();
+        return super.prepareExploreStream(
             trackingParams,
             loadSources,
             allowPartialCompilation,
         );
     }
 
-    public async test() {
-        await this._refreshRepo();
-        await super.test();
+    public async test(options?: { signal?: AbortSignal }) {
+        if (options?.signal) {
+            await this.prepareRepository(options.signal);
+            await super.test(options);
+        } else {
+            await this.prepareRepository();
+            await super.test();
+        }
+    }
+
+    private async prepareRepository(signal?: AbortSignal): Promise<number> {
+        signal?.throwIfAborted();
+        this.gitRefresh ??= (async () => {
+            const startedAt = Date.now();
+            await this._refreshRepo(signal);
+            return Date.now() - startedAt;
+        })();
+        try {
+            return await this.gitRefresh;
+        } catch (error) {
+            if (signal?.aborted) this.gitRefresh = null;
+            throw error;
+        }
+    }
+
+    public async prepareDbtSource(options?: {
+        signal?: AbortSignal;
+    }): Promise<DbtSourcePreparation> {
+        options?.signal?.throwIfAborted();
+        this.gitPreparation ??= (async () => {
+            const gitRefreshMs = await this.prepareRepository(options?.signal);
+            const preparation = await super.prepareDbtSource(options);
+            return {
+                ...preparation,
+                timings: { ...preparation.timings, gitRefreshMs },
+            };
+        })();
+        try {
+            return await this.gitPreparation;
+        } catch (error) {
+            if (options?.signal?.aborted) this.gitPreparation = null;
+            throw error;
+        }
     }
 }

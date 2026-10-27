@@ -1,6 +1,5 @@
-import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
     getErrorMessage,
     MissingConfigError,
@@ -16,6 +15,7 @@ import {
     S3CacheClient,
     type S3CacheClientArguments,
 } from '../Aws/S3CacheClient';
+import { destroyS3Body } from '../Aws/s3Streams';
 
 export class S3ResultsFileStorageClient extends S3CacheClient {
     private readonly s3ExpiresIn: number | undefined;
@@ -161,6 +161,18 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
         }
     }
 
+    async deleteFile(key: string): Promise<void> {
+        if (!this.configuration || !this.s3) {
+            throw new MissingConfigError('S3 configuration is not set');
+        }
+        await this.s3.send(
+            new DeleteObjectCommand({
+                Bucket: this.configuration.bucket,
+                Key: key,
+            }),
+        );
+    }
+
     async getDownloadStream(
         cacheKey: string,
         fileExtension = 'jsonl',
@@ -193,7 +205,7 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
                     buffer += chunk.toString();
                     const newlineIndex = buffer.indexOf('\n');
                     if (newlineIndex !== -1) {
-                        stream.destroy(); // Stop reading after first line
+                        destroyS3Body(stream); // Stop reading after first line
                         resolve(buffer.slice(0, newlineIndex));
                     }
                 };
@@ -212,7 +224,7 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
     }
 
     async getFileUrl(cacheKey: string, fileExtension = 'jsonl') {
-        if (!this.configuration || !this.s3) {
+        if (!this.configuration || !this.s3 || !this.urlSigner) {
             throw new MissingConfigError('S3 configuration is not set');
         }
 
@@ -222,15 +234,10 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
         );
 
         // Get the S3 URL
-        const url = await getSignedUrl(
-            this.s3,
-            new GetObjectCommand({
-                Bucket: this.configuration.bucket,
-                Key: key,
-            }),
-            {
-                expiresIn: this.s3ExpiresIn,
-            },
+        const url = await this.urlSigner.getSignedDownloadUrl(
+            this.configuration.bucket,
+            key,
+            this.s3ExpiresIn,
         );
 
         return url;

@@ -1,8 +1,10 @@
 import { type CreateSavedChartVersion } from '@lightdash/common';
-import { Button, Tooltip } from '@mantine-8/core';
+import { Button, Tooltip } from '@mantine/core';
 import { IconExternalLink } from '@tabler/icons-react';
 import { useCallback, useMemo, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
+import useEmbed from '../../../../ee/providers/Embed/useEmbed';
+import { useContentAuthoringEnabled } from '../../../../hooks/useContentAuthoringEnabled';
 import { getExplorerUrlFromCreateSavedChartVersion } from '../../../../hooks/useExplorerRoute';
 import { useCreateShareMutation } from '../../../../hooks/useShare';
 
@@ -17,6 +19,8 @@ export const ExploreFromHereButton: FC<Props> = ({
     unsavedChartVersion,
     canExplore,
 }) => {
+    const authoringEnabled = useContentAuthoringEnabled();
+    const { embedToken, onExplore } = useEmbed();
     const openInExploreUrl = useMemo(() => {
         if (!unsavedChartVersion) return undefined;
         return getExplorerUrlFromCreateSavedChartVersion(
@@ -30,13 +34,24 @@ export const ExploreFromHereButton: FC<Props> = ({
         useCreateShareMutation();
 
     const handleExploreFromHere = useCallback(async () => {
+        if (embedToken && unsavedChartVersion && onExplore) {
+            onExplore({ chart: unsavedChartVersion });
+            return;
+        }
+
         if (!openInExploreUrl) return;
         const shareUrl = await createShareUrl({
             path: openInExploreUrl.pathname,
             params: `?${openInExploreUrl.search}`,
         });
         window.open(`/share/${shareUrl.nanoid}`, '_blank');
-    }, [createShareUrl, openInExploreUrl]);
+    }, [
+        createShareUrl,
+        embedToken,
+        onExplore,
+        openInExploreUrl,
+        unsavedChartVersion,
+    ]);
 
     const isEnabled = Boolean(openInExploreUrl && canExplore);
 
@@ -47,9 +62,9 @@ export const ExploreFromHereButton: FC<Props> = ({
             disabled={!isEnabled}
         >
             <Button
+                display={authoringEnabled ? undefined : 'none'}
                 variant="default"
                 size="xs"
-                radius="md"
                 leftSection={<MantineIcon icon={IconExternalLink} />}
                 disabled={!isEnabled}
                 loading={isCreatingShareUrl}

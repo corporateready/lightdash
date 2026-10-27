@@ -1,11 +1,11 @@
 import { type QueryWarning } from '@lightdash/common';
 import {
-    ActionIcon,
     Box,
     Divider,
-    Popover,
     Stack,
     Title,
+    ActionIcon,
+    Popover,
     Tooltip,
 } from '@mantine/core';
 import { IconAlertCircle } from '@tabler/icons-react';
@@ -37,7 +37,6 @@ const QueryWarnings: FC<QueryWarningsProps> = ({ queryWarnings }) => {
                 <Tooltip label="Query warnings">
                     <ActionIcon
                         color="yellow"
-                        variant="subtle"
                         onClick={() => {
                             setWarningsPopoverOpened((o) => !o);
                             if (!warningsPopoverOpened) {
@@ -50,10 +49,8 @@ const QueryWarnings: FC<QueryWarningsProps> = ({ queryWarnings }) => {
                 </Tooltip>
             </Popover.Target>
             <Popover.Dropdown>
-                <Title order={6} fw={600}>
-                    Query warnings
-                </Title>
-                <Stack spacing="xs" mt={'md'}>
+                <Title order={6}>Query warnings</Title>
+                <Stack gap="xs" mt={'md'}>
                     {queryWarnings
                         .slice(
                             (warningsPage - 1) * WARNINGS_PER_PAGE,

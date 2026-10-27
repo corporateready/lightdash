@@ -1,0 +1,208 @@
+import {
+    type ApiDataAppVizPreviewTokenResponse,
+    type ApiDataAppVizRenderMetadataResponse,
+    type ApiError,
+    type DataAppVizRenderMetadata,
+    type DocumentQueryReference,
+} from '@lightdash/common';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
+import {
+    getPreviewTokenRefetchInterval,
+    previewTokenQueryOptions,
+} from '../../apps/hooks/previewTokenQueryOptions';
+
+const DATA_APP_VIZ_RENDER_POLL_INTERVAL_MS = 3000;
+const DATA_APP_VIZ_RENDER_MAX_RETRIES = 3;
+
+type DataAppVizRenderTarget = {
+    isEmbedded: boolean;
+    savedChartUuid: string | undefined;
+    // Set only while previewing an older chart version; the backend authorizes
+    // against that version's config instead of the latest.
+    chartVersionUuid?: string | undefined;
+    // Set when rendering a saved Document cell, which authorizes through the Document.
+    document?: DocumentQueryReference | undefined;
+};
+
+// Rendering a saved chart authorizes against that chart; the chart-less route is
+// the authoring preview, where no chart exists to defer to yet.
+const getRenderBaseUrl = (
+    projectUuid: string,
+    dataAppVizUuid: string,
+    { isEmbedded, savedChartUuid, document }: DataAppVizRenderTarget,
+): string => {
+    if (!isEmbedded && document) {
+        return `/ee/projects/${projectUuid}/apps/visualizations/${dataAppVizUuid}/documents/${document.documentUuid}/charts/${encodeURIComponent(document.chartId)}`;
+    }
+    if (isEmbedded) {
+        return savedChartUuid
+            ? `/embed/${projectUuid}/chart/${savedChartUuid}/visualizations/${dataAppVizUuid}`
+            : `/embed/${projectUuid}/visualizations/${dataAppVizUuid}`;
+    }
+    return savedChartUuid
+        ? `/ee/projects/${projectUuid}/apps/visualizations/${dataAppVizUuid}/charts/${savedChartUuid}`
+        : `/ee/projects/${projectUuid}/apps/visualizations/${dataAppVizUuid}`;
+};
+
+const getChartVersionQuery = ({
+    isEmbedded,
+    savedChartUuid,
+    chartVersionUuid,
+    document,
+}: DataAppVizRenderTarget): string => {
+    if (!isEmbedded && document) {
+        return `?documentVersionUuid=${document.versionUuid}`;
+    }
+    return !isEmbedded && savedChartUuid && chartVersionUuid
+        ? `?chartVersionUuid=${chartVersionUuid}`
+        : '';
+};
+
+// Immutable chart-less artifacts include their pin; authoring stays latest.
+const getRenderMetadataQuery = (
+    target: DataAppVizRenderTarget,
+    pinnedVersion: number | undefined,
+): string => {
+    const chartVersionQuery = getChartVersionQuery(target);
+    if (chartVersionQuery) return chartVersionQuery;
+
+    return !target.savedChartUuid && pinnedVersion !== undefined
+        ? `?version=${pinnedVersion}`
+        : '';
+};
+
+const isTargetReady = (
+    projectUuid: string | undefined,
+    dataAppVizUuid: string | null,
+): boolean => !!projectUuid && dataAppVizUuid !== null;
+
+const shouldRetryDataAppVizRenderQuery = (
+    failureCount: number,
+    error: ApiError,
+): boolean => {
+    if (error.error.statusCode === 403 || error.error.statusCode === 404) {
+        return false;
+    }
+
+    return failureCount < DATA_APP_VIZ_RENDER_MAX_RETRIES;
+};
+
+const getRenderMetadataQueryKey = (
+    projectUuid: string | undefined,
+    dataAppVizUuid: string | null,
+    target: DataAppVizRenderTarget,
+    pinnedVersion: number | undefined,
+) => [
+    'data-app-viz-render-metadata',
+    projectUuid,
+    dataAppVizUuid,
+    target.isEmbedded ? 'embed' : 'registered',
+    target.savedChartUuid,
+    target.chartVersionUuid,
+    target.document,
+    pinnedVersion,
+];
+
+export const useDataAppVizRenderMetadata = (
+    projectUuid: string | undefined,
+    dataAppVizUuid: string | null,
+    target: DataAppVizRenderTarget,
+    pinnedVersion?: number,
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DataAppVizRenderMetadata, ApiError>({
+        queryKey: getRenderMetadataQueryKey(
+            projectUuid,
+            dataAppVizUuid,
+            target,
+            pinnedVersion,
+        ),
+        queryFn: () =>
+            lightdashApi<ApiDataAppVizRenderMetadataResponse['results']>({
+                method: 'GET',
+                url: `${getRenderBaseUrl(
+                    projectUuid!,
+                    dataAppVizUuid!,
+                    target,
+                )}/render-metadata${getRenderMetadataQuery(
+                    target,
+                    pinnedVersion,
+                )}`,
+            }),
+        enabled: isTargetReady(projectUuid, dataAppVizUuid),
+        retry: shouldRetryDataAppVizRenderQuery,
+        refetchInterval: (metadata) =>
+            metadata?.latestBuildInProgress
+                ? DATA_APP_VIZ_RENDER_POLL_INTERVAL_MS
+                : false,
+    });
+};
+
+export const useDataAppVizPreviewToken = (
+    projectUuid: string | undefined,
+    dataAppVizUuid: string | null,
+    version: number | undefined,
+    target: DataAppVizRenderTarget,
+    pinnedVersion?: number,
+) => {
+    const lightdashApi = useLightdashApi();
+    const queryClient = useQueryClient();
+    return useQuery<string, ApiError>({
+        queryKey: [
+            'data-app-viz-preview-token',
+            projectUuid,
+            dataAppVizUuid,
+            version,
+            target.isEmbedded ? 'embed' : 'registered',
+            target.savedChartUuid,
+            target.chartVersionUuid,
+            target.document,
+        ],
+        queryFn: async () => {
+            const { token } = await lightdashApi<
+                ApiDataAppVizPreviewTokenResponse['results']
+            >({
+                method: 'GET',
+                url: `${getRenderBaseUrl(
+                    projectUuid!,
+                    dataAppVizUuid!,
+                    target,
+                )}/versions/${version}/preview-token${getChartVersionQuery(
+                    target,
+                )}`,
+            });
+            return token;
+        },
+        enabled:
+            isTargetReady(projectUuid, dataAppVizUuid) &&
+            version !== undefined &&
+            version > 0,
+        retry: shouldRetryDataAppVizRenderQuery,
+        onError: (error) => {
+            queryClient.getDefaultOptions().queries?.onError?.(error);
+            // A repinned chart rejects tokens for the cached metadata's version.
+            // Refresh its metadata once; unchanged versions retain the error.
+            if (
+                error.error.statusCode === 403 &&
+                (target.savedChartUuid || target.document)
+            ) {
+                void queryClient.invalidateQueries(
+                    {
+                        queryKey: getRenderMetadataQueryKey(
+                            projectUuid,
+                            dataAppVizUuid,
+                            target,
+                            pinnedVersion,
+                        ),
+                        exact: true,
+                    },
+                    { cancelRefetch: false },
+                );
+            }
+        },
+        refetchInterval: (_data, query) =>
+            getPreviewTokenRefetchInterval(query.state.error),
+        ...previewTokenQueryOptions,
+    });
+};

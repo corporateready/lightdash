@@ -1,14 +1,13 @@
 import {
-    CreateWarehouseCredentials,
     DbtProjectEnvironmentVariable,
     SupportedDbtVersions,
 } from '@lightdash/common';
 import { WarehouseClient } from '@lightdash/warehouses';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
+import type { DbtTargetResult } from '../services/WarehouseClientFactory/CredentialResolver';
 import { CachedWarehouse } from '../types';
+import { DEFAULT_BITBUCKET_HOST_DOMAIN } from '../utils/credentialDestination';
 import { DbtGitProjectAdapter } from './dbtGitProjectAdapter';
-
-const DEFAULT_HOST_DOMAIN = 'bitbucket.org';
 
 type Args = {
     warehouseClient: WarehouseClient;
@@ -17,18 +16,22 @@ type Args = {
     repository: string;
     branch: string;
     projectDirectorySubPath: string;
-    warehouseCredentials: CreateWarehouseCredentials;
+    dbtTarget: DbtTargetResult;
+    explicitCredentials: boolean;
     hostDomain?: string;
     targetName: string | undefined;
     environment: DbtProjectEnvironmentVariable[] | undefined;
+    environmentVariableAllowlist: string[];
     cachedWarehouse: CachedWarehouse;
     dbtVersion: SupportedDbtVersions;
     selector?: string;
     analytics?: LightdashAnalytics;
+    partialParseBaselinePath: string | null;
 };
 
 export class DbtBitBucketProjectAdapter extends DbtGitProjectAdapter {
     constructor({
+        partialParseBaselinePath,
         analytics,
         warehouseClient,
         username,
@@ -36,27 +39,32 @@ export class DbtBitBucketProjectAdapter extends DbtGitProjectAdapter {
         personalAccessToken,
         repository,
         projectDirectorySubPath,
-        warehouseCredentials,
+        dbtTarget,
+        explicitCredentials,
         hostDomain,
         targetName,
         environment,
+        environmentVariableAllowlist,
         cachedWarehouse,
         dbtVersion,
         selector,
     }: Args) {
         const remoteRepositoryUrl = `https://${username}:${personalAccessToken}@${
-            hostDomain || DEFAULT_HOST_DOMAIN
+            hostDomain || DEFAULT_BITBUCKET_HOST_DOMAIN
         }/${repository}.git`;
         super({
             analytics,
+            partialParseBaselinePath,
             warehouseClient,
             gitBranch: branch,
             remoteRepositoryUrl,
             repository,
             projectDirectorySubPath,
-            warehouseCredentials,
+            dbtTarget,
+            explicitCredentials,
             targetName,
             environment,
+            environmentVariableAllowlist,
             cachedWarehouse,
             dbtVersion,
             selector,

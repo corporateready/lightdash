@@ -205,7 +205,7 @@ export class CommentService extends BaseService {
     async findCommentsForDashboard(
         user: SessionUser,
         dashboardUuidOrSlug: string,
-        options?: { projectUuid?: string },
+        options?: { projectUuid?: string; resolved?: boolean },
     ): Promise<Record<string, Comment[]>> {
         this.throwIfDisabled();
 
@@ -249,6 +249,7 @@ export class CommentService extends BaseService {
             dashboard.uuid,
             user.userUuid,
             canUserRemoveAnyComment,
+            options?.resolved ?? false,
         );
     }
 
@@ -256,6 +257,7 @@ export class CommentService extends BaseService {
         user: SessionUser,
         dashboardUuid: string,
         commentId: string,
+        resolved: boolean,
     ): Promise<void> {
         this.throwIfDisabled();
 
@@ -281,10 +283,13 @@ export class CommentService extends BaseService {
             );
         }
 
-        const comment = await this.commentModel.getComment(commentId);
+        const comment = await this.commentModel.getComment(
+            dashboard.uuid,
+            commentId,
+        );
 
         this.analytics.track({
-            event: 'comment.resolved',
+            event: resolved ? 'comment.resolved' : 'comment.unresolved',
             userId: user.userUuid,
             properties: {
                 isReply: !!comment.replyTo,
@@ -295,7 +300,9 @@ export class CommentService extends BaseService {
             },
         });
 
-        return this.commentModel.resolveComment(commentId);
+        return resolved
+            ? this.commentModel.resolveComment(dashboard.uuid, commentId)
+            : this.commentModel.unresolveComment(dashboard.uuid, commentId);
     }
 
     async deleteComment(
@@ -324,7 +331,10 @@ export class CommentService extends BaseService {
             }),
         );
 
-        const comment = await this.commentModel.getComment(commentId);
+        const comment = await this.commentModel.getComment(
+            dashboard.uuid,
+            commentId,
+        );
         const isOwner = comment.userUuid === user.userUuid;
 
         if (!canRemoveAnyComment && !isOwner) {
@@ -340,7 +350,7 @@ export class CommentService extends BaseService {
             });
         }
 
-        await this.commentModel.deleteComment(commentId);
+        await this.commentModel.deleteComment(dashboard.uuid, commentId);
 
         this.analytics.track({
             event: 'comment.deleted',

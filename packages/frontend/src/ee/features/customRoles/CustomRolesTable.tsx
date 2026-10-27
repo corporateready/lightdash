@@ -1,19 +1,29 @@
 import { formatDate, type RoleWithScopes } from '@lightdash/common';
 import {
     ActionIcon,
+    Badge,
     Box,
+    Group,
     Menu,
     Paper,
     Table,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+    UnstyledButton,
+} from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconDots, IconEdit, IconTrash } from '@tabler/icons-react';
-import { useState, type FC } from 'react';
+import {
+    IconArrowDown,
+    IconArrowsSort,
+    IconArrowUp,
+    IconDots,
+    IconEdit,
+    IconTrash,
+} from '@tabler/icons-react';
+import { useMemo, useState, type FC, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import MantineIcon from '../../../components/common/MantineIcon';
-import { useTableStyles } from '../../../hooks/styles/useTableStyles';
+import tableStyles from '../../../hooks/styles/tableStyles.module.css';
 import { useIsTruncated } from '../../../hooks/useIsTruncated';
 import { CustomRolesDeleteModal } from './CustomRolesDeleteModal';
 
@@ -22,7 +32,7 @@ const TableRow: FC<{
     onClickEdit: (role: RoleWithScopes) => void;
     onClickDelete: (role: RoleWithScopes) => void;
 }> = ({ role, onClickDelete }) => {
-    const { name, description, createdAt } = role;
+    const { name, description, level, createdAt } = role;
     const { ref: nameRef, isTruncated: isNameTruncated } =
         useIsTruncated<HTMLDivElement>();
     const { ref: descriptionRef, isTruncated: isDescriptionTruncated } =
@@ -57,14 +67,19 @@ const TableRow: FC<{
                     </Box>
                 </Tooltip>
             </Table.Td>
+            <Table.Td>
+                <Badge>
+                    {level === 'organization' ? 'Organization' : 'Project'}
+                </Badge>
+            </Table.Td>
             <Table.Td>{createdAt ? formatDate(createdAt) : '-'}</Table.Td>
             <Table.Td w="1%">
-                <Menu withinPortal position="bottom-end">
+                <Menu position="bottom-end">
                     <Menu.Target>
                         <ActionIcon
                             variant="transparent"
                             size="sm"
-                            color="ldGray.6"
+                            aria-label={`Actions for ${name}`}
                         >
                             <MantineIcon icon={IconDots} />
                         </ActionIcon>
@@ -91,6 +106,62 @@ const TableRow: FC<{
     );
 };
 
+type SortField = 'name' | 'createdAt';
+type SortDirection = 'asc' | 'desc';
+
+const compareRoles = (
+    a: RoleWithScopes,
+    b: RoleWithScopes,
+    field: SortField,
+): number => {
+    if (field === 'createdAt') {
+        return (
+            new Date(a.createdAt ?? 0).getTime() -
+            new Date(b.createdAt ?? 0).getTime()
+        );
+    }
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+};
+
+const SortableTh: FC<{
+    field: SortField;
+    sortField: SortField;
+    sortDirection: SortDirection;
+    onSort: (field: SortField) => void;
+    children: ReactNode;
+}> = ({ field, sortField, sortDirection, onSort, children }) => {
+    const isActive = field === sortField;
+    return (
+        <Table.Th
+            aria-sort={
+                isActive
+                    ? sortDirection === 'asc'
+                        ? 'ascending'
+                        : 'descending'
+                    : 'none'
+            }
+        >
+            <UnstyledButton onClick={() => onSort(field)} fz="inherit">
+                <Group gap="two" wrap="nowrap">
+                    {children}
+                    {isActive ? (
+                        <MantineIcon
+                            icon={
+                                sortDirection === 'asc'
+                                    ? IconArrowUp
+                                    : IconArrowDown
+                            }
+                            color="blue.6"
+                        />
+                    ) : (
+                        <MantineIcon icon={IconArrowsSort} color="ldGray.5" />
+                    )}
+                </Group>
+            </UnstyledButton>
+        </Table.Th>
+    );
+};
+
 type TableProps = {
     roles: RoleWithScopes[];
     onDelete: (uuid: string) => void;
@@ -104,12 +175,34 @@ export const CustomRolesTable: FC<TableProps> = ({
     onEdit,
     isDeleting,
 }) => {
-    const { cx, classes } = useTableStyles();
     const [deleteOpened, { open: openDelete, close: closeDelete }] =
         useDisclosure(false);
     const [roleToDelete, setRoleToDelete] = useState<
         RoleWithScopes | undefined
     >();
+    const [sortField, setSortField] = useState<SortField>('name');
+    const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+
+    const sortedRoles = useMemo(
+        () =>
+            roles
+                .slice()
+                .sort(
+                    (a, b) =>
+                        compareRoles(a, b, sortField) *
+                        (sortDirection === 'asc' ? 1 : -1),
+                ),
+        [roles, sortField, sortDirection],
+    );
+
+    const handleSort = (field: SortField) => {
+        if (field === sortField) {
+            setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+        } else {
+            setSortField(field);
+            setSortDirection('asc');
+        }
+    };
 
     const handleDelete = async () => {
         if (roleToDelete) {
@@ -131,27 +224,46 @@ export const CustomRolesTable: FC<TableProps> = ({
 
     return (
         <>
-            <Paper withBorder style={{ overflow: 'hidden' }}>
-                <Table className={cx(classes.root, classes.alignLastTdRight)}>
-                    <Table.Thead>
-                        <Table.Tr>
-                            <Table.Th>Name</Table.Th>
-                            <Table.Th>Description</Table.Th>
-                            <Table.Th>Created</Table.Th>
-                            <Table.Th></Table.Th>
-                        </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                        {roles.map((role) => (
-                            <TableRow
-                                key={role.roleUuid}
-                                role={role}
-                                onClickEdit={onEdit}
-                                onClickDelete={handleOpenDeleteModal}
-                            />
-                        ))}
-                    </Table.Tbody>
-                </Table>
+            <Paper className={tableStyles.paper}>
+                <Table.ScrollContainer minWidth={720}>
+                    <Table
+                        className={`${tableStyles.root} ${tableStyles.alignLastTdRight}`}
+                    >
+                        <Table.Thead>
+                            <Table.Tr>
+                                <SortableTh
+                                    field="name"
+                                    sortField={sortField}
+                                    sortDirection={sortDirection}
+                                    onSort={handleSort}
+                                >
+                                    Name
+                                </SortableTh>
+                                <Table.Th>Description</Table.Th>
+                                <Table.Th>Type</Table.Th>
+                                <SortableTh
+                                    field="createdAt"
+                                    sortField={sortField}
+                                    sortDirection={sortDirection}
+                                    onSort={handleSort}
+                                >
+                                    Created
+                                </SortableTh>
+                                <Table.Th></Table.Th>
+                            </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                            {sortedRoles.map((role) => (
+                                <TableRow
+                                    key={role.roleUuid}
+                                    role={role}
+                                    onClickEdit={onEdit}
+                                    onClickDelete={handleOpenDeleteModal}
+                                />
+                            ))}
+                        </Table.Tbody>
+                    </Table>
+                </Table.ScrollContainer>
             </Paper>
 
             {roleToDelete && (

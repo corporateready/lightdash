@@ -19,6 +19,57 @@ describe('scopeAbilityBuilder', () => {
         organizationUuid: 'org-123',
     };
 
+    it('grants organization roadmap management through a custom scope', () => {
+        const builder = new AbilityBuilder<MemberAbility>(Ability);
+        buildAbilityFromScopes(
+            {
+                ...baseContextWithOrg,
+                isEnterprise: true,
+                scopes: ['manage:Roadmap'],
+            },
+            builder,
+        );
+        const ability = builder.build();
+        expect(
+            ability.can(
+                'manage',
+                subject('Roadmap', { organizationUuid: 'org-123' }),
+            ),
+        ).toBe(true);
+        expect(
+            ability.can(
+                'view',
+                subject('Roadmap', { organizationUuid: 'org-123' }),
+            ),
+        ).toBe(true);
+        expect(
+            ability.can(
+                'manage',
+                subject('Roadmap', { organizationUuid: 'different-org' }),
+            ),
+        ).toBe(false);
+    });
+
+    it('keeps roadmap view-only scopes read-only', () => {
+        const builder = new AbilityBuilder<MemberAbility>(Ability);
+        buildAbilityFromScopes(
+            {
+                ...baseContextWithOrg,
+                isEnterprise: true,
+                scopes: ['view:Roadmap'],
+            },
+            builder,
+        );
+        expect(
+            builder
+                .build()
+                .can(
+                    'manage',
+                    subject('Roadmap', { organizationUuid: 'org-123' }),
+                ),
+        ).toBe(false);
+    });
+
     it('should build ability with organization view permissions', () => {
         const builder = new AbilityBuilder<MemberAbility>(Ability);
         buildAbilityFromScopes(
@@ -1420,11 +1471,92 @@ describe('scopeAbilityBuilder', () => {
                 ),
             ).toBe(true);
 
-            // Cannot promote without editor access
+            // Can promote dashboard with admin access
             expect(
                 ability.can(
                     'promote',
                     subject('Dashboard', {
+                        projectUuid: 'project-123',
+                        access: [
+                            {
+                                userUuid: 'user-456',
+                                role: SpaceMemberRole.ADMIN,
+                            },
+                        ],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Cannot promote without editor or admin access
+            expect(
+                ability.can(
+                    'promote',
+                    subject('Dashboard', {
+                        projectUuid: 'project-123',
+                        access: [
+                            {
+                                userUuid: 'user-456',
+                                role: SpaceMemberRole.VIEWER,
+                            },
+                        ],
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('should handle promote:saved_chart@space permissions', () => {
+            const contextWithUser = {
+                ...baseContext,
+                userUuid: 'user-456',
+            };
+
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    ...contextWithUser,
+                    scopes: ['promote:SavedChart@space'],
+                },
+                builder,
+            );
+            const ability = builder.build();
+
+            // Can promote chart with editor access
+            expect(
+                ability.can(
+                    'promote',
+                    subject('SavedChart', {
+                        projectUuid: 'project-123',
+                        access: [
+                            {
+                                userUuid: 'user-456',
+                                role: SpaceMemberRole.EDITOR,
+                            },
+                        ],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Can promote chart with admin access
+            expect(
+                ability.can(
+                    'promote',
+                    subject('SavedChart', {
+                        projectUuid: 'project-123',
+                        access: [
+                            {
+                                userUuid: 'user-456',
+                                role: SpaceMemberRole.ADMIN,
+                            },
+                        ],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Cannot promote without editor or admin access
+            expect(
+                ability.can(
+                    'promote',
+                    subject('SavedChart', {
                         projectUuid: 'project-123',
                         access: [
                             {
@@ -1725,6 +1857,37 @@ describe('scopeAbilityBuilder', () => {
                     }),
                 ),
             ).toBe(true);
+        });
+
+        it('should grant view:compiled_sql without custom field authoring', () => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    ...baseContext,
+                    scopes: ['view:CompiledSql'],
+                },
+                builder,
+            );
+            const ability = builder.build();
+
+            expect(
+                ability.can(
+                    'view',
+                    subject('CompiledSql', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                    }),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'manage',
+                    subject('CustomFields', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                    }),
+                ),
+            ).toBe(false);
         });
     });
 
@@ -2248,6 +2411,773 @@ describe('scopeAbilityBuilder', () => {
 
             expect(
                 ability.can('manage', subject('PersonalAccessToken', {})),
+            ).toBe(false);
+        });
+    });
+
+    describe('content as code permissions', () => {
+        const enterpriseContext = {
+            ...baseContext,
+            userUuid: 'user-456',
+            isEnterprise: true,
+        };
+
+        // Read endpoints (download) check `view`; write endpoints (upload)
+        // check `manage`. Splitting the scope lets a custom role grant
+        // download without upload (the PROD-7379 safeguard for production).
+        const contentAsCodeSubject = subject('ContentAsCode', {
+            organizationUuid: 'org-123',
+            projectUuid: 'project-123',
+        });
+
+        const buildAbility = (scopes: string[]) => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes({ ...enterpriseContext, scopes }, builder);
+            return builder.build();
+        };
+
+        it('view:ContentAsCode allows download but not upload (PROD-7379)', () => {
+            const ability = buildAbility(['view:ContentAsCode']);
+
+            // Can download (view) content as code
+            expect(ability.can('view', contentAsCodeSubject)).toBe(true);
+
+            // Cannot upload (manage) — the safeguard this feature adds
+            expect(ability.can('manage', contentAsCodeSubject)).toBe(false);
+        });
+
+        it('manage:ContentAsCode allows download and upload', () => {
+            const ability = buildAbility(['manage:ContentAsCode']);
+
+            // `manage` implies `view`, so existing manage holders keep download
+            expect(ability.can('view', contentAsCodeSubject)).toBe(true);
+            expect(ability.can('manage', contentAsCodeSubject)).toBe(true);
+        });
+
+        it('create:ContentAsCode allows upload but not manage', () => {
+            const ability = buildAbility(['create:ContentAsCode']);
+
+            expect(ability.can('create', contentAsCodeSubject)).toBe(true);
+            expect(ability.can('manage', contentAsCodeSubject)).toBe(false);
+        });
+
+        it('manage:ContentAsCode@self allows upload only to own previews from the granted project', () => {
+            const ability = buildAbility(['manage:ContentAsCode@self']);
+
+            const ownPreviewFromDirectProject = subject('ContentAsCode', {
+                organizationUuid: 'org-123',
+                projectUuid: 'project-123',
+                upstreamProjectUuid: 'upstream-project',
+                type: ProjectType.PREVIEW,
+                createdByUserUuid: 'user-456',
+            });
+            const ownPreviewFromUpstreamProject = subject('ContentAsCode', {
+                organizationUuid: 'org-123',
+                projectUuid: 'preview-123',
+                upstreamProjectUuid: 'project-123',
+                type: ProjectType.PREVIEW,
+                createdByUserUuid: 'user-456',
+            });
+            const ownProduction = subject('ContentAsCode', {
+                organizationUuid: 'org-123',
+                projectUuid: 'project-123',
+                type: ProjectType.DEFAULT,
+                createdByUserUuid: 'user-456',
+            });
+            const othersPreview = subject('ContentAsCode', {
+                organizationUuid: 'org-123',
+                projectUuid: 'preview-123',
+                upstreamProjectUuid: 'project-123',
+                type: ProjectType.PREVIEW,
+                createdByUserUuid: 'another-user',
+            });
+            const ownPreviewFromAnotherProject = subject('ContentAsCode', {
+                organizationUuid: 'org-123',
+                projectUuid: 'preview-456',
+                upstreamProjectUuid: 'another-project',
+                type: ProjectType.PREVIEW,
+                createdByUserUuid: 'user-456',
+            });
+
+            // Can upload to a preview project they created
+            expect(ability.can('manage', ownPreviewFromDirectProject)).toBe(
+                true,
+            );
+            expect(ability.can('manage', ownPreviewFromUpstreamProject)).toBe(
+                true,
+            );
+
+            // Cannot upload to production, even their own
+            expect(ability.can('manage', ownProduction)).toBe(false);
+
+            // Cannot upload to a preview created by someone else
+            expect(ability.can('manage', othersPreview)).toBe(false);
+
+            expect(ability.can('manage', ownPreviewFromAnotherProject)).toBe(
+                false,
+            );
+
+            // Does not grant blanket manage when the subject lacks self context
+            expect(ability.can('manage', contentAsCodeSubject)).toBe(false);
+        });
+
+        it('content as code scopes are gated behind enterprise', () => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    ...baseContext,
+                    userUuid: 'user-456',
+                    isEnterprise: false,
+                    scopes: ['view:ContentAsCode', 'manage:ContentAsCode'],
+                },
+                builder,
+            );
+            const ability = builder.build();
+
+            expect(ability.rules.length).toBe(0);
+        });
+    });
+
+    describe('selfPreview scopes', () => {
+        const selfPreviewContext = {
+            ...baseContext,
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: 'user1',
+        };
+
+        type BaseTestScopeContext = Omit<typeof baseContext, 'projectUuid'>;
+        type TestScopeContext =
+            | (BaseTestScopeContext & {
+                  projectUuid: string;
+                  organizationUuid?: undefined;
+                  projectType?: ProjectType;
+                  projectCreatedByUserUuid?: string | null;
+              })
+            | (BaseTestScopeContext & {
+                  organizationUuid: string;
+                  projectUuid?: undefined;
+                  projectType?: undefined;
+                  projectCreatedByUserUuid?: undefined;
+              });
+
+        const buildWith = (context: TestScopeContext, scopes: string[]) => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes({ ...context, scopes }, builder);
+            return builder.build();
+        };
+
+        it('create:Job@self grants job creation only inside the own preview', () => {
+            const ability = buildWith(selfPreviewContext, ['create:Job@self']);
+
+            expect(
+                ability.can(
+                    'create',
+                    subject('Job', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                    }),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'create',
+                    subject('Job', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'another-project',
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('create:Job@self grants nothing outside an own preview', () => {
+            const notOwn = buildWith(
+                { ...selfPreviewContext, projectCreatedByUserUuid: 'user2' },
+                ['create:Job@self'],
+            );
+            const notPreview = buildWith(
+                { ...selfPreviewContext, projectType: ProjectType.DEFAULT },
+                ['create:Job@self'],
+            );
+            const orgLevel = buildWith(baseContextWithOrg, ['create:Job@self']);
+
+            [notOwn, notPreview, orgLevel].forEach((ability) => {
+                expect(ability.rules.length).toBe(0);
+                expect(
+                    ability.can(
+                        'create',
+                        subject('Job', {
+                            organizationUuid: 'org-123',
+                            projectUuid: 'project-123',
+                        }),
+                    ),
+                ).toBe(false);
+            });
+        });
+
+        it('manage:Dashboard@self grants manage in own preview, bounded to viewable spaces', () => {
+            const ability = buildWith(selfPreviewContext, [
+                'manage:Dashboard@self',
+            ]);
+
+            // Public/shared space → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Private space the user is a member of → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: false,
+                        access: [{ userUuid: 'user1' }],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Private space the user is NOT a member of → invisible + uneditable
+            // (manage implies view, so this is the leak being closed)
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+
+            // Other projects unaffected
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'other-project',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('manage:SavedChart@self grants manage in own preview, bounded to viewable spaces', () => {
+            const ability = buildWith(selfPreviewContext, [
+                'manage:SavedChart@self',
+            ]);
+
+            // Public/shared space → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('SavedChart', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Private space the user is a member of → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('SavedChart', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: false,
+                        access: [{ userUuid: 'user1' }],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Private space the user is NOT a member of → invisible + uneditable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('SavedChart', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('SavedChart', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'other-project',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('manage:Space@self grants manage in own preview, bounded to viewable spaces but allowing creation', () => {
+            const ability = buildWith(selfPreviewContext, [
+                'manage:Space@self',
+            ]);
+
+            // Public/shared space → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Space', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Private space the user is a member of → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Space', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: false,
+                        access: [{ userUuid: 'user1' }],
+                    }),
+                ),
+            ).toBe(true);
+
+            // Private space the user is NOT a member of → uneditable, and can't
+            // self-add access to escalate into copied private content
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Space', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        inheritsFromOrgOrProject: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+
+            // Creating a brand-new space: metadata-only subject (no access field)
+            // → still allowed inside the own preview
+            expect(
+                ability.can(
+                    'create',
+                    subject('Space', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        metadata: { spaceName: 'New space' },
+                    }),
+                ),
+            ).toBe(true);
+
+            // ...but not in another project
+            expect(
+                ability.can(
+                    'create',
+                    subject('Space', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'other-project',
+                        metadata: { spaceName: 'New space' },
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('manage:Explore@self grants explore/query access in own preview project', () => {
+            const ability = buildWith(selfPreviewContext, [
+                'manage:Explore@self',
+            ]);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Explore', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                    }),
+                ),
+            ).toBe(true);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Explore', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'other-project',
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('project-management @self scopes match own previews from the granted upstream project', () => {
+            const ability = buildWith(baseContext, [
+                'manage:DeployProject@self',
+                'update:Project@self',
+                'delete:Project@self',
+            ]);
+            const ownPreviewFromProject = () => ({
+                organizationUuid: 'org-123',
+                projectUuid: 'preview-123',
+                upstreamProjectUuid: 'project-123',
+                type: ProjectType.PREVIEW,
+                createdByUserUuid: 'user1',
+            });
+            const ownPreviewFromAnotherProject = {
+                ...ownPreviewFromProject(),
+                projectUuid: 'preview-456',
+                upstreamProjectUuid: 'another-project',
+            };
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DeployProject', ownPreviewFromProject()),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'update',
+                    subject('Project', ownPreviewFromProject()),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'delete',
+                    subject('Project', ownPreviewFromProject()),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DeployProject', ownPreviewFromAnotherProject),
+                ),
+            ).toBe(false);
+        });
+
+        it('org-level @self scopes match only previews created by the user', () => {
+            const ability = buildWith(
+                { ...baseContextWithOrg, userUuid: 'user1' },
+                ['manage:DeployProject@self'],
+            );
+            const builderWithoutUser = new AbilityBuilder<MemberAbility>(
+                Ability,
+            );
+            buildAbilityFromScopes(
+                {
+                    ...baseContextWithOrg,
+                    userUuid: undefined,
+                    scopes: ['manage:DeployProject@self'],
+                } as never,
+                builderWithoutUser,
+            );
+            const abilityWithoutUser = builderWithoutUser.build();
+
+            const ownPreviewInOrg = subject('DeployProject', {
+                organizationUuid: 'org-123',
+                projectUuid: 'preview-123',
+                type: ProjectType.PREVIEW,
+                createdByUserUuid: 'user1',
+            });
+
+            expect(ability.can('manage', ownPreviewInOrg)).toBe(true);
+            expect(abilityWithoutUser.can('manage', ownPreviewInOrg)).toBe(
+                false,
+            );
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DeployProject', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'preview-456',
+                        type: ProjectType.PREVIEW,
+                        createdByUserUuid: 'another-user',
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('grants nothing when the project is not a preview', () => {
+            const ability = buildWith(
+                {
+                    ...baseContext,
+                    projectType: ProjectType.DEFAULT,
+                    projectCreatedByUserUuid: 'user1',
+                },
+                ['manage:Dashboard@self'],
+            );
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        isPrivate: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+            expect(ability.rules.length).toBe(0);
+        });
+
+        it('grants nothing when the preview was created by someone else', () => {
+            const ability = buildWith(
+                {
+                    ...baseContext,
+                    projectType: ProjectType.PREVIEW,
+                    projectCreatedByUserUuid: 'someone-else',
+                },
+                ['manage:Dashboard@self'],
+            );
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        isPrivate: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('grants nothing when project metadata is absent from context', () => {
+            const ability = buildWith(baseContext, ['manage:Dashboard@self']);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        isPrivate: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('grants nothing for org-level role assignments', () => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    ...baseContextWithOrg,
+                    scopes: ['manage:Dashboard@self'],
+                },
+                builder,
+            );
+            const ability = builder.build();
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                        isPrivate: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+            expect(ability.rules.length).toBe(0);
+        });
+    });
+    describe('data app preview scopes', () => {
+        const buildDataAppAbility = (scopes: string[]) => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes({ ...baseContext, scopes }, builder);
+            return builder.build();
+        };
+
+        const ownPreviewFromDirectProject = {
+            organizationUuid: 'org-123',
+            projectUuid: 'project-123',
+            upstreamProjectUuid: 'upstream-project',
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: 'user1',
+        };
+        const ownPreviewFromUpstreamProject = {
+            organizationUuid: 'org-123',
+            projectUuid: 'preview-123',
+            upstreamProjectUuid: 'project-123',
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: 'user1',
+        };
+        const ownProduction = {
+            organizationUuid: 'org-123',
+            projectUuid: 'project-123',
+            upstreamProjectUuid: null,
+            projectType: ProjectType.DEFAULT,
+            projectCreatedByUserUuid: 'user1',
+        };
+        const othersPreview = {
+            organizationUuid: 'org-123',
+            projectUuid: 'preview-123',
+            upstreamProjectUuid: 'project-123',
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: 'another-user',
+        };
+
+        it('create:DataApp@preview only reaches previews the user created', () => {
+            const ability = buildDataAppAbility(['create:DataApp@preview']);
+
+            expect(
+                ability.can(
+                    'create',
+                    subject('DataApp', ownPreviewFromDirectProject),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'create',
+                    subject('DataApp', ownPreviewFromUpstreamProject),
+                ),
+            ).toBe(true);
+
+            expect(
+                ability.can('create', subject('DataApp', ownProduction)),
+            ).toBe(false);
+            expect(
+                ability.can('create', subject('DataApp', othersPreview)),
+            ).toBe(false);
+        });
+
+        it('manage:DataApp@preview lets the user iterate on apps inside their own preview', () => {
+            const ability = buildDataAppAbility(['manage:DataApp@preview']);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DataApp', {
+                        ...ownPreviewFromDirectProject,
+                        createdByUserUuid: 'user1',
+                    }),
+                ),
+            ).toBe(true);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DataApp', {
+                        ...ownProduction,
+                        createdByUserUuid: 'user1',
+                    }),
+                ),
+            ).toBe(false);
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DataApp', {
+                        ...othersPreview,
+                        createdByUserUuid: 'user1',
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('keeps project ownership separate from app ownership', () => {
+            const ability = buildDataAppAbility(['manage:DataApp@self']);
+
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DataApp', ownPreviewFromDirectProject),
+                ),
+            ).toBe(false);
+            expect(
+                ability.can(
+                    'manage',
+                    subject('DataApp', {
+                        ...ownPreviewFromDirectProject,
+                        createdByUserUuid: 'user1',
+                    }),
+                ),
+            ).toBe(true);
+        });
+
+        it('the preview scopes do not grant the production create/manage rules', () => {
+            const ability = buildDataAppAbility([
+                'create:DataApp@preview',
+                'manage:DataApp@preview',
+            ]);
+
+            expect(
+                ability.can(
+                    'create',
+                    subject('DataApp', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'project-123',
+                    }),
+                ),
+            ).toBe(false);
+        });
+
+        it('create:DataApp still covers production and previews alike', () => {
+            const ability = buildDataAppAbility(['create:DataApp']);
+
+            expect(
+                ability.can('create', subject('DataApp', ownProduction)),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'create',
+                    subject('DataApp', ownPreviewFromDirectProject),
+                ),
+            ).toBe(true);
+        });
+
+        it('grants nothing for org-level assignments outside the user own previews', () => {
+            const builder = new AbilityBuilder<MemberAbility>(Ability);
+            buildAbilityFromScopes(
+                {
+                    ...baseContextWithOrg,
+                    scopes: ['create:DataApp@preview'],
+                },
+                builder,
+            );
+            const ability = builder.build();
+
+            expect(
+                ability.can(
+                    'create',
+                    subject('DataApp', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'preview-123',
+                        projectType: ProjectType.PREVIEW,
+                        projectCreatedByUserUuid: 'user1',
+                    }),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'create',
+                    subject('DataApp', {
+                        organizationUuid: 'org-123',
+                        projectUuid: 'preview-123',
+                        projectType: ProjectType.PREVIEW,
+                        projectCreatedByUserUuid: 'another-user',
+                    }),
+                ),
             ).toBe(false);
         });
     });

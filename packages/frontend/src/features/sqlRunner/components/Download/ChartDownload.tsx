@@ -4,12 +4,13 @@ import {
     type VizTableConfig,
 } from '@lightdash/common';
 import {
-    ActionIcon,
     Center,
-    Popover,
-    SegmentedControl,
     Stack,
     Text,
+    ActionIcon,
+    SegmentedControl,
+    Popover,
+    Tooltip,
 } from '@mantine/core';
 import { IconDownload, IconPhoto, IconTableExport } from '@tabler/icons-react';
 import { memo, useState } from 'react';
@@ -35,22 +36,29 @@ export const ChartDownload: React.FC<Props> = memo(
         return (
             <Popover>
                 <Popover.Target>
-                    <ActionIcon variant="default" disabled={disabled}>
-                        <MantineIcon icon={IconDownload} />
-                    </ActionIcon>
+                    <Tooltip label="Download chart" position="bottom">
+                        <ActionIcon
+                            aria-label="Download chart"
+                            disabled={disabled}
+                        >
+                            <MantineIcon icon={IconDownload} />
+                        </ActionIcon>
+                    </Tooltip>
                 </Popover.Target>
                 <Popover.Dropdown miw={250}>
-                    <Stack spacing="xs">
-                        <Stack spacing="xs">
+                    <Stack gap="xs">
+                        <Stack gap="xs">
                             <Text fw={500}>Download as</Text>
                             <SegmentedControl
                                 size="xs"
                                 value={downloadFormat}
-                                onChange={(
-                                    value:
-                                        | DownloadFileType.CSV
-                                        | DownloadFileType.IMAGE,
-                                ) => setDownloadFormat(value)}
+                                onChange={(value) =>
+                                    setDownloadFormat(
+                                        value as
+                                            | DownloadFileType.CSV
+                                            | DownloadFileType.IMAGE,
+                                    )
+                                }
                                 data={[
                                     {
                                         value: DownloadFileType.CSV,

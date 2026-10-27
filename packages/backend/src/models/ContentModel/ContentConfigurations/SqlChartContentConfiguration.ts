@@ -18,6 +18,7 @@ import {
     ContentTypePriority,
     SummaryContentRow,
 } from '../ContentModelTypes';
+import { applyContentNameSearch } from '../ContentSearchUtils';
 
 type SelectSavedSql = SummaryContentRow<{
     source: ChartSourceType.SQL;
@@ -36,6 +37,8 @@ const coerceChartKind = (value: string): ChartKind =>
 export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> =
     {
         shouldQueryBeIncluded: (filters: ContentFilters) => {
+            // Only dashboards have owners
+            if (filters.ownerUserUuids) return false;
             const contentTypeMatch =
                 !filters.contentTypes ||
                 filters.contentTypes?.includes(ContentType.CHART);
@@ -138,6 +141,7 @@ export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> 
                     knex.raw(
                         `${SavedSqlTableName}.first_viewed_at::timestamp as first_viewed_at`,
                     ),
+                    `${SavedSqlTableName}.last_viewed_at`,
                     knex.raw(
                         `${SavedSqlTableName}.deleted_at::timestamp as deleted_at`,
                     ),
@@ -154,6 +158,10 @@ export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> 
                     `verifiedByUser.user_uuid as verified_by_user_uuid`,
                     `verifiedByUser.first_name as verified_by_user_first_name`,
                     `verifiedByUser.last_name as verified_by_user_last_name`,
+                    knex.raw(`null::uuid as owner_user_uuid`),
+                    knex.raw(`null as owner_user_first_name`),
+                    knex.raw(`null as owner_user_last_name`),
+                    knex.raw(`null as owner_user_email`),
                     knex.raw(`json_build_object(
                     'source','${ChartSourceType.SQL}',
                     'chart_kind', ${SavedSqlTableName}.last_version_chart_kind,
@@ -185,6 +193,13 @@ export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> 
                         );
                     }
 
+                    if (filters.uuids) {
+                        void builder.whereIn(
+                            `${SavedSqlTableName}.saved_sql_uuid`,
+                            filters.uuids,
+                        );
+                    }
+
                     if (filters.spaceUuids) {
                         void builder.whereIn(
                             `${SpaceTableName}.space_uuid`,
@@ -192,9 +207,10 @@ export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> 
                         );
                     }
                     if (filters.search) {
-                        void builder.whereRaw(
-                            `LOWER(${SavedSqlTableName}.name) LIKE ?`,
-                            [`%${filters.search.toLowerCase()}%`],
+                        applyContentNameSearch(
+                            builder,
+                            `${SavedSqlTableName}.name`,
+                            filters.search,
                         );
                     }
 
@@ -212,6 +228,8 @@ export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> 
             }
             return {
                 contentType: ContentType.CHART,
+                // Filled in by ContentService for the requesting user.
+                directAccessRoles: [],
                 uuid: value.uuid,
                 slug: value.slug,
                 name: value.name,
@@ -260,6 +278,7 @@ export const sqlChartContentConfiguration: ContentConfiguration<SelectSavedSql> 
                     : null,
                 views: value.views,
                 firstViewedAt: value.first_viewed_at,
+                lastViewedAt: value.last_viewed_at,
                 verification:
                     value.verified_at !== null &&
                     value.verified_by_user_uuid !== null &&

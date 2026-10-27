@@ -10,42 +10,87 @@ import {
     type Field,
     type TableCalculation,
 } from '@lightdash/common';
-import { NumberInput } from '@mantine-8/core';
 import {
+    TextInput,
     ActionIcon,
     CloseButton,
     Group,
     SegmentedControl,
     Stack,
-    TextInput,
     Tooltip,
 } from '@mantine/core';
 import { IconRotate360 } from '@tabler/icons-react';
 import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
-import { EMPTY_X_AXIS } from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
+import {
+    selectCartesianDirtyChartType,
+    selectCartesianEditor,
+    selectCartesianLayout,
+    selectCartesianValidConfig,
+    useVisualizationSelector,
+    type VisualizationInputs,
+    type VisualizationStoreState,
+} from '../../../../features/visualization/store';
+import {
+    EMPTY_X_AXIS,
+    useCartesianEditorActions,
+} from '../../../../hooks/cartesianChartConfig/useCartesianChartConfig';
 import FieldSelect from '../../../common/FieldSelect';
 import MantineIcon from '../../../common/MantineIcon';
-import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import { NumberInput } from '../../../common/NumberInput';
+import {
+    useVisualizationInputs,
+    useVisualizationInputSelector,
+    useVisualizationServices,
+} from '../../../LightdashVisualization/useVisualizationContext';
 import { AddButton } from '../../common/AddButton';
 import { Config } from '../../common/Config';
 import { RowLimitControls } from '../../common/RowLimitControls';
+import { useAddFieldsToQuery } from '../../common/useAddFieldsToQuery';
 import { MAX_PIVOTS } from '../../TableConfigPanel/constants';
 
 type Props = {
     items: (Field | TableCalculation | CustomDimension)[];
 };
 
+// The valid layout keeps its identity across edits that leave it alone
+const selectValidLayout = (
+    state: VisualizationStoreState,
+    inputs: VisualizationInputs,
+) => selectCartesianValidConfig(state, inputs).layout;
+const selectRowLimit = (state: VisualizationStoreState) =>
+    selectCartesianEditor(state).rowLimit;
+const selectColumnLimit = (state: VisualizationStoreState) =>
+    selectCartesianEditor(state).columnLimit;
+
 export const Layout: FC<Props> = ({ items }) => {
-    const { visualizationConfig, pivotDimensions, setPivotDimensions } =
-        useVisualizationContext();
+    const { setPivotDimensions } = useVisualizationServices();
+    const { pivotDimensions } = useVisualizationInputs();
+    const dirtyLayout = useVisualizationSelector(selectCartesianLayout);
+    const validLayout = useVisualizationInputSelector(selectValidLayout);
+    const cartesianType = useVisualizationSelector(
+        selectCartesianDirtyChartType,
+    );
+    const rowLimit = useVisualizationSelector(selectRowLimit);
+    const columnLimit = useVisualizationSelector(selectColumnLimit);
+    const {
+        setXField,
+        setStacking,
+        setFlipAxis,
+        updateYField,
+        removeSingleSeries,
+        addSingleSeries,
+        setRowLimit,
+        setColumnLimit,
+    } = useCartesianEditorActions();
+    const { addableItems, addFieldToQuery, isFieldPending } =
+        useAddFieldsToQuery();
 
-    const isCartesianChart =
-        isCartesianVisualizationConfig(visualizationConfig);
-
-    const cartesianType = isCartesianChart
-        ? visualizationConfig.chartConfig.dirtyChartType
-        : undefined;
+    // Whether picking this option must first put its field on the query.
+    const isAddableField = useCallback(
+        (value: Field | TableCalculation | CustomDimension) =>
+            !items.some((i) => getItemId(i) === getItemId(value)),
+        [items],
+    );
 
     const canBeStacked =
         cartesianType !== CartesianSeriesType.LINE &&
@@ -53,9 +98,7 @@ export const Layout: FC<Props> = ({ items }) => {
 
     // Initialize stacking mode from saved configuration
     const initialStackMode = useMemo(() => {
-        if (!isCartesianChart) return StackType.NONE;
-        const { validConfig } = visualizationConfig.chartConfig;
-        const stackValue = validConfig?.layout?.stack;
+        const stackValue = validLayout.stack;
 
         // Convert boolean format to StackType for backward compatibility
         if (stackValue === true) return StackType.NORMAL;
@@ -63,7 +106,7 @@ export const Layout: FC<Props> = ({ items }) => {
 
         // Return StackType format or default to NONE
         return stackValue || StackType.NONE;
-    }, [isCartesianChart, visualizationConfig.chartConfig]);
+    }, [validLayout]);
 
     // Track current stacking mode locally
     const [currentStackMode, setCurrentStackMode] =
@@ -76,11 +119,11 @@ export const Layout: FC<Props> = ({ items }) => {
 
     // X axis logic
     const xAxisField = useMemo(() => {
-        if (!isCartesianChart) return undefined;
-        const { dirtyLayout } = visualizationConfig.chartConfig;
-
-        return items.find((item) => getItemId(item) === dirtyLayout?.xField);
-    }, [items, isCartesianChart, visualizationConfig]);
+        return (
+            items.find((item) => getItemId(item) === dirtyLayout?.xField) ??
+            addableItems.find((item) => getItemId(item) === dirtyLayout?.xField)
+        );
+    }, [items, addableItems, dirtyLayout?.xField]);
 
     const isXAxisFieldNumeric = useMemo(
         () => isNumericItem(xAxisField),
@@ -88,29 +131,27 @@ export const Layout: FC<Props> = ({ items }) => {
     );
 
     // Y axis logic
-    const yFields = useMemo(() => {
-        if (!isCartesianChart) return [];
-        const { dirtyLayout } = visualizationConfig.chartConfig;
-
-        return dirtyLayout?.yField || [];
-    }, [isCartesianChart, visualizationConfig]);
+    const yFields = useMemo(() => dirtyLayout?.yField || [], [dirtyLayout]);
 
     const yActiveField = useCallback(
         (field: string) => {
-            return items.find((item) => getItemId(item) === field);
+            return (
+                items.find((item) => getItemId(item) === field) ??
+                addableItems.find((item) => getItemId(item) === field)
+            );
         },
-        [items],
+        [items, addableItems],
     );
 
-    const availableYFields = useMemo(() => {
-        if (!isCartesianChart) return [];
+    const availableYFields = useMemo(
+        () => items.filter((item) => !yFields.includes(getItemId(item))),
+        [items, yFields],
+    );
 
-        const { dirtyLayout } = visualizationConfig.chartConfig;
-
-        return items.filter(
-            (item) => !dirtyLayout?.yField?.includes(getItemId(item)),
-        );
-    }, [isCartesianChart, items, visualizationConfig]);
+    const addableYItems = useMemo(
+        () => addableItems.filter((item) => !yFields.includes(getItemId(item))),
+        [addableItems, yFields],
+    );
 
     // Group series logic
     const availableDimensions = useMemo(() => {
@@ -120,44 +161,53 @@ export const Layout: FC<Props> = ({ items }) => {
     }, [items]);
 
     const chartHasMetricOrTableCalc = useMemo(() => {
-        if (!isCartesianChart) return false;
-
-        const { validConfig } = visualizationConfig.chartConfig;
-
-        const yField = validConfig?.layout.yField;
+        const yField = validLayout.yField;
 
         if (!yField) return false;
 
         return items.some(
             (item) => !isDimension(item) && yField.includes(getItemId(item)),
         );
-    }, [isCartesianChart, items, visualizationConfig]);
+    }, [items, validLayout]);
 
     const availableGroupByDimensions = useMemo(
         () =>
             availableDimensions.filter(
                 (item) =>
                     !pivotDimensions?.includes(getItemId(item)) &&
-                    (!isCartesianChart ||
-                        getItemId(item) !==
-                            visualizationConfig.chartConfig.dirtyLayout
-                                ?.xField),
+                    getItemId(item) !== dirtyLayout?.xField,
             ),
-        [
-            availableDimensions,
-            visualizationConfig.chartConfig,
-            isCartesianChart,
-            pivotDimensions,
-        ],
+        [availableDimensions, dirtyLayout?.xField, pivotDimensions],
+    );
+
+    const addableDimensions = useMemo(
+        () =>
+            addableItems.filter(
+                (item) => isDimension(item) || isCustomDimension(item),
+            ),
+        [addableItems],
+    );
+
+    const addableGroupByDimensions = useMemo(
+        () =>
+            addableDimensions.filter(
+                (item) =>
+                    !pivotDimensions?.includes(getItemId(item)) &&
+                    getItemId(item) !== dirtyLayout?.xField,
+            ),
+        [addableDimensions, dirtyLayout?.xField, pivotDimensions],
     );
 
     const canAddPivot = useMemo(
         () =>
             chartHasMetricOrTableCalc &&
-            availableGroupByDimensions.length > 0 &&
+            availableGroupByDimensions.length +
+                addableGroupByDimensions.length >
+                0 &&
             (!pivotDimensions || pivotDimensions.length < MAX_PIVOTS),
         [
             availableGroupByDimensions.length,
+            addableGroupByDimensions.length,
             pivotDimensions,
             chartHasMetricOrTableCalc,
         ],
@@ -165,8 +215,9 @@ export const Layout: FC<Props> = ({ items }) => {
 
     const handleOnChangeOfXAxisField = useCallback(
         (newValue: Field | TableCalculation | CustomDimension | undefined) => {
-            if (!isCartesianChart) return;
-            const { setXField, setStacking } = visualizationConfig.chartConfig;
+            if (newValue && isAddableField(newValue)) {
+                addFieldToQuery(newValue);
+            }
 
             const fieldId = newValue ? getItemId(newValue) : undefined;
             setXField(fieldId ?? undefined);
@@ -180,25 +231,14 @@ export const Layout: FC<Props> = ({ items }) => {
                 setCurrentStackMode(StackType.NONE);
             }
         },
-        [isCartesianChart, visualizationConfig, currentStackMode],
+        [
+            setXField,
+            setStacking,
+            currentStackMode,
+            isAddableField,
+            addFieldToQuery,
+        ],
     );
-
-    if (!isCartesianChart) return null;
-
-    const {
-        validConfig,
-        dirtyLayout,
-        setXField,
-        setStacking,
-        setFlipAxis,
-        updateYField,
-        removeSingleSeries,
-        addSingleSeries,
-        rowLimit,
-        setRowLimit,
-        columnLimit,
-        setColumnLimit,
-    } = visualizationConfig.chartConfig;
 
     const handleColumnLimitChange = (value: string | number) => {
         if (typeof value === 'number') {
@@ -214,10 +254,10 @@ export const Layout: FC<Props> = ({ items }) => {
                 <Config.Section>
                     <Config.Group>
                         <Config.Heading>{`${
-                            validConfig?.layout.flipAxes ? 'Y' : 'X'
+                            validLayout.flipAxes ? 'Y' : 'X'
                         }-axis`}</Config.Heading>
-                        <Group spacing="two">
-                            <Tooltip variant="xs" label="Flip Axes">
+                        <Group gap="two">
+                            <Tooltip label="Flip Axes">
                                 <ActionIcon
                                     onClick={() =>
                                         setFlipAxis(!dirtyLayout?.flipAxes)
@@ -229,17 +269,33 @@ export const Layout: FC<Props> = ({ items }) => {
                             </Tooltip>
                             {dirtyLayout?.xField === EMPTY_X_AXIS &&
                                 (() => {
-                                    const availableXField = items.find(
-                                        (item) =>
-                                            !pivotDimensions?.includes(
-                                                getItemId(item),
-                                            ),
-                                    );
+                                    const availableXField =
+                                        items.find(
+                                            (item) =>
+                                                !pivotDimensions?.includes(
+                                                    getItemId(item),
+                                                ),
+                                        ) ??
+                                        addableItems.find(
+                                            (item) =>
+                                                !pivotDimensions?.includes(
+                                                    getItemId(item),
+                                                ),
+                                        );
                                     return (
                                         <AddButton
                                             disabled={!availableXField}
                                             onClick={() => {
                                                 if (availableXField) {
+                                                    if (
+                                                        isAddableField(
+                                                            availableXField,
+                                                        )
+                                                    ) {
+                                                        addFieldToQuery(
+                                                            availableXField,
+                                                        );
+                                                    }
                                                     setXField(
                                                         getItemId(
                                                             availableXField,
@@ -257,10 +313,14 @@ export const Layout: FC<Props> = ({ items }) => {
                             data-testid="x-axis-field-select"
                             item={xAxisField}
                             items={items}
+                            addItems={addableItems}
+                            loading={isFieldPending(dirtyLayout?.xField)}
                             inactiveItemIds={pivotDimensions}
                             onChange={handleOnChangeOfXAxisField}
                             rightSection={
                                 <CloseButton
+                                    aria-label="Clear x-axis field"
+                                    size="xs"
                                     onClick={() => {
                                         setXField(EMPTY_X_AXIS);
                                     }}
@@ -276,15 +336,20 @@ export const Layout: FC<Props> = ({ items }) => {
                 <Config.Section>
                     <Config.Group>
                         <Config.Heading>{`${
-                            validConfig?.layout.flipAxes ? 'X' : 'Y'
+                            validLayout.flipAxes ? 'X' : 'Y'
                         }-axis`}</Config.Heading>
-                        {availableYFields.length > 0 && (
+                        {(availableYFields.length > 0 ||
+                            addableYItems.length > 0) && (
                             <AddButton
-                                onClick={() =>
-                                    addSingleSeries(
-                                        getItemId(availableYFields[0]),
-                                    )
-                                }
+                                onClick={() => {
+                                    const nextYField =
+                                        availableYFields[0] ?? addableYItems[0];
+                                    if (!nextYField) return;
+                                    if (isAddableField(nextYField)) {
+                                        addFieldToQuery(nextYField);
+                                    }
+                                    addSingleSeries(getItemId(nextYField));
+                                }}
                             />
                         )}
                     </Config.Group>
@@ -300,7 +365,12 @@ export const Layout: FC<Props> = ({ items }) => {
                                 data-testid="y-axis-field-select"
                                 item={activeField}
                                 items={yFieldsOptions}
+                                addItems={addableYItems}
+                                loading={isFieldPending(field)}
                                 onChange={(newValue) => {
+                                    if (newValue && isAddableField(newValue)) {
+                                        addFieldToQuery(newValue);
+                                    }
                                     updateYField(
                                         index,
                                         newValue ? getItemId(newValue) : '',
@@ -309,6 +379,8 @@ export const Layout: FC<Props> = ({ items }) => {
                                 rightSection={
                                     yFields?.length !== 1 && (
                                         <CloseButton
+                                            aria-label="Remove y-axis field"
+                                            size="xs"
                                             onClick={() => {
                                                 removeSingleSeries(index);
                                             }}
@@ -324,21 +396,26 @@ export const Layout: FC<Props> = ({ items }) => {
 
             <Config>
                 <Config.Section>
-                    <Stack spacing="xs">
+                    <Stack gap="xs">
                         <Config.Group>
-                            <Group spacing="one">
+                            <Group gap="one">
                                 <Config.Heading>Group</Config.Heading>
                             </Group>
                             {canAddPivot && (
                                 <AddButton
-                                    onClick={() =>
+                                    onClick={() => {
+                                        const nextGroupField =
+                                            availableGroupByDimensions[0] ??
+                                            addableGroupByDimensions[0];
+                                        if (!nextGroupField) return;
+                                        if (isAddableField(nextGroupField)) {
+                                            addFieldToQuery(nextGroupField);
+                                        }
                                         setPivotDimensions([
                                             ...(pivotDimensions || []),
-                                            getItemId(
-                                                availableGroupByDimensions[0],
-                                            ),
-                                        ])
-                                    }
+                                            getItemId(nextGroupField),
+                                        ]);
+                                    }}
                                 />
                             )}
                         </Config.Group>
@@ -353,12 +430,15 @@ export const Layout: FC<Props> = ({ items }) => {
                             )}
                     </Stack>
 
-                    <Stack spacing="xs">
+                    <Stack gap="xs">
                         {pivotDimensions &&
                             pivotDimensions.map((pivotKey) => {
                                 // Group series logic
                                 const groupSelectedField =
                                     availableDimensions.find(
+                                        (item) => getItemId(item) === pivotKey,
+                                    ) ??
+                                    addableDimensions.find(
                                         (item) => getItemId(item) === pivotKey,
                                     );
                                 const activeField = chartHasMetricOrTableCalc
@@ -371,11 +451,18 @@ export const Layout: FC<Props> = ({ items }) => {
                                 if (!groupSelectedField) {
                                     return (
                                         <TextInput
+                                            size="xs"
                                             key={pivotKey}
                                             readOnly
                                             value={pivotKey}
+                                            rightSectionPointerEvents="all"
                                             rightSection={
                                                 <CloseButton
+                                                    onMouseDown={(event) =>
+                                                        event.preventDefault()
+                                                    }
+                                                    aria-label="Remove pivot dimension"
+                                                    size="xs"
                                                     onClick={() => {
                                                         setPivotDimensions(
                                                             pivotDimensions.filter(
@@ -392,7 +479,7 @@ export const Layout: FC<Props> = ({ items }) => {
                                     );
                                 }
                                 return (
-                                    <Group spacing="xs" key={pivotKey}>
+                                    <Group gap="xs" key={pivotKey}>
                                         <FieldSelect
                                             disabled={
                                                 !chartHasMetricOrTableCalc
@@ -400,11 +487,16 @@ export const Layout: FC<Props> = ({ items }) => {
                                             placeholder="Select a field to group by"
                                             item={activeField}
                                             items={availableDimensions}
+                                            addItems={addableDimensions}
+                                            loading={isFieldPending(pivotKey)}
                                             inactiveItemIds={inactiveItemIds.filter(
                                                 (id) => id !== pivotKey,
                                             )} // keep current value enabled
                                             onChange={(newValue) => {
                                                 if (!newValue) return;
+                                                if (isAddableField(newValue)) {
+                                                    addFieldToQuery(newValue);
+                                                }
                                                 setPivotDimensions(
                                                     pivotDimensions
                                                         ? replaceStringInArray(
@@ -420,6 +512,8 @@ export const Layout: FC<Props> = ({ items }) => {
                                             rightSection={
                                                 groupSelectedField && (
                                                     <CloseButton
+                                                        aria-label="Remove pivot dimension"
+                                                        size="xs"
                                                         onClick={() => {
                                                             setPivotDimensions(
                                                                 pivotDimensions.filter(
@@ -440,15 +534,14 @@ export const Layout: FC<Props> = ({ items }) => {
                     </Stack>
                     {canBeStacked && (
                         <Tooltip
-                            variant="xs"
                             label="x-axis must be non-numeric to enable stacking"
-                            withinPortal
                             position="top-start"
                             disabled={!isXAxisFieldNumeric}
                         >
-                            <Group spacing="xs">
+                            <Group gap="xs">
                                 <Config.Label>Stacking</Config.Label>
                                 <SegmentedControl
+                                    size="xs"
                                     disabled={isXAxisFieldNumeric}
                                     value={
                                         isXAxisFieldNumeric

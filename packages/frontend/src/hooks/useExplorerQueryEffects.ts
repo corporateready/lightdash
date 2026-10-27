@@ -1,6 +1,5 @@
 import {
     derivePivotConfigurationFromChart,
-    FeatureFlags,
     getFieldsFromMetricQuery,
     assertUnreachable,
 } from '@lightdash/common';
@@ -28,8 +27,12 @@ import useHealth from './health/useHealth';
 import { useExplorerQueryManager } from './useExplorerQueryManager';
 import { usePreAggregateCacheEnabled } from './usePreAggregateCacheEnabled';
 import { usePreAggregateCheck } from './usePreAggregateCheck';
-import { useProjectUuid } from './useProjectUuid';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
+
+type ExplorerQueryEffectsArgs = {
+    minimal?: boolean;
+    projectUuid?: string;
+    savedQueryUuid?: string;
+};
 
 /**
  * Effects layer for Explorer query orchestration
@@ -47,7 +50,9 @@ import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
  */
 export const useExplorerQueryEffects = ({
     minimal = false,
-}: { minimal?: boolean } = {}) => {
+    projectUuid: explicitProjectUuid,
+    savedQueryUuid,
+}: ExplorerQueryEffectsArgs = {}) => {
     const dispatch = useExplorerDispatch();
 
     useEffect(() => {
@@ -55,17 +60,21 @@ export const useExplorerQueryEffects = ({
     }, [minimal, dispatch]);
 
     // Get all state and runQuery from manager (single source of truth)
-    const { runQuery, query, validQueryArgs, explore } =
-        useExplorerQueryManager();
+    const {
+        runQuery,
+        query,
+        validQueryArgs,
+        explore,
+        projectUuid: resolvedProjectUuid,
+    } = useExplorerQueryManager({
+        projectUuid: explicitProjectUuid,
+        savedQueryUuid,
+    });
 
     const isEditMode = useExplorerSelector(selectIsEditMode);
     const isResultsOpen = useExplorerSelector(selectIsResultsExpanded);
     const fromDashboard = useExplorerSelector(selectFromDashboard);
     const isExploreFromHere = useExplorerSelector(selectIsExploreFromHere);
-
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
 
     const unsavedChartVersion = useExplorerSelector(selectUnsavedChartVersion);
 
@@ -83,7 +92,6 @@ export const useExplorerQueryEffects = ({
     const isPreAggregateFeatureEnabled = health?.preAggregates?.enabled;
     const tableName = useExplorerSelector(selectTableName);
     const metricQuery = useExplorerSelector(selectMetricQuery);
-    const projectUuid = useProjectUuid();
     const [preAggCacheEnabled] = usePreAggregateCacheEnabled();
 
     const hasSelectedFields =
@@ -115,7 +123,7 @@ export const useExplorerQueryEffects = ({
     }, [hasConfiguredPreAggregates, explore, isPreAggregateFeatureEnabled]);
 
     const preAggregateCheckQuery = usePreAggregateCheck({
-        projectUuid,
+        projectUuid: resolvedProjectUuid,
         exploreName: tableName,
         metricQuery,
         usePreAggregateCache: preAggCacheEnabled,
@@ -179,7 +187,7 @@ export const useExplorerQueryEffects = ({
 
     // Check if we need unpivoted data for results table
     const needsUnpivotedData = useMemo(() => {
-        if (!useSqlPivotResults?.enabled || !explore) return false;
+        if (!explore) return false;
 
         const items = getFieldsFromMetricQuery(
             unsavedChartVersion.metricQuery,
@@ -192,7 +200,7 @@ export const useExplorerQueryEffects = ({
         );
 
         return !!pivotConfiguration;
-    }, [useSqlPivotResults?.enabled, explore, unsavedChartVersion]);
+    }, [explore, unsavedChartVersion]);
 
     // Effect 1: Auto-fetch logic
     // Handles both initial fetch and reactive auto-fetch

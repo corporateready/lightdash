@@ -93,7 +93,7 @@ The route reads `?login_hint=<email>` from the query and calls
 [`apiV1Router.ts`](../packages/backend/src/routers/apiV1Router.ts). The
 resolver:
 
-1. Calls `findEnabledAzureAdMethodForEmail(email)` to find the matching
+1. Calls `findEnabledMethodForEmail(email, AZUREAD)` to find the matching
    per-org config.
 2. If found, dynamically registers a passport strategy named
    `azuread:<orgUuid>` with that org's config and returns the strategy
@@ -171,6 +171,13 @@ ENABLED_FEATURE_FLAGS=sso-organization-settings
 
 This makes the panel available to every org admin on the instance. On a
 self-hosted single-customer deployment, no further gating is needed.
+
+## Managed sign-in (mobile)
+
+A Microsoft tenant that enforces "require app protection policy" blocks the
+in-app browser sheet, so browser sign-in fails on iOS and Android. The apps
+sign in to Microsoft directly instead and exchange the ID token for Lightdash
+tokens. See [managed-sign-in.md](./managed-sign-in.md).
 
 ## File map
 

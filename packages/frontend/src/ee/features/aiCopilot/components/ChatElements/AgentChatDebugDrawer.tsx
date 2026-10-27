@@ -4,6 +4,7 @@ import type {
     AiAgentToolResult,
 } from '@lightdash/common';
 import {
+    Badge,
     Box,
     Collapse,
     Drawer,
@@ -12,15 +13,16 @@ import {
     ScrollArea,
     Stack,
     Text,
-} from '@mantine-8/core';
-import { Prism } from '@mantine/prism';
+} from '@mantine/core';
 import {
     IconBug,
     IconChevronDown,
     IconChevronRight,
 } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
+import CodeBlock from '../../../../../components/common/CodeBlock/CodeBlock';
 import MantineIcon from '../../../../../components/common/MantineIcon';
+import { NAVBAR_HEIGHT } from '../../../../../components/common/Page/constants';
 import { useAiAgentArtifact } from '../../hooks/useAiAgentArtifacts';
 import classes from './AgentChatDebugDrawer.module.css';
 import { ToolResults } from './ToolResults';
@@ -96,7 +98,7 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
         <Drawer
             title={
                 <Group gap={6}>
-                    <Paper p="xxs" withBorder radius="sm">
+                    <Paper p="xxs" radius="sm">
                         <MantineIcon icon={IconBug} size="sm" />
                     </Paper>
                     <Text fw={500} size="md">
@@ -108,6 +110,13 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
             onClose={onClose}
             size="lg"
             position="right"
+            classNames={{
+                inner: classes.inner,
+                overlay: classes.overlay,
+            }}
+            __vars={{
+                '--drawer-top-offset': `${NAVBAR_HEIGHT}px`,
+            }}
             styles={{
                 header: {
                     padding: '12px 16px',
@@ -139,17 +148,17 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
                             className={classes.codeBlock}
                         >
                             {configJson ? (
-                                <Prism
+                                <CodeBlock
+                                    code={configJson}
                                     language="json"
+                                    lineNumberFontSize="12px"
                                     withLineNumbers
                                     styles={{
                                         code: {
                                             fontSize: '12px',
                                         },
                                     }}
-                                >
-                                    {configJson}
-                                </Prism>
+                                />
                             ) : (
                                 <Box p="md" className={classes.centerText}>
                                     <Text size="sm" c="dimmed" fs="italic">
@@ -181,6 +190,12 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
                                     toolCall.toolArgs,
                                     2,
                                 );
+                                const toolResult = toolResultsMap.get(
+                                    toolCall.toolCallId,
+                                );
+                                const isError =
+                                    toolResult?.metadata?.status === 'error';
+
                                 return (
                                     <Box
                                         key={callId}
@@ -216,10 +231,18 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
                                                         {toolCall.toolName ||
                                                             'Unknown'}
                                                     </Text>
+                                                    {isError && (
+                                                        <Badge
+                                                            color="red"
+                                                            size="xs"
+                                                        >
+                                                            Error
+                                                        </Badge>
+                                                    )}
                                                 </Group>
                                             </Group>
                                         </Box>
-                                        <Collapse in={isExpanded}>
+                                        <Collapse expanded={isExpanded}>
                                             <Stack gap="sm" p="sm">
                                                 {/* Tool Arguments */}
                                                 {argsJson ? (
@@ -232,7 +255,8 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
                                                         >
                                                             Arguments
                                                         </Text>
-                                                        <Prism
+                                                        <CodeBlock
+                                                            code={argsJson}
                                                             language="json"
                                                             styles={{
                                                                 code: {
@@ -240,9 +264,7 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
                                                                         '11px',
                                                                 },
                                                             }}
-                                                        >
-                                                            {argsJson}
-                                                        </Prism>
+                                                        />
                                                     </Box>
                                                 ) : (
                                                     <Box
@@ -264,9 +286,7 @@ const AgentChatDebugDrawer: React.FC<Props> = ({
 
                                                 <ToolResults
                                                     toolCall={toolCall}
-                                                    toolResult={toolResultsMap.get(
-                                                        toolCall.toolCallId,
-                                                    )}
+                                                    toolResult={toolResult}
                                                 />
                                             </Stack>
                                         </Collapse>

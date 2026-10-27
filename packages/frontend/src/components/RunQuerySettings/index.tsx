@@ -1,18 +1,22 @@
+import { type TimezoneSetting } from '@lightdash/common';
 import {
     Button,
     Divider,
     Popover,
     Stack,
+    Tooltip,
     type ButtonProps,
     type MantineSize,
-} from '@mantine-8/core';
-import { useClickOutside, useDisclosure } from '@mantine-8/hooks';
-import { IconChevronDown } from '@tabler/icons-react';
-import { memo, useCallback, useEffect, useRef, useState, type FC } from 'react';
+} from '@mantine/core';
+import { useClickOutside, useDisclosure } from '@mantine/hooks';
+import { IconChevronDown, IconX } from '@tabler/icons-react';
+import { memo, useCallback, useRef, useState, type FC } from 'react';
+import ChartTimezoneSelect from '../common/ChartTimezoneSelect';
 import MantineIcon from '../common/MantineIcon';
 import AutoFetchResultsSwitch from './AutoFetchResultsSwitch';
 import LimitInput from './LimitInput';
 import PreAggregateCacheSwitch from './PreAggregateCacheSwitch';
+import classes from './RunQueryButton.module.css';
 
 export type Props = {
     size?: MantineSize;
@@ -22,7 +26,14 @@ export type Props = {
     onLimitChange: (value: number) => void;
     showAutoFetchSetting?: boolean;
     showPreAggregateSetting?: boolean;
+    showTimezoneSetting?: boolean;
+    timezone?: string;
+    onTimezoneChange?: (value: TimezoneSetting) => void;
     targetProps?: ButtonProps;
+    /** While the query runs the same control cancels it, so the split button
+     *  keeps its width. */
+    isQueryRunning?: boolean;
+    onCancelQuery?: () => void;
 };
 
 const RunQuerySettings: FC<Props> = memo(
@@ -34,7 +45,12 @@ const RunQuerySettings: FC<Props> = memo(
         onLimitChange,
         showAutoFetchSetting = false,
         showPreAggregateSetting = false,
+        showTimezoneSetting = false,
+        timezone,
+        onTimezoneChange,
         targetProps,
+        isQueryRunning = false,
+        onCancelQuery,
     }) => {
         const [opened, { open, close }] = useDisclosure(false);
         const mouseDownInsideRef = useRef(false);
@@ -52,9 +68,10 @@ const RunQuerySettings: FC<Props> = memo(
 
         const [tempLimit, setTempLimit] = useState(limit);
 
-        useEffect(() => {
+        const handleOpen = () => {
             setTempLimit(limit);
-        }, [limit]);
+            open();
+        };
 
         const handleLimitChange = (value: number) => {
             setTempLimit(value);
@@ -66,48 +83,69 @@ const RunQuerySettings: FC<Props> = memo(
             }
         };
 
+        const hasToggleSettings =
+            showAutoFetchSetting || showPreAggregateSetting;
+        const showCancel = isQueryRunning && onCancelQuery !== undefined;
+
         return (
             <Popover
-                withinPortal
-                disabled={disabled}
+                disabled={disabled || showCancel}
                 opened={opened}
                 position="bottom-end"
                 withArrow
-                shadow="md"
                 offset={2}
                 arrowOffset={10}
             >
                 <Popover.Target>
-                    <Button
-                        size={size}
-                        p="xs"
-                        disabled={disabled}
-                        onClick={opened ? undefined : open}
-                        {...targetProps}
+                    <Tooltip
+                        label="Cancel query"
+                        position="bottom"
+                        disabled={!showCancel}
                     >
-                        <MantineIcon icon={IconChevronDown} size="sm" />
-                    </Button>
+                        <Button
+                            size={size}
+                            disabled={disabled}
+                            onClick={
+                                showCancel
+                                    ? onCancelQuery
+                                    : opened
+                                      ? undefined
+                                      : handleOpen
+                            }
+                            className={classes.attached}
+                            aria-label={
+                                showCancel ? 'Cancel query' : 'Query settings'
+                            }
+                            {...targetProps}
+                        >
+                            <MantineIcon
+                                icon={showCancel ? IconX : IconChevronDown}
+                                size="sm"
+                            />
+                        </Button>
+                    </Tooltip>
                 </Popover.Target>
 
                 <Popover.Dropdown>
                     <Stack
                         ref={ref}
+                        gap="sm"
+                        w={232}
                         onMouseDown={() => {
                             mouseDownInsideRef.current = true;
                         }}
                     >
-                        {showPreAggregateSetting && (
-                            <PreAggregateCacheSwitch size={size} />
+                        {hasToggleSettings && (
+                            <Stack gap="xs">
+                                {showPreAggregateSetting && (
+                                    <PreAggregateCacheSwitch size={size} />
+                                )}
+                                {showAutoFetchSetting && (
+                                    <AutoFetchResultsSwitch size={size} />
+                                )}
+                            </Stack>
                         )}
-                        {showPreAggregateSetting && showAutoFetchSetting && (
-                            <Divider />
-                        )}
-                        {showAutoFetchSetting && (
-                            <AutoFetchResultsSwitch size={size} />
-                        )}
-                        {(showAutoFetchSetting || showPreAggregateSetting) && (
-                            <Divider />
-                        )}
+                        {hasToggleSettings && <Divider />}
                         <LimitInput
                             maxLimit={maxLimit}
                             limit={tempLimit}
@@ -123,6 +161,14 @@ const RunQuerySettings: FC<Props> = memo(
                                 },
                             }}
                         />
+                        {showTimezoneSetting && onTimezoneChange && (
+                            <ChartTimezoneSelect
+                                label="Timezone"
+                                value={timezone}
+                                onChange={onTimezoneChange}
+                                w="100%"
+                            />
+                        )}
                     </Stack>
                 </Popover.Dropdown>
             </Popover>

@@ -1,0 +1,1611 @@
+import {
+    assertRegisteredAccount,
+    ContentAsCodeType,
+    type AgentAsCode,
+    type AlertAsCode,
+    type AnyType,
+    type ApiAgentAsCodeListResponse,
+    type ApiAgentAsCodeUpsertResponse,
+    type ApiAlertAsCodeListResponse,
+    type ApiAlertAsCodeUpsertResponse,
+    type ApiChartAsCodeListResponse,
+    type ApiChartAsCodeUpsertResponse,
+    type ApiContentAsCodeProposeResponse,
+    type ApiContentAsCodePullResponse,
+    type ApiContentAsCodeSettingsResponse,
+    type ApiContentAsCodeUploadAdvisoryResponse,
+    type ApiContentAsCodeWritebacksResponse,
+    type ApiContentDraftRebaseResponse,
+    type ApiContentDraftReopenResponse,
+    type ApiContentDraftReviewResponse,
+    type ApiContentDraftsResponse,
+    type ApiContentDraftStalenessResponse,
+    type ApiContentDraftWriteBackResponse,
+    type ApiDashboardAsCodeListResponse,
+    type ApiDashboardAsCodeUpsertResponse,
+    type ApiDocumentAsCodeListResponse,
+    type ApiDocumentAsCodeUpsertResponse,
+    type ApiErrorPayload,
+    type ApiExternalConnectionAsCodeListResponse,
+    type ApiExternalConnectionAsCodeUpsertRequest,
+    type ApiExternalConnectionAsCodeUpsertResponse,
+    type ApiGoogleSheetsSyncAsCodeListResponse,
+    type ApiGoogleSheetsSyncAsCodeUpsertResponse,
+    type ApiHomepageAsCodeListResponse,
+    type ApiHomepageAsCodeUpsertResponse,
+    type ApiScheduledDeliveryAsCodeListResponse,
+    type ApiScheduledDeliveryAsCodeUpsertResponse,
+    type ApiSpaceAsCodeListResponse,
+    type ApiSpaceAsCodeUpsertResponse,
+    type ApiSqlChartAsCodeListResponse,
+    type ApiSqlChartAsCodeUpsertResponse,
+    type ApiSuccessEmpty,
+    type ApiVirtualViewAsCodeListResponse,
+    type ApiVirtualViewAsCodeUpsertResponse,
+    type ChartAsCode,
+    type ContentAsCodeSettingsStamp,
+    type ContentDraftRebaseRequest,
+    type ContentSlugRenameRequest,
+    type DashboardAsCode,
+    type DocumentAsCode,
+    type ExternalConnectionAsCode,
+    type GoogleSheetsSyncAsCode,
+    type HomepageAsCode,
+    type RegisteredAccount,
+    type ScheduledDeliveryAsCode,
+    type SpaceAsCode,
+    type SqlChartAsCode,
+    type VirtualViewAsCode,
+} from '@lightdash/common';
+import {
+    Body,
+    Get,
+    Middlewares,
+    OperationId,
+    Path,
+    Post,
+    Query,
+    Request,
+    Response,
+    Route,
+    SuccessResponse,
+    Tags,
+} from '@tsoa/runtime';
+import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
+import { BaseController } from './baseController';
+import {
+    CODE_READ_MIDDLEWARES,
+    CODE_WRITE_MIDDLEWARES,
+    codeSuccess,
+    toDraftSummary,
+    toWritebackSummary,
+} from './CoderControllerUtils';
+
+type AiAgentCoder = {
+    downloadAgents(
+        user: ReturnType<typeof toSessionUser>,
+        projectUuid: string,
+        ids?: string[],
+        offset?: number,
+    ): Promise<ApiAgentAsCodeListResponse['results']>;
+    upsertAgents(
+        user: ReturnType<typeof toSessionUser>,
+        projectUuid: string,
+        agents: AgentAsCode[],
+        force?: boolean,
+    ): Promise<ApiAgentAsCodeUpsertResponse['results']>;
+};
+
+type ExternalConnectionCoder = {
+    downloadExternalConnections(
+        account: RegisteredAccount,
+        projectUuid: string,
+        slugs?: string[],
+        offset?: number,
+    ): Promise<ApiExternalConnectionAsCodeListResponse['results']>;
+    upsertExternalConnection(
+        account: RegisteredAccount,
+        projectUuid: string,
+        slug: string,
+        connection: ExternalConnectionAsCode,
+        secret?: string,
+        force?: boolean,
+    ): Promise<ApiExternalConnectionAsCodeUpsertResponse['results']>;
+};
+
+type HomepageCoder = {
+    downloadHomepagesAsCode(
+        account: RegisteredAccount,
+        projectUuid: string,
+        names?: string[],
+    ): Promise<ApiHomepageAsCodeListResponse['results']>;
+    upsertHomepageAsCode(
+        account: RegisteredAccount,
+        projectUuid: string,
+        name: string,
+        document: HomepageAsCode,
+        publish?: boolean,
+    ): Promise<ApiHomepageAsCodeUpsertResponse['results']>;
+};
+
+@Route('/api/v1/projects/{projectUuid}')
+@Response<ApiErrorPayload>('default', 'Error')
+export class ProjectCoderController extends BaseController {
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/homepages')
+    @OperationId('getCodeHomepages')
+    async getHomepagesAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() names?: string[],
+    ): Promise<ApiHomepageAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        return codeSuccess(
+            await this.services
+                .getProjectHomepageService<HomepageCoder>()
+                .downloadHomepagesAsCode(req.account, projectUuid, names),
+        );
+    }
+
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/homepages/{name}')
+    @OperationId('upsertCodeHomepage')
+    async upsertHomepageAsCode(
+        @Path() projectUuid: string,
+        @Path() name: string,
+        @Body() document: HomepageAsCode,
+        @Request() req: express.Request,
+        @Query() publish: boolean = false,
+    ): Promise<ApiHomepageAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        return codeSuccess(
+            await this.services
+                .getProjectHomepageService<HomepageCoder>()
+                .upsertHomepageAsCode(
+                    req.account,
+                    projectUuid,
+                    name,
+                    document,
+                    publish,
+                ),
+        );
+    }
+    /**
+     * Rename a project-scoped content slug
+     * @summary Rename content slug
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/slugs/rename')
+    @OperationId('renameContentSlug')
+    async renameContentSlug(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Body() body: ContentSlugRenameRequest,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        await this.services
+            .getCoderService()
+            .renameContentSlug(toSessionUser(req.account), projectUuid, body);
+        return { status: 'ok', results: undefined };
+    }
+
+    /**
+     * List this instance's content-as-code write-back PRs for the project.
+     * Pass refresh=true to also re-check open PRs against the git provider
+     * (a merged PR then reads as merged instead of a stale pending badge).
+     * @summary List content-as-code write-backs
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/writebacks')
+    @OperationId('listContentAsCodeWritebacks')
+    async listContentAsCodeWritebacks(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() refresh?: boolean,
+    ): Promise<ApiContentAsCodeWritebacksResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const rows = await this.services
+            .getContentAsCodeWritebackService()
+            .listWritebacks(toSessionUser(req.account), projectUuid, {
+                refresh,
+            });
+        return codeSuccess(rows.map(toWritebackSummary));
+    }
+
+    /**
+     * Propose the current instance version of a managed chart back to the
+     * connected repo: opens (or appends to) this instance's write-back PR
+     * for the slug. The retroactive migration path for drifted content.
+     * @summary Propose chart to git
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/writebacks/charts/{slug}/propose')
+    @OperationId('proposeChartToGit')
+    async proposeChartToGit(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Request() req: express.Request,
+        @Body() body?: { addToGit?: boolean },
+    ): Promise<ApiContentAsCodeProposeResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const row = await this.services
+            .getContentAsCodeWritebackService()
+            .propose(toSessionUser(req.account), projectUuid, 'chart', slug, {
+                addToGit: body?.addToGit,
+            });
+        return codeSuccess(toWritebackSummary(row));
+    }
+
+    /**
+     * Propose the current instance version of a managed dashboard back to
+     * the connected repo, including its dashboard-owned tile charts. Pass
+     * addToGit to deliberately add UI-only content to the repo.
+     * @summary Propose dashboard to git
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/writebacks/dashboards/{slug}/propose')
+    @OperationId('proposeDashboardToGit')
+    async proposeDashboardToGit(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Request() req: express.Request,
+        @Body() body?: { addToGit?: boolean },
+    ): Promise<ApiContentAsCodeProposeResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const row = await this.services
+            .getContentAsCodeWritebackService()
+            .propose(
+                toSessionUser(req.account),
+                projectUuid,
+                'dashboard',
+                slug,
+                { addToGit: body?.addToGit },
+            );
+        return codeSuccess(toWritebackSummary(row));
+    }
+
+    /**
+     * The content_as_code flags last stamped on this project by an upload
+     * @summary Get content-as-code settings
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/sync-settings')
+    @OperationId('getContentAsCodeSettings')
+    async getContentAsCodeSettings(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentAsCodeSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getContentAsCodeSettings(
+                    toSessionUser(req.account),
+                    projectUuid,
+                ),
+        );
+    }
+
+    /**
+     * Apply charts and dashboards as code from the project's repo, the in-app
+     * equivalent of `lightdash upload`
+     * @summary Pull content from git
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/pull')
+    @OperationId('pullContentAsCodeFromGit')
+    async pullContentAsCodeFromGit(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentAsCodePullResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getContentAsCodeWritebackService()
+                .pullFromGit(toSessionUser(req.account), projectUuid),
+        );
+    }
+
+    /**
+     * Advisory state shown by the CLI before an upload. It never gates upload.
+     * @summary Get content-as-code upload advisory
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/upload-advisory')
+    @OperationId('getContentAsCodeUploadAdvisory')
+    async getContentAsCodeUploadAdvisory(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentAsCodeUploadAdvisoryResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getContentAsCodeWritebackService()
+                .getUploadAdvisory(toSessionUser(req.account), projectUuid),
+        );
+    }
+
+    /**
+     * Unpublished content drafts awaiting review
+     * @summary List content drafts
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/drafts')
+    @OperationId('listContentDrafts')
+    async listContentDrafts(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() refresh?: boolean,
+    ): Promise<ApiContentDraftsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const drafts = await this.services
+            .getContentAsCodeWritebackService()
+            .listDrafts(toSessionUser(req.account), projectUuid, {
+                refresh,
+            });
+        return codeSuccess(drafts.map(toDraftSummary));
+    }
+
+    /**
+     * The review payload for one draft: published vs draft as canonical YAML
+     * @summary Get content draft review
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/drafts/{draftUuid}/review')
+    @OperationId('getContentDraftReview')
+    async getContentDraftReview(
+        @Path() projectUuid: string,
+        @Path() draftUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentDraftReviewResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const review = await this.services
+            .getContentAsCodeWritebackService()
+            .getDraftReview(toSessionUser(req.account), projectUuid, draftUuid);
+        return codeSuccess({
+            summary: toDraftSummary(review.draft),
+            filePath: review.filePath,
+            publishedYaml: review.publishedYaml,
+            draftYaml: review.draftYaml,
+            staleness: review.staleness,
+        });
+    }
+
+    /**
+     * What the repo and the draft each changed since the draft's base
+     * @summary Get content draft staleness
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/drafts/{draftUuid}/staleness')
+    @OperationId('getContentDraftStaleness')
+    async getContentDraftStaleness(
+        @Path() projectUuid: string,
+        @Path() draftUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentDraftStalenessResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getContentAsCodeWritebackService()
+                .getDraftStalenessDetails(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    draftUuid,
+                ),
+        );
+    }
+
+    /**
+     * Move the caller's draft onto the repo's latest upload snapshot
+     * @summary Rebase content draft
+     */
+    @Tags('Projects')
+    @Middlewares([
+        ...CODE_WRITE_MIDDLEWARES,
+        requireOAuthScopeOperation('ProjectCoderController.rebaseContentDraft'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/code/drafts/{draftUuid}/rebase')
+    @OperationId('rebaseContentDraft')
+    async rebaseContentDraft(
+        @Path() projectUuid: string,
+        @Path() draftUuid: string,
+        @Request() req: express.Request,
+        @Body() body: ContentDraftRebaseRequest,
+    ): Promise<ApiContentDraftRebaseResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const draft = await this.services
+            .getContentAsCodeWritebackService()
+            .rebaseDraft(
+                toSessionUser(req.account),
+                projectUuid,
+                draftUuid,
+                body.resolutions,
+            );
+        return codeSuccess(toDraftSummary(draft));
+    }
+
+    /**
+     * Write a reviewed draft back to the repo as a pull request
+     * @summary Write back content draft
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/drafts/{draftUuid}/write-back')
+    @OperationId('writeBackContentDraft')
+    async writeBackContentDraft(
+        @Path() projectUuid: string,
+        @Path() draftUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentDraftWriteBackResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const draft = await this.services
+            .getContentAsCodeWritebackService()
+            .writeBackDraft(toSessionUser(req.account), projectUuid, draftUuid);
+        return codeSuccess(toDraftSummary(draft));
+    }
+
+    /**
+     * Dismiss a draft without writing it back
+     * @summary Dismiss content draft
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/drafts/{draftUuid}/dismiss')
+    @OperationId('dismissContentDraft')
+    async dismissContentDraft(
+        @Path() projectUuid: string,
+        @Path() draftUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        await this.services
+            .getContentAsCodeWritebackService()
+            .dismissDraft(toSessionUser(req.account), projectUuid, draftUuid);
+        return { status: 'ok', results: undefined };
+    }
+
+    /**
+     * Reopen the caller's dismissed draft without creating another record
+     * @summary Reopen content draft
+     */
+    @Tags('Projects')
+    @Middlewares([
+        ...CODE_WRITE_MIDDLEWARES,
+        requireOAuthScopeOperation('ProjectCoderController.reopenContentDraft'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/code/drafts/{draftUuid}/reopen')
+    @OperationId('reopenContentDraft')
+    async reopenContentDraft(
+        @Path() projectUuid: string,
+        @Path() draftUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiContentDraftReopenResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const draft = await this.services
+            .getContentAsCodeWritebackService()
+            .reopenDraft(toSessionUser(req.account), projectUuid, draftUuid);
+        return codeSuccess(toDraftSummary(draft));
+    }
+
+    /**
+     * Persist the repo's content_as_code flags as project-level state.
+     * Called by the CLI at upload time so the instance learns what the
+     * repo has opted into (Git-backed tracking and write-back).
+     * @summary Stamp content-as-code settings
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/sync-settings')
+    @OperationId('stampContentAsCodeSettings')
+    async stampContentAsCodeSettings(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Body() body: ContentAsCodeSettingsStamp,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        await this.services
+            .getCoderService()
+            .stampContentAsCodeSettings(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+            );
+        return { status: 'ok', results: undefined };
+    }
+
+    /**
+     * Get charts in code representation
+     * @summary List charts as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/charts')
+    @OperationId('getCodeCharts')
+    async getChartsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+        @Query() languageMap?: boolean,
+    ): Promise<ApiChartAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getChartsForExport(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    ids,
+                    offset,
+                    languageMap,
+                ),
+        );
+    }
+
+    /**
+     * Get dashboards in code representation
+     * @summary List dashboards as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/dashboards')
+    @OperationId('getCodeDashboards')
+    async getDashboardsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+        @Query() languageMap?: boolean,
+    ): Promise<ApiDashboardAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getDashboardsForExport(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    ids,
+                    offset,
+                    languageMap,
+                ),
+        );
+    }
+
+    /**
+     * Gets SQL charts in code representation
+     * @summary Get SQL charts as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/sqlCharts')
+    @OperationId('getCodeSqlCharts')
+    async getSqlChartsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+    ): Promise<ApiSqlChartAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getSqlCharts(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    ids,
+                    offset,
+                ),
+        );
+    }
+
+    /**
+     * Get virtual views in code representation
+     * @summary List virtual views as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/virtualViews')
+    @OperationId('getCodeVirtualViews')
+    async getVirtualViewsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiVirtualViewAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getVirtualViews(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slugs,
+                ),
+        );
+    }
+
+    /**
+     * Get scheduled deliveries in code representation
+     * @summary List scheduled deliveries as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/scheduledDeliveries')
+    @OperationId('getCodeScheduledDeliveries')
+    async getScheduledDeliveriesAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiScheduledDeliveryAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getScheduledDeliveries(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slugs,
+                ),
+        );
+    }
+
+    /**
+     * Get alerts in code representation
+     * @summary List alerts as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/alerts')
+    @OperationId('getCodeAlerts')
+    async getAlertsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiAlertAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getScheduledDeliveries(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slugs,
+                    ContentAsCodeType.ALERT,
+                ),
+        );
+    }
+
+    /**
+     * Get Google Sheets syncs in code representation
+     * @summary List Google Sheets syncs as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/googleSheets')
+    @OperationId('getCodeGoogleSheetsSyncs')
+    async getGoogleSheetsSyncsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiGoogleSheetsSyncAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getScheduledDeliveries(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slugs,
+                    ContentAsCodeType.GOOGLE_SHEETS_SYNC,
+                ),
+        );
+    }
+
+    /**
+     * Get spaces and their direct access policy in code representation
+     * @summary List spaces as code
+     */
+    @Tags('Spaces')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/spaces')
+    @OperationId('getCodeSpaces')
+    async getCodeSpaces(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiSpaceAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .getSpaces(req.account, projectUuid),
+        );
+    }
+
+    /**
+     * @summary List spaces as code (deprecated)
+     * @deprecated Use GET /code/spaces. Scheduled for removal after 2026-08-17.
+     */
+    @Tags('Spaces')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/spaces/code')
+    @OperationId('getSpacesAsCode')
+    async getSpacesAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiSpaceAsCodeListResponse> {
+        return this.getCodeSpaces(projectUuid, req);
+    }
+
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/aiAgents')
+    @OperationId('getCodeAiAgents')
+    async getAiAgentsAsCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+    ): Promise<ApiAgentAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getAiAgentCoderService<AiAgentCoder>()
+                .downloadAgents(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    ids,
+                    offset,
+                ),
+        );
+    }
+
+    /**
+     * Get data-app external connections in code representation. Enterprise
+     * only; requires the manage ExternalConnection permission. Secrets are
+     * never included.
+     * @summary List external connections as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/externalConnections')
+    @OperationId('getCodeExternalConnections')
+    async getExternalConnectionsAsCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Query() slugs?: string[],
+        @Query() offset?: number,
+    ): Promise<ApiExternalConnectionAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getExternalConnectionCoderService<ExternalConnectionCoder>()
+                .downloadExternalConnections(
+                    req.account,
+                    projectUuid,
+                    slugs,
+                    offset,
+                ),
+        );
+    }
+
+    /**
+     * Upsert a virtual view from code representation
+     * @summary Upsert virtual view as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/virtualViews/{slug}')
+    @OperationId('upsertCodeVirtualView')
+    async upsertVirtualViewAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() virtualView: VirtualViewAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiVirtualViewAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .upsertVirtualView(
+                    req.account,
+                    projectUuid,
+                    slug,
+                    virtualView,
+                    force,
+                ),
+        );
+    }
+
+    /**
+     * Upsert a scheduled delivery from code representation
+     * @summary Upsert scheduled delivery as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/scheduledDeliveries/{slug}')
+    @OperationId('upsertCodeScheduledDelivery')
+    async upsertScheduledDeliveryAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() delivery: ScheduledDeliveryAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiScheduledDeliveryAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .upsertScheduledDelivery(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slug,
+                    delivery,
+                    force,
+                ),
+        );
+    }
+
+    /**
+     * Upsert an alert from code representation
+     * @summary Upsert alert as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/alerts/{slug}')
+    @OperationId('upsertCodeAlert')
+    async upsertAlertAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() alert: AlertAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiAlertAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .upsertScheduledDelivery(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slug,
+                    alert,
+                    force,
+                ),
+        );
+    }
+
+    /**
+     * Upsert a Google Sheets sync from code representation
+     * @summary Upsert Google Sheets sync as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/googleSheets/{slug}')
+    @OperationId('upsertCodeGoogleSheetsSync')
+    async upsertGoogleSheetsSyncAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() googleSheetsSync: GoogleSheetsSyncAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiGoogleSheetsSyncAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .upsertScheduledDelivery(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    slug,
+                    googleSheetsSync,
+                    force,
+                ),
+        );
+    }
+
+    /**
+     * Upsert a chart from code representation
+     * @summary Upsert chart as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/charts/{slug}')
+    @OperationId('upsertCodeChart')
+    async upsertChartAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body()
+        chart: Omit<ChartAsCode, 'chartConfig' | 'description'> & {
+            skipSpaceCreate?: boolean;
+            publicSpaceCreate?: boolean;
+            force?: boolean;
+            spaceNames?: Record<string, string>;
+            chartConfig: AnyType;
+            description?: string | null;
+            filePath?: string;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiChartAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services.getCoderService().upsertChart(
+                toSessionUser(req.account),
+                projectUuid,
+                slug,
+                { ...chart, description: chart.description ?? undefined },
+                {
+                    account: req.account,
+                    skipSpaceCreate: chart.skipSpaceCreate,
+                    publicSpaceCreate: chart.publicSpaceCreate,
+                    force: chart.force,
+                    spaceNames: chart.spaceNames,
+                    filePath: chart.filePath,
+                },
+            ),
+        );
+    }
+
+    /**
+     * Upserts an SQL chart from code representation
+     * @summary Upsert SQL chart as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/sqlCharts/{slug}')
+    @OperationId('upsertCodeSqlChart')
+    async upsertSqlChartAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body()
+        sqlChart: Omit<SqlChartAsCode, 'config' | 'description'> & {
+            skipSpaceCreate?: boolean;
+            publicSpaceCreate?: boolean;
+            force?: boolean;
+            spaceNames?: Record<string, string>;
+            config: AnyType;
+            description?: string | null;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiSqlChartAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services.getCoderService().upsertSqlChart(
+                toSessionUser(req.account),
+                projectUuid,
+                slug,
+                { ...sqlChart, description: sqlChart.description ?? null },
+                {
+                    account: req.account,
+                    skipSpaceCreate: sqlChart.skipSpaceCreate,
+                    publicSpaceCreate: sqlChart.publicSpaceCreate,
+                    spaceNames: sqlChart.spaceNames,
+                },
+            ),
+        );
+    }
+
+    /**
+     * Upsert a dashboard from code representation
+     * @summary Upsert dashboard as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/dashboards/{slug}')
+    @OperationId('upsertCodeDashboard')
+    async upsertDashboardAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body()
+        dashboard: Omit<DashboardAsCode, 'tiles' | 'description'> & {
+            skipSpaceCreate?: boolean;
+            publicSpaceCreate?: boolean;
+            force?: boolean;
+            spaceNames?: Record<string, string>;
+            tiles: AnyType;
+            description?: string | null;
+            filePath?: string;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiDashboardAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services.getCoderService().upsertDashboard(
+                toSessionUser(req.account),
+                projectUuid,
+                slug,
+                {
+                    ...dashboard,
+                    description: dashboard.description ?? undefined,
+                },
+                {
+                    account: req.account,
+                    skipSpaceCreate: dashboard.skipSpaceCreate,
+                    publicSpaceCreate: dashboard.publicSpaceCreate,
+                    force: dashboard.force,
+                    spaceNames: dashboard.spaceNames,
+                    filePath: dashboard.filePath,
+                },
+            ),
+        );
+    }
+
+    /**
+     * Create or update a space and its direct access policy from code
+     * @summary Upsert space as code
+     */
+    @Tags('Spaces')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/spaces')
+    @OperationId('upsertCodeSpace')
+    async upsertCodeSpace(
+        @Path() projectUuid: string,
+        @Body() space: SpaceAsCode,
+        @Request() req: express.Request,
+        @Query() skipSpaceCreate: boolean = false,
+        @Query() publicSpaceCreate: boolean = false,
+    ): Promise<ApiSpaceAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getCoderService()
+                .upsertSpace(req.account, projectUuid, space, {
+                    skipSpaceCreate,
+                    publicSpaceCreate,
+                }),
+        );
+    }
+
+    /**
+     * @summary Upsert space as code (deprecated)
+     * @deprecated Use POST /code/spaces. Scheduled for removal after 2026-08-17.
+     */
+    @Tags('Spaces')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/spaces/code')
+    @OperationId('upsertSpaceAsCode')
+    async upsertSpaceAsCode(
+        @Path() projectUuid: string,
+        @Body() space: SpaceAsCode,
+        @Request() req: express.Request,
+        @Query() skipSpaceCreate: boolean = false,
+        @Query() publicSpaceCreate: boolean = false,
+    ): Promise<ApiSpaceAsCodeUpsertResponse> {
+        return this.upsertCodeSpace(
+            projectUuid,
+            space,
+            req,
+            skipSpaceCreate,
+            publicSpaceCreate,
+        );
+    }
+
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/aiAgents')
+    @OperationId('upsertCodeAiAgents')
+    async upsertAiAgentsAsCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: { agents: AgentAsCode[] },
+        @Query() force?: boolean,
+    ): Promise<ApiAgentAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getAiAgentCoderService<AiAgentCoder>()
+                .upsertAgents(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    body.agents,
+                    force,
+                ),
+        );
+    }
+
+    /**
+     * Create or update a data-app external connection from its code
+     * representation. Enterprise only; requires the manage ExternalConnection
+     * permission. The body nests the document under `connection`; the optional
+     * `secret` rides alongside it and is never part of the YAML document.
+     * @summary Upsert external connection as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/externalConnections/{slug}')
+    @OperationId('upsertCodeExternalConnection')
+    async upsertExternalConnectionAsCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() body: ApiExternalConnectionAsCodeUpsertRequest,
+        @Query() force?: boolean,
+    ): Promise<ApiExternalConnectionAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return codeSuccess(
+            await this.services
+                .getExternalConnectionCoderService<ExternalConnectionCoder>()
+                .upsertExternalConnection(
+                    req.account,
+                    projectUuid,
+                    slug,
+                    body.connection,
+                    body.secret,
+                    force,
+                ),
+        );
+    }
+
+    /**
+     * @summary List charts as code (deprecated)
+     * @deprecated Use GET /code/charts. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/charts/code')
+    @OperationId('getChartsAsCode')
+    async legacyGetChartsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+        @Query() languageMap?: boolean,
+    ): Promise<ApiChartAsCodeListResponse> {
+        return this.getChartsAsCode(projectUuid, req, ids, offset, languageMap);
+    }
+
+    /**
+     * @summary List dashboards as code (deprecated)
+     * @deprecated Use GET /code/dashboards. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/dashboards/code')
+    @OperationId('getDashboardsAsCode')
+    async legacyGetDashboardsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+        @Query() languageMap?: boolean,
+    ): Promise<ApiDashboardAsCodeListResponse> {
+        return this.getDashboardsAsCode(
+            projectUuid,
+            req,
+            ids,
+            offset,
+            languageMap,
+        );
+    }
+
+    /**
+     * @summary List SQL charts as code (deprecated)
+     * @deprecated Use GET /code/sqlCharts. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/sqlCharts/code')
+    @OperationId('getSqlChartsAsCode')
+    async legacyGetSqlChartsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+    ): Promise<ApiSqlChartAsCodeListResponse> {
+        return this.getSqlChartsAsCode(projectUuid, req, ids, offset);
+    }
+
+    /**
+     * @summary List virtual views as code (deprecated)
+     * @deprecated Use GET /code/virtualViews. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/virtualViews/code')
+    @OperationId('getVirtualViewsAsCode')
+    async legacyGetVirtualViewsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiVirtualViewAsCodeListResponse> {
+        return this.getVirtualViewsAsCode(projectUuid, req, slugs);
+    }
+
+    /**
+     * @summary List scheduled deliveries as code (deprecated)
+     * @deprecated Use GET /code/scheduledDeliveries. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/scheduledDeliveries/code')
+    @OperationId('getScheduledDeliveriesAsCode')
+    async legacyGetScheduledDeliveriesAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiScheduledDeliveryAsCodeListResponse> {
+        return this.getScheduledDeliveriesAsCode(projectUuid, req, slugs);
+    }
+
+    /**
+     * @summary List alerts as code (deprecated)
+     * @deprecated Use GET /code/alerts. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/alerts/code')
+    @OperationId('getAlertsAsCode')
+    async legacyGetAlertsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiAlertAsCodeListResponse> {
+        return this.getAlertsAsCode(projectUuid, req, slugs);
+    }
+
+    /**
+     * @summary List Google Sheets syncs as code (deprecated)
+     * @deprecated Use GET /code/googleSheets. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/googleSheets/code')
+    @OperationId('getGoogleSheetsSyncsAsCode')
+    async legacyGetGoogleSheetsSyncsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+    ): Promise<ApiGoogleSheetsSyncAsCodeListResponse> {
+        return this.getGoogleSheetsSyncsAsCode(projectUuid, req, slugs);
+    }
+
+    /**
+     * @summary List AI agents as code (deprecated)
+     * @deprecated Use GET /code/aiAgents. Remove after 2026-08-17.
+     */
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/aiAgents/code')
+    @OperationId('getAiAgentsAsCode')
+    async legacyGetAiAgentsAsCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Query() ids?: string[],
+        @Query() offset?: number,
+    ): Promise<ApiAgentAsCodeListResponse> {
+        return this.getAiAgentsAsCode(req, projectUuid, ids, offset);
+    }
+
+    /**
+     * @summary Upsert virtual view as code (deprecated)
+     * @deprecated Use POST /code/virtualViews/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/virtualViews/{slug}/code')
+    @OperationId('upsertVirtualViewAsCode')
+    async legacyUpsertVirtualViewAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() virtualView: VirtualViewAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiVirtualViewAsCodeUpsertResponse> {
+        return this.upsertVirtualViewAsCode(
+            projectUuid,
+            slug,
+            virtualView,
+            req,
+            force,
+        );
+    }
+
+    /**
+     * @summary Upsert scheduled delivery as code (deprecated)
+     * @deprecated Use POST /code/scheduledDeliveries/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/scheduledDeliveries/{slug}/code')
+    @OperationId('upsertScheduledDeliveryAsCode')
+    async legacyUpsertScheduledDeliveryAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() delivery: ScheduledDeliveryAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiScheduledDeliveryAsCodeUpsertResponse> {
+        return this.upsertScheduledDeliveryAsCode(
+            projectUuid,
+            slug,
+            delivery,
+            req,
+            force,
+        );
+    }
+
+    /**
+     * @summary Upsert alert as code (deprecated)
+     * @deprecated Use POST /code/alerts/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/alerts/{slug}/code')
+    @OperationId('upsertAlertAsCode')
+    async legacyUpsertAlertAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() alert: AlertAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiAlertAsCodeUpsertResponse> {
+        return this.upsertAlertAsCode(projectUuid, slug, alert, req, force);
+    }
+
+    /**
+     * @summary Upsert Google Sheets sync as code (deprecated)
+     * @deprecated Use POST /code/googleSheets/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/googleSheets/{slug}/code')
+    @OperationId('upsertGoogleSheetsSyncAsCode')
+    async legacyUpsertGoogleSheetsSyncAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() googleSheetsSync: GoogleSheetsSyncAsCode,
+        @Request() req: express.Request,
+        @Query() force: boolean = false,
+    ): Promise<ApiGoogleSheetsSyncAsCodeUpsertResponse> {
+        return this.upsertGoogleSheetsSyncAsCode(
+            projectUuid,
+            slug,
+            googleSheetsSync,
+            req,
+            force,
+        );
+    }
+
+    /**
+     * @summary Upsert chart as code (deprecated)
+     * @deprecated Use POST /code/charts/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/charts/{slug}/code')
+    @OperationId('upsertChartAsCode')
+    async legacyUpsertChartAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body()
+        chart: Omit<ChartAsCode, 'chartConfig' | 'description'> & {
+            skipSpaceCreate?: boolean;
+            publicSpaceCreate?: boolean;
+            force?: boolean;
+            spaceNames?: Record<string, string>;
+            chartConfig: AnyType;
+            description?: string | null;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiChartAsCodeUpsertResponse> {
+        return this.upsertChartAsCode(projectUuid, slug, chart, req);
+    }
+
+    /**
+     * @summary Upsert SQL chart as code (deprecated)
+     * @deprecated Use POST /code/sqlCharts/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/sqlCharts/{slug}/code')
+    @OperationId('upsertSqlChartAsCode')
+    async legacyUpsertSqlChartAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body()
+        sqlChart: Omit<SqlChartAsCode, 'config' | 'description'> & {
+            skipSpaceCreate?: boolean;
+            publicSpaceCreate?: boolean;
+            force?: boolean;
+            spaceNames?: Record<string, string>;
+            config: AnyType;
+            description?: string | null;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiSqlChartAsCodeUpsertResponse> {
+        return this.upsertSqlChartAsCode(projectUuid, slug, sqlChart, req);
+    }
+
+    /**
+     * @summary Upsert dashboard as code (deprecated)
+     * @deprecated Use POST /code/dashboards/{slug}. Remove after 2026-08-17.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/dashboards/{slug}/code')
+    @OperationId('upsertDashboardAsCode')
+    async legacyUpsertDashboardAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body()
+        dashboard: Omit<DashboardAsCode, 'tiles' | 'description'> & {
+            skipSpaceCreate?: boolean;
+            publicSpaceCreate?: boolean;
+            force?: boolean;
+            spaceNames?: Record<string, string>;
+            tiles: AnyType;
+            description?: string | null;
+        },
+        @Request() req: express.Request,
+    ): Promise<ApiDashboardAsCodeUpsertResponse> {
+        return this.upsertDashboardAsCode(projectUuid, slug, dashboard, req);
+    }
+
+    /**
+     * @summary Upsert AI agents as code (deprecated)
+     * @deprecated Use POST /code/aiAgents. Remove after 2026-08-17.
+     */
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/aiAgents/code')
+    @OperationId('upsertAiAgentsAsCode')
+    async legacyUpsertAiAgentsAsCode(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: { agents: AgentAsCode[] },
+        @Query() force?: boolean,
+    ): Promise<ApiAgentAsCodeUpsertResponse> {
+        return this.upsertAiAgentsAsCode(req, projectUuid, body, force);
+    }
+
+    /**
+     * List the Documents you can view, in code representation
+     * @summary List Documents as code
+     * @param schemaVersion The newest Document schema version the client reads. An older version is refused with an upgrade message.
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_READ_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Get('/code/documents')
+    @OperationId('getCodeDocuments')
+    async getDocumentsAsCode(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Query() slugs?: string[],
+        @Query() offset?: number,
+        @Query() schemaVersion?: number,
+    ): Promise<ApiDocumentAsCodeListResponse> {
+        assertRegisteredAccount(req.account);
+        return codeSuccess(
+            await this.services
+                .getDocumentService()
+                .listAsCode(req.account, projectUuid, {
+                    slugs,
+                    offset,
+                    schemaVersion,
+                }),
+        );
+    }
+
+    /**
+     * Create or update a Document, matched by slug, from code representation
+     * @summary Upsert Document as code
+     */
+    @Tags('Projects')
+    @Middlewares(CODE_WRITE_MIDDLEWARES)
+    @SuccessResponse('200', 'Success')
+    @Post('/code/documents/{slug}')
+    @OperationId('upsertCodeDocument')
+    async upsertDocumentAsCode(
+        @Path() projectUuid: string,
+        @Path() slug: string,
+        @Body() document: DocumentAsCode,
+        @Request() req: express.Request,
+    ): Promise<ApiDocumentAsCodeUpsertResponse> {
+        assertRegisteredAccount(req.account);
+        return codeSuccess({
+            action: await this.services
+                .getDocumentService()
+                .upsertAsCode(req.account, projectUuid, slug, document),
+        });
+    }
+}

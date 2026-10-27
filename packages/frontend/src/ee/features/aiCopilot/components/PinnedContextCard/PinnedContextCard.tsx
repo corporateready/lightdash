@@ -1,86 +1,298 @@
-import { assertUnreachable, type AiPromptContextItem } from '@lightdash/common';
-import { Anchor, Text } from '@mantine-8/core';
 import {
-    IconArrowRight,
-    IconLayoutDashboard,
-    type Icon,
-} from '@tabler/icons-react';
-import { type FC } from 'react';
-import { Link } from 'react-router';
-import MantineIcon from '../../../../../components/common/MantineIcon';
-import { getChartIcon } from '../../../../../components/common/ResourceIcon/utils';
-import contentLinkStyles from '../ChatElements/ContentLink.module.css';
+    assertUnreachable,
+    getDocumentUrl,
+    isTabularThreadFileName,
+    type AiPromptContextItem,
+} from '@lightdash/common';
+import { IconTable, IconWindowMaximize, type Icon } from '@tabler/icons-react';
+import { type FC, type MouseEvent } from 'react';
+import { dataAppHref } from '../../../../../features/apps/utils/appUrls';
+import { elementRefChipLabel } from '../../../../../features/apps/utils/elementRefs';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
+import { useEmbedAiAgentDashboardOpener } from '../../hooks/useEmbedAiAgentDashboardOpener';
+import { useIsAiAgentNavigationDisabled } from '../../hooks/useIsAiAgentNavigationDisabled';
+import { ContentReferenceLink } from '../ChatElements/ContentReferenceLink';
+import {
+    getDataAppContextItemLabel,
+    getThemeContextItemLabel,
+} from '../ChatElements/contentReferenceUtils';
+import {
+    isPlainLeftClick,
+    useDataAppPreviewLink,
+} from '../ChatElements/useDataAppPreviewLink';
+import { useAiThreadChartEdit } from '../ThreadChartEditor/useAiThreadChartEdit';
+import { PinnedReviewEntityCard } from './PinnedReviewEntityCard';
+
+// The sent thread message the chip belongs to; lets a data app chip open the
+// in-thread preview panel. Null on pre-send surfaces (no message yet).
+export type PinnedContextPreviewScope = {
+    messageUuid: string;
+    threadUuid: string;
+    agentUuid: string;
+};
 
 type Props = {
     item: AiPromptContextItem;
     projectUuid: string;
+    previewScope: PinnedContextPreviewScope | null;
 };
 
 type ItemMeta = {
-    icon: Icon;
-    iconColor: string;
-    iconFill: string;
+    kind:
+        | 'thread'
+        | 'file'
+        | 'repository'
+        | 'external_source'
+        | 'thread_file'
+        | 'data_app_element';
     label: string;
-    href: string;
+    href: string | null;
+    icon?: Icon;
 };
 
 const getItemMeta = (
-    item: AiPromptContextItem,
-    projectUuid: string,
+    item: Extract<
+        AiPromptContextItem,
+        {
+            type:
+                | 'thread'
+                | 'file'
+                | 'repository'
+                | 'external_source'
+                | 'thread_file'
+                | 'data_app_element';
+        }
+    >,
 ): ItemMeta => {
     switch (item.type) {
-        case 'chart':
+        // A pinned thread can live in another project, so there is no
+        // reliable in-project URL to offer.
+        case 'thread':
             return {
-                icon: getChartIcon(item.chartKind ?? undefined),
-                iconColor: 'blue.7',
-                iconFill: 'blue.4',
-                label: item.displayName ?? 'Chart',
-                href: `/projects/${projectUuid}/saved/${item.chartUuid}`,
+                kind: 'thread',
+                label: item.displayName ?? 'Conversation',
+                href: null,
             };
-        case 'dashboard':
+        case 'file':
+            return { kind: 'file', label: item.path, href: null };
+        case 'repository':
+            return { kind: 'repository', label: item.fullName, href: null };
+        case 'external_source':
             return {
-                icon: IconLayoutDashboard,
-                iconColor: 'green.7',
-                iconFill: 'green.6',
-                label: item.displayName ?? 'Dashboard',
-                href: `/projects/${projectUuid}/dashboards/${item.dashboardUuid}`,
+                kind: 'external_source',
+                label: item.displayName,
+                href: null,
+            };
+        // No download route by design; the file is read through the agent.
+        case 'thread_file':
+            return {
+                kind: 'thread_file',
+                label: item.fileName,
+                href: null,
+                icon: isTabularThreadFileName(item.fileName)
+                    ? IconTable
+                    : undefined,
+            };
+        // The app's source is not browsable from the thread, so no link.
+        case 'data_app_element':
+            return {
+                kind: 'data_app_element',
+                label: elementRefChipLabel(item),
+                href: null,
             };
         default:
             return assertUnreachable(item, 'Unknown AiPromptContextItem type');
     }
 };
 
-export const PinnedContextCard: FC<Props> = ({ item, projectUuid }) => {
-    const meta = getItemMeta(item, projectUuid);
+// Opens the in-place chart editor when the host provides one; the href keeps
+// modified clicks (new tab) working.
+const PinnedChartCard: FC<{
+    item: Extract<AiPromptContextItem, { type: 'chart' }>;
+    projectUuid: string;
+}> = ({ item, projectUuid }) => {
+    const openChartEditor = useAiThreadChartEdit();
+    const isEmbed = useIsEmbedded();
+    const handleClick = openChartEditor
+        ? (e: MouseEvent<HTMLAnchorElement>) => {
+              if (!isPlainLeftClick(e)) return;
+              e.preventDefault();
+              openChartEditor(item.chartUuid);
+          }
+        : undefined;
+
+    // The full app is unreachable from an embed, so the chip is a static
+    // reference there.
+    if (isEmbed) {
+        return (
+            <ContentReferenceLink
+                kind="chart"
+                chartKind={item.chartKind ?? undefined}
+                showArrow={false}
+            >
+                {item.displayName ?? 'Chart'}
+            </ContentReferenceLink>
+        );
+    }
+
     return (
-        <Anchor
-            component={Link}
-            to={meta.href}
+        <ContentReferenceLink
+            kind="chart"
+            chartKind={item.chartKind ?? undefined}
+            rel="noreferrer"
+            to={`/projects/${projectUuid}/saved/${item.chartUuid}`}
             target="_blank"
-            fz="sm"
-            fw={500}
-            bg="ldGray.0"
-            c="ldGray.7"
-            td="none"
-            classNames={{ root: contentLinkStyles.contentLink }}
+            onClick={handleClick}
+            showArrow
+            trailingIcon={handleClick ? IconWindowMaximize : undefined}
         >
-            <MantineIcon
-                icon={meta.icon}
-                size="md"
-                color={meta.iconColor}
-                fill={meta.iconFill}
-                fillOpacity={0.2}
-                strokeWidth={1.9}
-            />
-            <Text fz="sm" fw={500} m={0} truncate>
-                {meta.label}
-            </Text>
-            <MantineIcon
-                icon={IconArrowRight}
-                color="ldGray.7"
-                size="sm"
-                strokeWidth={2.0}
-            />
-        </Anchor>
+            {item.displayName ?? 'Chart'}
+        </ContentReferenceLink>
     );
+};
+
+const PinnedDashboardCard: FC<{
+    item: Extract<AiPromptContextItem, { type: 'dashboard' }>;
+    projectUuid: string;
+}> = ({ item, projectUuid }) => {
+    const openEmbedDashboard = useEmbedAiAgentDashboardOpener(projectUuid);
+    const navigationDisabled = useIsAiAgentNavigationDisabled();
+    const label = item.displayName ?? 'Dashboard';
+
+    if (navigationDisabled) {
+        return (
+            <ContentReferenceLink kind="dashboard" showArrow={false}>
+                {label}
+            </ContentReferenceLink>
+        );
+    }
+
+    if (openEmbedDashboard) {
+        return (
+            <ContentReferenceLink
+                kind="dashboard"
+                onClick={() => openEmbedDashboard(item.dashboardUuid, null)}
+                showArrow
+            >
+                {label}
+            </ContentReferenceLink>
+        );
+    }
+
+    return (
+        <ContentReferenceLink
+            kind="dashboard"
+            rel="noreferrer"
+            to={`/projects/${projectUuid}/dashboards/${item.dashboardUuid}`}
+            target="_blank"
+            showArrow
+        >
+            {label}
+        </ContentReferenceLink>
+    );
+};
+
+const PinnedDataAppCard: FC<{
+    item: Extract<AiPromptContextItem, { type: 'data_app' }>;
+    projectUuid: string;
+    previewScope: PinnedContextPreviewScope | null;
+}> = ({ item, projectUuid, previewScope }) => {
+    const { isActive, onClick } = useDataAppPreviewLink(
+        item.appUuid,
+        previewScope ? { ...previewScope, projectUuid } : null,
+    );
+
+    return (
+        <ContentReferenceLink
+            kind="data_app"
+            rel="noreferrer"
+            to={dataAppHref(projectUuid, item.appUuid)}
+            target="_blank"
+            onClick={onClick}
+            data-app-active={isActive || undefined}
+            showArrow
+        >
+            {getDataAppContextItemLabel(item)}
+        </ContentReferenceLink>
+    );
+};
+
+export const PinnedContextCard: FC<Props> = ({
+    item,
+    projectUuid,
+    previewScope,
+}) => {
+    switch (item.type) {
+        case 'chart':
+            return <PinnedChartCard item={item} projectUuid={projectUuid} />;
+        case 'dashboard':
+            return (
+                <PinnedDashboardCard item={item} projectUuid={projectUuid} />
+            );
+        case 'thread':
+        case 'file':
+        case 'repository':
+        case 'external_source':
+        case 'thread_file':
+        case 'data_app_element': {
+            const meta = getItemMeta(item);
+            return (
+                <ContentReferenceLink
+                    kind={meta.kind}
+                    icon={meta.icon}
+                    rel="noreferrer"
+                    to={meta.href ?? undefined}
+                    target={meta.href ? '_blank' : undefined}
+                    showArrow={meta.href !== null}
+                >
+                    {meta.label}
+                </ContentReferenceLink>
+            );
+        }
+        case 'data_app':
+            return (
+                <PinnedDataAppCard
+                    item={item}
+                    projectUuid={projectUuid}
+                    previewScope={previewScope}
+                />
+            );
+        case 'document':
+            return (
+                <ContentReferenceLink
+                    kind="document"
+                    rel="noreferrer"
+                    to={getDocumentUrl(
+                        projectUuid,
+                        item.documentUuid,
+                        item.documentSlug ?? undefined,
+                    )}
+                    target="_blank"
+                >
+                    {item.displayName ?? item.documentSlug ?? 'Document'}
+                </ContentReferenceLink>
+            );
+        case 'pull_request':
+        case 'proposed_change':
+        case 'review_finding':
+        case 'preview_environment':
+            return <PinnedReviewEntityCard item={item} />;
+        // System-only: written by the thread restore, rendered as a build card.
+        case 'data_app_restore':
+            return null;
+        case 'design':
+            return (
+                <ContentReferenceLink kind="design" showArrow={false}>
+                    {getThemeContextItemLabel(item)}
+                </ContentReferenceLink>
+            );
+        case 'skill':
+            return (
+                <ContentReferenceLink kind="skill" showArrow={false}>
+                    {`/${item.name}`}
+                </ContentReferenceLink>
+            );
+        default:
+            return assertUnreachable(item, 'Unknown AiPromptContextItem type');
+    }
 };

@@ -3,15 +3,29 @@ import {
     TimeFrames,
     UnitOfTime,
     type FilterableField,
+    type UiStringResolver,
 } from '@lightdash/common';
 import { Select } from '@mantine/core';
 import { useMemo, type FC } from 'react';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 
-const allPeriodOptions = [
-    { value: UnitOfTime.years, label: 'year to date (YTD)' },
-    { value: UnitOfTime.quarters, label: 'quarter to date (QTD)' },
-    { value: UnitOfTime.months, label: 'month to date (MTD)' },
-    { value: UnitOfTime.weeks, label: 'week to date (WTD)' },
+const getAllPeriodOptions = (getUiString: UiStringResolver) => [
+    {
+        value: UnitOfTime.years,
+        label: getUiString('filters.periodToDateSelect.years'),
+    },
+    {
+        value: UnitOfTime.quarters,
+        label: getUiString('filters.periodToDateSelect.quarters'),
+    },
+    {
+        value: UnitOfTime.months,
+        label: getUiString('filters.periodToDateSelect.months'),
+    },
+    {
+        value: UnitOfTime.weeks,
+        label: getUiString('filters.periodToDateSelect.weeks'),
+    },
 ];
 
 /**
@@ -38,6 +52,11 @@ interface Props {
     unitOfTime?: UnitOfTime;
     field?: FilterableField;
     onChange: (unitOfTime: UnitOfTime) => void;
+    popoverProps?: {
+        withinPortal?: boolean;
+        onOpen?: () => void;
+        onClose?: () => void;
+    };
 }
 
 const FilterPeriodToDateSelect: FC<Props> = ({
@@ -45,8 +64,11 @@ const FilterPeriodToDateSelect: FC<Props> = ({
     unitOfTime,
     field,
     onChange,
+    popoverProps,
 }) => {
+    const getUiString = useUiStrings();
     const options = useMemo(() => {
+        const allPeriodOptions = getAllPeriodOptions(getUiString);
         if (!field || !isDimension(field) || !field.timeInterval) {
             return allPeriodOptions;
         }
@@ -57,14 +79,19 @@ const FilterPeriodToDateSelect: FC<Props> = ({
             const optIndex = unitOrder.indexOf(opt.value as UnitOfTime);
             return optIndex >= minIndex;
         });
-    }, [field]);
+    }, [field, getUiString]);
 
     return (
         <Select
+            scrollAreaProps={{ type: 'always' }}
+            allowDeselect={false}
             w="100%"
             size="xs"
             disabled={disabled}
-            placeholder="Select period"
+            placeholder={getUiString('filters.selectPeriodPlaceholder')}
+            comboboxProps={{ withinPortal: popoverProps?.withinPortal }}
+            onDropdownOpen={popoverProps?.onOpen}
+            onDropdownClose={popoverProps?.onClose}
             data={options}
             value={unitOfTime ?? null}
             data-autofocus={!unitOfTime || undefined}

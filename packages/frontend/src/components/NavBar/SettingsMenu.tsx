@@ -1,5 +1,5 @@
 import { subject } from '@casl/ability';
-import { Button, getDefaultZIndex, Menu } from '@mantine-8/core';
+import { Button, getDefaultZIndex, Menu } from '@mantine/core';
 import {
     IconBuildingBank,
     IconDatabase,
@@ -7,15 +7,21 @@ import {
 } from '@tabler/icons-react';
 import { type FC } from 'react';
 import { Link } from 'react-router';
+import { useProjectSettingsAccess } from '../../hooks/settings/useProjectSettingsAccess';
 import { useActiveProjectUuid } from '../../hooks/useActiveProject';
+import { useProject } from '../../hooks/useProject';
 import useApp from '../../providers/App/useApp';
 import MantineIcon from '../common/MantineIcon';
+import { useNavBarMenuProps } from './NavBarPortalContext';
 
-const SettingsMenu: FC = () => {
+const SettingsMenu: FC<{ withLabel?: boolean }> = ({ withLabel = false }) => {
+    const menuProps = useNavBarMenuProps();
     const {
         user: { data: user },
     } = useApp();
     const { activeProjectUuid } = useActiveProjectUuid();
+    const { data: project } = useProject(activeProjectUuid);
+    const { projectSettingsAccess } = useProjectSettingsAccess(project);
 
     if (!user || !activeProjectUuid) return null;
 
@@ -26,27 +32,17 @@ const SettingsMenu: FC = () => {
         }),
     );
 
-    const userCanCreateProject = user.ability.can(
-        'update',
-        subject('Project', {
-            organizationUuid: user.organizationUuid,
-            projectUuid: activeProjectUuid,
-        }),
-    );
-
-    if (!userCanViewOrganization && !userCanCreateProject) {
+    if (!userCanViewOrganization && projectSettingsAccess.type === 'none') {
         return null;
     }
 
     return (
         <Menu
-            withArrow
-            shadow="lg"
             position="bottom-end"
             arrowOffset={16}
             offset={-2}
             zIndex={getDefaultZIndex('max')}
-            portalProps={{ target: '#navbar-header' }}
+            {...menuProps}
         >
             <Menu.Target>
                 <Button
@@ -54,17 +50,28 @@ const SettingsMenu: FC = () => {
                     variant="default"
                     size="xs"
                     data-testid="settings-menu"
+                    // Navigation anchor for scope walkthroughs (data-tour-via)
+                    data-tour-nav="settings"
+                    data-tour-hint="Click Settings"
                 >
                     <MantineIcon icon={IconSettings} />
+                    {withLabel && ' Settings'}
                 </Button>
             </Menu.Target>
 
             <Menu.Dropdown>
-                {activeProjectUuid && userCanCreateProject && (
+                {projectSettingsAccess.type !== 'none' && (
                     <Menu.Item
                         component={Link}
                         leftSection={<MantineIcon icon={IconDatabase} />}
-                        to={`/generalSettings/projectManagement/${activeProjectUuid}/settings`}
+                        to={
+                            project?.provisioningSource === 'analytics' &&
+                            projectSettingsAccess.type === 'full'
+                                ? '/generalSettings/lightdashAnalytics'
+                                : `/generalSettings/projectManagement/${activeProjectUuid}/${projectSettingsAccess.defaultPage}`
+                        }
+                        data-tour-nav="project-settings"
+                        data-tour-hint="Open Project settings"
                     >
                         Project settings
                     </Menu.Item>

@@ -1,6 +1,7 @@
 import {
     assertUnreachable,
     getItemId,
+    interpolateUiString,
     MetricExplorerComparison,
     type MetricExplorerQuery,
     type MetricWithAssociatedTimeDimension,
@@ -11,17 +12,20 @@ import {
     Loader,
     Paper,
     Radio,
-    Select,
     Stack,
     Text,
+    Select,
     Tooltip,
 } from '@mantine/core';
 import { IconCalendar, IconStack } from '@tabler/icons-react';
 import { type UseQueryResult } from '@tanstack/react-query';
 import { useCallback, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
-import { useSelectStyles } from '../../styles/useSelectStyles';
+import { groupComboboxItems } from '../../../../components/common/Select/utils';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
+import selectStyles from '../../styles/selectStyles.module.css';
 import SelectItem from '../SelectItem';
+import comparisonStyles from './MetricExploreComparison.module.css';
 
 type Props = {
     baseMetricLabel: string | undefined;
@@ -41,8 +45,7 @@ export const MetricExploreComparison: FC<Props> = ({
     metricsWithTimeDimensionsQuery,
     canCompareToAnotherMetric = true,
 }) => {
-    const { classes } = useSelectStyles();
-
+    const getUiString = useUiStrings();
     const handleComparisonChange = useCallback(
         (newComparison: MetricExplorerComparison) => {
             switch (newComparison) {
@@ -101,13 +104,19 @@ export const MetricExploreComparison: FC<Props> = ({
     );
 
     return (
-        <Radio.Group value={query.comparison} onChange={handleComparisonChange}>
-            <Stack spacing="sm">
+        <Radio.Group
+            aria-label={getUiString('metrics.comparison')}
+            value={query.comparison}
+            onChange={(value) =>
+                handleComparisonChange(value as MetricExplorerComparison)
+            }
+        >
+            <Stack gap="sm">
                 {[
                     {
                         type: MetricExplorerComparison.PREVIOUS_PERIOD,
                         icon: IconCalendar,
-                        label: 'Compare to previous year',
+                        label: getUiString('metrics.comparePreviousYear'),
                         tooltipLabel:
                             'Show data from the same period in the previous year',
                     },
@@ -115,8 +124,13 @@ export const MetricExploreComparison: FC<Props> = ({
                         ? {
                               type: MetricExplorerComparison.DIFFERENT_METRIC,
                               icon: IconStack,
-                              label: 'Compare to another metric',
-                              tooltipLabel: `Compare "${baseMetricLabel}" to another metric`,
+                              label: getUiString(
+                                  'metrics.compareAnotherMetric',
+                              ),
+                              tooltipLabel: interpolateUiString(
+                                  getUiString('metrics.compareMetricTooltip'),
+                                  { metric: baseMetricLabel ?? '' },
+                              ),
                           }
                         : null,
                 ]
@@ -130,70 +144,47 @@ export const MetricExploreComparison: FC<Props> = ({
                         <Tooltip
                             key={comparison.type}
                             label={comparison.tooltipLabel}
-                            variant="xs"
-                            position="right"
-                            withinPortal
+                            position="top"
+                            maw="min(300px, calc(100vw - 24px))"
+                            multiline
                         >
                             <Paper
                                 p="sm"
-                                withBorder
                                 radius="md"
-                                sx={(theme) => ({
-                                    cursor: 'pointer',
-                                    transition: `all ${theme.other.transitionDuration}ms ${theme.other.transitionTimingFunction}`,
-                                    '&[data-with-border="true"]': {
-                                        border:
-                                            query.comparison === comparison.type
-                                                ? `1px solid ${theme.colors.indigo[5]}`
-                                                : `1px solid ${theme.colors.ldGray[2]}`,
-                                    },
-                                    '&:hover': {
-                                        backgroundColor:
-                                            theme.colorScheme === 'dark'
-                                                ? theme.colors.ldDark[3]
-                                                : theme.colors.ldGray[0],
-                                    },
-                                    backgroundColor:
-                                        query.comparison === comparison.type
-                                            ? theme.colorScheme === 'dark'
-                                                ? theme.colors.ldDark[2]
-                                                : theme.fn.lighten(
-                                                      theme.colors.ldGray[1],
-                                                      0.3,
-                                                  )
-                                            : theme.colors.background[0],
-                                })}
-                                onClick={() =>
-                                    handleComparisonChange(comparison.type)
+                                className={comparisonStyles.comparisonPaper}
+                                data-selected={
+                                    query.comparison === comparison.type ||
+                                    undefined
                                 }
                             >
                                 <Stack>
-                                    <Group
-                                        align="center"
-                                        noWrap
-                                        position="apart"
-                                    >
-                                        <Group noWrap>
-                                            <Paper
-                                                p="xs"
-                                                radius="md"
-                                                withBorder
-                                            >
-                                                <MantineIcon
-                                                    icon={comparison.icon}
-                                                />
-                                            </Paper>
+                                    <Radio
+                                        value={comparison.type}
+                                        size="xs"
+                                        color="indigo"
+                                        labelPosition="left"
+                                        classNames={{
+                                            body: comparisonStyles.radioBody,
+                                            label: comparisonStyles.radioLabel,
+                                        }}
+                                        label={
+                                            <Group wrap="nowrap">
+                                                <Paper p="xs" radius="md">
+                                                    <MantineIcon
+                                                        icon={comparison.icon}
+                                                    />
+                                                </Paper>
 
-                                            <Text color="ldGray.7" fw={500}>
-                                                {comparison.label}
-                                            </Text>
-                                        </Group>
-                                        <Radio
-                                            value={comparison.type}
-                                            size="xs"
-                                            color="indigo"
-                                        />
-                                    </Group>
+                                                <Text
+                                                    fz="sm"
+                                                    c="ldGray.7"
+                                                    fw={500}
+                                                >
+                                                    {comparison.label}
+                                                </Text>
+                                            </Group>
+                                        }
+                                    />
 
                                     {comparison.type ===
                                         MetricExplorerComparison.DIFFERENT_METRIC &&
@@ -204,11 +195,14 @@ export const MetricExploreComparison: FC<Props> = ({
                                             metricsWithTimeDimensionsQuery.data
                                                 .length > 0) ? (
                                             <Select
+                                                allowDeselect={false}
                                                 placeholder="Select a metric"
+                                                aria-label={getUiString(
+                                                    'metrics.comparisonMetric',
+                                                )}
                                                 searchable
-                                                radius="md"
                                                 size="xs"
-                                                data={
+                                                data={groupComboboxItems(
                                                     metricsWithTimeDimensionsQuery.data?.map(
                                                         (metric) => ({
                                                             value: getItemId(
@@ -217,14 +211,25 @@ export const MetricExploreComparison: FC<Props> = ({
                                                             label: metric.label,
                                                             group: metric.tableLabel,
                                                         }),
-                                                    ) ?? []
-                                                }
+                                                    ) ?? [],
+                                                )}
                                                 value={getItemId(query.metric)}
                                                 onChange={handleMetricChange}
-                                                itemComponent={SelectItem}
-                                                // this does not work as expected in Mantine 6
+                                                renderOption={({
+                                                    option,
+                                                    checked,
+                                                }) => (
+                                                    <SelectItem
+                                                        value={option.value}
+                                                        label={option.label}
+                                                        selected={
+                                                            checked ?? false
+                                                        }
+                                                    />
+                                                )}
                                                 data-disabled={
-                                                    !metricsWithTimeDimensionsQuery.isSuccess
+                                                    !metricsWithTimeDimensionsQuery.isSuccess ||
+                                                    undefined
                                                 }
                                                 rightSection={
                                                     metricsWithTimeDimensionsQuery.isLoading ? (
@@ -235,19 +240,23 @@ export const MetricExploreComparison: FC<Props> = ({
                                                     ) : undefined
                                                 }
                                                 classNames={{
-                                                    input: classes.input,
-                                                    item: classes.item,
-                                                    rightSection:
-                                                        classes.rightSection,
-                                                    dropdown: classes.dropdown,
+                                                    wrapper:
+                                                        selectStyles.wrapper,
+                                                    input: selectStyles.input,
+                                                    option: selectStyles.option,
+                                                    section:
+                                                        selectStyles.rightSection,
+                                                    dropdown:
+                                                        selectStyles.dropdown,
                                                 }}
                                             />
                                         ) : (
-                                            <Text span c="ldGray.7" fz={13}>
+                                            <Text span c="ldGray.7" fz="sm">
                                                 Only metrics with a time
                                                 dimension defined in the .yml
                                                 can be compared.{' '}
                                                 <Anchor
+                                                    inherit
                                                     c="ldGray.9"
                                                     fw={500}
                                                     target="_blank"

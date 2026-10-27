@@ -1,33 +1,126 @@
-import { type ApiAiAgentThreadResponse } from '@lightdash/common';
-import { useEffect } from 'react';
-import { useAiAgentThreadStreaming } from '../streaming/useAiAgentThreadStreamQuery';
+import {
+    AI_WRITEBACK_PENDING_GRACE_MS,
+    isToolEditDbtProjectResult,
+    type ApiAiAgentThreadResponse,
+} from '@lightdash/common';
+import { useEffect, useState } from 'react';
+import {
+    markStreamPolling,
+    stopStreaming,
+} from '../store/aiAgentThreadStreamSlice';
+import { useAiAgentStoreDispatch } from '../store/hooks';
+import {
+    useAiAgentThreadRecoveryActive,
+    useAiAgentThreadStreaming,
+} from '../streaming/useAiAgentThreadStreamQuery';
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 5000;
 
 type Thread = ApiAiAgentThreadResponse['results'] | undefined;
+type ThreadRefetch = () => Promise<{ isError: boolean }>;
 
-/**
- * Polls the thread query while there is a pending assistant message and no
- * active stream — covers the gap between submission and the first stream
- * chunk, and the case where the stream never connects (e.g. Slack-created
- * threads).
- */
+const getPendingWritebackExpiresAt = (thread: Thread): number | null => {
+    const pendingExpirations =
+        thread?.messages.flatMap((message) =>
+            message.role === 'assistant'
+                ? message.toolResults.flatMap((toolResult) => {
+                      if (
+                          !isToolEditDbtProjectResult(toolResult) ||
+                          toolResult.metadata.status !== 'pending'
+                      ) {
+                          return [];
+                      }
+
+                      const createdAt =
+                          toolResult.createdAt instanceof Date
+                              ? toolResult.createdAt.getTime()
+                              : new Date(toolResult.createdAt).getTime();
+                      return Number.isFinite(createdAt)
+                          ? [createdAt + AI_WRITEBACK_PENDING_GRACE_MS]
+                          : [];
+                  })
+                : [],
+        ) ?? [];
+
+    return pendingExpirations.length > 0
+        ? Math.max(...pendingExpirations)
+        : null;
+};
+
 export const usePendingThreadRefetch = (
     thread: Thread,
     threadUuid: string,
-    refetch: () => unknown,
+    refetch: ThreadRefetch,
 ) => {
+    const dispatch = useAiAgentStoreDispatch();
     const isStreaming = useAiAgentThreadStreaming(threadUuid);
-    const isPending = thread?.messages?.some(
-        (message) =>
-            message.role === 'assistant' && message.status === 'pending',
+    const isRecoveryActive = useAiAgentThreadRecoveryActive(threadUuid);
+    const [expirationClock, setExpirationClock] = useState(0);
+    const pendingWritebackExpiresAt = getPendingWritebackExpiresAt(thread);
+    const isBackgroundWorkPending =
+        pendingWritebackExpiresAt !== null &&
+        pendingWritebackExpiresAt > Math.max(Date.now(), expirationClock);
+    const isThreadPending = Boolean(
+        thread?.messages?.some(
+            (message) =>
+                message.role === 'assistant' && message.status === 'pending',
+        ),
     );
+    const shouldPoll = isThreadPending || isBackgroundWorkPending;
 
     useEffect(() => {
-        if (!isPending || isStreaming) return;
-        const interval = setInterval(() => void refetch(), POLL_INTERVAL_MS);
-        return () => clearInterval(interval);
-    }, [isPending, isStreaming, refetch]);
+        if (pendingWritebackExpiresAt === null) {
+            return;
+        }
 
-    return { isStreaming, isPending };
+        const remainingMs = pendingWritebackExpiresAt - Date.now();
+        if (remainingMs <= 0) {
+            return;
+        }
+
+        const timeout = setTimeout(() => {
+            try {
+                void Promise.resolve(refetch()).catch(() => undefined);
+            } catch {
+                // This final refresh is best-effort; expiry must stay bounded.
+            } finally {
+                setExpirationClock(pendingWritebackExpiresAt);
+            }
+        }, remainingMs);
+        return () => clearTimeout(timeout);
+    }, [pendingWritebackExpiresAt, refetch]);
+
+    useEffect(() => {
+        if (!shouldPoll || isStreaming) return;
+
+        const pollThread = async () => {
+            try {
+                const result = await refetch();
+                if (isRecoveryActive && !result.isError) {
+                    dispatch(markStreamPolling({ threadUuid }));
+                }
+            } catch {
+                // Keep showing the recovery alert until a refetch succeeds.
+            }
+        };
+        const interval = setInterval(() => {
+            void pollThread();
+        }, POLL_INTERVAL_MS);
+        return () => clearInterval(interval);
+    }, [
+        dispatch,
+        isRecoveryActive,
+        isStreaming,
+        refetch,
+        shouldPoll,
+        threadUuid,
+    ]);
+
+    useEffect(() => {
+        if (thread !== undefined && isRecoveryActive && !isThreadPending) {
+            dispatch(stopStreaming({ threadUuid }));
+        }
+    }, [dispatch, isRecoveryActive, isThreadPending, thread, threadUuid]);
+
+    return { isStreaming, isThreadPending, isBackgroundWorkPending };
 };

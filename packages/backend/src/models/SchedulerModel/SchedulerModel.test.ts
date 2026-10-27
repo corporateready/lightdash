@@ -1,8 +1,32 @@
-import { AnyType, SchedulerJobStatus, SchedulerLog } from '@lightdash/common';
+import {
+    AnyType,
+    SchedulerFormat,
+    SchedulerJobStatus,
+    SchedulerLog,
+    type SchedulerAndTargets,
+} from '@lightdash/common';
+import knex from 'knex';
+import { getTracker, MockClient, Tracker } from 'knex-mock-client';
+import { SchedulerTableName } from '../../database/entities/scheduler';
 import { SchedulerModel } from './index';
 
 describe('Scheduler model test', () => {
-    test('Test scheduler log sorting', () => {
+    describe('getSchedulers', () => {
+        const database = knex({ client: MockClient, dialect: 'pg' });
+
+        it('selects project_uuid only from scheduler rows', () => {
+            const { sql } = database(SchedulerTableName)
+                .select(...SchedulerModel.getSchedulerListSelect(database))
+                .toSQL();
+
+            expect(sql).toContain('"scheduler".*');
+            expect(sql).not.toContain(
+                '"projects"."project_uuid" as "project_uuid"',
+            );
+        });
+    });
+
+    test('scheduler log sorting', () => {
         const baseLog: SchedulerLog = {
             task: 'handleScheduledDelivery',
             schedulerUuid: '1',
@@ -45,6 +69,39 @@ describe('Scheduler model test', () => {
             '1',
             '6',
         ]);
+    });
+
+    describe('webhook validation', () => {
+        const database = { transaction: vi.fn() };
+        const model = new SchedulerModel({ database: database as AnyType });
+
+        afterEach(() => {
+            vi.clearAllMocks();
+        });
+
+        it('rejects private webhook targets before creating a scheduler', async () => {
+            await expect(
+                model.createScheduler({
+                    targets: [{ webhook: 'https://169.254.169.254/hook' }],
+                } as AnyType),
+            ).rejects.toThrow('must use a public URL');
+
+            expect(database.transaction).not.toHaveBeenCalled();
+        });
+
+        it('rejects private webhook targets before updating a scheduler', async () => {
+            await expect(
+                model.updateScheduler({
+                    targets: [
+                        {
+                            googleChatWebhook: 'https://127.0.0.1/hook',
+                        },
+                    ],
+                } as AnyType),
+            ).rejects.toThrow('must use a public URL');
+
+            expect(database.transaction).not.toHaveBeenCalled();
+        });
     });
 
     describe('getRuns pagination with filtering', () => {
@@ -109,16 +166,164 @@ describe('Scheduler model test', () => {
         });
     });
 
+    describe('getAllSchedulers', () => {
+        const database = knex({ client: MockClient, dialect: 'pg' });
+        const model = new SchedulerModel({ database });
+        let tracker: Tracker;
+
+        beforeAll(() => {
+            tracker = getTracker();
+        });
+
+        afterEach(() => {
+            tracker.reset();
+        });
+
+        const schedulerSelectSql = () =>
+            tracker.history.select.find((query) =>
+                query.sql.includes(`from "${SchedulerTableName}"`),
+            )?.sql;
+
+        it('includes active human creators or existing service accounts', async () => {
+            tracker.on
+                .select(/to_regclass/)
+                .response([{ has_service_accounts: true }]);
+            tracker.on.select(SchedulerTableName).response([]);
+
+            await model.getAllSchedulers();
+
+            const sql = schedulerSelectSql();
+            expect(sql).toContain('"users"."is_active"');
+            expect(sql).toContain(
+                'exists (select * from "service_accounts" where service_accounts.service_account_user_uuid = scheduler.created_by)',
+            );
+        });
+
+        it('omits the service account clause when the table is absent (OSS)', async () => {
+            tracker.on
+                .select(/to_regclass/)
+                .response([{ has_service_accounts: false }]);
+            tracker.on.select(SchedulerTableName).response([]);
+
+            await model.getAllSchedulers();
+
+            const sql = schedulerSelectSql();
+            expect(sql).toContain('"users"."is_active"');
+            expect(sql).not.toContain('service_accounts');
+        });
+    });
+
+    describe('getRunsForSchedulers', () => {
+        const database = knex({ client: MockClient, dialect: 'pg' });
+        const model = new SchedulerModel({ database });
+        let tracker: Tracker;
+
+        beforeAll(() => {
+            tracker = getTracker();
+        });
+
+        afterEach(() => {
+            tracker.reset();
+        });
+
+        it('limits child job ranking to runs for the requested schedulers', async () => {
+            tracker.on.select(/scheduler_log/).response([]);
+            const scheduler: SchedulerAndTargets = {
+                schedulerUuid: 'scheduler-1',
+                slug: 'daily-dashboard',
+                name: 'Daily dashboard',
+                message: undefined,
+                createdAt: new Date('2026-08-24T00:00:00Z'),
+                updatedAt: new Date('2026-08-24T00:00:00Z'),
+                createdBy: 'user-1',
+                createdByName: 'Test user',
+                format: SchedulerFormat.PDF,
+                cron: '0 9 * * *',
+                timezone: 'UTC',
+                savedChartUuid: null,
+                savedChartName: null,
+                dashboardUuid: 'dashboard-1',
+                dashboardName: 'Dashboard',
+                savedSqlUuid: null,
+                savedSqlName: null,
+                appUuid: null,
+                appName: null,
+                options: {},
+                filters: undefined,
+                parameters: undefined,
+                selectedTabs: null,
+                enabled: true,
+                includeLinks: true,
+                plainTextEmail: false,
+                targets: [],
+            };
+
+            await model.getRunsForSchedulers({ schedulers: [scheduler] });
+
+            const [query] = tracker.history.select;
+            const normalizedSql = query.sql.replace(/\$\d+/g, '?');
+            expect(normalizedSql).toContain(
+                '"job_group" in (select distinct "job_id" from "scheduler_log" where job_id = job_group and "scheduler_uuid" in (?) and "scheduled_time" > ? and "scheduled_time" < ?)',
+            );
+            expect(normalizedSql.match(/job_id = job_group/g)).toHaveLength(2);
+            const dateBindings = query.bindings.filter(
+                (binding): binding is Date => binding instanceof Date,
+            );
+            expect(dateBindings).toHaveLength(4);
+            expect(dateBindings[0]).toEqual(dateBindings[2]);
+            expect(dateBindings[1]).toEqual(dateBindings[3]);
+            expect(
+                query.bindings.filter((binding) => binding === 'scheduler-1'),
+            ).toHaveLength(2);
+        });
+    });
+
+    describe('attachLatestRunToSchedulerList', () => {
+        it('attaches each scheduler latest run and marks missing runs as null', async () => {
+            const model = new SchedulerModel({ database: {} as AnyType });
+            const schedulers = [
+                { schedulerUuid: 'scheduler-1' },
+                { schedulerUuid: 'scheduler-2' },
+            ] as SchedulerAndTargets[];
+            const latestRun = {
+                schedulerUuid: 'scheduler-1',
+                runId: 'run-1',
+            } as AnyType;
+            const getRunsSpy = vi
+                .spyOn(model, 'getRunsForSchedulers')
+                .mockResolvedValue({
+                    pagination: {
+                        page: 1,
+                        pageSize: 1,
+                        totalPageCount: 1,
+                        totalResults: 1,
+                    },
+                    data: [latestRun],
+                });
+
+            await expect(
+                model.attachLatestRunToSchedulerList(schedulers),
+            ).resolves.toEqual([
+                { ...schedulers[0], latestRun },
+                { ...schedulers[1], latestRun: null },
+            ]);
+            expect(getRunsSpy).toHaveBeenCalledWith({
+                schedulers,
+                latestOnly: true,
+            });
+        });
+    });
+
     describe('getSchedulerRuns scheduler filtering', () => {
         const createModel = () =>
             new SchedulerModel({ database: {} as AnyType });
 
         it('uses getSchedulersByUuid when schedulerUuids filter is provided', async () => {
             const model = createModel();
-            const getSchedulersByUuidSpy = jest
+            const getSchedulersByUuidSpy = vi
                 .spyOn(model, 'getSchedulersByUuid')
                 .mockResolvedValue([]);
-            const getSchedulerForProjectSpy = jest
+            const getSchedulerForProjectSpy = vi
                 .spyOn(model, 'getSchedulerForProject')
                 .mockResolvedValue([]);
 
@@ -142,10 +347,10 @@ describe('Scheduler model test', () => {
 
         it('falls back to getSchedulerForProject when no schedulerUuids filter is provided', async () => {
             const model = createModel();
-            const getSchedulersByUuidSpy = jest
+            const getSchedulersByUuidSpy = vi
                 .spyOn(model, 'getSchedulersByUuid')
                 .mockResolvedValue([]);
-            const getSchedulerForProjectSpy = jest
+            const getSchedulerForProjectSpy = vi
                 .spyOn(model, 'getSchedulerForProject')
                 .mockResolvedValue([]);
 

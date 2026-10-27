@@ -1,9 +1,13 @@
 import {
     formatItemValue,
     getItemId,
+    getPivotValueColumnName,
     hashFieldReference,
     isDimension,
+    VizAggregationOptions,
+    type CustomDimension,
     type EChartsSeries,
+    type Field,
     type ItemsMap,
     type ResultValue,
 } from '@lightdash/common';
@@ -26,10 +30,24 @@ const extractFieldValuesFromClickEvent = (
         e.dimensionNames.forEach((dimName, index) => {
             if (dimName && index < valueArray.length) {
                 const val = valueArray[index];
+                // Sparse tuple slots (e.g. padded gap rows) carry no value for
+                // this column — skip them instead of building a broken filter
+                if (val === undefined) return;
                 const raw = val === '∅' ? null : val; // convert ∅ values back to null. Echarts doesn't support null formatting https://github.com/apache/echarts/issues/15821
                 fieldValues[dimName] = { raw, formatted: String(val ?? '') };
             }
         });
+        // Stacked bar tuples only carry the plotted columns, so restore the
+        // clicked row's remaining ones (e.g. non-plotted dimensions) from the
+        // dataset row — without them their filters get silently dropped.
+        // Tuple values win: they are the clicked item.
+        if (e.datasetRow) {
+            Object.entries(e.datasetRow).forEach(([key, val]) => {
+                if (fieldValues[key] !== undefined || val === undefined) return;
+                const raw = val === '∅' ? null : val;
+                fieldValues[key] = { raw, formatted: String(val ?? '') };
+            });
+        }
         return fieldValues;
     }
 
@@ -55,11 +73,19 @@ const getPivotColumnNames = (pivotReference: {
     // Old format: field.pivotField.value (using hashFieldReference)
     names.push(hashFieldReference(pivotReference));
 
-    // New SQL pivot format: field_any_value
+    // New SQL pivot format, named by the same rule the backend pivot uses —
+    // including its '<null>' placeholder (PROD-7896 — without it the column
+    // lookup fails for null pivot segments and the click falls back to the
+    // wrong selectedField). The name carries every group-by value, so a chart
+    // grouped by more than one dimension needs all of them to match.
     if (pivotReference.pivotValues && pivotReference.pivotValues.length > 0) {
-        const pivotValue = pivotReference.pivotValues[0].value;
-        // Format: metricField_any_pivotValue (e.g., orders_total_order_amount_any_credit_card)
-        names.push(`${pivotReference.field}_any_${pivotValue}`);
+        names.push(
+            getPivotValueColumnName(
+                pivotReference.field,
+                VizAggregationOptions.ANY,
+                pivotReference.pivotValues.map((pivot) => pivot.value),
+            ),
+        );
     }
 
     return names;
@@ -100,12 +126,12 @@ export const getDataFromChartClick = (
 
     // For pivoted metrics, we need to find the value using any of the possible column names
     // and also ensure it's accessible via the hashFieldReference key
-    let selectedValue: unknown;
+    let selectedFieldValue: ResultValue | undefined;
     if (selectedField && pivotReference) {
         const possibleNames = getPivotColumnNames(pivotReference);
         const matchingName = possibleNames.find((name) => fieldValues[name]);
         if (matchingName) {
-            selectedValue = fieldValues[matchingName]?.raw;
+            selectedFieldValue = fieldValues[matchingName];
             // Also add the value under the hashFieldReference key for DrillDownMenuItem
             const hashKey = hashFieldReference(pivotReference);
             if (!fieldValues[hashKey] && fieldValues[matchingName]) {
@@ -113,16 +139,47 @@ export const getDataFromChartClick = (
             }
         }
     } else if (selectedField) {
-        selectedValue = fieldValues[getItemId(selectedField)]?.raw;
+        selectedFieldValue = fieldValues[getItemId(selectedField)];
+    }
+
+    const value = {
+        raw: selectedFieldValue?.raw,
+        formatted: formatItemValue(selectedField, selectedFieldValue?.raw),
+    };
+    if (selectedFieldValue) {
+        selectedFieldValue.formatted = value.formatted;
     }
 
     return {
         item: selectedField,
-        value: {
-            raw: selectedValue,
-            formatted: formatItemValue(selectedField, selectedValue),
-        },
+        value,
         fieldValues,
         pivotReference,
     };
+};
+
+/**
+ * Orders underlying-data field ids by their position in `show_underlying_values`
+ * (or the table's `default_show_underlying_values`). The modal table and its
+ * CSV/XLSX export both use this order so they stay in sync.
+ */
+export const getUnderlyingDataColumnOrder = (
+    fieldIds: string[],
+    showUnderlyingValues: string[] | undefined,
+    allFields: Array<Field | CustomDimension>,
+): string[] => {
+    if (showUnderlyingValues === undefined) return fieldIds;
+
+    const indexOfUnderlyingValue = (fieldId: string): number => {
+        const field = allFields.find((f) => getItemId(f) === fieldId);
+        if (field === undefined) return -1;
+        const index = showUnderlyingValues.indexOf(field.name);
+        return index !== -1
+            ? index
+            : showUnderlyingValues.indexOf(`${field.table}.${field.name}`);
+    };
+
+    return [...fieldIds].sort(
+        (a, b) => indexOfUnderlyingValue(a) - indexOfUnderlyingValue(b),
+    );
 };

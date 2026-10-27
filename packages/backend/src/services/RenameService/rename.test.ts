@@ -7,6 +7,7 @@ import {
     CustomVisConfig,
     DashboardDAO,
     DashboardFilterRule,
+    DataAppVizChartConfig,
     FilterGroup,
     FilterOperator,
     isFilterRuleDefinedForFieldId,
@@ -185,6 +186,22 @@ describe('createRenametableRename', () => {
             // And we need to replace the references separately, using different methods
             expect(tableRename.replaceId('payment_payment_id')).toBe(
                 'invoice_payment_id',
+            );
+            const joinedRename = createRenameFactory({
+                from: 'payment_items',
+                to: 'line_items',
+                fromReference: 'payment_items',
+                toReference: 'line_items',
+                fromFieldName: undefined,
+                toFieldName: undefined,
+                isPrefix: true,
+                protectedModelNames: ['payment', 'payment_items'],
+            });
+            expect(joinedRename.replaceId('payment_items_amount')).toBe(
+                'line_items_amount',
+            );
+            expect(joinedRename.replaceString('payment_items_amount')).toBe(
+                'line_items_amount',
             );
         });
         test('replaceId should not replace invalid prefix', () => {
@@ -469,6 +486,7 @@ describe('renameMetricQuery', () => {
                     table: 'payment',
                     sql: '${TABLE}.amount',
                     type: MetricType.SUM,
+                    baseMetricName: 'amount',
                     filters: [
                         {
                             id: '954711ae-88e0-4b24-9b27-47a676597b18',
@@ -513,6 +531,7 @@ describe('renameMetricQuery', () => {
                 : undefined,
         ).toBe('${payment.cost} * 2');
         expect(result.additionalMetrics?.[0].sql).toBe('${TABLE}.cost');
+        expect(result.additionalMetrics?.[0].baseMetricName).toBe('cost');
         expect(
             result.additionalMetrics?.[0].filters?.[0].target?.fieldRef,
         ).toBe('payment.cost');
@@ -756,6 +775,27 @@ describe('renameMetricQuery', () => {
 });
 
 describe('renameChartConfigType', () => {
+    test('renames scalar and ordered multiple data app viz field bindings', () => {
+        const chartConfig = {
+            type: ChartType.DATA_APP_VIZ,
+            config: {
+                dataAppVizUuid: 'viz-uuid',
+                fieldMapping: {
+                    category: 'payment_category',
+
+                    metrics: ['payment_amount', 'orders_count', 'payment_tax'],
+                },
+            },
+        } as DataAppVizChartConfig;
+
+        const result = renameChartConfigType(chartConfig, tableRename);
+
+        expect((result as DataAppVizChartConfig).config?.fieldMapping).toEqual({
+            category: 'invoice_category',
+            metrics: ['invoice_amount', 'orders_count', 'invoice_tax'],
+        });
+    });
+
     test('should rename table prefix in cartesian chart config', () => {
         const chartConfig = {
             type: ChartType.CARTESIAN,
@@ -952,6 +992,7 @@ describe('renameChartConfigType', () => {
                     mark: 'bar',
                     encoding: {
                         x: { field: 'payment_date' },
+                        y: { field: 'archived_payment_date' },
                     },
                 },
             },
@@ -962,10 +1003,56 @@ describe('renameChartConfigType', () => {
         const config = (result as CustomVisConfig).config!;
         expect((config.spec as AnyType).data.name).toBe('invoice_data');
         expect((config.spec?.encoding as AnyType).x.field).toBe('invoice_date');
+        expect((config.spec?.encoding as AnyType).y.field).toBe(
+            'archived_payment_date',
+        );
     });
 });
 
 describe('renameSavedChart', () => {
+    test('should repoint a split explore and its field references', () => {
+        const { updatedChart, hasChanges } = renameSavedChart({
+            type: RenameType.MODEL,
+            chart: {
+                ...chartMocked,
+                tableName: 'orders',
+                metricQuery: {
+                    ...chartMocked.metricQuery,
+                    exploreName: 'orders',
+                    dimensions: [],
+                    metrics: ['orders_amount'],
+                    sorts: [],
+                    tableCalculations: [],
+                    additionalMetrics: [],
+                    customDimensions: [],
+                },
+                tableConfig: {
+                    ...chartMocked.tableConfig,
+                    columnOrder: ['orders_amount'],
+                },
+            },
+            nameChanges: {
+                from: 'orders',
+                to: 'sourceA__orders',
+                fromReference: 'orders',
+                toReference: 'sourceA__orders',
+                fromFieldName: undefined,
+                toFieldName: undefined,
+            },
+            validate: false,
+        });
+
+        expect(hasChanges).toBe(true);
+        expect(updatedChart.tableName).toBe('sourceA__orders');
+        expect(updatedChart.metricQuery.exploreName).toBe('sourceA__orders');
+        expect(updatedChart.metricQuery.metrics).toEqual([
+            'sourceA__orders_amount',
+        ]);
+        expect(updatedChart.tableConfig.columnOrder).toEqual([
+            'sourceA__orders_amount',
+        ]);
+    });
+
     test('should rename mocked saved chart field', () => {
         const { updatedChart, hasChanges } = renameSavedChart({
             type: RenameType.FIELD,
@@ -983,6 +1070,46 @@ describe('renameSavedChart', () => {
 
         expect(hasChanges).toBe(true);
         expect(updatedChart).toEqual(expectedRenamedChartMocked); // toEqual doesn't check extra `undefined` fields
+    });
+    test('renames ordered multiple bindings in a saved data app viz config', () => {
+        const { updatedChart, hasChanges } = renameSavedChart({
+            type: RenameType.FIELD,
+            chart: {
+                ...chartMocked,
+                chartConfig: {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: {
+                        dataAppVizUuid: 'viz-uuid',
+                        fieldMapping: {
+                            category: 'orders_status',
+
+                            metrics: [
+                                'orders_status',
+                                'orders_order_date_week',
+                            ],
+                        },
+                    },
+                },
+            },
+            nameChanges: {
+                from: 'orders_status',
+                to: 'orders_order_type',
+                fromReference: 'orders.status',
+                toReference: 'orders.order_type',
+                fromFieldName: 'status',
+                toFieldName: 'order_type',
+            },
+            validate: false,
+        });
+
+        expect(hasChanges).toBe(true);
+        expect(
+            (updatedChart.chartConfig as DataAppVizChartConfig).config
+                ?.fieldMapping,
+        ).toEqual({
+            category: 'orders_order_type',
+            metrics: ['orders_order_type', 'orders_order_date_week'],
+        });
     });
     test('should rename mocked saved chart field with custom metric', () => {
         const { updatedChart, hasChanges } = renameSavedChart({
@@ -1224,6 +1351,7 @@ describe('renameSavedChart', () => {
             },
             pivotConfig: {
                 columns: ['payment_type'],
+                rows: ['payment_id', 'payment_amount'],
             },
         } as SavedChartDAO;
 
@@ -1260,6 +1388,10 @@ describe('renameSavedChart', () => {
             'invoice_amount',
         ]);
         expect(updatedChart.pivotConfig?.columns).toEqual(['invoice_type']);
+        expect(updatedChart.pivotConfig?.rows).toEqual([
+            'invoice_id',
+            'invoice_amount',
+        ]);
     });
 
     // Regression test for PROD-7548: model rename silently skipped charts
@@ -1419,39 +1551,38 @@ describe('renameDashboard', () => {
         );
     });
 
-    test('should return unchanged dashboard when no matches found', () => {
-        const dashboard = {
-            name: 'Customer Dashboard',
-            filters: {
-                dimensions: [
-                    {
-                        target: {
-                            fieldId: 'customer_id',
-                            tableName: 'customer',
-                        },
-                    },
-                ],
-                metrics: [],
-                tableCalculations: [],
-            },
-        } as unknown as DashboardDAO; // TODO fix
+    test.each([
+        { tableName: 'customer', fieldId: 'customer_id' },
+        { tableName: 'payment_v2', fieldId: 'payment_v2_id' },
+    ])(
+        'reports no changes for unaffected or already-renamed filters: $tableName',
+        ({ tableName, fieldId }) => {
+            const dashboard = {
+                name: 'Customer Dashboard',
+                filters: {
+                    metrics: [],
+                    dimensions: [{ target: { fieldId, tableName } }],
+                    tableCalculations: [],
+                },
+            } as unknown as DashboardDAO;
 
-        const { updatedDashboard, hasChanges } = renameDashboard(
-            RenameType.MODEL,
-            dashboard,
-            {
-                from: 'payment',
-                fromReference: 'payment',
-                to: 'invoice',
-                toReference: 'invoice',
-                fromFieldName: undefined,
-                toFieldName: undefined,
-            },
-        );
+            const { updatedDashboard, hasChanges } = renameDashboard(
+                RenameType.MODEL,
+                dashboard,
+                {
+                    from: 'payment',
+                    fromReference: 'payment',
+                    to: 'payment_v2',
+                    toReference: 'payment_v2',
+                    fromFieldName: undefined,
+                    toFieldName: undefined,
+                },
+            );
 
-        expect(hasChanges).toBe(false);
-        expect(updatedDashboard).toBe(dashboard); // Should be the same object reference
-    });
+            expect(hasChanges).toBe(false);
+            expect(updatedDashboard).toEqual(dashboard);
+        },
+    );
 });
 
 describe('validateRename', () => {
@@ -1467,7 +1598,7 @@ describe('validateRename', () => {
         toFieldName: undefined,
     };
     beforeEach(() => {
-        console.warn = jest.fn();
+        console.warn = vi.fn();
     });
 
     afterEach(() => {
@@ -1562,5 +1693,84 @@ describe('getNameChanges', () => {
             fromReference: 'payments',
             toReference: 'orders',
         });
+    });
+});
+
+describe('idempotent model rename (new name extends old, e.g. orders -> orders_restricted)', () => {
+    const nameChanges = {
+        from: 'orders',
+        to: 'orders_restricted',
+        fromReference: 'orders',
+        toReference: 'orders_restricted',
+        fromFieldName: undefined,
+        toFieldName: undefined,
+    };
+    const factory = createRenameFactory({ ...nameChanges, isPrefix: true });
+
+    test('replaceId renames bare ids but is a no-op on already-renamed ids', () => {
+        expect(factory.replaceId('orders_status')).toBe(
+            'orders_restricted_status',
+        );
+        // already renamed -> unchanged (previously doubled to orders_restricted_restricted_status)
+        expect(factory.replaceId('orders_restricted_status')).toBe(
+            'orders_restricted_status',
+        );
+    });
+
+    test('replaceString is a no-op on already-renamed ids', () => {
+        expect(factory.replaceString('orders_status')).toBe(
+            'orders_restricted_status',
+        );
+        expect(factory.replaceString('orders_restricted_status')).toBe(
+            'orders_restricted_status',
+        );
+    });
+
+    test('replaceFull renames the bare model but is a no-op on the renamed model', () => {
+        expect(factory.replaceFull('orders')).toBe('orders_restricted');
+        expect(factory.replaceFull('orders_restricted')).toBe(
+            'orders_restricted',
+        );
+    });
+
+    test('renameSavedChart is idempotent: applying the rename twice equals applying it once', () => {
+        const once = renameSavedChart({
+            type: RenameType.MODEL,
+            chart: chartMocked,
+            nameChanges,
+            validate: false,
+        }).updatedChart;
+        const twice = renameSavedChart({
+            type: RenameType.MODEL,
+            chart: once,
+            nameChanges,
+            validate: false,
+        }).updatedChart;
+
+        expect(twice).toEqual(once);
+        // sanity: the first rename happened and did not double anything
+        expect(once.tableName).toBe('orders_restricted');
+        expect(once.metricQuery.exploreName).toBe('orders_restricted');
+        expect(once.metricQuery.dimensions).toEqual([
+            'orders_restricted_status',
+            'orders_restricted_order_date_week',
+        ]);
+        expect(JSON.stringify(twice)).not.toContain(
+            'orders_restricted_restricted',
+        );
+    });
+
+    test('a normal rename (new name does not extend old) is unaffected by the guard', () => {
+        const normal = createRenameFactory({
+            from: 'payment',
+            to: 'invoice',
+            fromReference: 'payment',
+            toReference: 'invoice',
+            fromFieldName: undefined,
+            toFieldName: undefined,
+            isPrefix: true,
+        });
+        expect(normal.replaceId('payment_amount')).toBe('invoice_amount');
+        expect(normal.replaceFull('payment')).toBe('invoice');
     });
 });

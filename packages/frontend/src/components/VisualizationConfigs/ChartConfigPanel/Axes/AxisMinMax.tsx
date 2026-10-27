@@ -1,4 +1,4 @@
-import { Group, Switch, TextInput } from '@mantine-8/core';
+import { Group, Switch, TextInput } from '@mantine/core';
 import { useCallback, type FC } from 'react';
 import { useToggle } from 'react-use';
 import useTracking from '../../../../providers/Tracking/useTracking';
@@ -28,6 +28,7 @@ export const AxisMinMax: FC<Props> = ({ label, min, max, setMin, setMax }) => {
     return (
         <Group wrap="nowrap" gap="xs">
             <Switch
+                size="xs"
                 label={isAuto && label}
                 checked={isAuto}
                 onChange={() => {
@@ -46,12 +47,14 @@ export const AxisMinMax: FC<Props> = ({ label, min, max, setMin, setMax }) => {
                 <Group wrap="nowrap" gap="xs">
                     <Config.Label>Min</Config.Label>
                     <TextInput
+                        size="xs"
                         placeholder="Min"
                         defaultValue={min || undefined}
                         onBlur={(e) => setMin(e.currentTarget.value)}
                     />
                     <Config.Label>Max</Config.Label>
                     <TextInput
+                        size="xs"
                         placeholder="Max"
                         defaultValue={max || undefined}
                         onBlur={(e) => setMax(e.currentTarget.value)}

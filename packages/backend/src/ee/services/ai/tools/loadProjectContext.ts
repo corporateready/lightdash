@@ -1,0 +1,276 @@
+import {
+    formatAiProjectContextObjectRef,
+    loadProjectContextToolDefinition,
+    serializeAiProjectContextObjectRef,
+    type ToolLoadProjectContextOutput,
+    type ToolLoadProjectContextStructuredContent,
+} from '@lightdash/common';
+import { tool } from 'ai';
+import Logger from '../../../../logging/logger';
+import { renderMemoryBlockWithDetails } from '../utils/memoryBlock';
+import type {
+    ExecuteStructuredToolResult,
+    ExecuteToolErrorResult,
+} from '../utils/structuredToolResult';
+import { toModelOutput } from '../utils/toModelOutput';
+import { toolErrorOutput } from '../utils/toolErrorHandler';
+import { filterProjectContext } from './filterProjectContext';
+import type { ProjectContextSearchEntry } from './memoryProjectContext';
+
+const MEMORY_AWARE_DESCRIPTION =
+    "Load the project's curated business context and memories. Prefer `patterns`, which load only the entries relevant to the question.";
+
+type MemoryEntry = Extract<ProjectContextSearchEntry, { source: 'memory' }>;
+
+type LoadedStructuredContent = Extract<
+    ToolLoadProjectContextStructuredContent,
+    { outcome: 'loaded' }
+>;
+type NoMatchStructuredContent = Extract<
+    ToolLoadProjectContextStructuredContent,
+    { outcome: 'no_match' }
+>;
+type SuccessMetadata = ToolLoadProjectContextOutput['metadata'] & {
+    status: 'success';
+    entryIds: string[];
+    approxTokens: number;
+};
+type LoadProjectContextResult =
+    | ExecuteStructuredToolResult<
+          ToolLoadProjectContextStructuredContent,
+          SuccessMetadata
+      >
+    | ExecuteToolErrorResult;
+
+const isMemoryEntry = (
+    entry: ProjectContextSearchEntry,
+): entry is MemoryEntry => entry.source === 'memory';
+
+const renderMemories = (
+    entries: ProjectContextSearchEntry[],
+    getContent: (entry: MemoryEntry) => string,
+) =>
+    renderMemoryBlockWithDetails(
+        entries.filter(isMemoryEntry).map((entry) => ({
+            slug: entry.id,
+            content: getContent(entry),
+            scope: entry.memoryScope,
+            objects: entry.objects,
+            ageDays: entry.memoryAgeDays,
+        })),
+    );
+
+export const renderProjectContextEntries = (
+    entries: ProjectContextSearchEntry[],
+): string => {
+    if (entries.length === 0) {
+        return 'No project context is configured for this project.';
+    }
+    const context = entries
+        .filter(
+            (
+                entry,
+            ): entry is ProjectContextSearchEntry & {
+                source?: 'context';
+            } => entry.source !== 'memory',
+        )
+        .map((entry) => {
+            const terms =
+                entry.terms.length > 0
+                    ? ` terms: ${entry.terms.join(', ')};`
+                    : '';
+            const refs =
+                entry.objects.length > 0
+                    ? ` refs: ${entry.objects.map(formatAiProjectContextObjectRef).join(', ')};`
+                    : '';
+            const source = entry.source ? ' source: context;' : '';
+            const prefix = `- id: ${entry.id};${source} kind: ${entry.kind};${terms}${refs}`;
+            return `${prefix} content: ${entry.content}`;
+        })
+        .join('\n');
+    const memoryBlock = renderMemories(entries, (entry) => entry.content);
+
+    return [context, memoryBlock.block].filter(Boolean).join('\n');
+};
+
+const toLoadedEntry = (
+    entry: ProjectContextSearchEntry,
+): LoadedStructuredContent['entries'][number] =>
+    isMemoryEntry(entry)
+        ? {
+              id: entry.id,
+              source: 'memory',
+              scope: entry.memoryScope,
+              ageDays: entry.memoryAgeDays,
+              objects: entry.objects,
+              content: entry.content,
+          }
+        : {
+              id: entry.id,
+              source: 'context',
+              kind: entry.kind,
+              terms: entry.terms,
+              objects: entry.objects,
+              content: entry.content,
+          };
+
+// When patterns match nothing, list the available entries (id/kind/terms) so
+// the agent can retry with broader patterns or load everything — cheaper than
+// silently dumping the whole context.
+const renderNoMatch = (all: ProjectContextSearchEntry[]) => {
+    const context = all
+        .filter((entry) => entry.source !== 'memory')
+        .map((entry) => {
+            const terms =
+                entry.terms.length > 0
+                    ? ` terms: ${entry.terms.join(', ')};`
+                    : '';
+            const source = entry.source ? ` source: ${entry.source};` : '';
+            return `- id: ${entry.id};${source} kind: ${entry.kind};${terms}`;
+        })
+        .join('\n');
+    const memoryBlock = renderMemories(all, (entry) =>
+        entry.terms.length > 0
+            ? `Available search terms: ${entry.terms.join(', ')}`
+            : 'No search terms.',
+    );
+    const inventory = [context, memoryBlock.block].filter(Boolean).join('\n');
+
+    return {
+        result: `No context entry matched your patterns. Retry with broader patterns, or call again without patterns to load all ${all.length} entries:\n${inventory}`,
+        renderedMemoryCount: memoryBlock.renderedCount,
+        truncationNote: memoryBlock.truncationNote,
+    };
+};
+
+const toAvailableEntry = (
+    entry: ProjectContextSearchEntry,
+): NoMatchStructuredContent['available'][number] =>
+    isMemoryEntry(entry)
+        ? {
+              id: entry.id,
+              source: 'memory',
+              scope: entry.memoryScope,
+              ageDays: entry.memoryAgeDays,
+              objects: entry.objects,
+              terms: entry.terms,
+          }
+        : {
+              id: entry.id,
+              source: 'context',
+              kind: entry.kind,
+              terms: entry.terms,
+          };
+
+export const getLoadProjectContext = ({
+    getDocument,
+    includeMemories = false,
+    onEntriesLoaded,
+}: {
+    getDocument: () => Promise<ProjectContextSearchEntry[]>;
+    includeMemories?: boolean;
+    onEntriesLoaded?: (entries: ProjectContextSearchEntry[]) => Promise<void>;
+}) =>
+    tool({
+        ...loadProjectContextToolDefinition.for('agent'),
+        ...(includeMemories ? { description: MEMORY_AWARE_DESCRIPTION } : {}),
+        execute: async ({ patterns }): Promise<LoadProjectContextResult> => {
+            try {
+                const entries = await getDocument();
+                const selected = patterns?.length
+                    ? filterProjectContext(entries, patterns)
+                    : entries;
+
+                // Patterns given but nothing matched: surface the available
+                // entries instead of an empty result.
+                if (patterns?.length && selected.length === 0) {
+                    const rendered = renderNoMatch(entries);
+                    // Mirror the inventory as printed: context entries, then
+                    // the memories the block had room for.
+                    const availableEntries = [
+                        ...entries.filter((entry) => !isMemoryEntry(entry)),
+                        ...entries
+                            .filter(isMemoryEntry)
+                            .slice(0, rendered.renderedMemoryCount),
+                    ];
+                    return {
+                        result: rendered.result,
+                        metadata: {
+                            status: 'success',
+                            entryIds: [],
+                            approxTokens: 0,
+                        },
+                        structuredContent: {
+                            outcome: 'no_match',
+                            totalEntries: entries.length,
+                            available: availableEntries.map(toAvailableEntry),
+                            truncationNote: rendered.truncationNote,
+                        },
+                    };
+                }
+
+                try {
+                    await onEntriesLoaded?.(selected);
+                } catch (error) {
+                    Logger.warn(
+                        '[ProjectContext] failed to record loaded entries',
+                        error,
+                    );
+                }
+
+                const approxTokens = Math.ceil(
+                    selected.reduce(
+                        (sum, e) =>
+                            sum +
+                            e.content.length +
+                            e.id.length +
+                            e.terms.join(' ').length +
+                            e.objects
+                                .map(serializeAiProjectContextObjectRef)
+                                .join(' ').length +
+                            (e.source?.length ?? 0) +
+                            32,
+                        0,
+                    ) / 4,
+                );
+                const entryIds = selected.map((e) => e.id);
+                // Budget metric: what the agent actually loads per turn.
+                Logger.info(
+                    `[ProjectContext] loaded=${selected.length}/${
+                        entries.length
+                    } approxTokens=${approxTokens} patterns=${
+                        patterns?.join('|') ?? '(all)'
+                    } ids=${entryIds.join(',')}`,
+                );
+
+                // Mirror the entries as printed: context entries, then the
+                // memories the block had room for.
+                const memoryBlock = renderMemories(
+                    selected,
+                    (entry) => entry.content,
+                );
+                const loadedEntries = [
+                    ...selected.filter((entry) => !isMemoryEntry(entry)),
+                    ...selected
+                        .filter(isMemoryEntry)
+                        .slice(0, memoryBlock.renderedCount),
+                ];
+                return {
+                    result: renderProjectContextEntries(selected),
+                    metadata: {
+                        status: 'success',
+                        entryIds,
+                        approxTokens,
+                    },
+                    structuredContent: {
+                        outcome: 'loaded',
+                        entries: loadedEntries.map(toLoadedEntry),
+                        truncationNote: memoryBlock.truncationNote,
+                    },
+                };
+            } catch (error) {
+                return toolErrorOutput(error, 'Error loading project context');
+            }
+        },
+        toModelOutput: ({ output }) => toModelOutput(output),
+    });

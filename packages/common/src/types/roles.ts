@@ -1,4 +1,23 @@
 import type { ApiSuccessEmpty } from './api/success';
+import type { OrganizationMemberRole } from './organizationMemberProfile';
+import type { ProjectMemberRole } from './projectMemberRole';
+import type { PromotionAction } from './promotion';
+
+export type RoleLevel = 'project' | 'organization';
+
+/**
+ * Complete set of roles held at one level: at most one system role plus any
+ * number of custom roles. Permissions are the union of all held roles.
+ */
+export type OrganizationRoleSet = {
+    systemRole: OrganizationMemberRole | null;
+    customRoleUuids: string[];
+};
+
+export type ProjectRoleSet = {
+    systemRole: ProjectMemberRole | null;
+    customRoleUuids: string[];
+};
 
 export type ProjectAccess = {
     projectUuid: string;
@@ -7,6 +26,7 @@ export type ProjectAccess = {
     roleName: string;
     firstName: string;
     lastName: string;
+    hasMultipleRoles?: boolean;
 };
 
 export type GroupProjectAccess = {
@@ -15,12 +35,14 @@ export type GroupProjectAccess = {
     roleUuid: string;
     roleName: string;
     groupName: string;
+    hasMultipleRoles?: boolean;
 };
 
 export type Role = {
     roleUuid: string;
     name: string;
     description: string | null;
+    level: RoleLevel;
     organizationUuid: string | null; // System roles don't have an organization
     ownerType: 'user' | 'system';
     createdBy: string | null;
@@ -35,15 +57,41 @@ export type RoleWithScopes = Role & {
 export type CreateRole = {
     name: string;
     description?: string;
+    level?: RoleLevel;
     scopes?: string[];
 };
 
 export type UpdateRole = {
     name?: string;
-    description?: string;
+    description?: string | null;
     scopes?: {
         add: string[];
         remove: string[];
+    };
+};
+
+export type CustomRoleAsCode = {
+    version: 1;
+    name: string;
+    description: string | null;
+    level: RoleLevel;
+    scopes: string[];
+};
+
+export type ApiCustomRoleAsCodeListResponse = {
+    status: 'ok';
+    results: {
+        customRoles: CustomRoleAsCode[];
+    };
+};
+
+export type ApiCustomRoleAsCodeUpsertResponse = {
+    status: 'ok';
+    results: {
+        action:
+            | PromotionAction.CREATE
+            | PromotionAction.UPDATE
+            | PromotionAction.NO_CHANGES;
     };
 };
 
@@ -93,6 +141,18 @@ export type RoleAssignment = {
     projectId?: string; // for project-level assignments
     createdAt: Date;
     updatedAt: Date;
+    /** True when the assignee holds extra custom roles beyond `roleId` (see role sets). */
+    hasMultipleRoles?: boolean;
+};
+
+export type ApiOrganizationRoleSetResponse = {
+    status: 'ok';
+    results: OrganizationRoleSet;
+};
+
+export type ApiProjectRoleSetResponse = {
+    status: 'ok';
+    results: ProjectRoleSet;
 };
 
 export type CreateRoleAssignmentRequest = {

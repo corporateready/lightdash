@@ -9,11 +9,17 @@ import { parseFilters } from '../types/filterGrammar';
 import type {
     PreAggregateDef,
     PreAggregateMaterializationRole,
+    PreAggregateSort,
 } from '../types/preAggregate';
 import { TimeFrames } from '../types/timeFrames';
 import type { UserAttributeValueMap } from '../types/userAttributes';
 
 const PRE_AGGREGATE_NAME_PATTERN = /^[a-zA-Z0-9_]+$/;
+const EXTERNAL_TABLE_PATTERN =
+    /^(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:""|[^"\u0000-\u001F])+"|`[^`\u0000-\u001F]+`)(?:\.(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:""|[^"\u0000-\u001F])+"|`[^`\u0000-\u001F]+`))*$/;
+
+const isUnknownRecord = (value: unknown): value is Record<string, unknown> =>
+    isPlainObject(value);
 
 const parsePreAggregateGranularity = (
     granularity: string,
@@ -48,6 +54,72 @@ const parsePreAggregateStringArray = (
             );
         }
         return item.trim();
+    });
+};
+
+const parsePreAggregateSorts = (
+    value: unknown,
+    modelName: string,
+    preAggregateName: string,
+): PreAggregateSort[] => {
+    if (value === false) {
+        return [];
+    }
+
+    if (!Array.isArray(value)) {
+        throw new ParseError(
+            `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "sorts". Expected an array of sort entries, or false / [] to disable materialization sorting, or remove "sorts" for automatic sorting.`,
+        );
+    }
+
+    const fieldIds = new Set<string>();
+
+    return value.map((sort, index) => {
+        if (!isUnknownRecord(sort)) {
+            throw new ParseError(
+                `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "sorts" entry at index ${index}. Expected an object.`,
+            );
+        }
+
+        const { fieldId, descending, ...unknownFields } = sort;
+        const unsupportedFields = Object.keys(unknownFields);
+        if (unsupportedFields.length > 0) {
+            throw new ParseError(
+                `Pre-aggregate "${preAggregateName}" in model "${modelName}" has unsupported "sorts" fields: ${unsupportedFields.join(
+                    ', ',
+                )}`,
+            );
+        }
+
+        if (typeof fieldId !== 'string' || fieldId.trim().length === 0) {
+            throw new ParseError(
+                `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "sorts" entry at index ${index}: "fieldId" must be a non-empty string.`,
+            );
+        }
+        const normalizedFieldId = fieldId.trim();
+
+        if (fieldIds.has(normalizedFieldId)) {
+            throw new ParseError(
+                `Pre-aggregate "${preAggregateName}" in model "${modelName}" has duplicate "sorts" fieldId "${normalizedFieldId}".`,
+            );
+        }
+        fieldIds.add(normalizedFieldId);
+
+        if (descending === undefined) {
+            throw new ParseError(
+                `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "sorts" entry at index ${index}: "descending" is required.`,
+            );
+        }
+        if (typeof descending !== 'boolean') {
+            throw new ParseError(
+                `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "sorts" entry at index ${index}: "descending" must be a boolean.`,
+            );
+        }
+
+        return {
+            fieldId: normalizedFieldId,
+            descending,
+        };
     });
 };
 
@@ -128,6 +200,45 @@ const parseMaterializationRole = (
     };
 };
 
+const parsePreAggregateRefresh = (
+    refresh: unknown,
+    modelName: string,
+    preAggregateName: string,
+): PreAggregateDef['refresh'] | undefined => {
+    if (refresh === undefined) {
+        return undefined;
+    }
+    if (refresh === null || typeof refresh !== 'object') {
+        throw new ParseError(
+            `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "refresh". Expected an object with "cron" and/or "on_change".`,
+        );
+    }
+    const { cron: rawCron, on_change: rawOnChange } = refresh as Record<
+        string,
+        unknown
+    >;
+    if (rawCron != null && typeof rawCron !== 'string') {
+        throw new ParseError(
+            `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "refresh.cron". Expected a cron expression string.`,
+        );
+    }
+    if (rawOnChange != null && typeof rawOnChange !== 'boolean') {
+        throw new ParseError(
+            `Pre-aggregate "${preAggregateName}" in model "${modelName}" has invalid "refresh.on_change". Expected true or false.`,
+        );
+    }
+    // Empty/null cron is treated as unset, matching previous behaviour
+    const cron = rawCron?.trim() ? rawCron : undefined;
+    const onChange = rawOnChange ?? undefined;
+    if (cron === undefined && onChange === undefined) {
+        return undefined;
+    }
+    return {
+        ...(cron !== undefined ? { cron } : {}),
+        ...(onChange !== undefined ? { onChange } : {}),
+    };
+};
+
 export const parseDbtPreAggregateDef = (
     preAggregate: DbtPreAggregateDef | unknown,
     modelName: string,
@@ -188,6 +299,19 @@ export const parseDbtPreAggregateDef = (
         );
     }
 
+    const table =
+        typeof safePreAggregate?.table === 'string'
+            ? safePreAggregate.table.trim()
+            : undefined;
+    if (
+        safePreAggregate?.table !== undefined &&
+        (!table || !EXTERNAL_TABLE_PATTERN.test(table))
+    ) {
+        throw new ParseError(
+            `Pre-aggregate "${name}" in model "${modelName}" has invalid "table". Expected a qualified SQL identifier.`,
+        );
+    }
+
     const maxRows =
         typeof safePreAggregate?.max_rows === 'number'
             ? safePreAggregate.max_rows
@@ -207,6 +331,17 @@ export const parseDbtPreAggregateDef = (
               )
             : undefined;
 
+    const refresh = parsePreAggregateRefresh(
+        safePreAggregate?.refresh,
+        modelName,
+        name,
+    );
+
+    const sorts =
+        safePreAggregate?.sorts !== undefined
+            ? parsePreAggregateSorts(safePreAggregate.sorts, modelName, name)
+            : undefined;
+
     const filters = safePreAggregate?.filters
         ? parseFilters(safePreAggregate.filters)
         : undefined;
@@ -215,13 +350,13 @@ export const parseDbtPreAggregateDef = (
         name,
         dimensions,
         metrics,
+        ...(table ? { table } : {}),
+        ...(sorts !== undefined ? { sorts } : {}),
         ...(filters ? { filters } : {}),
         ...(timeDimension ? { timeDimension } : {}),
         ...(granularity ? { granularity } : {}),
         ...(maxRows !== undefined ? { maxRows } : {}),
-        ...(safePreAggregate.refresh?.cron
-            ? { refresh: { cron: safePreAggregate.refresh.cron } }
-            : {}),
+        ...(refresh ? { refresh } : {}),
         ...(materializationRole ? { materializationRole } : {}),
     };
 };

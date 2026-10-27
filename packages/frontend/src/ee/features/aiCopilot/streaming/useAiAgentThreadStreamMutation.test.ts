@@ -1,32 +1,205 @@
+import type { ReasoningUIPart } from 'ai';
 import { describe, expect, it } from 'vitest';
-import { getMcpUnavailableNoticeFromChunk } from './useAiAgentThreadStreamMutation';
+import {
+    getReasoningFromPart,
+    getStreamToolCallPart,
+    getStepProgressFromChunk,
+    readStreamResult,
+    getArtifactReadyFromChunk,
+} from './useAiAgentThreadStreamMutation';
 
-describe('getMcpUnavailableNoticeFromChunk', () => {
-    it('parses MCP unavailable data chunks', () => {
+describe('artifact readiness', () => {
+    it('accepts complete artifact references for an early thread refresh', () => {
+        const data = {
+            promptUuid: 'prompt',
+            artifactUuid: 'artifact',
+            versionUuid: 'version',
+        };
         expect(
-            getMcpUnavailableNoticeFromChunk({
-                type: 'data-mcp-unavailable',
+            getArtifactReadyFromChunk({
+                type: 'data-artifact-ready',
+                data,
+                transient: true,
+            }),
+        ).toEqual(data);
+    });
+
+    it('ignores malformed events and other stream chunks', () => {
+        expect(
+            getArtifactReadyFromChunk({
+                type: 'data-artifact-ready',
+                data: { versionUuid: 'version' },
+            }),
+        ).toBeNull();
+        expect(getArtifactReadyFromChunk({ type: 'finish' })).toBeNull();
+    });
+});
+
+describe('getReasoningFromPart', () => {
+    it('reads Gemini reasoning signatures', () => {
+        const part: ReasoningUIPart = {
+            type: 'reasoning',
+            text: 'Reasoning summary',
+            providerMetadata: {
+                google: { signature: 'gemini-signature' },
+            },
+        };
+
+        expect(getReasoningFromPart(part)).toEqual({
+            reasoningId: 'gemini-signature',
+            text: 'Reasoning summary',
+        });
+    });
+
+    it('leaves unsigned Gemini reasoning for downstream filtering', () => {
+        const part: ReasoningUIPart = {
+            type: 'reasoning',
+            text: 'Reasoning summary',
+            providerMetadata: {
+                google: { interactionId: 'interaction-id' },
+            },
+        };
+
+        expect(getReasoningFromPart(part)).toEqual({
+            reasoningId: undefined,
+            text: 'Reasoning summary',
+        });
+    });
+});
+
+describe('getStreamToolCallPart', () => {
+    it('keeps MCP tool input parts for live rendering', () => {
+        expect(
+            getStreamToolCallPart({
+                type: 'dynamic-tool',
+                toolName: 'mcp_lightdash__set_project',
+                toolCallId: 'toolu_123',
+                state: 'input-available',
+                input: {
+                    projectUuid: '3675b69e-8324-4110-bdca-059031aa8da3',
+                },
+            } as never),
+        ).toEqual({
+            type: 'toolCall',
+            toolCallId: 'toolu_123',
+            toolName: 'mcp_lightdash__set_project',
+            toolArgs: {
+                projectUuid: '3675b69e-8324-4110-bdca-059031aa8da3',
+            },
+            toolResult: null,
+            isPreliminary: undefined,
+            isArgsPartial: false,
+        });
+    });
+
+    it('keeps MCP tool output parts for live rendering', () => {
+        const output = {
+            content: [
+                {
+                    type: 'text',
+                    text: '{"projectName":"Jaffle shop"}',
+                },
+            ],
+        };
+
+        expect(
+            getStreamToolCallPart({
+                type: 'dynamic-tool',
+                toolName: 'mcp_lightdash__set_project',
+                toolCallId: 'toolu_123',
+                state: 'output-available',
+                input: {
+                    projectUuid: '3675b69e-8324-4110-bdca-059031aa8da3',
+                },
+                output,
+            } as never),
+        ).toEqual({
+            type: 'toolCall',
+            toolCallId: 'toolu_123',
+            toolName: 'mcp_lightdash__set_project',
+            toolArgs: {
+                projectUuid: '3675b69e-8324-4110-bdca-059031aa8da3',
+            },
+            toolResult: output,
+            isPreliminary: false,
+            isArgsPartial: false,
+        });
+    });
+});
+
+describe('readStreamResult', () => {
+    it('returns a successful stream read', async () => {
+        await expect(
+            readStreamResult(() => Promise.resolve('chunk')),
+        ).resolves.toEqual({ status: 'success', value: 'chunk' });
+    });
+
+    it('returns a stream read error without inspecting its message', async () => {
+        const error = new Error('browser-specific message');
+
+        await expect(
+            readStreamResult(() => Promise.reject(error)),
+        ).resolves.toEqual({ status: 'error', error });
+    });
+});
+
+describe('getStepProgressFromChunk', () => {
+    it('parses progress data chunks with a tool name', () => {
+        expect(
+            getStepProgressFromChunk({
+                type: 'data-step-progress',
                 data: {
-                    serverUuid: 'server-1',
-                    serverName: 'Docs MCP',
-                    message: 'Connection refused',
-                    status: 'error',
+                    message: 'Cloning project',
+                    toolName: 'editDbtProject',
                 },
                 transient: true,
             }),
         ).toEqual({
-            serverUuid: 'server-1',
-            serverName: 'Docs MCP',
-            message: 'Connection refused',
-            status: 'error',
+            message: 'Cloning project',
+            toolName: 'editDbtProject',
+            progressId: null,
+            progressStatus: null,
+        });
+    });
+
+    it('parses progress data chunks without a tool name (toolName null)', () => {
+        expect(
+            getStepProgressFromChunk({
+                type: 'data-step-progress',
+                data: { message: 'Running your query...' },
+                transient: true,
+            }),
+        ).toEqual({
+            message: 'Running your query...',
+            toolName: null,
+            progressId: null,
+            progressStatus: null,
         });
     });
 
     it('ignores unrelated chunks', () => {
         expect(
-            getMcpUnavailableNoticeFromChunk({
+            getStepProgressFromChunk({
                 type: 'text-start',
                 id: 'text-1',
+            }),
+        ).toBeNull();
+    });
+
+    it('ignores data-step-progress chunks with a non-string message', () => {
+        expect(
+            getStepProgressFromChunk({
+                type: 'data-step-progress',
+                data: { message: 42 as unknown as string },
+            }),
+        ).toBeNull();
+    });
+
+    it('ignores data-step-progress chunks with an empty message', () => {
+        expect(
+            getStepProgressFromChunk({
+                type: 'data-step-progress',
+                data: { message: '' },
             }),
         ).toBeNull();
     });

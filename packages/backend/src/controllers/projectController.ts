@@ -1,65 +1,111 @@
 import {
+    AlertAsCode,
     AnyType,
+    ApiAlertAsCodeListResponse,
+    ApiAlertAsCodeUpsertResponse,
     ApiCalculateTotalResponse,
     ApiChartAsCodeListResponse,
     ApiChartAsCodeUpsertResponse,
     ApiChartListResponse,
     ApiChartSummaryListResponse,
     ApiCreateTagResponse,
+    ApiCreateTrainingPreviewResponse,
     ApiDashboardAsCodeListResponse,
     ApiDashboardAsCodeUpsertResponse,
+    ApiDataTimezonePreview,
     ApiErrorPayload,
     ApiGetProjectGroupAccesses,
     ApiGetProjectMemberResponse,
+    ApiGoogleSheetsSyncAsCodeListResponse,
+    ApiGoogleSheetsSyncAsCodeUpsertResponse,
+    ApiPreviewExpirationProjectSettingsResponse,
+    ApiPreviewExpiresAtResponse,
     ApiProjectAccessListResponse,
     ApiProjectColorPaletteResponse,
     ApiProjectResponse,
+    ApiResultsCacheProjectSettingsResponse,
+    ApiScheduledDeliveryAsCodeListResponse,
+    ApiScheduledDeliveryAsCodeUpsertResponse,
     ApiSpaceSummaryListResponse,
     ApiSqlChartAsCodeListResponse,
     ApiSqlChartAsCodeUpsertResponse,
     ApiSqlQueryResults,
     ApiSuccessEmpty,
+    ApiVirtualViewAsCodeListResponse,
+    ApiVirtualViewAsCodeUpsertResponse,
     assertRegisteredAccount,
     CalculateTotalFromQuery,
     ChartAsCode,
+    ContentAsCodeType,
     CreateProjectMember,
     DashboardAsCode,
     DbtExposure,
     DbtProjectEnvironmentVariable,
+    ForbiddenError,
+    formatMergeQueryRefusal,
+    getErrorMessage,
     getRequestMethod,
+    GoogleSheetsSyncAsCode,
     isDuplicateDashboardParams,
     LightdashRequestMethodHeader,
     ParameterError,
+    QueryExecutionContext,
     RequestMethod,
+    ScheduledDeliveryAsCode,
     SqlChartAsCode,
     UpdateDefaultUserSpaces,
     UpdateMetadata,
+    UpdateProjectDetails,
     UpdateProjectMember,
     UserWarehouseCredentials,
+    VirtualViewAsCode,
+    type AgentSqlScope,
     type ApiCalculateSubtotalsResponse,
+    type ApiCompiledMergeQueryResults,
     type ApiCreateDashboardResponse,
     type ApiCreateDashboardWithChartsResponse,
     type ApiCreatePreviewResults,
+    type ApiExecuteAsyncMetricQueryResults,
     type ApiGetDashboardsResponse,
     type ApiGetTagsResponse,
+    type ApiRefreshBody,
     type ApiRefreshResults,
     type ApiSuccess,
     type ApiTableGroupsResults,
     type ApiUpdateDashboardsResponse,
+    type ApiUpstreamDiffResponse,
     type ApiVerifiedContentListResponse,
+    type ApiWarehouseConnectionTestBody,
+    type ApiWarehouseConnectionTestResponse,
     type CalculateSubtotalsFromQuery,
+    type CompileMergeQueryRequest,
     type CreateDashboard,
     type CreateDashboardWithCharts,
+    type DataTimezonePreviewRequest,
     type DuplicateDashboardParams,
+    type MergeQuery,
+    type MergeQueryColumns,
+    type MergeQueryError,
+    type MetricQuery,
+    type ParametersValuesMap,
+    type ProjectSummary,
+    type RunMergeQueryRequest,
+    type SharedSignInStatus,
     type Tag,
+    type UpdateAgentSqlScope,
     type UpdateMultipleDashboards,
+    type UpdatePreviewExpirationProjectSettings,
+    type UpdatePreviewExpiresAt,
     type UpdateQueryTimezoneSettings,
+    type UpdateResultsCacheProjectSettings,
     type UpdateSchedulerSettings,
+    type UUID,
 } from '@lightdash/common';
 import {
     Body,
     Delete,
     Deprecated,
+    Extension,
     Get,
     Hidden,
     Middlewares,
@@ -76,19 +122,58 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
+import { getContextFromHeader } from '../analytics/LightdashAnalytics';
 import { toSessionUser } from '../auth/account';
+import { assertAgentConnectionGrantOperation } from '../auth/agentConnectionGrants/evaluateGrant';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import type { DbTagUpdate } from '../database/entities/tags';
+import Logger from '../logging/logger';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
 import { BaseController } from './baseController';
 
+const isPositiveIntegerString = (value: string): boolean => /^\d+$/.test(value);
+
 @Route('/api/v1/projects')
 @Response<ApiErrorPayload>('default', 'Error')
 @Tags('Projects')
 export class ProjectController extends BaseController {
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Get('{projectUuid}/warehouse-credentials/shared-sign-in')
+    @OperationId('GetSharedSignInStatus')
+    async getSharedSignInStatus(
+        @Path() projectUuid: UUID,
+        @Request() req: express.Request,
+    ): Promise<ApiSuccess<SharedSignInStatus | null>> {
+        assertRegisteredAccount(req.account);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .getSharedSignInStatus(req.account, projectUuid),
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Post('{projectUuid}/warehouse-credentials/shared-sign-in')
+    @OperationId('ReconnectSharedSignIn')
+    async reconnectSharedSignIn(
+        @Path() projectUuid: UUID,
+        @Request() req: express.Request,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        await this.services
+            .getProjectService()
+            .reconnectSharedSignIn(req.account, projectUuid);
+        return { status: 'ok', results: undefined };
+    }
+
     /**
      * Get a project of an organiztion
      * @summary Get project
@@ -107,6 +192,52 @@ export class ProjectController extends BaseController {
             results: await this.services
                 .getProjectService()
                 .getProject(projectUuid, req.account!),
+        };
+    }
+
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{projectUuid}/dbt/manifest')
+    @OperationId('GetMergedDbtManifest')
+    async getMergedManifest(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<void> {
+        assertRegisteredAccount(req.account);
+        const body = await this.services
+            .getProjectService()
+            .getMergedManifest(req.account, projectUuid);
+        const res = req.res!;
+        res.status(200);
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'no-store');
+        await pipeline(Readable.from(body), res);
+    }
+
+    /**
+     * Update simple project details without changing its connection configuration
+     * @summary Update project details
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Patch('{projectUuid}/details')
+    @OperationId('UpdateProjectDetails')
+    async updateProjectDetails(
+        @Path() projectUuid: string,
+        @Body() body: UpdateProjectDetails,
+        @Request() req: express.Request,
+    ): Promise<ApiSuccess<ProjectSummary>> {
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .updateProjectDetails(projectUuid, req.account!, body),
         };
     }
 
@@ -141,7 +272,11 @@ export class ProjectController extends BaseController {
      * @param req express request
      * @param excludeChartsSavedInDashboard Whether to exclude charts that are saved in dashboards
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2024-12-09')),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{projectUuid}/chart-summaries')
     @Deprecated()
@@ -219,15 +354,21 @@ export class ProjectController extends BaseController {
      * There may be users that have access to the project via their organization membership.
      * @summary Get project member access
      *
-     * NOTE:
-     * We don't use the API on the frontend. Instead, we can call the API
-     * so that we make sure of the user's access to the project.
+     * @deprecated Use GET /api/v2/projects/{projectId}/roles/assignments instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use GET /api/v2/projects/{projectId}/roles/assignments instead.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{projectUuid}/user/{userUuid}')
     @OperationId('GetProjectMemberAccess')
     @Tags('Roles & Permissions')
+    @Deprecated()
     async getProjectMember(
         @Path() projectUuid: string,
         @Path() userUuid: string,
@@ -278,6 +419,33 @@ export class ProjectController extends BaseController {
     }
 
     /**
+     * Preview how the warehouse disambiguates "now" under a data timezone
+     * @summary Preview data timezone
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('preview-data-timezone')
+    @OperationId('PreviewDataTimezone')
+    async previewDataTimezone(
+        @Body() body: DataTimezonePreviewRequest,
+        @Request() req: express.Request,
+    ): Promise<ApiDataTimezonePreview> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results = await this.services
+            .getProjectService()
+            .previewDataTimezone(req.account, body);
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
      * Update a user's access to a project
      * @summary Update project access for user
      * @deprecated use ProjectRolesController.UpdateProjectUserRoleAssignment instead
@@ -286,6 +454,10 @@ export class ProjectController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2025-08-26'), {
+            suffixMessage:
+                'Use ProjectRolesController.UpdateProjectUserRoleAssignment instead.',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Patch('{projectUuid}/access/{userUuid}')
@@ -322,6 +494,10 @@ export class ProjectController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2025-08-26'), {
+            suffixMessage:
+                'Use ProjectRolesController.DeleteProjectUserRoleAssignment instead.',
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Delete('{projectUuid}/access/{userUuid}')
@@ -371,17 +547,30 @@ export class ProjectController extends BaseController {
     }
 
     /**
-     * Run a raw sql query against the project's warehouse connection
+     * Deprecated — use the v2 Execute SQL query endpoint instead.
+     *
+     * This endpoint was deprecated on 17 February 2025 and is past its sunset date (17 May 2025) — it may be removed at any time. Migrate to the v2 async query flow: Execute SQL query, then Get results.
      * @summary Run SQL query
-     * @deprecated Use /api/v1/projects/<project id>/sqlRunner/run instead
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/sql instead
      * @param projectUuid The uuid of the project to run the query against
      * @param body The query to run
      * @param req express request
      */
+    @Extension('x-mint', {
+        content: `<Warning>
+**This endpoint is deprecated and past its sunset date (17 May 2025) — it may be removed at any time.**
+
+Migrate to the v2 async query flow: [Execute SQL query](https://docs.lightdash.com/api-reference/v2/execute-sql-query) (\`POST /api/v2/projects/{projectUuid}/query/sql\`) to start the query, then [Get results](https://docs.lightdash.com/api-reference/v2/get-results) to fetch rows. See also [Cancel query](https://docs.lightdash.com/api-reference/v2/cancel-query) and [Download results](https://docs.lightdash.com/api-reference/v2/download-results).
+</Warning>`,
+    })
     @Middlewares([
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2025-02-17'), {
+            suffixMessage:
+                "Use 'POST /api/v2/projects/{projectUuid}/query/sql' in conjunction with 'GET /api/v2/projects/{projectUuid}/query/{queryUuid}' instead.",
+        }),
     ])
     @SuccessResponse('200', 'Success')
     @Post('{projectUuid}/sqlQuery')
@@ -399,18 +588,162 @@ export class ProjectController extends BaseController {
             status: 'ok',
             results: await this.services
                 .getProjectService()
-                .runSqlQuery(toSessionUser(req.account), projectUuid, body.sql),
+                .runSqlQuery(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    body.sql,
+                    {
+                        kind: 'connection',
+                        warehouseConnectionUuid: null,
+                    },
+                ),
         };
+    }
+
+    /**
+     * Compile several queries into a single merged warehouse statement.
+     *
+     * Returns the statement and the fields it produces, without running it.
+     * Use it to validate a merge while it is being built: a merge that would
+     * produce wrong numbers comes back with `errors` and a null `sql` — most
+     * importantly the fan-out case, where a query still carries a dimension
+     * that is neither joined on nor pivoted. Run a valid merge with
+     * POST {projectUuid}/mergeQuery/run.
+     * @summary Compile merge query
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ProjectController.CompileMergeQuery'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('{projectUuid}/mergeQuery/compile')
+    @OperationId('CompileMergeQuery')
+    @Tags('Exploring')
+    async CompileMergeQuery(
+        @Path() projectUuid: string,
+        @Body() body: CompileMergeQueryRequest,
+        @Request() req: express.Request,
+    ): Promise<{
+        status: 'ok';
+        results: ApiCompiledMergeQueryResults;
+    }> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            // The async query service, not the base project service: result
+            // sources resolve from query history, which only it can reach
+            results: await this.services
+                .getAsyncQueryService()
+                .compileMergeQuery({
+                    account: req.account,
+                    projectUuid,
+                    mergeQuery: body.mergeQuery,
+                    parameters: body.parameters,
+                }),
+        };
+    }
+
+    /**
+     * Run a merge, returning a query uuid to page results from.
+     *
+     * The merged statement is registered as an ordinary async query, so its
+     * results are fetched, formatted, cancelled and downloaded through the
+     * same endpoints as any other query — page them with
+     * GET /api/v2/projects/{projectUuid}/query/{queryUuid}.
+     *
+     * A merge that cannot be run is rejected here rather than returned:
+     * compile it first to show the problem against the query that caused it.
+     * @summary Run merge query
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ProjectController.RunMergeQuery'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('{projectUuid}/mergeQuery/run')
+    @OperationId('RunMergeQuery')
+    @Tags('Exploring')
+    async RunMergeQuery(
+        @Path() projectUuid: string,
+        @Body() body: RunMergeQueryRequest,
+        @Request() req: express.Request,
+    ): Promise<{
+        status: 'ok';
+        results: ApiExecuteAsyncMetricQueryResults;
+    }> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const result = await this.services
+            .getAsyncQueryService()
+            .executeLegacyAsyncMergeQuery({
+                account: req.account,
+                projectUuid,
+                mergeQuery: body.mergeQuery,
+                parameters: body.parameters,
+                mode:
+                    body.csvLimit === undefined
+                        ? { type: 'interactive' }
+                        : { type: 'export', limit: body.csvLimit },
+                pivotConfiguration: body.pivotConfiguration,
+                context:
+                    getContextFromHeader(req) ?? QueryExecutionContext.EXPLORE,
+            });
+        if (result.outcome === 'refused') {
+            throw new ParameterError(formatMergeQueryRefusal(result.errors), {
+                errors: result.errors,
+            });
+        }
+        return { status: 'ok', results: result.query };
+    }
+
+    /**
+     * Tests warehouse credentials without saving them. Reports each SSH tunnel hop and the database login separately so a broken bastion setup points at the step to fix.
+     * @summary Test warehouse connection
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('{projectUuid}/warehouse/test')
+    @OperationId('testWarehouseConnection')
+    async testWarehouseConnection(
+        @Path() projectUuid: UUID,
+        @Body() body: ApiWarehouseConnectionTestBody,
+        @Request() req: express.Request,
+    ): Promise<ApiWarehouseConnectionTestResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results = await this.services
+            .getProjectService()
+            .testWarehouseConnection(
+                req.account,
+                projectUuid,
+                body.warehouseConnection,
+            );
+        return { status: 'ok', results };
     }
 
     /**
      * Calculate all metric totals from a metricQuery
      * @summary Calculate total from query
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total instead, which computes totals from a previously-executed async query.
      * @param projectUuid The uuid of the project to get charts for
      * @param body The metric query to calculate totals for
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-05-29'), {
+            suffixMessage:
+                'Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total instead, which computes totals from a previously-executed async query.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('{projectUuid}/calculate-total')
     @OperationId('CalculateTotalFromQuery')
@@ -431,9 +764,17 @@ export class ProjectController extends BaseController {
 
     /**
      * Calculate subtotals from a metricQuery
+     * @deprecated Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total with kind 'columnSubtotal' instead.
      * @summary Calculate subtotals from query
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-04'), {
+            suffixMessage:
+                "Use POST /api/v2/projects/{projectUuid}/query/{queryUuid}/calculate-total with kind 'columnSubtotal' instead.",
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('{projectUuid}/calculate-subtotals')
     @OperationId('CalculateSubtotalsFromQuery')
@@ -536,7 +877,13 @@ export class ProjectController extends BaseController {
      * Update the user's warehouse credentials preference for a project
      * @summary Update user warehouse credentials preference
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'ProjectController.updateUserWarehouseCredentialsPreference',
+        ),
+    ])
     @SuccessResponse('200', 'Success')
     @Patch('{projectUuid}/user-credentials/{userWarehouseCredentialsUuid}')
     @OperationId('updateUserWarehouseCredentialsPreference')
@@ -563,11 +910,20 @@ export class ProjectController extends BaseController {
     /**
      * Get all custom metrics in a project
      * @summary List custom metrics
+     *
+     * @deprecated No replacement, this endpoint will be removed
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage: 'No replacement, this endpoint will be removed.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{projectUuid}/custom-metrics')
     @OperationId('getCustomMetrics')
+    @Deprecated()
     async getCustomMetrics(
         @Path() projectUuid: string,
         @Request() req: express.Request,
@@ -623,7 +979,8 @@ export class ProjectController extends BaseController {
 
     /**
      * Toggle default user spaces for a project.
-     * When enabled, creates personal spaces for all eligible users.
+     * When enabled, queues a background job that creates personal spaces
+     * for all eligible users.
      * @summary Update default user spaces setting
      */
     @Middlewares([
@@ -781,7 +1138,11 @@ export class ProjectController extends BaseController {
      * Get all dashboards in a project
      * @summary List dashboards
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ProjectController.getDashboards'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{projectUuid}/dashboards')
     @OperationId('getDashboards')
@@ -822,6 +1183,7 @@ export class ProjectController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('ProjectController.createDashboard'),
     ])
     @SuccessResponse('201', 'Created')
     @Post('{projectUuid}/dashboards')
@@ -832,7 +1194,6 @@ export class ProjectController extends BaseController {
         @Request() req: express.Request,
         @Query() duplicateFrom?: string,
     ): Promise<ApiCreateDashboardResponse> {
-        assertRegisteredAccount(req.account);
         const dashboardService = this.services.getDashboardService();
         this.setStatus(201);
 
@@ -845,8 +1206,8 @@ export class ProjectController extends BaseController {
                 );
             }
 
-            results = await dashboardService.duplicate(
-                toSessionUser(req.account),
+            results = await dashboardService.duplicateFromAccount(
+                req.account!,
                 projectUuid,
                 duplicateFrom.toString(),
                 body,
@@ -858,8 +1219,8 @@ export class ProjectController extends BaseController {
                 );
             }
 
-            results = await dashboardService.create(
-                toSessionUser(req.account),
+            results = await dashboardService.createFromAccount(
+                req.account!,
                 projectUuid,
                 body,
             );
@@ -893,7 +1254,7 @@ export class ProjectController extends BaseController {
         this.setStatus(201);
 
         const results = await dashboardService.createDashboardWithCharts(
-            toSessionUser(req.account),
+            req.account,
             projectUuid,
             body,
         );
@@ -912,6 +1273,7 @@ export class ProjectController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('ProjectController.updateDashboards'),
     ])
     @SuccessResponse('200', 'Updated')
     @Patch('{projectUuid}/dashboards')
@@ -942,6 +1304,7 @@ export class ProjectController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('ProjectController.createPreview'),
     ])
     @SuccessResponse('200', 'Created')
     @Post('{projectUuid}/createPreview')
@@ -952,6 +1315,7 @@ export class ProjectController extends BaseController {
         body: {
             name: string;
             copyContent: boolean;
+            asyncCopyContent?: boolean;
             dbtConnectionOverrides?: {
                 branch?: string;
                 environment?: DbtProjectEnvironmentVariable[];
@@ -964,15 +1328,235 @@ export class ProjectController extends BaseController {
         assertRegisteredAccount(req.account);
         this.setStatus(200);
 
+        const results = await this.services.getProjectService().createPreview(
+            toSessionUser(req.account),
+            projectUuid,
+            {
+                name: body.name,
+                copyContent: body.copyContent,
+                dbtConnectionOverrides: body.dbtConnectionOverrides,
+                warehouseConnectionOverrides: body.warehouseConnectionOverrides,
+            },
+            RequestMethod.WEB_APP,
+            body.asyncCopyContent,
+        );
+
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * The caller's own copy of the training project for a walkthrough: the
+     * copy they already have, kept for another day, or a new one from the
+     * seeded state when they have none or it has expired.
+     * @summary Create training preview
+     * @param projectUuid the training project
+     */
+    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @SuccessResponse('200', 'Success')
+    @Post('{projectUuid}/training-previews')
+    @OperationId('CreateTrainingPreview')
+    async createTrainingPreview(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiCreateTrainingPreviewResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
         const results = await this.services
             .getProjectService()
-            .createPreview(
+            .createTrainingPreview(toSessionUser(req.account), projectUuid);
+        return { status: 'ok', results };
+    }
+
+    /**
+     * Remove the caller's own copies of the training project, once a
+     * walkthrough is finished or abandoned.
+     * @summary Delete training previews
+     * @param projectUuid the training project
+     */
+    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @SuccessResponse('200', 'Success')
+    @Delete('{projectUuid}/training-previews')
+    @OperationId('DeleteTrainingPreviews')
+    async deleteTrainingPreviews(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        await this.services
+            .getProjectService()
+            .deleteTrainingPreviews(toSessionUser(req.account), projectUuid);
+        return { status: 'ok', results: undefined };
+    }
+
+    /**
+     * Diff a preview project against the project it was copied from, using the
+     * catalog index. Detects added/removed fields and label changes; does not
+     * detect SQL-only field changes.
+     * @summary Get upstream diff
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{projectUuid}/upstreamDiff')
+    @OperationId('getUpstreamDiff')
+    async getUpstreamDiff(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiUpstreamDiffResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .getUpstreamDiff(projectUuid, req.account),
+        };
+    }
+
+    /**
+     * Get preview project expiration settings for a project
+     * @summary Get preview expiration settings
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{projectUuid}/previews-config')
+    @OperationId('getProjectPreviewExpirationSettings')
+    async getProjectPreviewExpirationSettings(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiPreviewExpirationProjectSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        const settings = await this.services
+            .getProjectService()
+            .getProjectPreviewExpirationSettings(
+                toSessionUser(req.account),
+                projectUuid,
+            );
+        return {
+            status: 'ok',
+            results: settings,
+        };
+    }
+
+    /**
+     * Update preview project expiration settings for a project
+     * @summary Update preview expiration settings
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Updated')
+    @Patch('{projectUuid}/previews-config')
+    @OperationId('updateProjectPreviewExpirationSettings')
+    async updateProjectPreviewExpirationSettings(
+        @Path() projectUuid: string,
+        @Body() body: UpdatePreviewExpirationProjectSettings,
+        @Request() req: express.Request,
+    ): Promise<ApiPreviewExpirationProjectSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        const settings = await this.services
+            .getProjectService()
+            .updateProjectPreviewExpirationSettings(
                 toSessionUser(req.account),
                 projectUuid,
                 body,
-                RequestMethod.WEB_APP,
             );
+        return {
+            status: 'ok',
+            results: settings,
+        };
+    }
 
+    /**
+     * Get the results cache TTL for a project. A null TTL means the
+     * instance-wide default applies.
+     * @summary Get results cache settings
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{projectUuid}/results-cache-config')
+    @OperationId('getProjectResultsCacheSettings')
+    async getProjectResultsCacheSettings(
+        @Path() projectUuid: UUID,
+        @Request() req: express.Request,
+    ): Promise<ApiResultsCacheProjectSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        const settings = await this.services
+            .getProjectService()
+            .getProjectResultsCacheSettings(
+                toSessionUser(req.account),
+                projectUuid,
+            );
+        return {
+            status: 'ok',
+            results: settings,
+        };
+    }
+
+    /**
+     * Update the results cache TTL for a project. Pass null to fall back to
+     * the instance-wide default.
+     * @summary Update results cache settings
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Updated')
+    @Patch('{projectUuid}/results-cache-config')
+    @OperationId('updateProjectResultsCacheSettings')
+    async updateProjectResultsCacheSettings(
+        @Path() projectUuid: UUID,
+        @Body() body: UpdateResultsCacheProjectSettings,
+        @Request() req: express.Request,
+    ): Promise<ApiResultsCacheProjectSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        const settings = await this.services
+            .getProjectService()
+            .updateProjectResultsCacheSettings(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+            );
+        return {
+            status: 'ok',
+            results: settings,
+        };
+    }
+
+    /**
+     * Update the expiration date of a preview project. The expiration is
+     * recomputed from now, clamped to the upstream project's maximum preview
+     * expiration. Omit expiresInHours to reset to the upstream default.
+     * @summary Update preview expiration
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Updated')
+    @Patch('{projectUuid}/preview-expiration')
+    @OperationId('updatePreviewExpiresAt')
+    async updatePreviewExpiresAt(
+        @Path() projectUuid: string,
+        @Body() body: UpdatePreviewExpiresAt,
+        @Request() req: express.Request,
+    ): Promise<ApiPreviewExpiresAtResponse> {
+        assertRegisteredAccount(req.account);
+        const results = await this.services
+            .getProjectService()
+            .updatePreviewExpiresAt(
+                toSessionUser(req.account),
+                projectUuid,
+                body.expiresInHours,
+            );
         return {
             status: 'ok',
             results,
@@ -987,6 +1571,7 @@ export class ProjectController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('ProjectController.updateSchedulerSettings'),
     ])
     @SuccessResponse('200', 'Updated')
     @Patch('{projectUuid}/schedulerSettings')
@@ -1043,6 +1628,59 @@ export class ProjectController extends BaseController {
                 throw e;
             }
         }
+
+        return {
+            status: 'ok',
+            results: undefined,
+        };
+    }
+
+    /**
+     * Get the agent SQL scope for a project
+     * @summary Get agent SQL scope
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{projectUuid}/agentSqlScope')
+    @OperationId('getAgentSqlScope')
+    async getAgentSqlScope(
+        @Path() projectUuid: UUID,
+        @Request() req: express.Request,
+    ): Promise<{ status: 'ok'; results: AgentSqlScope | null }> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .getAgentSqlScope(req.account, projectUuid),
+        };
+    }
+
+    /**
+     * Update the agent SQL scope for a project
+     * @summary Update agent SQL scope
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Updated')
+    @Patch('{projectUuid}/agentSqlScope')
+    @OperationId('updateAgentSqlScope')
+    async updateAgentSqlScope(
+        @Path() projectUuid: UUID,
+        @Body() body: UpdateAgentSqlScope,
+        @Request() req: express.Request,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+
+        await this.services
+            .getProjectService()
+            .updateAgentSqlScope(req.account, projectUuid, body);
 
         return {
             status: 'ok',
@@ -1215,233 +1853,15 @@ export class ProjectController extends BaseController {
         @Path() projectUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiGetTagsResponse> {
-        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const results = await this.services
             .getProjectService()
-            .getTags(toSessionUser(req.account), projectUuid);
+            .getTags(req.account!, projectUuid);
 
         return {
             status: 'ok',
             results,
-        };
-    }
-
-    /**
-     * Get charts in code representation
-     * @summary List charts as code
-     */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Get('{projectUuid}/charts/code')
-    @OperationId('getChartsAsCode')
-    async getChartsAsCode(
-        @Path() projectUuid: string,
-        @Request() req: express.Request,
-        @Query() ids?: string[],
-        @Query() offset?: number,
-        @Query() languageMap?: boolean,
-    ): Promise<ApiChartAsCodeListResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services
-                .getCoderService()
-                .getCharts(
-                    toSessionUser(req.account),
-                    projectUuid,
-                    ids,
-                    offset,
-                    languageMap,
-                ),
-        };
-    }
-
-    /**
-     * Get dashboards in code representation
-     * @summary List dashboards as code
-     */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Get('{projectUuid}/dashboards/code')
-    @OperationId('getDashboardsAsCode')
-    async getDashboardsAsCode(
-        @Path() projectUuid: string,
-        @Request() req: express.Request,
-        @Query() ids?: string[],
-        @Query() offset?: number,
-        @Query() languageMap?: boolean,
-    ): Promise<ApiDashboardAsCodeListResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services
-                .getCoderService()
-                .getDashboards(
-                    toSessionUser(req.account),
-                    projectUuid,
-                    ids,
-                    offset,
-                    languageMap,
-                ),
-        };
-    }
-
-    /**
-     * Upsert a chart from code representation
-     * @summary Upsert chart as code
-     */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Post('{projectUuid}/charts/{slug}/code')
-    @OperationId('upsertChartAsCode')
-    async upsertChartAsCode(
-        @Path() projectUuid: string,
-        @Path() slug: string,
-        @Body()
-        chart: Omit<ChartAsCode, 'chartConfig' | 'description'> & {
-            skipSpaceCreate?: boolean;
-            publicSpaceCreate?: boolean;
-            force?: boolean;
-            spaceNames?: Record<string, string>;
-            chartConfig: AnyType;
-            description?: string | null; // Allow both undefined and null
-        },
-        @Request() req: express.Request,
-    ): Promise<ApiChartAsCodeUpsertResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services.getCoderService().upsertChart(
-                toSessionUser(req.account),
-                projectUuid,
-                slug,
-                {
-                    ...chart,
-                    description: chart.description ?? undefined,
-                },
-                chart.skipSpaceCreate,
-                chart.publicSpaceCreate,
-                chart.force,
-                chart.spaceNames,
-            ),
-        };
-    }
-
-    /**
-     * Gets SQL charts in code representation
-     * @summary Get SQL charts as code
-     */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Get('{projectUuid}/sqlCharts/code')
-    @OperationId('getSqlChartsAsCode')
-    async getSqlChartsAsCode(
-        @Path() projectUuid: string,
-        @Request() req: express.Request,
-        @Query() ids?: string[],
-        @Query() offset?: number,
-    ): Promise<ApiSqlChartAsCodeListResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services
-                .getCoderService()
-                .getSqlCharts(
-                    toSessionUser(req.account),
-                    projectUuid,
-                    ids,
-                    offset,
-                ),
-        };
-    }
-
-    /**
-     * Upserts an SQL chart from code representation
-     * @summary Upsert SQL chart as code
-     */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Post('{projectUuid}/sqlCharts/{slug}/code')
-    @OperationId('upsertSqlChartAsCode')
-    async upsertSqlChartAsCode(
-        @Path() projectUuid: string,
-        @Path() slug: string,
-        @Body()
-        sqlChart: Omit<SqlChartAsCode, 'config' | 'description'> & {
-            skipSpaceCreate?: boolean;
-            publicSpaceCreate?: boolean;
-            force?: boolean;
-            spaceNames?: Record<string, string>;
-            config: AnyType;
-            description?: string | null;
-        },
-        @Request() req: express.Request,
-    ): Promise<ApiSqlChartAsCodeUpsertResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services.getCoderService().upsertSqlChart(
-                toSessionUser(req.account),
-                projectUuid,
-                slug,
-                {
-                    ...sqlChart,
-                    description: sqlChart.description ?? null,
-                },
-                sqlChart.skipSpaceCreate,
-                sqlChart.publicSpaceCreate,
-                sqlChart.force,
-                sqlChart.spaceNames,
-            ),
-        };
-    }
-
-    /**
-     * Upsert a dashboard from code representation
-     * @summary Upsert dashboard as code
-     */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
-    @SuccessResponse('200', 'Success')
-    @Post('{projectUuid}/dashboards/{slug}/code')
-    @OperationId('upsertDashboardAsCode')
-    async upsertDashboardAsCode(
-        @Path() projectUuid: string,
-        @Path() slug: string,
-        @Body()
-        dashboard: Omit<DashboardAsCode, 'tiles' | 'description'> & {
-            skipSpaceCreate?: boolean;
-            publicSpaceCreate?: boolean;
-            force?: boolean;
-            spaceNames?: Record<string, string>;
-            tiles: AnyType;
-            description?: string | null; // Allow both undefined and null
-        }, // Simplify filter type for tsoa
-        @Request() req: express.Request,
-    ): Promise<ApiDashboardAsCodeUpsertResponse> {
-        assertRegisteredAccount(req.account);
-        this.setStatus(200);
-        return {
-            status: 'ok',
-            results: await this.services.getCoderService().upsertDashboard(
-                toSessionUser(req.account),
-                projectUuid,
-                slug,
-                {
-                    ...dashboard,
-                    description: dashboard.description ?? undefined,
-                },
-                dashboard.skipSpaceCreate,
-                dashboard.publicSpaceCreate,
-                dashboard.force,
-                dashboard.spaceNames,
-            ),
         };
     }
 
@@ -1456,17 +1876,46 @@ export class ProjectController extends BaseController {
         @Path() projectUuid: string,
         @Body() body: AnyType,
     ) {
-        // TODO validate webhook signature https://docs.getdbt.com/docs/deploy/webhooks#validate-a-webhook
         if (!body) {
             throw new ParameterError('Invalid body');
         }
         if (body.eventType === 'job.run.completed') {
-            // TODO: validate body is an object and has the account id and run id
-            const accountId: string = body.accountId as string;
-            const runId: string = body.data.runId as string;
-            await this.services
-                .getProjectService()
-                .createPreviewWithExplores(projectUuid, accountId, runId);
+            const accountId = String(body.accountId);
+            const runId =
+                typeof body.data === 'object' && body.data !== null
+                    ? String(body.data.runId)
+                    : '';
+            if (
+                !isPositiveIntegerString(accountId) ||
+                !isPositiveIntegerString(runId)
+            ) {
+                throw new ParameterError('Invalid accountId or runId');
+            }
+            try {
+                await this.services
+                    .getProjectService()
+                    .createPreviewFromDbtCloudWebhook(
+                        projectUuid,
+                        Number(accountId),
+                        Number(runId),
+                        {
+                            rawBody: req.rawBody ?? null,
+                            signature: req.header('authorization') ?? null,
+                        },
+                    );
+            } catch (e) {
+                // Reject invalid signatures, but acknowledge other failures
+                // (e.g. dbt Cloud's test webhook references a non-existent run)
+                // so they don't surface as a 500.
+                if (e instanceof ForbiddenError) {
+                    throw e;
+                }
+                Logger.error(
+                    `dbt Cloud webhook for project ${projectUuid} could not create a preview: ${getErrorMessage(
+                        e,
+                    )}`,
+                );
+            }
         }
 
         this.setStatus(200);
@@ -1490,8 +1939,22 @@ export class ProjectController extends BaseController {
     async refresh(
         @Path() projectUuid: string,
         @Request() req: express.Request,
+        @Body() body?: ApiRefreshBody,
     ): Promise<ApiSuccess<ApiRefreshResults>> {
         assertRegisteredAccount(req.account);
+        assertAgentConnectionGrantOperation(req.account, {
+            kind: 'rest',
+            key: 'ProjectController.refresh',
+            projectUuids: [projectUuid],
+        });
+        if (
+            req.account.authentication.type === 'oauth' &&
+            req.account.authentication.agentConnectionGrant &&
+            body?.syncContent === true
+        )
+            throw new ForbiddenError(
+                "This agent connection can't sync content during refresh.",
+            );
         this.setStatus(200);
         const context = getRequestMethod(
             req.header(LightdashRequestMethodHeader),
@@ -1502,6 +1965,9 @@ export class ProjectController extends BaseController {
                 toSessionUser(req.account),
                 projectUuid,
                 context,
+                false,
+                false,
+                body?.syncContent === true,
             );
         return {
             status: 'ok',

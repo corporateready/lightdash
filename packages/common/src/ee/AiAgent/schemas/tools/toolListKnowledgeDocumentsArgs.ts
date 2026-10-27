@@ -1,30 +1,73 @@
-import { type z } from 'zod';
+import { z } from 'zod';
+import { type ToolDescriptionContext } from '../defineTool';
+import {
+    baseOutputMetadataSchema,
+    structuredToolOutputSchema,
+} from '../outputMetadata';
 import { createToolSchema } from '../toolSchemaBuilder';
+import { toolNameFor } from './discoveryToolNames';
 
-const TOOL_LIST_KNOWLEDGE_DOCUMENTS_DESCRIPTION = `Tool: list_knowledge_documents
+export const TOOL_LIST_KNOWLEDGE_DOCUMENTS_DESCRIPTION = ({
+    runtime,
+    toolName,
+}: ToolDescriptionContext): string => {
+    const getKnowledgeDocumentContent = toolNameFor(
+        'getKnowledgeDocumentContent',
+        runtime,
+    );
+    return `Tool: ${toolName}
 
 Purpose:
-List the knowledge documents that have been curated for this AI agent by the organization. These are short, user-written reference notes (business rules, glossaries, definitions, policies, runbooks, domain background) intended to extend the agent's understanding of the project beyond what the semantic layer and warehouse schema describe.
-
-Each item in the result includes a short summary describing what the document is about. Use that summary to decide whether the full content is worth reading with get_knowledge_document_content.
+List the knowledge documents curated for this agent and the Deep Research reports from this conversation, each with a summary that tells you whether its full text is worth reading with ${getKnowledgeDocumentContent}.
 
 When to use:
-- At the start of a task, to discover what curated knowledge exists that might be relevant.
-- When the user references a concept that might be defined in business documentation (e.g. "what counts as an active user", "how do we classify a refund").
-- When you need background or policy context that the data warehouse alone cannot provide.
-
-Do NOT use:
-- For data queries — use runQuery / runSql / findFields instead.
-- For schema or table discovery — use findExplores / listWarehouseTables instead.
-
-Parameters:
-- (no parameters)
+"Available knowledge documents" in the system prompt already lists the curated documents, so call this to find a Deep Research report from this conversation.
 `;
+};
 
-export const toolListKnowledgeDocumentsArgsSchema = createToolSchema({
-    description: TOOL_LIST_KNOWLEDGE_DOCUMENTS_DESCRIPTION,
-}).build();
+export const toolListKnowledgeDocumentsArgsSchema = createToolSchema().build();
+
+export const toolListKnowledgeDocumentsStructuredContentSchema = z.object({
+    count: z
+        .number()
+        .int()
+        .describe('Number of knowledge documents curated for this agent.'),
+    documents: z.array(
+        z.object({
+            uuid: z
+                .string()
+                .describe(
+                    'Pass to getKnowledgeDocumentContent to read the full document.',
+                ),
+            name: z.string(),
+            sizeBytes: z
+                .number()
+                .int()
+                .describe('Size of the full document content in bytes.'),
+            relevance: z.enum(['high', 'medium', 'low', 'none']),
+            description: z.string(),
+            definedTerms: z.array(z.string()),
+            relatedExploreNames: z.array(z.string()),
+            useWhen: z.string(),
+            warning: z.string().nullable(),
+        }),
+    ),
+});
+
+export const toolListKnowledgeDocumentsOutputSchema =
+    structuredToolOutputSchema({
+        metadata: baseOutputMetadataSchema,
+        structuredContent: toolListKnowledgeDocumentsStructuredContentSchema,
+    });
 
 export type ToolListKnowledgeDocumentsArgs = z.infer<
     typeof toolListKnowledgeDocumentsArgsSchema
+>;
+
+export type ToolListKnowledgeDocumentsStructuredContent = z.infer<
+    typeof toolListKnowledgeDocumentsStructuredContentSchema
+>;
+
+export type ToolListKnowledgeDocumentsOutput = z.infer<
+    typeof toolListKnowledgeDocumentsOutputSchema
 >;

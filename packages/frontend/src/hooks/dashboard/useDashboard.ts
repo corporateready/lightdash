@@ -1,5 +1,6 @@
 import {
     formatDate,
+    SchedulerFormat,
     type ApiError,
     type ApiJobScheduledResponse,
     type CreateDashboard,
@@ -11,7 +12,11 @@ import {
     type DashboardTile,
     type DashboardVersion,
     type DateGranularity,
+    type ExportContentFormat,
+    type ParametersValuesMap,
     type SavedChartsInfoForDashboardAvailableFilters,
+    type SchedulerCsvOptions,
+    type SchedulerImageOptions,
     type UpdateDashboard,
 } from '@lightdash/common';
 import { IconArrowRight } from '@tabler/icons-react';
@@ -21,24 +26,37 @@ import {
     useQueryClient,
     type UseQueryOptions,
 } from '@tanstack/react-query';
-import { useNavigate, useParams } from 'react-router';
-import { lightdashApi } from '../../api';
+import { useNavigate } from 'react-router';
+import { type LightdashApi } from '../../api';
 import { pollJobStatus } from '../../features/scheduler/hooks/useScheduler';
 import useApp from '../../providers/App/useApp';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
 import useToaster from '../toaster/useToaster';
 import { invalidateContent } from '../useContent';
+import { useProjectUuid } from '../useProjectUuid';
 import useQueryError from '../useQueryError';
 import useDashboardStorage from './useDashboardStorage';
 
-export const getDashboard = async (id: string, projectUuid: string) =>
+export const getDashboard = async (
+    lightdashApi: LightdashApi,
+    id: string,
+    projectUuid: string,
+    includeUnpublishedDraft: boolean = false,
+) =>
     lightdashApi<Dashboard>({
-        url: `/projects/${projectUuid}/dashboards/${id}`,
+        url: `/projects/${projectUuid}/dashboards/${id}${
+            includeUnpublishedDraft ? '?includeUnpublishedDraft=true' : ''
+        }`,
         version: 'v2',
         method: 'GET',
         body: undefined,
     });
 
-const createDashboard = async (projectUuid: string, data: CreateDashboard) =>
+const createDashboard = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    data: CreateDashboard,
+) =>
     lightdashApi<Dashboard>({
         url: `/projects/${projectUuid}/dashboards`,
         method: 'POST',
@@ -46,6 +64,7 @@ const createDashboard = async (projectUuid: string, data: CreateDashboard) =>
     });
 
 const createDashboardWithCharts = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     data: CreateDashboardWithCharts,
 ) =>
@@ -56,6 +75,7 @@ const createDashboardWithCharts = async (
     });
 
 const duplicateDashboard = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     dashboardUuid: string,
     data: { dashboardName: string; dashboardDesc: string },
@@ -67,6 +87,7 @@ const duplicateDashboard = async (
     });
 
 const updateDashboard = async (
+    lightdashApi: LightdashApi,
     id: string,
     data: UpdateDashboard,
     projectUuid: string,
@@ -80,7 +101,11 @@ const updateDashboard = async (
 
 export const updateDashboardApi = updateDashboard;
 
-const deleteDashboard = async (id: string, projectUuid: string) =>
+const deleteDashboard = async (
+    lightdashApi: LightdashApi,
+    id: string,
+    projectUuid: string,
+) =>
     lightdashApi<null>({
         url: `/projects/${projectUuid}/dashboards/${id}`,
         version: 'v2',
@@ -89,6 +114,7 @@ const deleteDashboard = async (id: string, projectUuid: string) =>
     });
 
 const postDashboardsAvailableFilters = async (
+    lightdashApi: LightdashApi,
     savedChartUuidsAndTileUuids: SavedChartsInfoForDashboardAvailableFilters,
 ) =>
     lightdashApi<DashboardAvailableFilters>({
@@ -98,6 +124,7 @@ const postDashboardsAvailableFilters = async (
     });
 
 const postEmbedDashboardsAvailableFilters = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     savedChartUuidsAndTileUuids: SavedChartsInfoForDashboardAvailableFilters,
 ) =>
@@ -107,52 +134,62 @@ const postEmbedDashboardsAvailableFilters = async (
         body: JSON.stringify(savedChartUuidsAndTileUuids),
     });
 
-const exportDashboard = async (
-    id: string,
-    gridWidth: number | undefined,
-    queryFilters: string,
-    selectedTabs: string[] | null,
-) =>
-    lightdashApi<string>({
-        url: `/dashboards/${id}/export`,
-        method: 'POST',
-        body: JSON.stringify({ queryFilters, gridWidth, selectedTabs }),
-    });
-
 export const useDashboardsAvailableFilters = (
     savedChartUuidsAndTileUuids: SavedChartsInfoForDashboardAvailableFilters,
     projectUuid?: string,
     embedToken?: string,
-) =>
-    useQuery<DashboardAvailableFilters, ApiError>(
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DashboardAvailableFilters, ApiError>(
         ['dashboards', 'availableFilters', ...savedChartUuidsAndTileUuids],
         () =>
             embedToken && projectUuid
                 ? postEmbedDashboardsAvailableFilters(
+                      lightdashApi,
                       projectUuid,
                       savedChartUuidsAndTileUuids,
                   )
-                : postDashboardsAvailableFilters(savedChartUuidsAndTileUuids),
+                : postDashboardsAvailableFilters(
+                      lightdashApi,
+                      savedChartUuidsAndTileUuids,
+                  ),
         {
             enabled: savedChartUuidsAndTileUuids.length > 0,
         },
     );
+};
 
 export const useDashboardQuery = ({
     uuidOrSlug,
     projectUuid,
     useQueryOptions,
+    // Opt in from interactive editing surfaces only. Rendered pages (the
+    // /minimal routes the headless browser exports) must stay published, or a
+    // draft ends up in a scheduled delivery.
+    includeUnpublishedDraft = false,
 }: {
     uuidOrSlug?: string;
     projectUuid?: string;
     useQueryOptions?: UseQueryOptions<Dashboard, ApiError>;
+    includeUnpublishedDraft?: boolean;
 } = {}) => {
+    const lightdashApi = useLightdashApi();
     const setErrorResponse = useQueryError();
     return useQuery<Dashboard, ApiError>({
-        queryKey: ['saved_dashboard_query', uuidOrSlug, projectUuid],
+        queryKey: [
+            'saved_dashboard_query',
+            uuidOrSlug,
+            projectUuid,
+            includeUnpublishedDraft,
+        ],
         queryFn: async () => {
             if (!projectUuid) throw new Error('projectUuid is required');
-            return getDashboard(uuidOrSlug || '', projectUuid);
+            return getDashboard(
+                lightdashApi,
+                uuidOrSlug || '',
+                projectUuid,
+                includeUnpublishedDraft,
+            );
         },
         enabled: !!uuidOrSlug && !!projectUuid,
         retry: false,
@@ -169,9 +206,10 @@ export const useDashboardQuery = ({
  * @returns The latest dashboard or null if the dashboard is up to date
  */
 export const useDashboardVersionRefresh = (
-    dashboardUuid: string,
+    dashboardUuid: string | undefined,
     projectUuid?: string,
 ) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
 
     return useMutation<Dashboard | null, ApiError, Dashboard | undefined>({
@@ -181,11 +219,15 @@ export const useDashboardVersionRefresh = (
                 if (!currentDashboard) {
                     throw new Error('Current dashboard is undefined');
                 }
+                if (!dashboardUuid) {
+                    throw new Error('Dashboard UUID is undefined');
+                }
                 if (!projectUuid) {
                     throw new Error('Project UUID is undefined');
                 }
 
                 const latestDashboard = await getDashboard(
+                    lightdashApi,
                     dashboardUuid,
                     projectUuid,
                 );
@@ -217,75 +259,38 @@ export const useDashboardVersionRefresh = (
     });
 };
 
-export const useExportDashboard = () => {
-    const { showToastSuccess, showToastApiError, showToastInfo } = useToaster();
-    return useMutation<
-        string,
-        ApiError,
-        {
-            dashboard: Dashboard;
-            gridWidth: number | undefined;
-            queryFilters: string;
-            isPreview?: boolean;
-            selectedTabs: string[] | null;
-        }
-    >(
-        (data) =>
-            exportDashboard(
-                data.dashboard.uuid,
-                data.gridWidth,
-                data.queryFilters,
-                data.selectedTabs,
-            ),
-        {
-            mutationKey: ['export_dashboard'],
-            onMutate: (data) => {
-                showToastInfo({
-                    key: 'dashboard_export_toast',
-                    title: data.isPreview
-                        ? `Generating preview for ${data.dashboard.name}`
-                        : `${data.dashboard.name} is being exported. This might take a few seconds.`,
-                    autoClose: false,
-                    loading: true,
-                });
-            },
-            onSuccess: async (url, data) => {
-                if (url) {
-                    if (!data.isPreview) window.open(url, '_blank');
-                    showToastSuccess({
-                        key: 'dashboard_export_toast',
-                        title: data.isPreview
-                            ? 'Success!'
-                            : `Success! ${data.dashboard.name} was exported.`,
-                    });
-                }
-            },
-            onError: ({ error }, data) => {
-                showToastApiError({
-                    key: 'dashboard_export_toast',
-                    title: data.isPreview
-                        ? `Failed to generate preview for ${data.dashboard.name}`
-                        : `Failed to export ${data.dashboard.name}`,
-                    apiError: error,
-                });
-            },
-        },
-    );
-};
-
-const exportCsvDashboard = async (
+// projectUuid is passed as a query param, not because the endpoint needs it, but
+// because the JWT auth middleware resolves the embed secret from it — embedded
+// dashboards can't authenticate on a route without a project in the path.
+const exportDashboardContent = async (
+    lightdashApi: LightdashApi,
     id: string,
-    filters: DashboardFilters,
-    dateZoomGranularity: DateGranularity | string | undefined,
-    selectedTabs: string[] | null,
+    projectUuid: string,
+    data: {
+        format: ExportContentFormat;
+        options?: SchedulerCsvOptions | SchedulerImageOptions;
+        dashboardFilters?: DashboardFilters;
+        dateZoomGranularity?: DateGranularity | string;
+        customViewportWidth?: number;
+        selectedTabs?: string[] | null;
+        parameters?: ParametersValuesMap;
+    },
 ) =>
     lightdashApi<ApiJobScheduledResponse['results']>({
-        url: `/dashboards/${id}/exportCsv`,
+        url: `/dashboards/${id}/exports?projectUuid=${projectUuid}`,
+        version: 'v2',
         method: 'POST',
-        body: JSON.stringify({ filters, dateZoomGranularity, selectedTabs }),
+        body: JSON.stringify(data),
     });
 
-export const useExportCsvDashboard = () => {
+type DashboardContentExportDetails = {
+    url?: string;
+    fileType?: string;
+    numFailures?: number;
+};
+
+export const useExportDashboardContent = () => {
+    const lightdashApi = useLightdashApi();
     const {
         showToastSuccess,
         showToastError,
@@ -299,20 +304,32 @@ export const useExportCsvDashboard = () => {
         ApiError,
         {
             dashboard: Dashboard;
-            filters: DashboardFilters;
-            dateZoomGranularity: DateGranularity | string | undefined;
-            selectedTabs: string[] | null;
+            format: ExportContentFormat;
+            options?: SchedulerCsvOptions | SchedulerImageOptions;
+            dashboardFilters?: DashboardFilters;
+            dateZoomGranularity?: DateGranularity | string;
+            customViewportWidth?: number;
+            selectedTabs?: string[] | null;
+            parameters?: ParametersValuesMap;
         }
     >(
         (data) =>
-            exportCsvDashboard(
+            exportDashboardContent(
+                lightdashApi,
                 data.dashboard.uuid,
-                data.filters,
-                data.dateZoomGranularity,
-                data.selectedTabs,
+                data.dashboard.projectUuid,
+                {
+                    format: data.format,
+                    options: data.options,
+                    dashboardFilters: data.dashboardFilters,
+                    dateZoomGranularity: data.dateZoomGranularity,
+                    customViewportWidth: data.customViewportWidth,
+                    selectedTabs: data.selectedTabs,
+                    parameters: data.parameters,
+                },
             ),
         {
-            mutationKey: ['export_csv_dashboard'],
+            mutationKey: ['export_dashboard_content'],
             onMutate: (data) => {
                 showToastInfo({
                     key: 'dashboard_export_toast',
@@ -322,9 +339,15 @@ export const useExportCsvDashboard = () => {
                 });
             },
             onSuccess: async (job, data) => {
-                // Wait until validation is complete
-                pollJobStatus(job.jobId)
-                    .then(async (details) => {
+                pollJobStatus(
+                    lightdashApi,
+                    job.jobId,
+                    data.dashboard.projectUuid,
+                )
+                    .then((rawDetails) => {
+                        const details =
+                            rawDetails as DashboardContentExportDetails | null;
+
                         if (details?.url) {
                             const link = document.createElement('a');
                             link.href = details.url;
@@ -332,11 +355,11 @@ export const useExportCsvDashboard = () => {
                                 'download',
                                 `${data.dashboard.name}-${formatDate(
                                     Date.now(),
-                                )}`,
+                                )}.${details.fileType ?? data.format}`,
                             );
                             document.body.appendChild(link);
                             link.click();
-                            link.remove(); // Remove the link from the DOM
+                            link.remove();
 
                             const numFailures = Number(
                                 details.numFailures ?? 0,
@@ -381,12 +404,98 @@ export const useExportCsvDashboard = () => {
     );
 };
 
+// Preview generation goes through the async EXPORT_CONTENT job instead of the
+// synchronous export endpoint, so heavy dashboards don't hold an HTTP request
+// open until the gateway times out.
+export const useExportDashboardContentPreview = () => {
+    const lightdashApi = useLightdashApi();
+    const {
+        showToastInfo,
+        showToastSuccess,
+        showToastError,
+        showToastApiError,
+    } = useToaster();
+
+    return useMutation<
+        string,
+        ApiError | Error,
+        {
+            dashboard: Dashboard;
+            dashboardFilters?: DashboardFilters;
+            dateZoomGranularity?: DateGranularity | string;
+            customViewportWidth?: number;
+            selectedTabs?: string[] | null;
+            parameters?: ParametersValuesMap;
+        }
+    >(
+        async (data) => {
+            const job = await exportDashboardContent(
+                lightdashApi,
+                data.dashboard.uuid,
+                data.dashboard.projectUuid,
+                {
+                    format: SchedulerFormat.IMAGE,
+                    options: {},
+                    dashboardFilters: data.dashboardFilters,
+                    dateZoomGranularity: data.dateZoomGranularity,
+                    customViewportWidth: data.customViewportWidth,
+                    selectedTabs: data.selectedTabs,
+                    parameters: data.parameters,
+                },
+            );
+            const details = (await pollJobStatus(
+                lightdashApi,
+                job.jobId,
+                data.dashboard.projectUuid,
+            )) as DashboardContentExportDetails | null;
+            if (!details?.url) {
+                throw new Error('Preview generation returned no image');
+            }
+            return details.url;
+        },
+        {
+            mutationKey: ['export_dashboard_preview'],
+            onMutate: (data) => {
+                showToastInfo({
+                    key: 'dashboard_export_toast',
+                    title: `Generating preview for ${data.dashboard.name}`,
+                    autoClose: false,
+                    loading: true,
+                });
+            },
+            onSuccess: () => {
+                showToastSuccess({
+                    key: 'dashboard_export_toast',
+                    title: 'Success!',
+                });
+            },
+            onError: (error, data) => {
+                const title = `Failed to generate preview for ${data.dashboard.name}`;
+                if ('error' in error) {
+                    showToastApiError({
+                        key: 'dashboard_export_toast',
+                        title,
+                        apiError: error.error,
+                    });
+                } else {
+                    showToastError({
+                        key: 'dashboard_export_toast',
+                        title,
+                        subtitle: error.message,
+                    });
+                }
+            },
+        },
+    );
+};
+
 export const useUpdateDashboard = (
     id: string | undefined,
     projectUuid: string | undefined,
     showRedirectButton: boolean = false,
     onSuccessCallback?: (dashboard: Dashboard) => void,
 ) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
@@ -400,7 +509,7 @@ export const useUpdateDashboard = (
                 throw new Error('Project UUID is undefined');
             }
 
-            return updateDashboard(id, data, projectUuid);
+            return updateDashboard(lightdashApi, id, data, projectUuid);
         },
         {
             mutationKey: ['dashboard_update'],
@@ -415,7 +524,13 @@ export const useUpdateDashboard = (
                 await queryClient.invalidateQueries([
                     'dashboards-containing-chart',
                 ]);
-                await queryClient.resetQueries(['saved_dashboard_query', id]);
+                await Promise.all([
+                    queryClient.resetQueries(['saved_dashboard_query', id]),
+                    queryClient.resetQueries([
+                        'saved_dashboard_query',
+                        updatedDashboard.slug,
+                    ]),
+                ]);
                 // Remove stale chart results so navigating back doesn't
                 // show old cache timestamps after a save
                 queryClient.removeQueries({
@@ -435,16 +550,24 @@ export const useUpdateDashboard = (
                     Object.keys(variables).length === 1 &&
                     Object.keys(variables).includes('name');
                 showToastSuccess({
-                    title: `Success! Dashboard ${
-                        onlyUpdatedName ? 'name ' : ''
-                    }was updated.`,
+                    ...(updatedDashboard.hasUnpublishedChanges
+                        ? {
+                              title: 'Dashboard draft saved for review',
+                              subtitle:
+                                  'Only you can see these changes until a reviewer writes them back to the repo.',
+                          }
+                        : {
+                              title: `Success! Dashboard ${
+                                  onlyUpdatedName ? 'name ' : ''
+                              }was updated.`,
+                          }),
                     action: showRedirectButton
                         ? {
                               children: 'Open dashboard',
                               icon: IconArrowRight,
                               onClick: () =>
                                   navigate(
-                                      `/projects/${projectUuid}/dashboards/${id}`,
+                                      `/projects/${projectUuid}/dashboards/${updatedDashboard.slug}`,
                                   ),
                           }
                         : undefined,
@@ -471,12 +594,15 @@ export const useCreateMutation = (
     showRedirectButton: boolean = false,
     { showToastOnSuccess = true }: { showToastOnSuccess?: boolean } = {},
 ) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
     const { showToastSuccess, showToastApiError } = useToaster();
     const queryClient = useQueryClient();
     return useMutation<Dashboard, ApiError, CreateDashboard>(
         (data) =>
-            projectUuid ? createDashboard(projectUuid, data) : Promise.reject(),
+            projectUuid
+                ? createDashboard(lightdashApi, projectUuid, data)
+                : Promise.reject(),
         {
             mutationKey: ['dashboard_create', projectUuid],
             onSuccess: async (result) => {
@@ -498,7 +624,7 @@ export const useCreateMutation = (
                                   icon: IconArrowRight,
                                   onClick: () =>
                                       navigate(
-                                          `/projects/${projectUuid}/dashboards/${result.uuid}`,
+                                          `/projects/${projectUuid}/dashboards/${result.slug}`,
                                       ),
                               }
                             : undefined,
@@ -519,13 +645,14 @@ export const useCreateDashboardWithChartsMutation = (
     projectUuid: string | undefined,
     { showToastOnSuccess = true }: { showToastOnSuccess?: boolean } = {},
 ) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
     const { showToastSuccess, showToastApiError } = useToaster();
     const queryClient = useQueryClient();
     return useMutation<Dashboard, ApiError, CreateDashboardWithCharts>(
         (data) =>
             projectUuid
-                ? createDashboardWithCharts(projectUuid, data)
+                ? createDashboardWithCharts(lightdashApi, projectUuid, data)
                 : Promise.reject(),
         {
             mutationKey: ['dashboard_create_with_charts', projectUuid],
@@ -546,7 +673,7 @@ export const useCreateDashboardWithChartsMutation = (
                             children: 'Open dashboard',
                             onClick: () =>
                                 navigate(
-                                    `/projects/${projectUuid}/dashboards/${result.uuid}`,
+                                    `/projects/${projectUuid}/dashboards/${result.slug}`,
                                 ),
                         },
                     });
@@ -569,8 +696,9 @@ type DuplicateDashboardMutationOptions = {
 export const useDuplicateDashboardMutation = (
     options?: DuplicateDashboardMutationOptions,
 ) => {
+    const lightdashApi = useLightdashApi();
     const navigate = useNavigate();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<
@@ -580,7 +708,7 @@ export const useDuplicateDashboardMutation = (
     >(
         ({ uuid, name, description }) =>
             projectUuid
-                ? duplicateDashboard(projectUuid, uuid, {
+                ? duplicateDashboard(lightdashApi, projectUuid, uuid, {
                       dashboardName: name,
                       dashboardDesc: description ?? '',
                   })
@@ -605,7 +733,7 @@ export const useDuplicateDashboardMutation = (
                               icon: IconArrowRight,
                               onClick: () =>
                                   navigate(
-                                      `/projects/${projectUuid}/dashboards/${data.uuid}`,
+                                      `/projects/${projectUuid}/dashboards/${data.slug}`,
                                   ),
                           }
                         : undefined,
@@ -622,6 +750,7 @@ export const useDuplicateDashboardMutation = (
 };
 
 export const useDashboardDeleteMutation = (projectUuid?: string) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const navigate = useNavigate();
     const { health } = useApp();
@@ -632,7 +761,7 @@ export const useDashboardDeleteMutation = (projectUuid?: string) => {
             if (!projectUuid) {
                 throw new Error('Project UUID is undefined');
             }
-            return deleteDashboard(id, projectUuid);
+            return deleteDashboard(lightdashApi, id, projectUuid);
         },
         {
             onSuccess: async () => {
@@ -667,6 +796,7 @@ export const useDashboardDeleteMutation = (projectUuid?: string) => {
 };
 
 const getDashboardHistory = async (
+    lightdashApi: LightdashApi,
     dashboardUuid: string,
 ): Promise<DashboardHistory> =>
     lightdashApi<DashboardHistory>({
@@ -675,15 +805,18 @@ const getDashboardHistory = async (
         body: undefined,
     });
 
-export const useDashboardHistory = (dashboardUuid: string | undefined) =>
-    useQuery<DashboardHistory, ApiError>({
+export const useDashboardHistory = (dashboardUuid: string | undefined) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DashboardHistory, ApiError>({
         queryKey: ['dashboard_history', dashboardUuid],
-        queryFn: () => getDashboardHistory(dashboardUuid!),
+        queryFn: () => getDashboardHistory(lightdashApi, dashboardUuid!),
         enabled: dashboardUuid !== undefined,
         retry: false,
     });
+};
 
 const getDashboardVersion = async (
+    lightdashApi: LightdashApi,
     dashboardUuid: string,
     versionUuid: string,
 ): Promise<DashboardVersion> => {
@@ -697,15 +830,19 @@ const getDashboardVersion = async (
 export const useDashboardVersion = (
     dashboardUuid: string | undefined,
     versionUuid: string | undefined,
-) =>
-    useQuery<DashboardVersion, ApiError>({
+) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<DashboardVersion, ApiError>({
         queryKey: ['dashboard_version', dashboardUuid, versionUuid],
-        queryFn: () => getDashboardVersion(dashboardUuid!, versionUuid!),
+        queryFn: () =>
+            getDashboardVersion(lightdashApi, dashboardUuid!, versionUuid!),
         enabled: dashboardUuid !== undefined && versionUuid !== undefined,
         retry: false,
     });
+};
 
 const rollbackDashboard = async (
+    lightdashApi: LightdashApi,
     dashboardUuid: string,
     versionUuid: string,
 ): Promise<null> =>
@@ -718,12 +855,13 @@ const rollbackDashboard = async (
 export const useDashboardVersionRollbackMutation = (
     dashboardUuid: string | undefined,
 ) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<null, ApiError, string>(
         (versionUuid: string) =>
             dashboardUuid && versionUuid
-                ? rollbackDashboard(dashboardUuid, versionUuid)
+                ? rollbackDashboard(lightdashApi, dashboardUuid, versionUuid)
                 : Promise.reject(),
         {
             mutationKey: ['dashboard_version_rollback'],

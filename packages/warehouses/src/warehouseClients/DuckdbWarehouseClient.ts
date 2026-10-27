@@ -1,29 +1,56 @@
-import { DuckDBInstance, DuckDBTypeId } from '@duckdb/node-api';
+import {
+    DuckDBInstance,
+    DuckDBTypeId,
+    version as duckdbVersion,
+    type DuckDBType,
+} from '@duckdb/node-api';
 import {
     AnyType,
+    assertUnreachable,
     CreateDuckdbCredentials,
+    CreateDuckdbDucklakeCredentials,
+    CreateDuckdbEmbeddedCredentials,
+    CreateDuckdbMotherduckCredentials,
     DimensionType,
+    DuckdbConnectionType,
+    DucklakeCatalogType,
+    DucklakeDataPathType,
     formatMilliseconds,
     getErrorMessage,
+    getWarehouseTableType,
     Metric,
     MetricType,
     NotImplementedError,
     ParameterError,
+    setCatalogTimestampDomain,
     SupportedDbtAdapter,
     WarehouseCatalog,
+    WarehouseQueryError,
     WarehouseResults,
+    WarehouseTables,
     WarehouseTypes,
+    type ResultNumericKind,
+    type TimestampDomain,
+    type WarehouseQueryPhase,
 } from '@lightdash/common';
+import { createHash } from 'crypto';
+import fsSync from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import {
+    getEmbeddedDatabaseFileName,
+    resolveEmbeddedBundleDatabasePath,
+} from './duckdbEmbeddedBundle';
+import { classifyMotherduckError } from './MotherduckErrorClassifier';
+import * as MotherduckInstanceCache from './MotherduckInstanceCache';
 import WarehouseBaseClient from './WarehouseBaseClient';
 import WarehouseBaseSqlBuilder from './WarehouseBaseSqlBuilder';
 
 type DuckdbStreamResult = {
     columnCount: number;
     columnNames: () => string[];
-    columnTypeId: (columnIndex: number) => number;
+    columnType: (columnIndex: number) => DuckDBType;
     yieldRowObjectJson: () => AsyncIterableIterator<Record<string, AnyType>[]>;
 };
 
@@ -51,6 +78,8 @@ type DuckdbConnection = {
         values?: AnyType[] | Record<string, AnyType>,
     ) => Promise<DuckdbStreamResult>;
     extractStatements: (sql: string) => Promise<DuckdbExtractedStatements>;
+    getTableNames: (sql: string, qualified: boolean) => readonly string[];
+    interrupt: () => void;
     closeSync?: () => void;
     disconnectSync?: () => void;
 };
@@ -85,7 +114,24 @@ export type DuckdbS3SessionConfig = {
     secretKey?: string;
     forcePathStyle: boolean;
     useSsl: boolean;
-};
+    /** Limit this DuckDB secret to trusted S3 URIs or prefixes. */
+    scope?: string[];
+    /** PEM bundle httpfs verifies HTTPS object storage with. */
+    caCertFile?: string;
+} & (
+    | { authMode?: 'default'; getAccessToken?: never }
+    | {
+          authMode: 'gcp_oauth';
+          /** Resolve per query session; the provider owns token caching/refresh. */
+          getAccessToken: () => Promise<string>;
+          scope: string[];
+      }
+);
+
+type GcpOAuthS3SessionConfig = Extract<
+    DuckdbS3SessionConfig,
+    { authMode: 'gcp_oauth' }
+>;
 
 export type DuckdbResourceLimits = {
     memoryLimit?: string; // e.g. '256MB'
@@ -94,6 +140,7 @@ export type DuckdbResourceLimits = {
 
 export type DuckdbLogger = {
     info: (message: string, metadata?: Record<string, unknown>) => void;
+    warn?: (message: string, metadata?: Record<string, unknown>) => void;
 };
 
 export type DuckdbQueryProfileMetrics = {
@@ -101,6 +148,8 @@ export type DuckdbQueryProfileMetrics = {
     cpuMs: number;
     waitMs: number;
     readParquetMs: number | null;
+    /** Time in read_json scans, the format query results are stored in. */
+    readJsonMs: number | null;
     bytesRead: number | null;
     rowsReturned: number | null;
     rowsScanned: number | null;
@@ -112,13 +161,55 @@ export type DuckdbS3Credentials = {
     s3Config: DuckdbS3SessionConfig;
 };
 
-export type DuckdbConnectionCredentials = DuckdbS3Credentials;
+export type DuckdbParquetColumns = {
+    name: string;
+    type: 'VARCHAR' | 'BOOLEAN' | 'TIMESTAMP' | 'INTEGER' | 'BIGINT';
+}[];
 
-// Backwards-compatible alias while this API settles.
-export type DuckdbS3ConnectionConfig = DuckdbS3Credentials;
+/** Server-owned manifest. Never accept this configuration from project APIs. */
+export type DuckdbParquetSource = {
+    /** Trusted provider bytes for exact manifest URLs; staged privately per query. */
+    fileBuffers?: ReadonlyMap<string, Uint8Array>;
+    scope: string;
+    tables: {
+        name: string;
+        urls: string[];
+        columns?: DuckdbParquetColumns;
+        /** Disable inferred path columns for tables with mixed partition layouts. */
+        hivePartitioning?: boolean;
+        /** Suppress historical fallback rows when a captured row has the same identity. */
+        fallbackRows?: {
+            keyColumns: string[];
+            markerColumn: string;
+            markerValue: string;
+        };
+    }[];
+    /** Typed, empty lookups for snapshots which have not been published yet. */
+    emptyTables?: {
+        name: string;
+        columns: DuckdbParquetColumns;
+    }[];
+    /** Exact server-signed GET URLs; never combine with bucket credentials. */
+    signedUrls?: boolean;
+    httpAuth?: { bearerToken: string };
+    s3Config?: DuckdbS3SessionConfig;
+};
+
+export type DuckdbParquetCredentials = {
+    type: 'duckdb_parquet';
+    /** Resolve again for every session so new files and refreshed credentials are visible. */
+    resolveSource: (
+        referencedTables?: readonly string[],
+    ) => Promise<DuckdbParquetSource>;
+};
+
+export type DuckdbConnectionCredentials =
+    | DuckdbS3Credentials
+    | DuckdbParquetCredentials;
 
 export type DuckdbWarehouseClientOptions = {
-    /** Resource-constrained isolated sessions, used for materialization/parquet conversion. */
+    agentSession?: boolean;
+    /** Resource-constrained isolated sessions, used for materialization/parquet conversion and embedded databases. */
     resourceLimits?: DuckdbResourceLimits;
     /** Resource limits for query sessions. When combined with instanceCacheKey, they apply to the shared warm instance. */
     sharedResourceLimits?: DuckdbResourceLimits;
@@ -130,7 +221,19 @@ export type DuckdbWarehouseClientOptions = {
      */
     instanceCacheKey?: string;
     logger?: DuckdbLogger;
+    enableQueryProfiling?: boolean;
     onQueryProfile?: (profile: DuckdbQueryProfileMetrics) => void;
+    embeddedQueryTimeoutMs?: number;
+    enableInstanceCache?: boolean;
+    projectUuid?: string;
+    /** Process-local per-organization cap for isolated S3 query clients. */
+    organizationConcurrencyLimit?: number;
+    /**
+     * Confine the instance to its storage bucket(s) and a private temp
+     * directory. Serve sessions only read object storage, so they have no
+     * use for anything else on disk or on the network.
+     */
+    objectStorageOnly?: boolean;
 };
 
 export const mapFieldTypeFromTypeId = (typeId: number): DimensionType => {
@@ -166,6 +269,56 @@ export const mapFieldTypeFromTypeId = (typeId: number): DimensionType => {
     }
 };
 
+const getNumericKindFromType = (type: DuckDBType): ResultNumericKind | null => {
+    switch (type.typeId) {
+        case DuckDBTypeId.TINYINT:
+        case DuckDBTypeId.SMALLINT:
+        case DuckDBTypeId.INTEGER:
+        case DuckDBTypeId.BIGINT:
+        case DuckDBTypeId.HUGEINT:
+        case DuckDBTypeId.UTINYINT:
+        case DuckDBTypeId.USMALLINT:
+        case DuckDBTypeId.UINTEGER:
+        case DuckDBTypeId.UBIGINT:
+        case DuckDBTypeId.UHUGEINT:
+            return { kind: 'integer' };
+        case DuckDBTypeId.FLOAT:
+        case DuckDBTypeId.DOUBLE:
+            return { kind: 'float' };
+        case DuckDBTypeId.DECIMAL:
+            return { kind: 'decimal', scale: type.scale };
+        default:
+            return null;
+    }
+};
+
+export const getDuckdbTimestampDomainFromString = (
+    typeName: string,
+): TimestampDomain | undefined => {
+    const upper = typeName.toUpperCase().replace(/\(\d+\)/, '');
+    if (upper === 'TIMESTAMP WITH TIME ZONE' || upper === 'TIMESTAMPTZ')
+        return 'aware';
+    // TIMESTAMP and its precision variants (TIMESTAMP_S/_MS/_NS)
+    if (upper.startsWith('TIMESTAMP')) return 'naive';
+    return undefined;
+};
+
+export const mapFieldTypeFromDuckdbTypeName = (
+    typeName: string,
+): DimensionType => {
+    const upper = typeName.toUpperCase();
+    const typeId = {
+        'TIMESTAMP WITH TIME ZONE': DuckDBTypeId.TIMESTAMP_TZ,
+        TIMESTAMPTZ: DuckDBTypeId.TIMESTAMP_TZ,
+        'TIME WITH TIME ZONE': DuckDBTypeId.TIME_TZ,
+        TIMETZ: DuckDBTypeId.TIME_TZ,
+        REAL: DuckDBTypeId.FLOAT,
+        NUMERIC: DuckDBTypeId.DECIMAL,
+        ...DuckDBTypeId,
+    }[upper.replace(/\(.*\)$/, '') as keyof typeof DuckDBTypeId];
+    return mapFieldTypeFromTypeId(typeof typeId === 'number' ? typeId : 0);
+};
+
 const mapFieldTypeFromString = (typeName: string): DimensionType => {
     const upper = typeName.toUpperCase();
     if (upper === 'DATE') return DimensionType.DATE;
@@ -192,8 +345,9 @@ const mapFieldTypeFromString = (typeName: string): DimensionType => {
     return DimensionType.STRING;
 };
 
-const DUCKDB_INTERNAL_CREDENTIALS: CreateDuckdbCredentials = {
+const DUCKDB_INTERNAL_CREDENTIALS: CreateDuckdbMotherduckCredentials = {
     type: WarehouseTypes.DUCKDB,
+    connectionType: DuckdbConnectionType.MOTHERDUCK,
     database: ':memory:',
     schema: 'main',
     token: '',
@@ -254,6 +408,94 @@ class AsyncSemaphore {
     }
 }
 
+class ConcurrencyBudget {
+    private active = 0;
+
+    private pendingAcquires: Array<{
+        resolve: (acquired: boolean) => void;
+        timeout?: ReturnType<typeof setTimeout>;
+    }> = [];
+
+    constructor(private readonly limit: number) {}
+
+    tryAcquire(): boolean {
+        if (this.active >= this.limit) {
+            return false;
+        }
+
+        this.active += 1;
+        return true;
+    }
+
+    acquire(timeoutMs?: number): Promise<boolean> {
+        if (this.tryAcquire()) {
+            return Promise.resolve(true);
+        }
+
+        return new Promise<boolean>((resolve) => {
+            const pendingAcquire: (typeof this.pendingAcquires)[number] = {
+                resolve,
+            };
+            if (timeoutMs !== undefined) {
+                const timeout = setTimeout(() => {
+                    const index = this.pendingAcquires.indexOf(pendingAcquire);
+                    if (index === -1) {
+                        return;
+                    }
+
+                    this.pendingAcquires.splice(index, 1);
+                    resolve(false);
+                }, timeoutMs);
+                timeout.unref();
+                pendingAcquire.timeout = timeout;
+            }
+            this.pendingAcquires.push(pendingAcquire);
+        });
+    }
+
+    release(): void {
+        if (this.active === 0) {
+            return;
+        }
+
+        const pendingAcquire = this.pendingAcquires.shift();
+        if (pendingAcquire) {
+            if (pendingAcquire.timeout) {
+                clearTimeout(pendingAcquire.timeout);
+            }
+            pendingAcquire.resolve(true);
+            return;
+        }
+
+        this.active -= 1;
+    }
+
+    isIdle(): boolean {
+        return this.active === 0;
+    }
+
+    reset(): void {
+        this.active = 0;
+        const pendingAcquires = this.pendingAcquires.splice(0);
+        pendingAcquires.forEach(({ resolve, timeout }) => {
+            if (timeout) {
+                clearTimeout(timeout);
+            }
+            resolve(false);
+        });
+    }
+}
+
+const PARQUET_QUERY_TIMEOUT_MS = 120_000;
+
+class ParquetQueryTimeoutError extends WarehouseQueryError {
+    constructor() {
+        super(
+            'Analytics query exceeded the 120 second execution limit and was stopped. Try a narrower date range.',
+        );
+    }
+}
+
 // DuckDB StatementType values — see duckdb/common/enums/statement_type.hpp
 const ALLOWED_STATEMENT_TYPES_USER_SQL = new Set([1 /* SELECT */]);
 
@@ -266,20 +508,174 @@ const BLOCKED_STATEMENT_TYPES_INTERNAL_SQL = new Set([
     26, // DETACH
 ]);
 
+// `\s*"?\s*\(` also catches quoted-identifier calls (`"read_json"(...)`), which
+// DuckDB resolves to the same function; `\b` already covers schema-qualified
+// calls (`main.read_json(...)`) since `.` and `"` are word boundaries.
 const BLOCKED_FUNCTION_PATTERN =
-    /\b(current_setting|duckdb_settings|duckdb_secrets)\s*\(/i;
+    /\b(current_setting|duckdb_settings|duckdb_secrets|query|query_table)\s*"?\s*\(/i;
 
-export type DuckdbWarehouseClientArgs = {
-    databasePath?: string;
-    s3Config?: DuckdbS3SessionConfig;
+const BLOCKED_USER_SQL_FILE_FUNCTION_PATTERN =
+    /\b(read\s*_\s*(?:blob|csv(?:\s*_\s*auto)?|json(?:\s*_\s*(?:auto|objects(?:\s*_\s*auto)?))?|ndjson(?:\s*_\s*(?:auto|objects(?:\s*_\s*auto)?))?|parquet|text|xlsx)|parquet\s*_\s*(?:scan|metadata|schema|file\s*_\s*metadata|kv\s*_\s*metadata|bloom\s*_\s*probe)|sniff\s*_\s*csv|csv\s*_\s*sniffer|glob|sqlite\s*_\s*scan|postgres\s*_\s*scan|mysql\s*_\s*scan)\s*"?\s*\(/i;
+
+const BLOCKED_USER_SQL_FILE_TABLE_PATTERN = /\b(?:from|join)\s+'[^']*'/i;
+
+export const buildMotherduckConnectionString = ({
+    database,
+    token,
+}: Pick<CreateDuckdbMotherduckCredentials, 'database' | 'token'>): string => {
+    const params = new URLSearchParams({
+        motherduck_token: token,
+        saas_mode: 'true',
+    });
+
+    return `md:${encodeURIComponent(database)}?${params.toString()}`;
 };
 
-export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCredentials> {
+const EMBEDDED_DATASET_PATTERN = /^[a-z0-9_-]+$/;
+
+const DEFAULT_EMBEDDED_DATA_DIRECTORY = path.resolve(
+    __dirname,
+    '../../../backend/assets/playground',
+);
+
+const EMBEDDED_RESOURCE_LIMITS: Required<DuckdbResourceLimits> = {
+    memoryLimit: '256MB',
+    threads: 1,
+};
+
+const EMBEDDED_QUERY_TIMEOUT_MS = 10_000;
+
+const getPositiveIntegerEnvironmentVariable = (
+    name: string,
+    defaultValue: number,
+): number => {
+    const environmentValue = process.env[name]?.trim();
+    if (!environmentValue || !/^\d+$/.test(environmentValue)) {
+        return defaultValue;
+    }
+
+    const value = Number(environmentValue);
+    return Number.isSafeInteger(value) && value > 0 ? value : defaultValue;
+};
+
+const EMBEDDED_MAX_CONCURRENT_QUERIES = getPositiveIntegerEnvironmentVariable(
+    'PLAYGROUND_MAX_CONCURRENT_QUERIES',
+    8,
+);
+
+const EMBEDDED_MAX_CONCURRENT_QUERIES_PER_ORGANIZATION =
+    getPositiveIntegerEnvironmentVariable(
+        'PLAYGROUND_MAX_CONCURRENT_QUERIES_PER_ORGANIZATION',
+        4,
+    );
+
+const EMBEDDED_CONCURRENCY_ACQUIRE_TIMEOUT_MS =
+    getPositiveIntegerEnvironmentVariable(
+        'PLAYGROUND_CONCURRENCY_ACQUIRE_TIMEOUT_MS',
+        15_000,
+    );
+
+const resolveEmbeddedDatabasePath = (
+    dataset: string,
+    bundleVersion: string | undefined,
+): string => {
+    if (!EMBEDDED_DATASET_PATTERN.test(dataset)) {
+        throw new ParameterError(
+            'Embedded DuckDB dataset must contain only lowercase letters, numbers, hyphens, and underscores',
+        );
+    }
+
+    const baseDirectory =
+        process.env.PLAYGROUND_DATA_DIR ?? DEFAULT_EMBEDDED_DATA_DIRECTORY;
+    let realBaseDirectory: string;
+    try {
+        realBaseDirectory = fsSync.realpathSync(baseDirectory);
+    } catch {
+        throw new ParameterError(
+            `Embedded DuckDB dataset "${dataset}" was not found in ${baseDirectory}`,
+        );
+    }
+
+    const databasePath = bundleVersion
+        ? resolveEmbeddedBundleDatabasePath(
+              baseDirectory,
+              dataset,
+              bundleVersion,
+          )
+        : path.join(baseDirectory, getEmbeddedDatabaseFileName(dataset));
+    let realDatabasePath: string;
+    try {
+        realDatabasePath = fsSync.realpathSync(databasePath);
+    } catch {
+        throw new ParameterError(
+            `Embedded DuckDB dataset "${dataset}" was not found in ${baseDirectory}`,
+        );
+    }
+
+    const relativePath = path.relative(realBaseDirectory, realDatabasePath);
+    if (
+        relativePath === '' ||
+        relativePath.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativePath)
+    ) {
+        throw new ParameterError(
+            `Embedded DuckDB dataset "${dataset}" resolves outside ${baseDirectory}`,
+        );
+    }
+
+    return realDatabasePath;
+};
+
+export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMotherduckCredentials> {
     private static readonly sharedInstances = new Map<string, DuckdbInstance>();
+
+    private static readonly sharedInstanceResourceLimits = new Map<
+        string,
+        DuckdbResourceLimits | undefined
+    >();
 
     private static readonly sharedInstanceSemaphores = new Map<
         string,
         AsyncSemaphore
+    >();
+
+    /**
+     * The Google access token each shared instance's GCS secret currently
+     * holds. Secrets belong to the instance, not the connection, so concurrent
+     * sessions replacing the same secret race in the catalog. Sessions skip
+     * the replacement while the token is unchanged.
+     */
+    private static readonly sharedInstanceGcsTokens = new Map<string, string>();
+
+    /**
+     * The S3 URIs each shared instance's secret is scoped to. Sessions that
+     * need a URI outside it widen the secret in place; it is never narrowed
+     * while other sessions may still read through it.
+     */
+    private static readonly sharedInstanceS3Scopes = new Map<
+        string,
+        string[]
+    >();
+
+    private static readonly sharedInstanceS3SecretLocks = new Map<
+        string,
+        AsyncSemaphore
+    >();
+
+    private static readonly embeddedConcurrencyBudget = new ConcurrencyBudget(
+        EMBEDDED_MAX_CONCURRENT_QUERIES,
+    );
+
+    private static readonly parquetConcurrencyBudget = new ConcurrencyBudget(2);
+
+    private static readonly embeddedOrganizationConcurrencyBudgets = new Map<
+        string,
+        ConcurrencyBudget
+    >();
+
+    private static readonly organizationConcurrencyBudgets = new Map<
+        string,
+        ConcurrencyBudget
     >();
 
     private static readonly sqlBuilder = new DuckdbSqlBuilder();
@@ -287,6 +683,12 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
     private readonly databasePath: string;
 
     private readonly s3Config?: DuckdbS3SessionConfig;
+
+    private readonly parquetConfig?: DuckdbParquetCredentials;
+
+    private readonly ducklakeConfig?: CreateDuckdbDucklakeCredentials;
+
+    private readonly embeddedConfig?: CreateDuckdbEmbeddedCredentials;
 
     private readonly resourceLimits?: DuckdbResourceLimits;
 
@@ -296,39 +698,123 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
 
     private readonly logger?: DuckdbLogger;
 
+    private readonly enableQueryProfiling: boolean;
+
     private readonly onQueryProfile?: (
         profile: DuckdbQueryProfileMetrics,
     ) => void;
+
+    private readonly embeddedQueryTimeoutMs: number;
+
+    private readonly enableInstanceCache: boolean;
+
+    private readonly projectUuid?: string;
+
+    private readonly organizationConcurrencyLimit?: number;
+
+    private readonly objectStorageOnly: boolean;
+
+    private allowsPreAggregateFileReads = false;
+
+    private hasWarnedAboutMotherduckTimezone = false;
 
     constructor(
         credentials?: CreateDuckdbCredentials | DuckdbConnectionCredentials,
         options?: DuckdbWarehouseClientOptions,
     ) {
-        const effectiveCredentials: CreateDuckdbCredentials =
+        const isS3Only =
             credentials &&
             'type' in credentials &&
-            credentials.type === 'duckdb_s3'
-                ? DUCKDB_INTERNAL_CREDENTIALS
-                : ((credentials as CreateDuckdbCredentials) ??
-                  DUCKDB_INTERNAL_CREDENTIALS);
+            credentials.type === 'duckdb_s3';
+        const isParquet = credentials?.type === 'duckdb_parquet';
+        if (
+            credentials?.type === WarehouseTypes.DUCKDB &&
+            credentials.connectionType === DuckdbConnectionType.ANALYTICS
+        ) {
+            throw new ParameterError(
+                'Analytics connections must be resolved by the internal project service',
+            );
+        }
+        const isDucklake =
+            !isS3Only &&
+            credentials &&
+            'type' in credentials &&
+            credentials.type === WarehouseTypes.DUCKDB &&
+            credentials.connectionType === DuckdbConnectionType.DUCKLAKE;
+        const isEmbedded =
+            !isS3Only &&
+            credentials &&
+            'type' in credentials &&
+            credentials.type === WarehouseTypes.DUCKDB &&
+            credentials.connectionType === DuckdbConnectionType.EMBEDDED;
+
+        let effectiveCredentials: CreateDuckdbMotherduckCredentials;
+        if (isS3Only || isParquet) {
+            effectiveCredentials = DUCKDB_INTERNAL_CREDENTIALS;
+        } else if (isDucklake) {
+            const ducklake = credentials as CreateDuckdbDucklakeCredentials;
+            // DuckLake is attached on top of an in-memory base instance.
+            // Surface the catalog alias as the DuckDB database name so the
+            // existing information_schema queries line up.
+            effectiveCredentials = {
+                type: WarehouseTypes.DUCKDB,
+                connectionType: DuckdbConnectionType.MOTHERDUCK,
+                database: ducklake.catalogAlias ?? 'ducklake',
+                schema: ducklake.schema,
+                token: '',
+                threads: ducklake.threads,
+                requireUserCredentials: ducklake.requireUserCredentials,
+                startOfWeek: ducklake.startOfWeek,
+                dataTimezone: ducklake.dataTimezone,
+            };
+        } else if (isEmbedded) {
+            effectiveCredentials = DUCKDB_INTERNAL_CREDENTIALS;
+        } else {
+            effectiveCredentials =
+                (credentials as CreateDuckdbMotherduckCredentials) ??
+                DUCKDB_INTERNAL_CREDENTIALS;
+        }
 
         super(
             effectiveCredentials,
             new DuckdbSqlBuilder(effectiveCredentials.startOfWeek),
+            options,
         );
 
-        // Determine s3Config from either the old DuckdbConnectionCredentials or options
-        if (
-            credentials &&
-            'type' in credentials &&
-            credentials.type === 'duckdb_s3'
-        ) {
+        if (isS3Only) {
             this.s3Config = (credentials as DuckdbS3Credentials).s3Config;
+        }
+
+        if (isParquet) {
+            this.parquetConfig = credentials as DuckdbParquetCredentials;
+            if (options?.instanceCacheKey || options?.enableInstanceCache) {
+                throw new ParameterError(
+                    'Parquet project sessions cannot share a DuckDB instance',
+                );
+            }
+        }
+
+        if (isDucklake) {
+            this.ducklakeConfig =
+                credentials as CreateDuckdbDucklakeCredentials;
+        }
+
+        if (isEmbedded) {
+            this.embeddedConfig =
+                credentials as CreateDuckdbEmbeddedCredentials;
         }
 
         // Project DuckDB credentials map to MotherDuck only. The in-memory
         // internal credentials remain available for pre-aggregate helper flows.
-        if (effectiveCredentials.database === ':memory:') {
+        if (this.embeddedConfig) {
+            this.databasePath = resolveEmbeddedDatabasePath(
+                this.embeddedConfig.dataset,
+                this.embeddedConfig.bundleVersion,
+            );
+        } else if (
+            this.ducklakeConfig ||
+            effectiveCredentials.database === ':memory:'
+        ) {
             this.databasePath = ':memory:';
         } else {
             const token = effectiveCredentials.token.trim();
@@ -337,21 +823,65 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                     'MotherDuck token is required for DuckDB warehouse connections',
                 );
             }
-            this.databasePath = `md:${effectiveCredentials.database}?motherduck_token=${token}`;
+            this.databasePath = buildMotherduckConnectionString({
+                database: effectiveCredentials.database,
+                token,
+            });
         }
 
-        this.resourceLimits = options?.resourceLimits;
-        this.sharedResourceLimits = options?.sharedResourceLimits;
-        this.instanceCacheKey = options?.instanceCacheKey;
+        this.resourceLimits = this.embeddedConfig
+            ? {
+                  ...EMBEDDED_RESOURCE_LIMITS,
+                  ...options?.resourceLimits,
+              }
+            : options?.resourceLimits;
+        this.sharedResourceLimits = isParquet
+            ? {
+                  memoryLimit: '256MB',
+                  // Parallel JSON decoders can exhaust this budget before spilling.
+                  threads: 1,
+                  ...options?.sharedResourceLimits,
+              }
+            : options?.sharedResourceLimits;
+        // DuckLake attaches a postgres catalog secret on every fresh DuckDB
+        // instance, and the postgres extension only pools 8 connections per
+        // instance — so parallel getFields() calls during project compile
+        // exhaust the pool. Default DuckLake clients to a shared warm instance
+        // keyed on the credentials so the attach runs once.
+        const ducklakeAutoCacheKey = this.ducklakeConfig
+            ? `ducklake:${DuckdbWarehouseClient.hashDucklakeConfig(this.ducklakeConfig)}`
+            : undefined;
+        this.instanceCacheKey =
+            options?.instanceCacheKey ?? ducklakeAutoCacheKey;
         this.logger = options?.logger;
+        this.enableQueryProfiling =
+            !isParquet && (options?.enableQueryProfiling ?? false);
         this.onQueryProfile = options?.onQueryProfile;
+        this.embeddedQueryTimeoutMs =
+            options?.embeddedQueryTimeoutMs ?? EMBEDDED_QUERY_TIMEOUT_MS;
+        this.enableInstanceCache = options?.enableInstanceCache ?? false;
+        this.projectUuid = options?.projectUuid;
+        this.organizationConcurrencyLimit =
+            options?.organizationConcurrencyLimit;
+        this.objectStorageOnly = options?.objectStorageOnly ?? false;
+    }
+
+    private static hashDucklakeConfig(
+        ducklake: CreateDuckdbDucklakeCredentials,
+    ): string {
+        return createHash('sha256')
+            .update(JSON.stringify(ducklake))
+            .digest('hex')
+            .slice(0, 16);
     }
 
     static createForPreAggregate(
-        credentials?: DuckdbConnectionCredentials,
+        credentials: DuckdbS3Credentials,
         options?: DuckdbWarehouseClientOptions,
     ): DuckdbWarehouseClient {
-        return new DuckdbWarehouseClient(credentials, options);
+        const client = new DuckdbWarehouseClient(credentials, options);
+        client.allowsPreAggregateFileReads = true;
+        return client;
     }
 
     private static getSharedInstanceSemaphore(
@@ -384,6 +914,86 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         return this.instanceCacheKey;
     }
 
+    private static async tryAcquireEmbeddedConcurrency(
+        organizationUuid?: string,
+    ): Promise<(() => void) | undefined> {
+        const acquireDeadline =
+            Date.now() + EMBEDDED_CONCURRENCY_ACQUIRE_TIMEOUT_MS;
+        const globalAcquired =
+            await DuckdbWarehouseClient.embeddedConcurrencyBudget.acquire(
+                EMBEDDED_CONCURRENCY_ACQUIRE_TIMEOUT_MS,
+            );
+        if (!globalAcquired) {
+            return undefined;
+        }
+
+        if (!organizationUuid) {
+            let released = false;
+            return () => {
+                if (released) {
+                    return;
+                }
+                released = true;
+                DuckdbWarehouseClient.embeddedConcurrencyBudget.release();
+            };
+        }
+
+        const organizationBudget =
+            DuckdbWarehouseClient.embeddedOrganizationConcurrencyBudgets.get(
+                organizationUuid,
+            ) ??
+            new ConcurrencyBudget(
+                EMBEDDED_MAX_CONCURRENT_QUERIES_PER_ORGANIZATION,
+            );
+        DuckdbWarehouseClient.embeddedOrganizationConcurrencyBudgets.set(
+            organizationUuid,
+            organizationBudget,
+        );
+
+        const organizationAcquired = await organizationBudget.acquire(
+            Math.max(0, acquireDeadline - Date.now()),
+        );
+        if (!organizationAcquired) {
+            DuckdbWarehouseClient.embeddedConcurrencyBudget.release();
+            return undefined;
+        }
+
+        let released = false;
+        return () => {
+            if (released) {
+                return;
+            }
+            released = true;
+            organizationBudget.release();
+            DuckdbWarehouseClient.embeddedConcurrencyBudget.release();
+            if (organizationBudget.isIdle()) {
+                DuckdbWarehouseClient.embeddedOrganizationConcurrencyBudgets.delete(
+                    organizationUuid,
+                );
+            }
+        };
+    }
+
+    private static tryAcquireOrganizationConcurrency(
+        organizationUuid: string,
+        limit: number,
+    ): (() => void) | undefined {
+        const key = `${limit}:${organizationUuid}`;
+        const budget =
+            DuckdbWarehouseClient.organizationConcurrencyBudgets.get(key) ??
+            new ConcurrencyBudget(limit);
+        DuckdbWarehouseClient.organizationConcurrencyBudgets.set(key, budget);
+        if (!budget.tryAcquire()) return undefined;
+        return () => {
+            budget.release();
+            if (budget.isIdle()) {
+                DuckdbWarehouseClient.organizationConcurrencyBudgets.delete(
+                    key,
+                );
+            }
+        };
+    }
+
     private getSQLWithMetadata(sql: string, tags?: Record<string, string>) {
         if (!tags) {
             return sql;
@@ -399,63 +1009,200 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         await db.run('SET allow_unredacted_secrets = false;');
     }
 
+    /**
+     * Limit the instance to its storage bucket(s) and a private temp
+     * directory for spill. Runs last in bootstrap: extensions are already
+     * loaded and the lockdown cannot be lifted afterwards, while the storage
+     * secret can still be replaced on the running instance.
+     */
+    private static async restrictToObjectStorage(
+        db: DuckdbConnection,
+        client: DuckdbWarehouseClient,
+    ): Promise<void> {
+        const escape = DuckdbWarehouseClient.escapeDuckdbString;
+        const buckets = new Set(
+            (client.s3Config?.scope ?? []).map((uri) => {
+                const { protocol, host } = new URL(uri);
+                return `${protocol}//${host}/`;
+            }),
+        );
+        if (buckets.size === 0) {
+            throw new Error(
+                'DuckDB object-storage sessions need a storage scope',
+            );
+        }
+        const tempDirectory = client.instanceCacheKey
+            ? path.join(
+                  os.tmpdir(),
+                  `duckdb-serve-${createHash('sha256')
+                      .update(client.instanceCacheKey)
+                      .digest('hex')
+                      .slice(0, 16)}`,
+              )
+            : await fs.mkdtemp(path.join(os.tmpdir(), 'duckdb-serve-'));
+        await fs.mkdir(tempDirectory, { recursive: true });
+        await db.run(`SET temp_directory = '${escape(tempDirectory)}';`);
+        await db.run(
+            `SET allowed_directories = [${[`${tempDirectory}/`, ...buckets]
+                .map((directory) => `'${escape(directory)}'`)
+                .join(', ')}];`,
+        );
+        await db.run('SET enable_external_access = false;');
+    }
+
+    private static async applyResourceLimits(
+        db: DuckdbConnection,
+        resourceLimits?: DuckdbResourceLimits,
+    ): Promise<void> {
+        if (resourceLimits?.memoryLimit) {
+            await db.run(`SET memory_limit = '${resourceLimits.memoryLimit}';`);
+        }
+
+        if (resourceLimits?.threads) {
+            await db.run(`SET threads = ${resourceLimits.threads};`);
+        }
+    }
+
     private static usesS3CredentialChain(
         s3Config: DuckdbS3SessionConfig,
     ): boolean {
-        return !(s3Config.accessKey && s3Config.secretKey);
+        return (
+            s3Config.authMode !== 'gcp_oauth' &&
+            !(s3Config.accessKey && s3Config.secretKey)
+        );
     }
 
-    private static async loadAwsExtensionForCredentialChain(
+    private static async getBundledExtensionPath(
+        extension: 'httpfs' | 'aws',
+    ): Promise<string | undefined> {
+        // Production images bundle signed extensions under the embedded DuckDB
+        // version to avoid runtime downloads. Local development has no bundled
+        // files and intentionally falls back to INSTALL/LOAD below.
+        const extensionPath = path.resolve(
+            __dirname,
+            '..',
+            'duckdbExtensions',
+            duckdbVersion(),
+            `${extension}.duckdb_extension`,
+        );
+
+        try {
+            await fs.access(extensionPath, fsSync.constants.R_OK);
+            return extensionPath;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async loadExtension(
         db: DuckdbConnection,
-        s3Config?: DuckdbS3SessionConfig,
+        extension: 'httpfs' | 'aws',
     ): Promise<void> {
-        if (s3Config && DuckdbWarehouseClient.usesS3CredentialChain(s3Config)) {
-            await db.run('INSTALL aws;');
-            await db.run('LOAD aws;');
+        const extensionPath =
+            await DuckdbWarehouseClient.getBundledExtensionPath(extension);
+        if (!extensionPath) {
+            await db.run(`INSTALL ${extension};`);
+            await db.run(`LOAD ${extension};`);
+            return;
+        }
+
+        // A bundled file should be valid because Docker verifies the version at
+        // build time. Surface load failures instead of hiding corruption or an
+        // ABI mismatch behind a network install.
+        await db.run(
+            `LOAD '${DuckdbWarehouseClient.escapeDuckdbString(extensionPath)}';`,
+        );
+    }
+
+    private async loadAwsExtensionForCredentialChain(
+        db: DuckdbConnection,
+    ): Promise<void> {
+        if (
+            this.s3Config &&
+            DuckdbWarehouseClient.usesS3CredentialChain(this.s3Config)
+        ) {
+            await this.loadExtension(db, 'aws');
         }
     }
 
     private static async bootstrapQuerySession(
         db: DuckdbConnection,
         client: DuckdbWarehouseClient,
+        querySql?: string,
+        parquetDirectory?: string,
     ): Promise<DuckdbBootstrapTiming> {
         const bootstrapStart = performance.now();
         const httpfsStart = performance.now();
-        await db.run('INSTALL httpfs;');
-        await db.run('LOAD httpfs;');
-        await DuckdbWarehouseClient.loadAwsExtensionForCredentialChain(
-            db,
-            client.s3Config,
-        );
+        if (!client.ducklakeConfig) {
+            // For DuckLake mode, httpfs and the ducklake/postgres/mysql/azure
+            // extensions are autoloaded by ATTACH — no explicit INSTALL/LOAD.
+            await client.loadExtension(db, 'httpfs');
+            if (client.s3Config?.caCertFile) {
+                await db.run(
+                    `SET ca_cert_file = '${DuckdbWarehouseClient.escapeDuckdbString(
+                        client.s3Config.caCertFile,
+                    )}';`,
+                );
+            }
+            await client.loadAwsExtensionForCredentialChain(db);
+        }
         const httpfsMs = performance.now() - httpfsStart;
 
         await db.run('SET enable_http_metadata_cache = true;');
         await db.run('SET enable_external_file_cache = true;');
         await db.run('SET parquet_metadata_cache = true;');
 
-        await DuckdbWarehouseClient.hardenInstance(db);
-
-        if (client.sharedResourceLimits?.memoryLimit) {
-            await db.run(
-                `SET memory_limit = '${client.sharedResourceLimits.memoryLimit}';`,
-            );
+        if (client.ducklakeConfig) {
+            // Parallel getFields() calls during compile all funnel through the
+            // attached postgres catalog. The duckdb-postgres extension caps
+            // the per-attach pool at 8 by default, which the compile easily
+            // exhausts on projects with >8 models.
+            await db.run('SET pg_connection_limit = 64;');
         }
 
-        if (client.sharedResourceLimits?.threads) {
-            await db.run(
-                `SET threads = ${client.sharedResourceLimits.threads};`,
-            );
+        if (client.ducklakeConfig) {
+            await db.run('SET autoinstall_known_extensions = true;');
+            await db.run('SET autoload_known_extensions = true;');
         }
+
+        await DuckdbWarehouseClient.applyResourceLimits(
+            db,
+            client.sharedResourceLimits,
+        );
 
         if (client.s3Config) {
-            await db.run(
-                DuckdbWarehouseClient.buildS3SecretSql(client.s3Config),
+            await DuckdbWarehouseClient.configureS3Secret(db, client.s3Config);
+        }
+
+        if (client.parquetConfig) {
+            await client.bootstrapParquetViews(db, querySql, parquetDirectory);
+        }
+
+        if (client.ducklakeConfig) {
+            const stmts = DuckdbWarehouseClient.buildDucklakeAttachSql(
+                client.ducklakeConfig,
             );
+            // eslint-disable-next-line no-restricted-syntax
+            for (const stmt of stmts) {
+                // eslint-disable-next-line no-await-in-loop
+                await db.run(stmt);
+            }
+        }
+
+        await DuckdbWarehouseClient.hardenInstance(db);
+
+        if (client.objectStorageOnly) {
+            await DuckdbWarehouseClient.restrictToObjectStorage(db, client);
+        }
+
+        if (client.parquetConfig) {
+            await db.run("SET allowed_configs = ['TimeZone'];");
+            await db.run('SET lock_configuration = true;');
         }
 
         const bootstrapMs = performance.now() - bootstrapStart;
         client.logger?.info(
-            `DuckDB query bootstrap complete: cacheKey=${client.instanceCacheKey ?? 'none'} bootstrap=${formatMilliseconds(bootstrapMs)}ms httpfs=${formatMilliseconds(httpfsMs)}ms memory_limit=${client.sharedResourceLimits?.memoryLimit ?? 'default'} threads=${client.sharedResourceLimits?.threads ?? 'default'} s3=${client.s3Config ? 'configured' : 'none'} shared=${client.instanceCacheKey ? 'true' : 'false'}`,
+            `DuckDB query bootstrap complete: cacheKey=${client.instanceCacheKey ?? 'none'} bootstrap=${formatMilliseconds(bootstrapMs)}ms httpfs=${formatMilliseconds(httpfsMs)}ms memory_limit=${client.sharedResourceLimits?.memoryLimit ?? 'default'} threads=${client.sharedResourceLimits?.threads ?? 'default'} s3=${client.s3Config ? 'configured' : 'none'} ducklake=${client.ducklakeConfig ? 'configured' : 'none'} shared=${client.instanceCacheKey ? 'true' : 'false'}`,
             {
                 shared: !!client.instanceCacheKey,
                 instanceCacheKey: client.instanceCacheKey,
@@ -465,6 +1212,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                     client.sharedResourceLimits?.memoryLimit ?? 'default',
                 threads: client.sharedResourceLimits?.threads ?? 'default',
                 s3Configured: !!client.s3Config,
+                ducklakeConfigured: !!client.ducklakeConfig,
             },
         );
 
@@ -472,6 +1220,308 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
             bootstrapMs,
             httpfsMs,
         };
+    }
+
+    /** Parse dependencies without granting unvalidated SQL any file access. */
+    private static async getParquetQueryTables(
+        sql?: string,
+    ): Promise<readonly string[] | undefined> {
+        if (!sql) return undefined;
+        const parser = await DuckDBInstance.create(':memory:', {
+            enable_external_access: 'false',
+            autoload_known_extensions: 'false',
+            autoinstall_known_extensions: 'false',
+            threads: '1',
+            memory_limit: '32MB',
+        });
+        try {
+            const connection = await parser.connect();
+            try {
+                const names = connection.getTableNames(sql, false);
+                // Unbound USING joins can return no references. Keep the full
+                // source in that case; normal SQL validation still runs later.
+                return names.length > 0
+                    ? names.map((name) => name.toLowerCase())
+                    : undefined;
+            } finally {
+                connection.closeSync();
+            }
+        } catch {
+            return undefined;
+        } finally {
+            parser.closeSync();
+        }
+    }
+
+    private async bootstrapParquetViews(
+        db: DuckdbConnection,
+        querySql?: string,
+        parquetDirectory?: string,
+    ): Promise<void> {
+        const references =
+            await DuckdbWarehouseClient.getParquetQueryTables(querySql);
+        const referencedTables = references ? new Set(references) : undefined;
+        const resolved = await this.parquetConfig!.resolveSource(references);
+        const source = {
+            ...resolved,
+            tables: resolved.tables.map((table) => ({
+                ...table,
+                urls: [...table.urls],
+            })),
+        };
+        const escape = DuckdbWarehouseClient.escapeDuckdbString;
+        const literal = (value: string) => `'${escape(value)}'`;
+        const scope = new URL(source.scope);
+        const localSignedSource =
+            source.signedUrls &&
+            scope.protocol === 'http:' &&
+            ['localhost', '127.0.0.1', '[::1]'].includes(scope.hostname);
+        if (
+            (!['https:', 's3:'].includes(scope.protocol) &&
+                !localSignedSource) ||
+            scope.username ||
+            scope.password ||
+            scope.search ||
+            scope.hash ||
+            !source.scope.endsWith('/') ||
+            scope.pathname === '/'
+        ) {
+            throw new ParameterError(
+                'Parquet source requires a scoped remote prefix',
+            );
+        }
+        if (
+            source.signedUrls &&
+            (source.httpAuth || source.s3Config || scope.protocol === 's3:')
+        ) {
+            throw new ParameterError(
+                'Signed Parquet sources cannot carry bucket credentials',
+            );
+        }
+        const names = new Set<string>();
+        const validateColumns = (columns: DuckdbParquetColumns) => {
+            if (
+                columns.length === 0 ||
+                new Set(columns.map((column) => column.name)).size !==
+                    columns.length ||
+                columns.some(
+                    (column) =>
+                        !/^[a-z][a-z0-9_]*$/.test(column.name) ||
+                        ![
+                            'VARCHAR',
+                            'BOOLEAN',
+                            'TIMESTAMP',
+                            'INTEGER',
+                            'BIGINT',
+                        ].includes(column.type),
+                )
+            )
+                throw new ParameterError('Invalid empty Parquet table schema');
+        };
+        (source.emptyTables ?? []).forEach(({ name, columns }) => {
+            if (!/^[a-z][a-z0-9_]*$/.test(name) || names.has(name)) {
+                throw new ParameterError('Invalid empty Parquet table schema');
+            }
+            validateColumns(columns);
+            names.add(name);
+        });
+        source.tables.forEach((table) => {
+            const { name, urls, columns, fallbackRows, hivePartitioning } =
+                table;
+            if (columns) validateColumns(columns);
+            if (
+                hivePartitioning !== undefined &&
+                typeof hivePartitioning !== 'boolean'
+            ) {
+                throw new ParameterError(
+                    'Invalid Parquet Hive partitioning configuration',
+                );
+            }
+            if (fallbackRows) {
+                const { keyColumns, markerColumn, markerValue } = fallbackRows;
+                const columnNames = new Set(
+                    columns?.map((column) => column.name),
+                );
+                if (
+                    !columns ||
+                    keyColumns.length === 0 ||
+                    new Set(keyColumns).size !== keyColumns.length ||
+                    [...keyColumns, markerColumn].some(
+                        (column) =>
+                            !/^[a-z][a-z0-9_]*$/.test(column) ||
+                            !columnNames.has(column),
+                    ) ||
+                    typeof markerValue !== 'string'
+                ) {
+                    throw new ParameterError(
+                        'Invalid Parquet fallback row configuration',
+                    );
+                }
+            }
+            if (
+                !/^[a-z][a-z0-9_]*$/.test(name) ||
+                names.has(name) ||
+                urls.length === 0
+            ) {
+                throw new ParameterError(
+                    'Parquet tables require unique names and a non-empty file manifest',
+                );
+            }
+            names.add(name);
+            urls.forEach((url) => {
+                const parsed = new URL(url);
+                if (
+                    parsed.href !== url ||
+                    !url.startsWith(source.scope) ||
+                    !parsed.pathname.endsWith('.parquet') ||
+                    (!source.signedUrls && parsed.search) ||
+                    (source.signedUrls &&
+                        ((!parsed.searchParams.has('X-Amz-Signature') &&
+                            !parsed.searchParams.has('X-Goog-Signature')) ||
+                            !/^[a-zA-Z0-9_./=%-]+$/.test(parsed.pathname) ||
+                            /%(?!3D)/i.test(parsed.pathname))) ||
+                    parsed.hash ||
+                    /[*?[\]{}]/.test(parsed.pathname) ||
+                    (!source.signedUrls && parsed.pathname.includes('%'))
+                ) {
+                    throw new ParameterError(
+                        'Parquet file is outside the trusted source prefix',
+                    );
+                }
+            });
+        });
+        if (source.httpAuth) {
+            if (scope.protocol !== 'https:') {
+                throw new ParameterError(
+                    'HTTP credentials require an HTTPS source',
+                );
+            }
+            await db.run(
+                `CREATE SECRET analytics_http (TYPE http, BEARER_TOKEN ${literal(source.httpAuth.bearerToken)}, SCOPE ${literal(source.scope)});`,
+            );
+        }
+        if (source.s3Config) {
+            if (DuckdbWarehouseClient.usesS3CredentialChain(source.s3Config)) {
+                await this.loadExtension(db, 'aws');
+            }
+            await DuckdbWarehouseClient.configureS3Secret(db, {
+                ...source.s3Config,
+                scope: [source.scope],
+            });
+        }
+        const spillDirectory = parquetDirectory
+            ? path.join(parquetDirectory, 'spill')
+            : '';
+        if (spillDirectory) await fs.mkdir(spillDirectory, { mode: 0o700 });
+        // DuckDB allowlists this private child when external access is disabled.
+        // User SQL still cannot call file functions or change this configuration.
+        await db.run("SET max_temp_directory_size = '2GB';");
+        await db.run(`SET temp_directory = ${literal(spillDirectory)};`);
+        await db.run('SET allowed_directories = [];');
+        // These caches live only in this query's private, memory-limited
+        // instance, which is closed in withEphemeralQuerySession's finally.
+        // Reuse metadata between view binding, validation and execution without
+        // retaining files or signed URLs across requests or organizations.
+        await db.run('SET enable_http_metadata_cache = true;');
+        await db.run('SET enable_external_file_cache = true;');
+        await db.run('SET parquet_metadata_cache = true;');
+        // Only validated manifest URLs can supply bytes. Each query owns a
+        // private directory; never allow the shared cache or another query's paths.
+        if (source.signedUrls && source.fileBuffers && parquetDirectory) {
+            let stagedBytes = 0;
+            for (const table of source.tables) {
+                const buffers = table.urls.map((url) =>
+                    source.fileBuffers!.get(url),
+                );
+                const size = buffers.reduce(
+                    (total, buffer) => total + (buffer?.byteLength ?? 0),
+                    0,
+                );
+                // DuckDB requires consistent Hive paths within each read_parquet.
+                // Never mix remote and local files in one table, including on failure.
+                if (
+                    buffers.every((buffer) => buffer) &&
+                    stagedBytes + size <= 8 * 1024 * 1024
+                ) {
+                    stagedBytes += size;
+                    const localPaths: string[] = [];
+                    try {
+                        for (let i = 0; i < table.urls.length; i += 1) {
+                            const localPath = path.join(
+                                parquetDirectory,
+                                decodeURIComponent(
+                                    new URL(table.urls[i]).pathname,
+                                ),
+                            );
+                            // eslint-disable-next-line no-await-in-loop
+                            await fs.mkdir(path.dirname(localPath), {
+                                recursive: true,
+                            });
+                            // eslint-disable-next-line no-await-in-loop
+                            await fs.writeFile(localPath, buffers[i]!, {
+                                mode: 0o600,
+                                flag: 'wx',
+                            });
+                            localPaths.push(localPath);
+                        }
+                        table.urls = localPaths;
+                    } catch {
+                        // Keep the entire table remote if temporary storage is unavailable.
+                    }
+                }
+            }
+        }
+        const files = source.tables.flatMap(({ urls }) => urls);
+        await db.run(`SET allowed_paths = [${files.map(literal).join(',')}];`);
+        await db.run('SET enable_external_access = false;');
+        // Only bind the dependencies resolved in the isolated parser above.
+        // Providers that do not support selective signing may still return all files.
+        const tables = source.tables.filter(
+            ({ name }) => !referencedTables?.size || referencedTables.has(name),
+        );
+        for (const { name, columns } of source.emptyTables ?? []) {
+            // eslint-disable-next-line no-await-in-loop
+            await db.run(
+                `CREATE VIEW "${name}" AS SELECT ${columns.map((column) => `NULL::${column.type} AS "${column.name}"`).join(', ')} WHERE false;`,
+            );
+        }
+        // eslint-disable-next-line no-restricted-syntax
+        for (const {
+            name,
+            urls,
+            columns,
+            fallbackRows,
+            hivePartitioning,
+        } of tables) {
+            // Older retained files may all predate an additive column. A typed
+            // zero-row branch supplies its schema without materializing rows.
+            const missingColumns = columns
+                ? ` UNION ALL BY NAME SELECT ${columns.map((column) => `NULL::${column.type} AS "${column.name}"`).join(', ')} WHERE false`
+                : '';
+            const sourceQuery = `SELECT * FROM read_parquet([${urls.map(literal).join(',')}], hive_partitioning = ${hivePartitioning ?? true}, union_by_name = true)${missingColumns}`;
+            const capturedRow = fallbackRows
+                ? `"${fallbackRows.markerColumn}" IS DISTINCT FROM ${literal(fallbackRows.markerValue)}`
+                : undefined;
+            // Keep every captured row, including its existing duplicate-delivery
+            // semantics. Only historical fallback rows yield to captured identities,
+            // regardless of completion date or nullable identity columns.
+            // Filter fallback rows before matching identities: a window over all
+            // captured events exceeds the query memory budget on larger histories.
+            const viewQuery = fallbackRows
+                ? `WITH parquet_source AS NOT MATERIALIZED (${sourceQuery})
+                   SELECT * FROM parquet_source WHERE ${capturedRow}
+                   UNION ALL
+                   SELECT history.* FROM parquet_source AS history
+                   WHERE NOT (history.${capturedRow})
+                   AND NOT EXISTS (
+                       SELECT 1 FROM parquet_source AS captured
+                       WHERE captured.${capturedRow}
+                       AND ${fallbackRows.keyColumns.map((column) => `captured."${column}" IS NOT DISTINCT FROM history."${column}"`).join(' AND ')}
+                   )`
+                : sourceQuery;
+            // eslint-disable-next-line no-await-in-loop
+            await db.run(`CREATE VIEW "${name}" AS ${viewQuery};`);
+        }
     }
 
     private static async bootstrapSharedInstance(
@@ -525,6 +1575,12 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                 };
             }
 
+            DuckdbWarehouseClient.sharedInstanceGcsTokens.delete(
+                instanceCacheKey,
+            );
+            DuckdbWarehouseClient.sharedInstanceS3Scopes.delete(
+                instanceCacheKey,
+            );
             const createStart = performance.now();
             const instance = await DuckDBInstance.create(':memory:');
             const instanceCreateMs = performance.now() - createStart;
@@ -546,6 +1602,16 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                 instanceCacheKey,
                 instance,
             );
+            DuckdbWarehouseClient.sharedInstanceResourceLimits.set(
+                instanceCacheKey,
+                client.sharedResourceLimits,
+            );
+            if (client.s3Config?.scope) {
+                DuckdbWarehouseClient.sharedInstanceS3Scopes.set(
+                    instanceCacheKey,
+                    [...client.s3Config.scope],
+                );
+            }
             client.logger?.info(
                 `DuckDB shared instance initialized: cacheKey=${instanceCacheKey} semaphore_wait=${formatMilliseconds(semaphoreWaitMs)}ms instance_create=${formatMilliseconds(instanceCreateMs)}ms bootstrap=${formatMilliseconds(bootstrapMs)}ms`,
                 {
@@ -567,42 +1633,447 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         }
     }
 
-    private static clearSharedInstance(
+    private static async clearSharedInstance(
         instanceCacheKey: string,
         logger?: DuckdbLogger,
-    ): void {
-        const sharedInstance =
-            DuckdbWarehouseClient.sharedInstances.get(instanceCacheKey);
-        if (sharedInstance) {
-            try {
-                sharedInstance.closeSync?.();
-            } catch {
-                // best-effort cleanup
+    ): Promise<void> {
+        const semaphore =
+            DuckdbWarehouseClient.getSharedInstanceSemaphore(instanceCacheKey);
+        await semaphore.acquire();
+        try {
+            const sharedInstance =
+                DuckdbWarehouseClient.sharedInstances.get(instanceCacheKey);
+            if (sharedInstance) {
+                try {
+                    sharedInstance.closeSync?.();
+                } catch {
+                    // best-effort cleanup
+                }
+                DuckdbWarehouseClient.sharedInstances.delete(instanceCacheKey);
+                DuckdbWarehouseClient.sharedInstanceResourceLimits.delete(
+                    instanceCacheKey,
+                );
+                DuckdbWarehouseClient.sharedInstanceGcsTokens.delete(
+                    instanceCacheKey,
+                );
+                DuckdbWarehouseClient.sharedInstanceS3Scopes.delete(
+                    instanceCacheKey,
+                );
+                logger?.info(
+                    `DuckDB shared instance cleared: ${instanceCacheKey}`,
+                );
             }
-            DuckdbWarehouseClient.sharedInstances.delete(instanceCacheKey);
-            DuckdbWarehouseClient.sharedInstanceSemaphores.delete(
-                instanceCacheKey,
-            );
-            logger?.info(`DuckDB shared instance cleared: ${instanceCacheKey}`);
+        } finally {
+            semaphore.release();
         }
     }
 
     /** Reset shared state without closing — for use in tests with mocked instances. */
     static resetSharedDuckdbStateForTesting(): void {
         DuckdbWarehouseClient.sharedInstances.clear();
+        DuckdbWarehouseClient.sharedInstanceResourceLimits.clear();
         DuckdbWarehouseClient.sharedInstanceSemaphores.clear();
+        DuckdbWarehouseClient.sharedInstanceGcsTokens.clear();
+        DuckdbWarehouseClient.sharedInstanceS3Scopes.clear();
+        DuckdbWarehouseClient.sharedInstanceS3SecretLocks.clear();
+        DuckdbWarehouseClient.embeddedConcurrencyBudget.reset();
+        DuckdbWarehouseClient.parquetConcurrencyBudget.reset();
+        DuckdbWarehouseClient.embeddedOrganizationConcurrencyBudgets.forEach(
+            (budget) => budget.reset(),
+        );
+        DuckdbWarehouseClient.embeddedOrganizationConcurrencyBudgets.clear();
     }
 
     async close(): Promise<void> {
         if (this.instanceCacheKey) {
-            DuckdbWarehouseClient.clearSharedInstance(
+            await DuckdbWarehouseClient.clearSharedInstance(
                 this.instanceCacheKey,
                 this.logger,
             );
         }
     }
 
-    private static buildS3SecretSql(s3Config: DuckdbS3SessionConfig): string {
+    private static readonly DUCKLAKE_CATALOG_SECRET =
+        '__lightdash_ducklake_catalog';
+
+    private static readonly DUCKLAKE_DATA_SECRET = '__lightdash_ducklake_data';
+
+    private static readonly DUCKLAKE_SECRET = '__lightdash_ducklake';
+
+    private static escapeDuckdbString(v: string): string {
+        return DuckdbWarehouseClient.sqlBuilder.escapeString(v);
+    }
+
+    private static quoteIdent(name: string): string {
+        return `"${name.replace(/"/g, '""')}"`;
+    }
+
+    private static buildDucklakeCatalogSecretSql(
+        ducklake: CreateDuckdbDucklakeCredentials,
+    ): string | null {
+        const e = DuckdbWarehouseClient.escapeDuckdbString;
+        const { catalog } = ducklake;
+        switch (catalog.type) {
+            case DucklakeCatalogType.POSTGRES:
+                return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_CATALOG_SECRET} (
+                    TYPE postgres,
+                    HOST '${e(catalog.host)}',
+                    PORT ${catalog.port},
+                    DATABASE '${e(catalog.database)}',
+                    USER '${e(catalog.user)}',
+                    PASSWORD '${e(catalog.password)}'
+                );`;
+            case DucklakeCatalogType.SQLITE:
+            case DucklakeCatalogType.DUCKDB:
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    private static buildDucklakeDataSecretSql(
+        ducklake: CreateDuckdbDucklakeCredentials,
+    ): string | null {
+        const e = DuckdbWarehouseClient.escapeDuckdbString;
+        const { dataPath } = ducklake;
+        switch (dataPath.type) {
+            case DucklakeDataPathType.S3: {
+                const hasStaticCreds = !!(
+                    dataPath.accessKeyId && dataPath.secretAccessKey
+                );
+                const providerClause = hasStaticCreds
+                    ? ''
+                    : `PROVIDER credential_chain, REFRESH auto, VALIDATION 'none',`;
+                const keyIdClause = dataPath.accessKeyId
+                    ? `KEY_ID '${e(dataPath.accessKeyId)}',`
+                    : '';
+                const secretClause = dataPath.secretAccessKey
+                    ? `SECRET '${e(dataPath.secretAccessKey)}',`
+                    : '';
+                const endpointClause = dataPath.endpoint
+                    ? `ENDPOINT '${e(dataPath.endpoint)}',`
+                    : '';
+                const regionClause = dataPath.region
+                    ? `REGION '${e(dataPath.region)}',`
+                    : '';
+                const urlStyleClause =
+                    dataPath.forcePathStyle === undefined
+                        ? ''
+                        : `URL_STYLE '${
+                              dataPath.forcePathStyle ? 'path' : 'vhost'
+                          }',`;
+                const useSslClause =
+                    dataPath.useSsl === undefined
+                        ? ''
+                        : `USE_SSL ${dataPath.useSsl},`;
+                return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_DATA_SECRET} (
+                    TYPE s3,
+                    ${providerClause}
+                    ${keyIdClause}
+                    ${secretClause}
+                    ${endpointClause}
+                    ${regionClause}
+                    ${urlStyleClause}
+                    ${useSslClause}
+                    SCOPE '${e(dataPath.url)}'
+                );`;
+            }
+            case DucklakeDataPathType.GCS: {
+                const hasStaticCreds = !!(
+                    dataPath.hmacKeyId && dataPath.hmacSecret
+                );
+                const providerClause = hasStaticCreds
+                    ? ''
+                    : `PROVIDER credential_chain,`;
+                const keyIdClause = dataPath.hmacKeyId
+                    ? `KEY_ID '${e(dataPath.hmacKeyId)}',`
+                    : '';
+                const secretClause = dataPath.hmacSecret
+                    ? `SECRET '${e(dataPath.hmacSecret)}',`
+                    : '';
+                return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_DATA_SECRET} (
+                    TYPE gcs,
+                    ${providerClause}
+                    ${keyIdClause}
+                    ${secretClause}
+                    SCOPE '${e(dataPath.url)}'
+                );`;
+            }
+            case DucklakeDataPathType.AZURE: {
+                if (dataPath.connectionString) {
+                    return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_DATA_SECRET} (
+                        TYPE azure,
+                        CONNECTION_STRING '${e(dataPath.connectionString)}',
+                        SCOPE '${e(dataPath.url)}'
+                    );`;
+                }
+                if (dataPath.accountName && dataPath.accountKey) {
+                    return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_DATA_SECRET} (
+                        TYPE azure,
+                        ACCOUNT_NAME '${e(dataPath.accountName)}',
+                        ACCOUNT_KEY '${e(dataPath.accountKey)}',
+                        SCOPE '${e(dataPath.url)}'
+                    );`;
+                }
+                if (dataPath.accountName) {
+                    return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_DATA_SECRET} (
+                        TYPE azure,
+                        PROVIDER credential_chain,
+                        ACCOUNT_NAME '${e(dataPath.accountName)}',
+                        SCOPE '${e(dataPath.url)}'
+                    );`;
+                }
+                return null;
+            }
+            case DucklakeDataPathType.LOCAL:
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    private static catalogUsesSecret(
+        ducklake: CreateDuckdbDucklakeCredentials,
+    ): boolean {
+        return ducklake.catalog.type === DucklakeCatalogType.POSTGRES;
+    }
+
+    private static buildDucklakeSecretSql(
+        ducklake: CreateDuckdbDucklakeCredentials,
+    ): string | null {
+        if (!DuckdbWarehouseClient.catalogUsesSecret(ducklake)) return null;
+        const e = DuckdbWarehouseClient.escapeDuckdbString;
+        const dataPathUrl =
+            ducklake.dataPath.type === DucklakeDataPathType.LOCAL
+                ? ducklake.dataPath.path
+                : ducklake.dataPath.url;
+        return `CREATE OR REPLACE SECRET ${DuckdbWarehouseClient.DUCKLAKE_SECRET} (
+            TYPE ducklake,
+            METADATA_PATH '',
+            DATA_PATH '${e(dataPathUrl)}',
+            METADATA_PARAMETERS MAP {'TYPE': 'postgres', 'SECRET': '${
+                DuckdbWarehouseClient.DUCKLAKE_CATALOG_SECRET
+            }'}
+        );`;
+    }
+
+    private static buildDucklakeAttachSql(
+        ducklake: CreateDuckdbDucklakeCredentials,
+    ): string[] {
+        const e = DuckdbWarehouseClient.escapeDuckdbString;
+        const alias = ducklake.catalogAlias ?? 'ducklake';
+        const quotedAlias = DuckdbWarehouseClient.quoteIdent(alias);
+        const stmts: string[] = [];
+
+        const catalogSecret =
+            DuckdbWarehouseClient.buildDucklakeCatalogSecretSql(ducklake);
+        if (catalogSecret) stmts.push(catalogSecret);
+
+        const dataSecret =
+            DuckdbWarehouseClient.buildDucklakeDataSecretSql(ducklake);
+        if (dataSecret) stmts.push(dataSecret);
+
+        if (DuckdbWarehouseClient.catalogUsesSecret(ducklake)) {
+            const ducklakeSecret =
+                DuckdbWarehouseClient.buildDucklakeSecretSql(ducklake);
+            if (ducklakeSecret) stmts.push(ducklakeSecret);
+            stmts.push(
+                `ATTACH 'ducklake:${DuckdbWarehouseClient.DUCKLAKE_SECRET}' AS ${quotedAlias} (READ_ONLY);`,
+            );
+        } else {
+            const { catalog } = ducklake;
+            const catalogTarget =
+                catalog.type === DucklakeCatalogType.SQLITE
+                    ? `ducklake:sqlite:${e(catalog.path)}`
+                    : `ducklake:${e((catalog as { path: string }).path)}`;
+            const dataPathUrl =
+                ducklake.dataPath.type === DucklakeDataPathType.LOCAL
+                    ? ducklake.dataPath.path
+                    : ducklake.dataPath.url;
+            stmts.push(
+                `ATTACH '${catalogTarget}' AS ${quotedAlias} (DATA_PATH '${e(
+                    dataPathUrl,
+                )}', READ_ONLY);`,
+            );
+        }
+
+        return stmts;
+    }
+
+    private static async configureS3Secret(
+        db: DuckdbConnection,
+        s3Config: DuckdbS3SessionConfig,
+    ): Promise<void> {
+        if (s3Config.authMode === 'gcp_oauth') {
+            await DuckdbWarehouseClient.createGcsSecret(
+                db,
+                s3Config,
+                await DuckdbWarehouseClient.getGcsAccessToken(s3Config),
+            );
+            return;
+        }
+        await db.run(DuckdbWarehouseClient.buildS3SecretSql(s3Config));
+    }
+
+    private static async getGcsAccessToken(
+        s3Config: GcpOAuthS3SessionConfig,
+    ): Promise<string> {
+        if (!s3Config.scope?.length) {
+            throw new Error('DuckDB GCP OAuth requires a storage scope');
+        }
+        try {
+            const token = await s3Config.getAccessToken();
+            if (!token) throw new Error('Empty access token');
+            return token;
+        } catch {
+            throw new Error(
+                'Unable to obtain a Google access token for DuckDB storage',
+            );
+        }
+    }
+
+    private static async createGcsSecret(
+        db: DuckdbConnection,
+        s3Config: GcpOAuthS3SessionConfig,
+        token: string,
+    ): Promise<void> {
+        const escape = (v: string) =>
+            DuckdbWarehouseClient.sqlBuilder.escapeString(v);
+        try {
+            await db.run(
+                `CREATE OR REPLACE SECRET __lightdash_s3 (
+                    TYPE gcs,
+                    BEARER_TOKEN $1,
+                    ENDPOINT '${escape(s3Config.endpoint)}',
+                    SCOPE (${s3Config.scope.map((uri) => `'${escape(uri)}'`).join(', ')}),
+                    URL_STYLE '${s3Config.forcePathStyle ? 'path' : 'vhost'}',
+                    USE_SSL ${s3Config.useSsl}
+                );`,
+                [token],
+            );
+        } catch (error) {
+            // Keep DuckDB's reason, but never the token: a failed statement
+            // can echo its parameters.
+            const reason = getErrorMessage(error)
+                .split(token)
+                .join('[redacted]');
+            throw new Error(
+                `Unable to configure GCP OAuth for DuckDB storage: ${reason}`,
+            );
+        }
+    }
+
+    /** URIs this session needs that the shared instance's secret does not yet cover. */
+    private static getMissingSharedS3Scope(
+        instanceCacheKey: string,
+        s3Config: DuckdbS3SessionConfig,
+    ): string[] {
+        const installed =
+            DuckdbWarehouseClient.sharedInstanceS3Scopes.get(instanceCacheKey);
+        if (!installed || !s3Config.scope) return [];
+        return s3Config.scope.filter((uri) => !installed.includes(uri));
+    }
+
+    private static async getSharedS3SecretToken(
+        s3Config: DuckdbS3SessionConfig,
+    ): Promise<string | null> {
+        return s3Config.authMode === 'gcp_oauth'
+            ? DuckdbWarehouseClient.getGcsAccessToken(s3Config)
+            : null;
+    }
+
+    /**
+     * Keeps a shared instance's S3 secret current for this session: the
+     * GCS bearer token the provider now holds, and a scope covering every
+     * URI the session reads. Secrets belong to the instance, so the secret
+     * is only replaced when something changed, once per instance under a
+     * lock, and the scope only ever widens (union of what sessions needed).
+     */
+    private static async ensureSharedS3Secret(
+        instanceCacheKey: string,
+        db: DuckdbConnection,
+        s3Config: DuckdbS3SessionConfig,
+    ): Promise<void> {
+        const tokens = DuckdbWarehouseClient.sharedInstanceGcsTokens;
+        const scopes = DuckdbWarehouseClient.sharedInstanceS3Scopes;
+        const needsReplacement = (token: string | null): boolean =>
+            (token !== null && tokens.get(instanceCacheKey) !== token) ||
+            DuckdbWarehouseClient.getMissingSharedS3Scope(
+                instanceCacheKey,
+                s3Config,
+            ).length > 0;
+
+        const token =
+            await DuckdbWarehouseClient.getSharedS3SecretToken(s3Config);
+        if (!needsReplacement(token)) return;
+
+        const locks = DuckdbWarehouseClient.sharedInstanceS3SecretLocks;
+        let lock = locks.get(instanceCacheKey);
+        if (!lock) {
+            lock = new AsyncSemaphore();
+            locks.set(instanceCacheKey, lock);
+        }
+        await lock.acquire();
+        try {
+            // Re-read under the lock. Another session may have installed a
+            // newer token or a wider scope while this one waited, and what
+            // was fetched above must not overwrite it.
+            const current =
+                await DuckdbWarehouseClient.getSharedS3SecretToken(s3Config);
+            if (!needsReplacement(current)) return;
+
+            const installedScope = scopes.get(instanceCacheKey);
+            const scope = installedScope
+                ? [
+                      ...installedScope,
+                      ...DuckdbWarehouseClient.getMissingSharedS3Scope(
+                          instanceCacheKey,
+                          s3Config,
+                      ),
+                  ]
+                : s3Config.scope;
+
+            switch (s3Config.authMode) {
+                case 'gcp_oauth': {
+                    if (current === null) {
+                        throw new Error(
+                            'DuckDB GCP OAuth requires an access token',
+                        );
+                    }
+                    await DuckdbWarehouseClient.createGcsSecret(
+                        db,
+                        { ...s3Config, scope: scope ?? s3Config.scope },
+                        current,
+                    );
+                    tokens.set(instanceCacheKey, current);
+                    break;
+                }
+                case 'default':
+                case undefined:
+                    await db.run(
+                        DuckdbWarehouseClient.buildS3SecretSql({
+                            ...s3Config,
+                            scope,
+                        }),
+                    );
+                    break;
+                default:
+                    return assertUnreachable(
+                        s3Config,
+                        'Unsupported DuckDB storage auth mode',
+                    );
+            }
+            if (scope) {
+                scopes.set(instanceCacheKey, scope);
+            }
+        } finally {
+            lock.release();
+        }
+    }
+
+    private static buildS3SecretSql(
+        s3Config: Extract<DuckdbS3SessionConfig, { authMode?: 'default' }>,
+    ): string {
         const escape = (v: string) =>
             DuckdbWarehouseClient.sqlBuilder.escapeString(v);
         const usesStaticCredentials =
@@ -626,6 +2097,11 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         const secretClause = s3Config.secretKey
             ? `SECRET '${escape(s3Config.secretKey)}',`
             : '';
+        const scopeClause = s3Config.scope
+            ? `SCOPE (${s3Config.scope
+                  .map((uri) => `'${escape(uri)}'`)
+                  .join(', ')}),`
+            : '';
 
         return `CREATE OR REPLACE SECRET __lightdash_s3 (
             TYPE s3,
@@ -634,6 +2110,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
             ${secretClause}
             ENDPOINT '${escape(s3Config.endpoint)}',
             ${regionClause}
+            ${scopeClause}
             URL_STYLE '${s3Config.forcePathStyle ? 'path' : 'vhost'}',
             USE_SSL ${s3Config.useSsl}
         );`;
@@ -694,7 +2171,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                 instanceCacheKey,
             },
         );
-        DuckdbWarehouseClient.clearSharedInstance(
+        await DuckdbWarehouseClient.clearSharedInstance(
             instanceCacheKey,
             this.logger,
         );
@@ -725,39 +2202,56 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         db: DuckdbConnection,
         tempDir: string,
     ): Promise<void> {
-        await db.run('INSTALL httpfs;');
-        await db.run('LOAD httpfs;');
-        await DuckdbWarehouseClient.loadAwsExtensionForCredentialChain(
-            db,
-            this.s3Config,
-        );
-
-        await DuckdbWarehouseClient.hardenInstance(db);
+        if (!this.ducklakeConfig) {
+            await this.loadExtension(db, 'httpfs');
+            await this.loadAwsExtensionForCredentialChain(db);
+        }
 
         await db.run(`SET temp_directory = '${tempDir}';`);
 
-        if (this.resourceLimits?.memoryLimit) {
-            await db.run(
-                `SET memory_limit = '${this.resourceLimits.memoryLimit}';`,
-            );
+        if (this.ducklakeConfig) {
+            await db.run('SET pg_connection_limit = 64;');
         }
 
-        if (this.resourceLimits?.threads) {
-            await db.run(`SET threads = ${this.resourceLimits.threads};`);
+        if (this.ducklakeConfig) {
+            await db.run('SET autoinstall_known_extensions = true;');
+            await db.run('SET autoload_known_extensions = true;');
         }
+
+        await DuckdbWarehouseClient.applyResourceLimits(
+            db,
+            this.resourceLimits,
+        );
 
         if (this.s3Config) {
-            await db.run(DuckdbWarehouseClient.buildS3SecretSql(this.s3Config));
+            await DuckdbWarehouseClient.configureS3Secret(db, this.s3Config);
         }
 
+        if (this.ducklakeConfig) {
+            const stmts = DuckdbWarehouseClient.buildDucklakeAttachSql(
+                this.ducklakeConfig,
+            );
+            // eslint-disable-next-line no-restricted-syntax
+            for (const stmt of stmts) {
+                // eslint-disable-next-line no-await-in-loop
+                await db.run(stmt);
+            }
+        }
+
+        await DuckdbWarehouseClient.hardenInstance(db);
+
         this.logger?.info(
-            `DuckDB isolated bootstrap: memory_limit=${this.resourceLimits?.memoryLimit ?? 'default'} threads=${this.resourceLimits?.threads ?? 'default'} s3=${this.s3Config ? 'configured' : 'none'}`,
+            `DuckDB isolated bootstrap: memory_limit=${this.resourceLimits?.memoryLimit ?? 'default'} threads=${this.resourceLimits?.threads ?? 'default'} s3=${this.s3Config ? 'configured' : 'none'} ducklake=${this.ducklakeConfig ? 'configured' : 'none'}`,
         );
     }
 
     /** Ephemeral DuckDB instance with resource limits (e.g. parquet conversion). */
     private async withIsolatedSession<T>(
         callback: (db: DuckdbConnection) => Promise<T>,
+        onPhaseTiming?: (
+            phase: WarehouseQueryPhase,
+            durationMs: number,
+        ) => void,
     ): Promise<T> {
         const sessionStart = performance.now();
 
@@ -768,6 +2262,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         const connectStart = performance.now();
         const connection = await instance.connect();
         const connectMs = performance.now() - connectStart;
+        onPhaseTiming?.('connect', instanceCreateMs + connectMs);
 
         const tempDir = await fs.mkdtemp(
             path.join(os.tmpdir(), 'duckdb-temp-'),
@@ -777,6 +2272,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
             const bootstrapStart = performance.now();
             await this.bootstrapIsolatedSession(connection, tempDir);
             const bootstrapMs = performance.now() - bootstrapStart;
+            onPhaseTiming?.('session', bootstrapMs);
 
             const queryStart = performance.now();
             const result = await callback(connection);
@@ -808,26 +2304,62 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
 
     private async withEphemeralQuerySession<T>(
         callback: (db: DuckdbConnection) => Promise<T>,
+        querySql?: string,
     ): Promise<T> {
         const sessionStart = performance.now();
-
-        const instanceCreateStart = performance.now();
-        const instance = await DuckDBInstance.create(':memory:');
-        const instanceCreateMs = performance.now() - instanceCreateStart;
-
-        const connectStart = performance.now();
-        const connection = await instance.connect();
-        const connectMs = performance.now() - connectStart;
-
+        const budget = this.parquetConfig
+            ? DuckdbWarehouseClient.parquetConcurrencyBudget
+            : undefined;
+        if (budget && !(await budget.acquire())) {
+            throw new WarehouseQueryError(
+                'Analytics query capacity was reset. Try again.',
+            );
+        }
+        let instance: DuckDBInstance | undefined;
+        let connection: DuckdbConnection | undefined;
+        let parquetDirectory: string | undefined;
+        let queryFailed = false;
+        let deadlineExceeded = false;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
+            const instanceCreateStart = performance.now();
+            instance = await DuckDBInstance.create(':memory:');
+            const instanceCreateMs = performance.now() - instanceCreateStart;
+
+            const connectStart = performance.now();
+            connection = await instance.connect();
+            const connectMs = performance.now() - connectStart;
+
+            if (this.parquetConfig) {
+                timeout = setTimeout(() => {
+                    deadlineExceeded = true;
+                    connection?.interrupt();
+                }, PARQUET_QUERY_TIMEOUT_MS);
+                timeout.unref();
+            }
+
+            if (this.parquetConfig) {
+                parquetDirectory = await fs
+                    .mkdtemp(
+                        path.join(os.tmpdir(), 'lightdash-analytics-query-'),
+                    )
+                    .catch(() => undefined);
+            }
             const bootstrapTiming =
                 await DuckdbWarehouseClient.bootstrapQuerySession(
                     connection,
                     this,
+                    querySql,
+                    parquetDirectory,
                 );
+
+            if (deadlineExceeded)
+                throw new Error('Analytics query deadline exceeded');
 
             const queryStart = performance.now();
             const result = await callback(connection);
+            if (deadlineExceeded)
+                throw new Error('Analytics query deadline exceeded');
             const queryMs = performance.now() - queryStart;
 
             const totalMs = performance.now() - sessionStart;
@@ -843,10 +2375,45 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
             );
 
             return result;
+        } catch (error) {
+            queryFailed = true;
+            if (deadlineExceeded) {
+                throw new ParquetQueryTimeoutError();
+            }
+            throw error;
         } finally {
-            connection.closeSync?.();
-            connection.disconnectSync?.();
-            instance.closeSync?.();
+            if (timeout) clearTimeout(timeout);
+            const cleanupErrors: unknown[] = [];
+            try {
+                for (const close of [
+                    () => connection?.closeSync?.(),
+                    () => connection?.disconnectSync?.(),
+                    () => instance?.closeSync?.(),
+                ]) {
+                    try {
+                        close();
+                    } catch (error) {
+                        cleanupErrors.push(error);
+                    }
+                }
+                if (parquetDirectory) {
+                    await fs
+                        .rm(parquetDirectory, {
+                            recursive: true,
+                            force: true,
+                            maxRetries: 3,
+                            retryDelay: 100,
+                        })
+                        .catch((error: unknown) => cleanupErrors.push(error));
+                }
+                if (cleanupErrors.length > 0) {
+                    this.logger?.warn?.('DuckDB query cleanup failed');
+                    // eslint-disable-next-line no-unsafe-finally -- Preserve primary errors, fail successful queries only.
+                    if (!queryFailed) throw cleanupErrors[0];
+                }
+            } finally {
+                budget?.release();
+            }
         }
     }
 
@@ -858,6 +2425,22 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         const sharedConnection = await this.connectWithRetry();
 
         try {
+            if (this.s3Config) {
+                await DuckdbWarehouseClient.ensureSharedS3Secret(
+                    this.getRequiredInstanceCacheKey(),
+                    sharedConnection.connection,
+                    this.s3Config,
+                );
+            }
+            await DuckdbWarehouseClient.applyResourceLimits(
+                sharedConnection.connection,
+                DuckdbWarehouseClient.sharedInstanceResourceLimits.get(
+                    this.getRequiredInstanceCacheKey(),
+                ),
+            );
+            await DuckdbWarehouseClient.hardenInstance(
+                sharedConnection.connection,
+            );
             const queryStart = performance.now();
             const result = await callback(sharedConnection.connection);
             const queryMs = performance.now() - queryStart;
@@ -890,49 +2473,262 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         );
     }
 
-    /**
-     * Dispatches to the appropriate session strategy:
-     * - Direct database (non-:memory: databasePath): connects to the MotherDuck path
-     * - Resource-limited: isolated ephemeral instance (e.g. parquet conversion)
-     * - Shared instance (has instanceCacheKey): warm cached instance for queries
-     * - Default: ephemeral query session
-     */
+    private isMotherduck(): boolean {
+        return (
+            !this.embeddedConfig &&
+            !this.ducklakeConfig &&
+            this.databasePath.startsWith('md:')
+        );
+    }
+
     private async withSession<T>(
         callback: (db: DuckdbConnection) => Promise<T>,
+        organizationUuid?: string,
+        retryable: () => boolean = () => true,
+        onPhaseTiming?: (
+            phase: WarehouseQueryPhase,
+            durationMs: number,
+        ) => void,
+        querySql?: string,
     ): Promise<T> {
-        if (this.databasePath !== ':memory:') {
-            return this.withDirectSession(callback);
+        const releaseOrganizationConcurrency =
+            !this.embeddedConfig &&
+            organizationUuid &&
+            this.organizationConcurrencyLimit
+                ? DuckdbWarehouseClient.tryAcquireOrganizationConcurrency(
+                      organizationUuid,
+                      this.organizationConcurrencyLimit,
+                  )
+                : undefined;
+        if (
+            !this.embeddedConfig &&
+            organizationUuid &&
+            this.organizationConcurrencyLimit &&
+            !releaseOrganizationConcurrency
+        ) {
+            throw new WarehouseQueryError(
+                'External source query capacity is full. Try again shortly.',
+            );
         }
+        try {
+            if (this.parquetConfig) {
+                try {
+                    return await this.withEphemeralQuerySession(
+                        callback,
+                        querySql,
+                    );
+                } catch (error) {
+                    if (
+                        error instanceof ParameterError ||
+                        error instanceof ParquetQueryTimeoutError
+                    )
+                        throw error;
+                    throw new WarehouseQueryError(
+                        'Internal analytics query failed. Check storage access and query permissions.',
+                    );
+                }
+            }
+            if (this.embeddedConfig) {
+                return await this.withDirectSession(
+                    callback,
+                    organizationUuid,
+                    onPhaseTiming,
+                );
+            }
 
-        if (this.hasResourceLimits()) {
-            return this.withIsolatedSession(callback);
+            if (this.isMotherduck()) {
+                if (
+                    this.enableInstanceCache &&
+                    this.credentials.requireUserCredentials !== true
+                ) {
+                    return await this.withMotherduckCachedSession(
+                        callback,
+                        retryable,
+                        onPhaseTiming,
+                    );
+                }
+                return await this.withDirectSession(
+                    callback,
+                    organizationUuid,
+                    onPhaseTiming,
+                );
+            }
+
+            if (this.hasResourceLimits()) {
+                return await this.withIsolatedSession(callback, onPhaseTiming);
+            }
+
+            if (this.instanceCacheKey) {
+                return await this.withSharedSession(callback);
+            }
+
+            return await this.withEphemeralQuerySession(callback);
+        } finally {
+            releaseOrganizationConcurrency?.();
         }
+    }
 
-        if (this.instanceCacheKey) {
-            return this.withSharedSession(callback);
+    private async withMotherduckCachedSession<T>(
+        callback: (db: DuckdbConnection) => Promise<T>,
+        retryable: () => boolean,
+        onPhaseTiming?: (
+            phase: WarehouseQueryPhase,
+            durationMs: number,
+        ) => void,
+    ): Promise<T> {
+        let activeEntryId: string | undefined;
+
+        const runAttempt = () =>
+            MotherduckInstanceCache.withInstance(
+                this.databasePath,
+                { projectUuid: this.projectUuid },
+                async (instance, entryId, acquisitionTiming) => {
+                    activeEntryId = entryId;
+                    const sessionStart = performance.now();
+                    const connection = await instance.connect();
+                    const { connectMs } = acquisitionTiming;
+                    onPhaseTiming?.(
+                        'connect',
+                        acquisitionTiming.waitMs +
+                            acquisitionTiming.instanceCreateMs +
+                            connectMs,
+                    );
+
+                    try {
+                        const queryStart = performance.now();
+                        const result = await callback(connection);
+                        const queryMs = performance.now() - queryStart;
+                        const totalMs = performance.now() - sessionStart;
+                        this.logger?.info(
+                            `MotherDuck cached-instance session complete: entry_id=${entryId} connect=${formatMilliseconds(connectMs)}ms query=${formatMilliseconds(queryMs)}ms total=${formatMilliseconds(totalMs)}ms`,
+                            {
+                                entryId,
+                                projectUuid: this.projectUuid,
+                                connectMs,
+                                queryMs,
+                                totalMs,
+                            },
+                        );
+                        return result;
+                    } finally {
+                        connection.closeSync?.();
+                        connection.disconnectSync?.();
+                    }
+                },
+            );
+
+        try {
+            return await runAttempt();
+        } catch (error) {
+            const errorClass = classifyMotherduckError(error);
+            const failedEntryId = activeEntryId;
+            if (errorClass === 'auth') {
+                if (failedEntryId) {
+                    await MotherduckInstanceCache.invalidate(
+                        failedEntryId,
+                        'auth',
+                    );
+                }
+                throw error;
+            }
+            if (errorClass !== 'stale' || !failedEntryId) {
+                throw error;
+            }
+
+            await MotherduckInstanceCache.invalidate(failedEntryId, 'stale');
+            if (!retryable()) {
+                throw error;
+            }
+
+            activeEntryId = undefined;
+            try {
+                const result = await runAttempt();
+                MotherduckInstanceCache.recordRetry(failedEntryId, 'recovered');
+                this.logger?.info(
+                    'MotherDuck cached-instance session retry recovered',
+                    {
+                        entryId: failedEntryId,
+                        projectUuid: this.projectUuid,
+                    },
+                );
+                return result;
+            } catch (retryError) {
+                MotherduckInstanceCache.recordRetry(failedEntryId, 'failed');
+                const retryErrorClass = classifyMotherduckError(retryError);
+                if (
+                    activeEntryId &&
+                    (retryErrorClass === 'stale' || retryErrorClass === 'auth')
+                ) {
+                    await MotherduckInstanceCache.invalidate(
+                        activeEntryId,
+                        retryErrorClass,
+                    );
+                }
+                this.logger?.info(
+                    'MotherDuck cached-instance session retry failed',
+                    {
+                        entryId: failedEntryId,
+                        projectUuid: this.projectUuid,
+                    },
+                );
+                throw retryError;
+            }
         }
-
-        return this.withEphemeralQuerySession(callback);
     }
 
     /** Direct connection to the configured MotherDuck database. */
     private async withDirectSession<T>(
         callback: (db: DuckdbConnection) => Promise<T>,
+        organizationUuid?: string,
+        onPhaseTiming?: (
+            phase: WarehouseQueryPhase,
+            durationMs: number,
+        ) => void,
     ): Promise<T> {
         const sessionStart = performance.now();
 
-        const instanceCreateStart = performance.now();
-        const instance = await DuckDBInstance.create(this.databasePath);
-        const instanceCreateMs = performance.now() - instanceCreateStart;
+        const releaseEmbeddedConcurrency = this.embeddedConfig
+            ? await DuckdbWarehouseClient.tryAcquireEmbeddedConcurrency(
+                  organizationUuid,
+              )
+            : undefined;
+        if (this.embeddedConfig && !releaseEmbeddedConcurrency) {
+            throw new WarehouseQueryError(
+                'Playground query capacity is full. Try again shortly.',
+            );
+        }
 
-        const connectStart = performance.now();
-        const connection = await instance.connect();
-        const connectMs = performance.now() - connectStart;
+        const instanceCreateStart = performance.now();
+        let instance: DuckdbInstance | undefined;
+        let connection: DuckdbConnection | undefined;
 
         try {
-            await DuckdbWarehouseClient.hardenInstance(connection);
+            instance = this.embeddedConfig
+                ? await DuckDBInstance.create(this.databasePath, {
+                      access_mode: 'READ_ONLY',
+                      memory_limit:
+                          this.resourceLimits?.memoryLimit ??
+                          EMBEDDED_RESOURCE_LIMITS.memoryLimit,
+                      threads: String(
+                          this.resourceLimits?.threads ??
+                              EMBEDDED_RESOURCE_LIMITS.threads,
+                      ),
+                  })
+                : await DuckDBInstance.create(this.databasePath);
+            const instanceCreateMs = performance.now() - instanceCreateStart;
+
+            const connectStart = performance.now();
+            connection = await instance.connect();
+            const connectMs = performance.now() - connectStart;
+            onPhaseTiming?.('connect', instanceCreateMs + connectMs);
+
+            if (this.embeddedConfig) {
+                await DuckdbWarehouseClient.hardenInstance(connection);
+            }
             const queryStart = performance.now();
-            const result = await callback(connection);
+            const result = this.embeddedConfig
+                ? await this.withEmbeddedQueryDeadline(connection, callback)
+                : await callback(connection);
             const queryMs = performance.now() - queryStart;
 
             const totalMs = performance.now() - sessionStart;
@@ -952,10 +2748,45 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
 
             return result;
         } finally {
-            connection.closeSync?.();
-            connection.disconnectSync?.();
-            instance.closeSync?.();
+            connection?.closeSync?.();
+            connection?.disconnectSync?.();
+            instance?.closeSync?.();
+            releaseEmbeddedConcurrency?.();
         }
+    }
+
+    private async withEmbeddedQueryDeadline<T>(
+        connection: DuckdbConnection,
+        callback: (db: DuckdbConnection) => Promise<T>,
+    ): Promise<T> {
+        let deadlineExceeded = false;
+        const timeout = setTimeout(() => {
+            deadlineExceeded = true;
+            connection.interrupt();
+        }, this.embeddedQueryTimeoutMs);
+        timeout.unref();
+
+        try {
+            const result = await callback(connection);
+            if (deadlineExceeded) {
+                throw this.getEmbeddedQueryTimeoutError();
+            }
+            return result;
+        } catch (error) {
+            if (deadlineExceeded) {
+                throw this.getEmbeddedQueryTimeoutError();
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    private getEmbeddedQueryTimeoutError(): WarehouseQueryError {
+        return new WarehouseQueryError(
+            `Playground query exceeded the ${this.embeddedQueryTimeoutMs / 1000} second execution limit and was stopped. Try a simpler query.`,
+            { timeoutMs: this.embeddedQueryTimeoutMs },
+        );
     }
 
     private getBindValues(options?: {
@@ -1032,6 +2863,16 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                           0,
                       )
                     : null;
+            const readJsonOperators = operators.filter((op) =>
+                op.name.startsWith('READ_JSON'),
+            );
+            const readJsonMs =
+                readJsonOperators.length > 0
+                    ? readJsonOperators.reduce(
+                          (sum, op) => sum + op.timingMs,
+                          0,
+                      )
+                    : null;
             const rowsScanned =
                 readParquetOperators.length > 0
                     ? readParquetOperators.reduce((sum, op) => sum + op.rows, 0)
@@ -1056,6 +2897,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                     cpuMs,
                     waitMs,
                     readParquetMs,
+                    readJsonMs,
                     bytesRead,
                     rowsScanned,
                     rowsReturned,
@@ -1068,6 +2910,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                 cpuMs,
                 waitMs,
                 readParquetMs,
+                readJsonMs,
                 bytesRead,
                 rowsReturned,
                 rowsScanned,
@@ -1086,17 +2929,77 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         const columnNames = result.columnNames();
         const fields: WarehouseResults['fields'] = {};
         for (let i = 0; i < result.columnCount; i += 1) {
+            const columnType = result.columnType(i);
+            const numericKind = getNumericKindFromType(columnType);
             fields[columnNames[i]] = {
-                type: mapFieldTypeFromTypeId(result.columnTypeId(i)),
+                type: mapFieldTypeFromTypeId(columnType.typeId),
+                ...(numericKind ? { numericKind } : {}),
             };
         }
         return fields;
     }
 
     private static stripSqlComments(sql: string): string {
-        return sql
-            .replace(/--[^\n]*/g, '') // line comments
-            .replace(/\/\*[\s\S]*?\*\//g, ''); // block comments
+        let result = '';
+        let index = 0;
+        let quote: "'" | '"' | '$$' | null = null;
+
+        while (index < sql.length) {
+            const current = sql[index];
+            const next = sql[index + 1];
+
+            if (quote) {
+                result += current;
+                if (quote === '$$') {
+                    if (current === '$' && next === '$') {
+                        result += next;
+                        index += 2;
+                        quote = null;
+                    } else {
+                        index += 1;
+                    }
+                } else if (current === quote) {
+                    if (next === quote) {
+                        result += next;
+                        index += 2;
+                    } else {
+                        quote = null;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            } else if (current === "'" || current === '"') {
+                quote = current;
+                result += current;
+                index += 1;
+            } else if (current === '$' && next === '$') {
+                quote = '$$';
+                result += '$$';
+                index += 2;
+            } else if (current === '-' && next === '-') {
+                result += ' ';
+                index += 2;
+                while (index < sql.length && sql[index] !== '\n') {
+                    index += 1;
+                }
+            } else if (current === '/' && next === '*') {
+                result += ' ';
+                index += 2;
+                while (
+                    index < sql.length &&
+                    !(sql[index] === '*' && sql[index + 1] === '/')
+                ) {
+                    index += 1;
+                }
+                index = Math.min(index + 2, sql.length);
+            } else {
+                result += current;
+                index += 1;
+            }
+        }
+
+        return result;
     }
 
     private static validateSqlFunctions(sql: string): void {
@@ -1109,7 +3012,28 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         }
     }
 
-    private async validateUserSql(
+    // Public so callers that inject server-built file reads (e.g. query-result
+    // references) can pre-validate the raw user SQL before substitution.
+    static validateUserSqlFileAccess(sql: string): void {
+        const stripped = DuckdbWarehouseClient.stripSqlComments(sql);
+        const functionMatch = stripped.match(
+            BLOCKED_USER_SQL_FILE_FUNCTION_PATTERN,
+        );
+        if (functionMatch) {
+            const functionName = functionMatch[1].replace(/\s+/g, '');
+            throw new Error(
+                `SQL validation error: function '${functionName}' is not allowed`,
+            );
+        }
+
+        if (BLOCKED_USER_SQL_FILE_TABLE_PATTERN.test(stripped)) {
+            throw new Error(
+                'SQL validation error: file table paths are not allowed',
+            );
+        }
+    }
+
+    private async validateSelectSql(
         db: DuckdbConnection,
         sql: string,
     ): Promise<void> {
@@ -1135,8 +3059,49 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
         } finally {
             stmt.destroySync();
         }
+    }
 
+    private async validateUserSql(
+        db: DuckdbConnection,
+        sql: string,
+    ): Promise<void> {
+        const stripped = DuckdbWarehouseClient.stripSqlComments(sql);
+        if (this.parquetConfig && /\bU&"/i.test(stripped)) {
+            throw new ParameterError(
+                'Escaped identifiers are not supported in analytics queries',
+            );
+        }
+        if (
+            this.parquetConfig &&
+            stripped
+                .match(/\$\$[\s\S]*?\$\$|'(?:[^']|'')*'|"(?:[^"]|"")*"/g)
+                ?.some((token) => token.startsWith('"') && /[\\/]/.test(token))
+        ) {
+            throw new ParameterError(
+                'File table paths are not allowed in analytics queries',
+            );
+        }
+        if (
+            this.parquetConfig &&
+            /\b(duckdb_\w+|pragma_\w+|sqlite_\w+|pg_\w+|information_schema)\b/i.test(
+                stripped,
+            )
+        ) {
+            throw new ParameterError(
+                'Internal analytics catalog access is not allowed',
+            );
+        }
         DuckdbWarehouseClient.validateSqlFunctions(sql);
+        DuckdbWarehouseClient.validateUserSqlFileAccess(sql);
+        await this.validateSelectSql(db, sql);
+    }
+
+    private async validatePreAggregateSql(
+        db: DuckdbConnection,
+        sql: string,
+    ): Promise<void> {
+        DuckdbWarehouseClient.validateSqlFunctions(sql);
+        await this.validateSelectSql(db, sql);
     }
 
     private async validateInternalSql(
@@ -1176,54 +3141,109 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
             queryParams?: Record<string, AnyType>;
             tags?: Record<string, string>;
             timezone?: string;
+            onPhaseTiming?: (
+                phase: WarehouseQueryPhase,
+                durationMs: number,
+            ) => void;
         },
     ): Promise<void> {
-        await this.withSession(async (db) => {
-            if (options?.timezone) {
-                await db.run(
-                    `SET TimeZone = '${this.escapeString(options.timezone)}';`,
+        const reportPhase = options?.onPhaseTiming;
+        let hasEmittedRows = false;
+        await this.withSession(
+            async (db) => {
+                const sessionStart = performance.now();
+                if (options?.timezone) {
+                    if (!this.isMotherduck()) {
+                        await db.run(
+                            `SET TimeZone = '${this.escapeString(
+                                options.timezone,
+                            )}';`,
+                        );
+                    } else if (!this.hasWarnedAboutMotherduckTimezone) {
+                        this.hasWarnedAboutMotherduckTimezone = true;
+                        const message = `Requested timezone "${options.timezone}" cannot be applied because MotherDuck locks configuration under saas_mode; timestamps return in the server default zone instead of the configured zone.`;
+                        if (this.logger?.warn) {
+                            this.logger.warn(message);
+                        } else {
+                            this.logger?.info(message);
+                        }
+                    }
+                }
+
+                // Profiles are written to a local file, which object-storage
+                // and embedded sessions do not use
+                const profilePath =
+                    this.logger &&
+                    this.enableQueryProfiling &&
+                    !this.embeddedConfig &&
+                    !this.objectStorageOnly &&
+                    !this.isMotherduck()
+                        ? path.join(
+                              os.tmpdir(),
+                              `duckdb-profile-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+                          )
+                        : undefined;
+
+                if (profilePath) {
+                    await db.run("PRAGMA enable_profiling='json';");
+                    await db.run(`PRAGMA profiling_output='${profilePath}';`);
+                }
+
+                if (this.embeddedConfig) {
+                    await db.run(
+                        "SET disabled_filesystems = 'LocalFileSystem';",
+                    );
+                }
+                if (this.allowsPreAggregateFileReads) {
+                    await this.validatePreAggregateSql(db, sql);
+                } else {
+                    await this.validateUserSql(db, sql);
+                }
+                reportPhase?.('session', performance.now() - sessionStart);
+
+                const queryStart = performance.now();
+                const result = await db.stream(
+                    this.getSQLWithMetadata(sql, options?.tags),
+                    this.getBindValues(options),
                 );
-            }
+                const fields =
+                    DuckdbWarehouseClient.getFieldsFromStreamResult(result);
 
-            const profilePath = this.logger
-                ? path.join(
-                      os.tmpdir(),
-                      `duckdb-profile-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-                  )
-                : undefined;
+                let fetchStart: number | undefined;
+                // eslint-disable-next-line no-restricted-syntax
+                for await (const rows of result.yieldRowObjectJson()) {
+                    if (fetchStart === undefined) {
+                        reportPhase?.('query', performance.now() - queryStart);
+                        fetchStart = performance.now();
+                    }
+                    hasEmittedRows = true;
+                    await streamCallback({ fields, rows });
+                }
+                if (fetchStart === undefined) {
+                    reportPhase?.('query', performance.now() - queryStart);
+                    reportPhase?.('fetch', 0);
+                } else {
+                    reportPhase?.('fetch', performance.now() - fetchStart);
+                }
 
-            if (profilePath) {
-                await db.run("PRAGMA enable_profiling='json';");
-                await db.run(`PRAGMA profiling_output='${profilePath}';`);
-            }
-
-            await this.validateUserSql(db, sql);
-
-            const result = await db.stream(
-                this.getSQLWithMetadata(sql, options?.tags),
-                this.getBindValues(options),
-            );
-            const fields =
-                DuckdbWarehouseClient.getFieldsFromStreamResult(result);
-
-            // eslint-disable-next-line no-restricted-syntax
-            for await (const rows of result.yieldRowObjectJson()) {
-                await streamCallback({ fields, rows });
-            }
-
-            if (profilePath) {
-                await this.logQueryProfile(
-                    profilePath,
-                    this.logger!,
-                    options?.tags,
-                );
-            }
-        });
+                if (profilePath) {
+                    await this.logQueryProfile(
+                        profilePath,
+                        this.logger!,
+                        options?.tags,
+                    );
+                }
+            },
+            options?.tags?.organization_uuid,
+            () => !hasEmittedRows,
+            reportPhase,
+            sql,
+        );
     }
 
     async executeAsyncQuery(
         ...args: Parameters<
-            WarehouseBaseClient<CreateDuckdbCredentials>['executeAsyncQuery']
+            WarehouseBaseClient<CreateDuckdbMotherduckCredentials>['executeAsyncQuery']
         >
     ) {
         const [queryArgs, resultsStreamCallback] = args;
@@ -1287,7 +3307,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
 
     async runQuery(
         ...args: Parameters<
-            WarehouseBaseClient<CreateDuckdbCredentials>['runQuery']
+            WarehouseBaseClient<CreateDuckdbMotherduckCredentials>['runQuery']
         >
     ) {
         return super.runQuery(...args);
@@ -1322,14 +3342,21 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                     if (!catalog[ref.database][ref.schema]) {
                         catalog[ref.database][ref.schema] = {};
                     }
-                    catalog[ref.database][ref.schema][ref.table] = rows.reduce<
-                        Record<string, DimensionType>
-                    >((acc, row) => {
+                    catalog[ref.database][ref.schema][ref.table] = {};
+                    rows.forEach((row) => {
                         const colName = row.column_name as string;
                         const colType = row.data_type as string;
-                        acc[colName] = mapFieldTypeFromString(colType);
-                        return acc;
-                    }, {});
+                        catalog[ref.database][ref.schema][ref.table][colName] =
+                            mapFieldTypeFromString(colType);
+                        setCatalogTimestampDomain(
+                            catalog,
+                            ref.database,
+                            ref.schema,
+                            ref.table,
+                            colName,
+                            getDuckdbTimestampDomainFromString(colType),
+                        );
+                    });
                 }
             }
             /* eslint-enable no-await-in-loop */
@@ -1341,15 +3368,9 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
     async getAllTables(
         schema?: string,
         tags?: Record<string, string>,
-    ): Promise<
-        {
-            database: string;
-            schema: string;
-            table: string;
-        }[]
-    > {
+    ): Promise<WarehouseTables> {
         return this.withSession(async (db) => {
-            let sql = `SELECT table_catalog AS database, table_schema AS schema, table_name AS table
+            let sql = `SELECT table_catalog AS database, table_schema AS schema, table_name AS table, table_type
                         FROM information_schema.tables
                         WHERE table_type IN ('BASE TABLE', 'VIEW')`;
 
@@ -1366,6 +3387,7 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbCrede
                 database: row.database as string,
                 schema: row.schema as string,
                 table: row.table as string,
+                tableType: getWarehouseTableType(row.table_type),
             }));
         });
     }

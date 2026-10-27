@@ -23,7 +23,7 @@ describe('Settings - Invites', () => {
             }
         });
         cy.get('[data-cy="welcome-user"]').should('be.visible');
-        cy.contains('Join your team').click();
+        cy.findByRole('button', { name: 'Join your team' }).click();
         cy.findByPlaceholderText('Your first name').type('Mary');
         cy.findByPlaceholderText('Your last name').type('Green');
         cy.get('[data-cy="email-address-input"]')
@@ -36,7 +36,6 @@ describe('Settings - Invites', () => {
             .each((input) => {
                 cy.wrap(input).type('0');
             });
-        cy.contains('Submit').click();
         cy.contains('Continue').click();
         cy.findByTestId('user-avatar').should('contain', 'MG');
     });

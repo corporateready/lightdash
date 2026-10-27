@@ -7,20 +7,37 @@ import {
 
 export const BaseResponse: HealthState = {
     healthy: true,
+    requiresMigration: false,
+    migrationWarnings: undefined,
+    license: {
+        hasLicenseKey: false,
+        valid: false,
+    },
     version: '0.1.0',
     mode: LightdashMode.DEFAULT,
+    mobile: {
+        minimumSupportedVersion: {
+            android: null,
+            ios: null,
+        },
+    },
     isAuthenticated: false,
     requiresOrgRegistration: false,
     localDbtEnabled: true,
+    defaultProject: undefined,
     siteUrl: 'https://test.lightdash.cloud',
     staticIp: '',
     signupUrl: undefined,
     helpMenuUrl: undefined,
     hasEmailClient: false,
+    hasPlaygroundProjects: false,
+    hasEmailWhitelabel: false,
     hasExtendedUsageAnalytics: false,
     hasMicrosoftTeams: false,
     hasGithub: false,
     hasGitlab: false,
+    hasJira: true,
+    hasLinear: true,
     hasHeadlessBrowser: false,
     hasSlack: false,
     auth: {
@@ -54,8 +71,15 @@ export const BaseResponse: HealthState = {
         snowflake: {
             enabled: false,
         },
+        snowflakeAi: {
+            enabled: false,
+        },
         databricks: {
             enabled: false,
+        },
+        mobileLogin: {
+            loginExperienceVersion: 1,
+            available: true,
         },
     },
     intercom: {
@@ -77,7 +101,10 @@ export const BaseResponse: HealthState = {
     },
     query: {
         csvCellsLimit: 100000,
+        exportTimeoutMs: 0,
+        csvMaxLimit: 5000000,
         maxLimit: 5000,
+        queryMaxLimit: 5000,
         maxPageSize: 2500,
         defaultLimit: 500,
         retryQueryOnTransientErrors: true,
@@ -105,7 +132,7 @@ export const BaseResponse: HealthState = {
         overrideColorPalette: undefined,
         overrideColorPaletteName: undefined,
     },
-    isServiceAccountEnabled: false,
+    hasBrandfetch: false,
     isOrganizationWarehouseCredentialsEnabled: false,
     isAthenaWarehouseIamRoleAuthEnabled: false,
     isSaveCredentialsFormEnabled: false,
@@ -115,6 +142,8 @@ export const BaseResponse: HealthState = {
         analyticsProjectUuid: undefined,
         analyticsDashboardUuid: undefined,
         isAmbientAiEnabled: false,
+        threadDumpEnabled: false,
+        fastDecisionsEnabled: false,
     },
     echarts6: {
         enabled: false,
@@ -126,14 +155,23 @@ export const BaseResponse: HealthState = {
         enabled: false,
         retentionDays: 30,
     },
+    learnSandbox: {
+        enabled: false,
+    },
     dashboardComments: {
         enabled: true,
     },
     preAggregates: {
         enabled: false,
     },
+    externalSources: {
+        engineAvailable: true,
+    },
     dataApps: {
         previewOrigin: null,
+        sampleDataEnabled: true,
+        capturesEnabled: true,
+        runtimeAvailable: false,
     },
 };
 

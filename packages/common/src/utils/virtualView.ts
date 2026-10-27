@@ -12,39 +12,149 @@ import { WarehouseTypes } from '../types/projects';
 import {
     type TimeIntervalUnit,
     type WarehouseClient,
+    type WarehouseSqlBuilder,
 } from '../types/warehouse';
 import { type VizColumn } from '../visualizations/types';
-import { WeekDay } from './timeFrames';
-import { defaultNullSafeEqualSql } from './warehouse';
+import assertUnreachable from './assertUnreachable';
+import { getDefaultTimeFrames, timeFrameConfigs, WeekDay } from './timeFrames';
+import { defaultNullSafeEqualSql, quoteFieldReference } from './warehouse';
+
+const isIntervalColumnType = (type: DimensionType): boolean =>
+    type === DimensionType.DATE || type === DimensionType.TIMESTAMP;
+
+export const getVirtualViewWarehouseType = (
+    adapterType: SupportedDbtAdapter,
+): WarehouseTypes => {
+    switch (adapterType) {
+        case SupportedDbtAdapter.BIGQUERY:
+            return WarehouseTypes.BIGQUERY;
+        case SupportedDbtAdapter.DATABRICKS:
+        case SupportedDbtAdapter.SPARK:
+            return WarehouseTypes.DATABRICKS;
+        case SupportedDbtAdapter.SNOWFLAKE:
+            return WarehouseTypes.SNOWFLAKE;
+        case SupportedDbtAdapter.REDSHIFT:
+            return WarehouseTypes.REDSHIFT;
+        case SupportedDbtAdapter.POSTGRES:
+            return WarehouseTypes.POSTGRES;
+        case SupportedDbtAdapter.DUCKDB:
+            return WarehouseTypes.DUCKDB;
+        case SupportedDbtAdapter.TRINO:
+            return WarehouseTypes.TRINO;
+        case SupportedDbtAdapter.CLICKHOUSE:
+            return WarehouseTypes.CLICKHOUSE;
+        case SupportedDbtAdapter.ATHENA:
+            return WarehouseTypes.ATHENA;
+        default:
+            return assertUnreachable(
+                adapterType,
+                `Unsupported adapter type: ${adapterType}`,
+            );
+    }
+};
+
+/**
+ * Build one dimension per column, plus the default time-interval dimensions
+ * for date/timestamp columns. Shared by virtual views and external source
+ * explores — both have no meta layer to override intervals.
+ */
+export const buildDimensionsFromColumns = (args: {
+    tableName: string;
+    tableLabel: string;
+    columns: Array<VizColumn & { label?: string }>;
+    warehouseSqlBuilder: WarehouseSqlBuilder;
+    qualifyColumnReferences?: boolean;
+}): Record<string, Dimension> => {
+    const { tableName, tableLabel, columns, warehouseSqlBuilder } = args;
+    const fieldQuoteChar = warehouseSqlBuilder.getFieldQuoteChar();
+    const adapterType = warehouseSqlBuilder.getAdapterType();
+    const startOfWeek = warehouseSqlBuilder.getStartOfWeek();
+    const columnReferences = new Set(columns.map(({ reference }) => reference));
+
+    return columns.reduce<Record<string, Dimension>>((acc, column) => {
+        const type = column.type ?? DimensionType.STRING;
+        const columnLabel = column.label ?? friendlyName(column.reference);
+        const columnReference = quoteFieldReference(
+            column.reference,
+            fieldQuoteChar,
+            adapterType,
+        );
+        const columnSql = args.qualifyColumnReferences
+            ? `\${TABLE}.${columnReference}`
+            : columnReference;
+        const isIntervalBase = isIntervalColumnType(type);
+
+        acc[column.reference] = {
+            name: column.reference,
+            label: columnLabel,
+            type,
+            table: tableName,
+            fieldType: FieldType.DIMENSION,
+            sql: columnSql,
+            tableLabel,
+            hidden: false,
+            isIntervalBase,
+        };
+
+        if (isIntervalBase) {
+            getDefaultTimeFrames(type).forEach((timeInterval) => {
+                const intervalName = `${
+                    column.reference
+                }_${timeInterval.toLowerCase()}`;
+                // A real column of the same name always wins
+                if (columnReferences.has(intervalName)) {
+                    return;
+                }
+                const intervalConfig = timeFrameConfigs[timeInterval];
+
+                acc[intervalName] = {
+                    name: intervalName,
+                    label: `${columnLabel} ${intervalConfig
+                        .getLabel()
+                        .toLowerCase()}`,
+                    type: intervalConfig.getDimensionType(type),
+                    table: tableName,
+                    fieldType: FieldType.DIMENSION,
+                    sql: intervalConfig.getSql(
+                        adapterType,
+                        timeInterval,
+                        columnSql,
+                        type,
+                        startOfWeek,
+                    ),
+                    tableLabel,
+                    hidden: false,
+                    timeInterval,
+                    timeIntervalBaseDimensionName: column.reference,
+                    timeIntervalBaseDimensionType: type,
+                    groups: [columnLabel],
+                    isIntervalBase: false,
+                };
+            });
+        }
+
+        return acc;
+    }, {});
+};
 
 export const createVirtualView = (
     virtualViewName: string,
     sql: string,
     columns: VizColumn[],
-    warehouseClient: WarehouseClient,
+    warehouseSqlBuilder: WarehouseSqlBuilder,
     label?: string,
     parameterValues?: ParametersValuesMap,
 ): Explore => {
-    const exploreCompiler = new ExploreCompiler(warehouseClient);
+    const exploreCompiler = new ExploreCompiler(warehouseSqlBuilder);
 
-    const fieldQuoteChar = warehouseClient.getFieldQuoteChar();
+    const tableLabel = friendlyName(virtualViewName);
 
-    const dimensions = columns.reduce<Record<string, Dimension>>(
-        (acc, column) => {
-            acc[column.reference] = {
-                name: column.reference,
-                label: friendlyName(column.reference),
-                type: column.type ?? DimensionType.STRING,
-                table: virtualViewName,
-                fieldType: FieldType.DIMENSION,
-                sql: `${fieldQuoteChar}${column.reference}${fieldQuoteChar}`,
-                tableLabel: friendlyName(virtualViewName),
-                hidden: false,
-            };
-            return acc;
-        },
-        {},
-    );
+    const dimensions = buildDimensionsFromColumns({
+        tableName: virtualViewName,
+        tableLabel,
+        columns,
+        warehouseSqlBuilder,
+    });
 
     const compiledTable: Table = {
         name: virtualViewName,
@@ -53,7 +163,9 @@ export const createVirtualView = (
         dimensions,
         metrics: {},
         lineageGraph: { nodes: [], edges: [] },
-        database: warehouseClient.credentials.type,
+        database: getVirtualViewWarehouseType(
+            warehouseSqlBuilder.getAdapterType(),
+        ),
         schema: '', // TODO: what should this be?
     };
 
@@ -64,7 +176,7 @@ export const createVirtualView = (
         baseTable: virtualViewName,
         joinedTables: [],
         tables: { [virtualViewName]: compiledTable },
-        targetDatabase: warehouseClient.getAdapterType(),
+        targetDatabase: warehouseSqlBuilder.getAdapterType(),
         meta: {},
     });
 
@@ -89,6 +201,7 @@ export const createTemporaryVirtualView = (
 ): Explore => {
     // Create a fake warehouseClient for compilation purposes
     const fakeWarehouseClient: WarehouseClient = {
+        getSessionTimezone: async () => null,
         credentials: {
             type: WarehouseTypes.BIGQUERY,
             project: '',
@@ -101,39 +214,44 @@ export const createTemporaryVirtualView = (
             maximumBytesBilled: 0,
         },
         getCatalog: async () => ({}),
-        getAsyncQueryResults: async () => ({
-            queryId: null,
-            queryMetadata: null,
-            totalRows: 0,
-            durationMs: 0,
-            fields: {},
-            pageCount: 0,
-            rows: [],
-        }),
         streamQuery: async () => {},
         executeAsyncQuery: async () => ({
             queryId: null,
             queryMetadata: null,
             totalRows: 0,
             durationMs: 0,
+            phaseTimings: {},
         }),
         runQuery: async () => ({ fields: {}, rows: [] }),
         test: async () => {},
         getStartOfWeek: () => WeekDay.MONDAY,
         getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+        supportsCteMaterialization: () => true,
         getStringQuoteChar: () => "'",
         getEscapeStringQuoteChar: () => "''",
         getFieldQuoteChar: () => '"',
+        getUnnestSql: () => null,
         getFloatingType: () => 'FLOAT',
         getNullSafeEqualSql: defaultNullSafeEqualSql,
+        getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
         getMetricSql: () => '',
         concatString: (...args) => args.join(''),
         getAllTables: async () => [],
+        listDatabases: async () => ({
+            databases: [],
+            truncated: false,
+            limit: 100,
+        }),
+        getTablesForDatabase: async () => [],
         getFields: async () => ({}),
         parseWarehouseCatalog: () => ({}),
         parseError: (error) => error,
         escapeString: (value) => value,
         castToTimestamp: (date) => `CAST('${date.toISOString()}' AS TIMESTAMP)`,
+        castToDate: (date) =>
+            `CAST('${date.toISOString().slice(0, 10)}' AS DATE)`,
+        castToNaiveTimestamp: (date) =>
+            `CAST('${date.toISOString()}' AS TIMESTAMP)`,
         getIntervalSql: (value: number, unit: TimeIntervalUnit) =>
             `INTERVAL '${value} ${unit}'`,
         getTimestampDiffSeconds: (startTimestampSql, endTimestampSql) =>

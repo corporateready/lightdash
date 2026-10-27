@@ -10,6 +10,7 @@ import {
     Project,
 } from '@lightdash/common';
 import { v4 as uuidv4 } from 'uuid';
+import { assertAgentCommandAllowed } from '../../agentConnections/commandPolicy';
 import { LightdashAnalytics } from '../../analytics/analytics';
 import { getConfig } from '../../config';
 import GlobalState from '../../globalState';
@@ -43,7 +44,7 @@ function delay(ms: number) {
     });
 }
 
-export const getRunningStepsMessage = (steps: JobStep[]): string => {
+const getRunningStepsMessage = (steps: JobStep[]): string => {
     const runningStep = steps.find(
         (step) => step.stepStatus === JobStepStatusType.RUNNING,
     );
@@ -55,7 +56,7 @@ export const getRunningStepsMessage = (steps: JobStep[]): string => {
     }: ${runningStep?.stepLabel || ''}`;
 };
 
-export const getErrorStepsMessage = (steps: JobStep[]): string => {
+const getErrorStepsMessage = (steps: JobStep[]): string => {
     const errorStep = steps.find(
         (step) => step.stepStatus === JobStepStatusType.ERROR,
     );
@@ -93,6 +94,7 @@ type RefreshHandlerOptions = {
 };
 
 export const refreshHandler = async (options: RefreshHandlerOptions) => {
+    assertAgentCommandAllowed('refresh');
     GlobalState.setVerbose(options.verbose);
     await checkLightdashVersion();
     const executionId = uuidv4();

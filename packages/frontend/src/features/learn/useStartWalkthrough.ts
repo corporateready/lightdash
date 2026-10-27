@@ -1,0 +1,98 @@
+import {
+    type ApiError,
+    type CreateTrainingPreviewResults,
+} from '@lightdash/common';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useState } from 'react';
+import { useNavigate } from 'react-router';
+import useToaster from '../../hooks/toaster/useToaster';
+import useApp from '../../providers/App/useApp';
+import { useLightdashApi } from '../../providers/LightdashApi/useLightdashApi';
+import { type LearnStartSource } from '../../providers/Tracking/types';
+import useTracking from '../../providers/Tracking/useTracking';
+import { EventName } from '../../types/Events';
+import { lessonScopesFor, tourFor } from '../scopeTours/tourFor';
+import {
+    createTrainingPreview,
+    tourUrlInCopy,
+} from '../scopeTours/trainingCopy';
+import { useLearnProgress, useLearnProgressActions } from './progress';
+
+/**
+ * Start a walkthrough the way the library does: make the learner's copy
+ * here and go straight into it, so nothing of the shared training project
+ * flashes past on the way. `from=learn` brings them back to the library
+ * side (the completion page on Got it, the library on Skip) when it ends.
+ * Shared by the library and the completion page so both start identically.
+ */
+export const useStartWalkthrough = (
+    trainingProjectUuid: string | undefined,
+) => {
+    const lightdashApi = useLightdashApi();
+    const navigate = useNavigate();
+    const { showToastApiError } = useToaster();
+    const queryClient = useQueryClient();
+    const { user } = useApp();
+    const { track } = useTracking();
+    const { completed } = useLearnProgress();
+    const { markScopeStarted } = useLearnProgressActions();
+    const [opening, setOpening] = useState<string | null>(null);
+    const { mutate: openInCopy } = useMutation<
+        CreateTrainingPreviewResults,
+        ApiError,
+        { scope: string }
+    >(() => createTrainingPreview(lightdashApi, trainingProjectUuid!), {
+        onMutate: ({ scope }) => setOpening(scope),
+        onError: ({ error }) => {
+            setOpening(null);
+            // A refused copy (cooldown, the organization's in-flight limit)
+            // must tell the learner why nothing opened.
+            showToastApiError({
+                title: 'Could not start the walkthrough',
+                apiError: error,
+            });
+        },
+        onSuccess: async (copy, { scope }) => {
+            // The navbar resolves the active project from the cached project
+            // list, and the trainee permissions on the new copy only exist
+            // in a freshly built ability, so refresh both before moving there.
+            await Promise.all([
+                queryClient.invalidateQueries(['projects']),
+                queryClient.invalidateQueries(['user']),
+                queryClient.invalidateQueries(['account']),
+            ]);
+            void navigate(tourUrlInCopy(copy.projectUuid, scope, 'learn'));
+        },
+    });
+    const start = useCallback(
+        (scope: string, source: LearnStartSource) => {
+            if (!trainingProjectUuid || opening || !tourFor(scope)) return;
+            // Recorded together: the progress the learner sees, and
+            // the event that says who started what, and from where.
+            markScopeStarted(scope);
+            track({
+                name: EventName.LEARN_WALKTHROUGH_STARTED,
+                properties: {
+                    organizationUuid: user.data?.organizationUuid ?? null,
+                    trainingProjectUuid,
+                    scope,
+                    source,
+                    isRestart: lessonScopesFor(scope).some((each) =>
+                        completed.includes(each),
+                    ),
+                },
+            });
+            openInCopy({ scope });
+        },
+        [
+            trainingProjectUuid,
+            opening,
+            openInCopy,
+            markScopeStarted,
+            track,
+            user.data?.organizationUuid,
+            completed,
+        ],
+    );
+    return { start, opening };
+};

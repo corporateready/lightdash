@@ -5,8 +5,19 @@ export default function mockHealthResponse(
 ): HealthState {
     return {
         healthy: true,
+        requiresMigration: false,
+        license: {
+            hasLicenseKey: false,
+            valid: false,
+        },
         mode: LightdashMode.CLOUD_BETA,
         version: '0.0.0',
+        mobile: {
+            minimumSupportedVersion: {
+                android: null,
+                ios: null,
+            },
+        },
         localDbtEnabled: true,
         isAuthenticated: true,
         requiresOrgRegistration: false,
@@ -43,8 +54,11 @@ export default function mockHealthResponse(
         query: {
             maxPageSize: 2500,
             maxLimit: 1000000,
+            queryMaxLimit: 1000000,
             defaultLimit: 500,
             csvCellsLimit: 100,
+            exportTimeoutMs: 600000,
+            csvMaxLimit: 5000000,
             retryQueryOnTransientErrors: true,
         },
         dashboard: {
@@ -87,22 +101,29 @@ export default function mockHealthResponse(
             snowflake: {
                 enabled: false,
             },
+            snowflakeAi: {
+                enabled: false,
+            },
             databricks: {
                 enabled: false,
             },
         },
         hasEmailClient: false,
+        hasPlaygroundProjects: false,
+        hasEmailWhitelabel: false,
         hasHeadlessBrowser: false,
         hasExtendedUsageAnalytics: false,
         hasGithub: false,
         hasGitlab: false,
+        hasJira: false,
+        hasLinear: false,
         hasCacheAutocompleResults: false,
         hasMicrosoftTeams: false,
         appearance: {
             overrideColorPalette: undefined,
             overrideColorPaletteName: undefined,
         },
-        isServiceAccountEnabled: false,
+        hasBrandfetch: false,
         isOrganizationWarehouseCredentialsEnabled: false,
         isAthenaWarehouseIamRoleAuthEnabled: false,
         isSaveCredentialsFormEnabled: false,
@@ -115,6 +136,8 @@ export default function mockHealthResponse(
             analyticsProjectUuid: undefined,
             analyticsDashboardUuid: undefined,
             isAmbientAiEnabled: false,
+            threadDumpEnabled: false,
+            fastDecisionsEnabled: false,
         },
         echarts6: {
             enabled: false,
@@ -126,14 +149,23 @@ export default function mockHealthResponse(
             enabled: false,
             retentionDays: 30,
         },
+        learnSandbox: {
+            enabled: false,
+        },
         dashboardComments: {
             enabled: true,
         },
         preAggregates: {
             enabled: false,
         },
+        externalSources: {
+            engineAvailable: true,
+        },
         dataApps: {
             previewOrigin: null,
+            sampleDataEnabled: true,
+            capturesEnabled: true,
+            runtimeAvailable: false,
         },
         ...overrides,
     };

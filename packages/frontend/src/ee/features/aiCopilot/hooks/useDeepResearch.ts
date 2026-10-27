@@ -1,0 +1,750 @@
+import {
+    type AnyType,
+    type AiDeepResearchEntryPoint,
+    type AiDeepResearchEventsPage,
+    type AiDeepResearchChartData,
+    type AiDeepResearchRequestBody,
+    type AiDeepResearchRun,
+    type ApiAiDeepResearchEventsResponse,
+    type ApiAiDeepResearchRunListResponse,
+    type ApiAiDeepResearchRunResponse,
+    type ApiAiDeepResearchChartResponse,
+    type ApiAiAgentThreadMessageVizQuery,
+    type ApiAiAgentThreadMessageVizQueryResponse,
+    type ApiError,
+    isAiDeepResearchRunTerminal,
+} from '@lightdash/common';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo, useRef } from 'react';
+import { type LightdashApi } from '../../../../api';
+import useToaster from '../../../../hooks/toaster/useToaster';
+import useUser from '../../../../hooks/user/useUser';
+import useApp from '../../../../providers/App/useApp';
+import { useLightdashApi } from '../../../../providers/LightdashApi/useLightdashApi';
+import useTracking from '../../../../providers/Tracking/useTracking';
+import { EventName } from '../../../../types/Events';
+import useIsEmbedded from '../../../providers/Embed/useIsEmbedded';
+import {
+    registerDeepResearchRun,
+    replaceDeepResearchRun,
+    restoreDeepResearchComposerPrompt,
+    updateDeepResearchRun,
+    useDeepResearchRunsForThread,
+} from '../deepResearch/deepResearchRegistry';
+import { getDeepResearchRunRefetchInterval } from '../deepResearch/runPolling';
+import {
+    adaptDeepResearchRun,
+    isDeepResearchRunTerminal,
+    toDeepResearchRegistration,
+} from '../deepResearch/runProgress';
+import {
+    type DeepResearchReportView,
+    type DeepResearchRunRegistration,
+    type StartDeepResearchArgs,
+} from '../deepResearch/types';
+
+const DEEP_RESEARCH_QUERY_KEY = 'deepResearch';
+const DEEP_RESEARCH_POLL_INTERVAL_MS = 2_000;
+const DEEP_RESEARCH_EVENT_PAGE_SIZE = 100;
+
+type PollFailureState = {
+    queryIdentity: string;
+    error: ApiError;
+    failureCount: number;
+};
+
+const getPollFailureForQuery = (
+    failure: PollFailureState | undefined,
+    queryIdentity: string,
+) => (failure?.queryIdentity === queryIdentity ? failure : undefined);
+
+const getBaseUrl = (projectUuid: string) =>
+    `/ee/projects/${projectUuid}/ai-deep-research`;
+
+const startDeepResearch = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    data: AiDeepResearchRequestBody,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: getBaseUrl(projectUuid),
+        method: 'POST',
+        body: JSON.stringify(data),
+    }) as Promise<ApiAiDeepResearchRunResponse['results']>;
+
+const getDeepResearchRun = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    runUuid: string,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: `${getBaseUrl(projectUuid)}/${runUuid}`,
+        method: 'GET',
+        body: undefined,
+    }) as Promise<ApiAiDeepResearchRunResponse['results']>;
+
+const listDeepResearchRuns = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    threadUuid: string,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: `${getBaseUrl(projectUuid)}?threadUuid=${threadUuid}`,
+        method: 'GET',
+        body: undefined,
+    }) as Promise<ApiAiDeepResearchRunListResponse['results']>;
+
+const getDeepResearchEventsPage = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    runUuid: string,
+    cursor?: string,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: `${getBaseUrl(projectUuid)}/${runUuid}/events?limit=${DEEP_RESEARCH_EVENT_PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+        method: 'GET',
+        body: undefined,
+    }) as Promise<ApiAiDeepResearchEventsResponse['results']>;
+
+const getDeepResearchEvents = async (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    runUuid: string,
+): Promise<AiDeepResearchEventsPage> => {
+    const events: AiDeepResearchEventsPage['events'] = [];
+    let cursor: string | undefined;
+    while (true) {
+        const page = await getDeepResearchEventsPage(
+            lightdashApi,
+            projectUuid,
+            runUuid,
+            cursor,
+        );
+        events.push(...page.events);
+        const nextCursor = page.nextCursor ?? undefined;
+        if (
+            !nextCursor ||
+            nextCursor === cursor ||
+            page.events.length < DEEP_RESEARCH_EVENT_PAGE_SIZE
+        ) {
+            break;
+        }
+        cursor = nextCursor;
+    }
+    return { events, nextCursor: null };
+};
+
+const cancelDeepResearch = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    runUuid: string,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: `${getBaseUrl(projectUuid)}/${runUuid}/cancel`,
+        method: 'POST',
+        body: JSON.stringify({}),
+    }) as Promise<ApiAiDeepResearchRunResponse['results']>;
+
+const refreshDeepResearchChart = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    runUuid: string,
+    chartKey: string,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: `${getBaseUrl(projectUuid)}/${runUuid}/charts/${encodeURIComponent(chartKey)}/refresh`,
+        method: 'POST',
+        body: JSON.stringify({}),
+    }) as Promise<ApiAiAgentThreadMessageVizQueryResponse['results']>;
+
+const getDeepResearchChart = (
+    lightdashApi: LightdashApi,
+    projectUuid: string,
+    runUuid: string,
+    queryUuid: string,
+) =>
+    lightdashApi<AnyType>({
+        version: 'v1',
+        url: `${getBaseUrl(projectUuid)}/${runUuid}/charts/${encodeURIComponent(queryUuid)}`,
+        method: 'GET',
+        body: undefined,
+    }) as Promise<ApiAiDeepResearchChartResponse['results']>;
+
+type StartMutationVariables = StartDeepResearchArgs & {
+    promptUuid: string;
+};
+
+type StartMutationIds = {
+    agentUuid: string;
+    threadUuid: string;
+};
+
+const useStartDeepResearchMutationBase = <
+    Variables extends StartMutationVariables,
+>(
+    projectUuid: string,
+    getIds: (variables: Variables) => StartMutationIds,
+    entryPoint: AiDeepResearchEntryPoint,
+) => {
+    const lightdashApi = useLightdashApi();
+
+    const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
+    const user = useUser(true);
+    return useMutation<
+        AiDeepResearchRun,
+        ApiError,
+        Variables,
+        { optimisticRunUuid: string; createdAt: string }
+    >({
+        onMutate: (variables) => {
+            const { agentUuid, threadUuid } = getIds(variables);
+            const optimisticRunUuid = `starting-${crypto.randomUUID()}`;
+            const createdAt = new Date().toISOString();
+            registerDeepResearchRun({
+                runUuid: optimisticRunUuid,
+                projectUuid,
+                agentUuid,
+                threadUuid,
+                promptUuid: variables.promptUuid,
+                userUuid: user.data?.userUuid ?? '',
+                question: variables.question,
+                createdAt,
+                state: 'starting',
+            });
+            return { optimisticRunUuid, createdAt };
+        },
+        mutationFn: (variables) => {
+            const { agentUuid, threadUuid } = getIds(variables);
+            return startDeepResearch(lightdashApi, projectUuid, {
+                prompt: variables.question,
+                agentUuid,
+                threadUuid,
+                promptUuid: variables.promptUuid,
+                entryPoint,
+                resumeFromRunUuid: variables.resumeFromRunUuid,
+            });
+        },
+        onSuccess: (run, variables, context) => {
+            const { agentUuid, threadUuid } = getIds(variables);
+            replaceDeepResearchRun(context?.optimisticRunUuid ?? '', {
+                runUuid: run.aiDeepResearchRunUuid,
+                projectUuid,
+                agentUuid,
+                threadUuid,
+                promptUuid: variables.promptUuid,
+                userUuid: user.data?.userUuid ?? '',
+                question: variables.question,
+                createdAt: context?.createdAt ?? new Date().toISOString(),
+                state: 'started',
+            });
+            void queryClient.invalidateQueries({
+                queryKey: [
+                    DEEP_RESEARCH_QUERY_KEY,
+                    projectUuid,
+                    'thread',
+                    threadUuid,
+                ],
+            });
+        },
+        onError: ({ error }, _variables, context) => {
+            if (context) {
+                updateDeepResearchRun(context.optimisticRunUuid, {
+                    state: 'start_failed',
+                    errorMessage: error.message,
+                });
+            }
+            const { threadUuid } = getIds(_variables);
+            restoreDeepResearchComposerPrompt(threadUuid, _variables.question);
+            showToastApiError({
+                title: 'Could not start research',
+                apiError: error,
+            });
+        },
+    });
+};
+
+export const useStartDeepResearchMutation = ({
+    projectUuid,
+    agentUuid,
+    threadUuid,
+    entryPoint = 'ask_ai',
+}: {
+    projectUuid: string;
+    agentUuid: string;
+    threadUuid: string;
+    entryPoint?: AiDeepResearchEntryPoint;
+}) =>
+    useStartDeepResearchMutationBase<StartMutationVariables>(
+        projectUuid,
+        () => ({ agentUuid, threadUuid }),
+        entryPoint,
+    );
+
+type StartForThreadMutationVariables = StartMutationVariables &
+    StartMutationIds;
+
+export const useStartDeepResearchForThreadMutation = (
+    projectUuid: string,
+    entryPoint: AiDeepResearchEntryPoint = 'ask_ai',
+) =>
+    useStartDeepResearchMutationBase<StartForThreadMutationVariables>(
+        projectUuid,
+        ({ agentUuid, threadUuid }) => ({ agentUuid, threadUuid }),
+        entryPoint,
+    );
+
+const useDeepResearchThreadRuns = (
+    projectUuid: string | undefined,
+    threadUuid: string,
+) => {
+    const lightdashApi = useLightdashApi();
+
+    const isEmbed = useIsEmbedded();
+    return useQuery<AiDeepResearchRun[], ApiError>({
+        queryKey: [DEEP_RESEARCH_QUERY_KEY, projectUuid, 'thread', threadUuid],
+        queryFn: () =>
+            listDeepResearchRuns(lightdashApi, projectUuid ?? '', threadUuid),
+        enabled: !isEmbed && !!projectUuid && !!threadUuid,
+        refetchInterval: (runs) =>
+            runs?.some((run) => !isAiDeepResearchRunTerminal(run.status))
+                ? DEEP_RESEARCH_POLL_INTERVAL_MS
+                : false,
+    });
+};
+
+type DeepResearchEngagementRun = Pick<
+    AiDeepResearchRun,
+    | 'aiDeepResearchRunUuid'
+    | 'projectUuid'
+    | 'agentUuid'
+    | 'aiThreadUuid'
+    | 'status'
+    | 'completedAt'
+    | 'updatedAt'
+>;
+
+export const useTrackDeepResearchReportEngagement = () => {
+    const { user } = useApp();
+    const { track } = useTracking();
+
+    return useCallback(
+        (
+            action: 'opened' | 'copied' | 'shared' | 'follow_up',
+            run: DeepResearchEngagementRun,
+        ) => {
+            const userId = user?.data?.userUuid;
+            const organizationId = user?.data?.organizationUuid;
+            if (
+                !userId ||
+                !organizationId ||
+                !isAiDeepResearchRunTerminal(run.status)
+            ) {
+                return;
+            }
+
+            const completedAt = run.completedAt ?? run.updatedAt;
+            track({
+                name: EventName.AI_DEEP_RESEARCH_REPORT_ENGAGED,
+                properties: {
+                    action,
+                    organizationId,
+                    projectId: run.projectUuid,
+                    userId,
+                    runUuid: run.aiDeepResearchRunUuid,
+                    threadId: run.aiThreadUuid,
+                    aiAgentId: run.agentUuid,
+                    runStatus: run.status,
+                    timeSinceCompletedMs: Math.max(
+                        0,
+                        Date.now() - new Date(completedAt).getTime(),
+                    ),
+                },
+            });
+        },
+        [track, user?.data?.organizationUuid, user?.data?.userUuid],
+    );
+};
+
+export const useTrackDeepResearchFollowUp = ({
+    projectUuid,
+    threadUuid,
+}: {
+    projectUuid: string;
+    threadUuid: string;
+}) => {
+    const runsQuery = useDeepResearchThreadRuns(projectUuid, threadUuid);
+    const trackEngagement = useTrackDeepResearchReportEngagement();
+
+    return useCallback(() => {
+        const latestTerminalRun = runsQuery.data
+            ?.filter((run) => isAiDeepResearchRunTerminal(run.status))
+            .toSorted(
+                (left, right) =>
+                    new Date(right.completedAt ?? right.updatedAt).getTime() -
+                    new Date(left.completedAt ?? left.updatedAt).getTime(),
+            )[0];
+        if (latestTerminalRun) {
+            trackEngagement('follow_up', latestTerminalRun);
+        }
+    }, [runsQuery.data, trackEngagement]);
+};
+
+type UseDeepResearchThreadRunRegistrationsOptions = {
+    projectUuid: string | undefined;
+    threadUuid: string;
+};
+
+// The server keeps one run per prompt, so a local start for a prompt it already
+// tracks is stale even when the start request never returned to this page.
+const getUntrackedRegistrations = (
+    localRegistrations: DeepResearchRunRegistration[],
+    serverRuns: AiDeepResearchRun[],
+): DeepResearchRunRegistration[] => {
+    const serverRunUuids = new Set(
+        serverRuns.map((run) => run.aiDeepResearchRunUuid),
+    );
+    const serverPromptUuids = new Set(serverRuns.map((run) => run.promptUuid));
+    return localRegistrations.filter(
+        (registration) =>
+            !serverRunUuids.has(registration.runUuid) &&
+            !serverPromptUuids.has(registration.promptUuid),
+    );
+};
+
+export const useDeepResearchThreadRunRegistrationState = ({
+    projectUuid,
+    threadUuid,
+}: UseDeepResearchThreadRunRegistrationsOptions) => {
+    const user = useUser(true);
+    const userUuid = user.data?.userUuid;
+    const serverRuns = useDeepResearchThreadRuns(projectUuid, threadUuid);
+    const localRegistrations = useDeepResearchRunsForThread(
+        projectUuid ?? '',
+        threadUuid,
+        userUuid,
+    );
+
+    const registrations = useMemo(() => {
+        const fromServer = (serverRuns.data ?? []).map((run) =>
+            toDeepResearchRegistration(run, {
+                threadUuid,
+                userUuid: userUuid ?? '',
+            }),
+        );
+        return [
+            ...fromServer,
+            ...getUntrackedRegistrations(
+                localRegistrations,
+                serverRuns.data ?? [],
+            ),
+        ];
+    }, [serverRuns.data, localRegistrations, threadUuid, userUuid]);
+
+    return {
+        registrations,
+        isReady: serverRuns.isSuccess && !serverRuns.isFetching,
+    };
+};
+
+export const useDeepResearchThreadRunRegistrations = (
+    options: UseDeepResearchThreadRunRegistrationsOptions,
+) => useDeepResearchThreadRunRegistrationState(options).registrations;
+
+export const useHasActiveDeepResearchRun = ({
+    projectUuid,
+    threadUuid,
+}: {
+    projectUuid: string | undefined;
+    threadUuid: string | undefined;
+}) => {
+    const user = useUser(true);
+    const userUuid = user.data?.userUuid;
+    const serverRuns = useDeepResearchThreadRuns(projectUuid, threadUuid ?? '');
+    const localRegistrations = useDeepResearchRunsForThread(
+        projectUuid ?? '',
+        threadUuid ?? '',
+        userUuid,
+    );
+
+    return useMemo(() => {
+        if (!projectUuid || !threadUuid) {
+            return false;
+        }
+
+        const hasLocalActiveRun = getUntrackedRegistrations(
+            localRegistrations,
+            serverRuns.data ?? [],
+        ).some(
+            (registration) =>
+                registration.state === 'starting' ||
+                registration.state === 'started',
+        );
+
+        return (
+            hasLocalActiveRun ||
+            serverRuns.data?.some(
+                (run) => !isAiDeepResearchRunTerminal(run.status),
+            ) === true
+        );
+    }, [localRegistrations, projectUuid, serverRuns.data, threadUuid]);
+};
+
+export const useDeepResearchRun = (
+    registration: DeepResearchRunRegistration,
+) => {
+    const lightdashApi = useLightdashApi();
+
+    const queryIdentity = `${registration.projectUuid}:${registration.runUuid}`;
+    const pollFailure = useRef<PollFailureState | undefined>(undefined);
+    const runQuery = useQuery<AiDeepResearchRun, ApiError>({
+        queryKey: [
+            DEEP_RESEARCH_QUERY_KEY,
+            registration.projectUuid,
+            registration.runUuid,
+        ],
+        queryFn: () =>
+            getDeepResearchRun(
+                lightdashApi,
+                registration.projectUuid,
+                registration.runUuid,
+            ),
+        enabled: registration.state === 'started',
+        refetchInterval: (run) =>
+            getDeepResearchRunRefetchInterval(
+                run,
+                DEEP_RESEARCH_POLL_INTERVAL_MS,
+                Date.now(),
+                getPollFailureForQuery(pollFailure.current, queryIdentity),
+            ),
+        onSuccess: () => {
+            pollFailure.current = undefined;
+        },
+        onError: (error) => {
+            pollFailure.current = {
+                queryIdentity,
+                error,
+                failureCount:
+                    (getPollFailureForQuery(pollFailure.current, queryIdentity)
+                        ?.failureCount ?? 0) + 1,
+            };
+        },
+    });
+    const isRunActive = runQuery.data
+        ? !isDeepResearchRunTerminal(runQuery.data.status)
+        : true;
+    const eventsPollFailure = useRef<PollFailureState | undefined>(undefined);
+    const runAccessUnavailable = [403, 404].includes(
+        runQuery.error?.error.statusCode ?? 0,
+    );
+    const eventsQuery = useQuery<AiDeepResearchEventsPage, ApiError>({
+        queryKey: [
+            DEEP_RESEARCH_QUERY_KEY,
+            registration.projectUuid,
+            registration.runUuid,
+            'events',
+        ],
+        queryFn: () =>
+            getDeepResearchEvents(
+                lightdashApi,
+                registration.projectUuid,
+                registration.runUuid,
+            ),
+        enabled: registration.state === 'started' && !runAccessUnavailable,
+        refetchInterval: () =>
+            isRunActive
+                ? getDeepResearchRunRefetchInterval(
+                      undefined,
+                      DEEP_RESEARCH_POLL_INTERVAL_MS,
+                      Date.now(),
+                      getPollFailureForQuery(
+                          eventsPollFailure.current,
+                          queryIdentity,
+                      ),
+                  )
+                : false,
+        onSuccess: () => {
+            eventsPollFailure.current = undefined;
+        },
+        onError: (error) => {
+            eventsPollFailure.current = {
+                queryIdentity,
+                error,
+                failureCount:
+                    (getPollFailureForQuery(
+                        eventsPollFailure.current,
+                        queryIdentity,
+                    )?.failureCount ?? 0) + 1,
+            };
+        },
+    });
+
+    return {
+        ...runQuery,
+        data: runQuery.data
+            ? adaptDeepResearchRun({
+                  run: runQuery.data,
+                  events: eventsQuery.data?.events ?? [],
+                  registration,
+              })
+            : undefined,
+        eventsQuery,
+    };
+};
+
+export const useDeepResearchReport = (
+    projectUuid: string | undefined,
+    runUuid: string | undefined,
+) => {
+    const lightdashApi = useLightdashApi();
+
+    const queryIdentity = `${projectUuid}:${runUuid}`;
+    const pollFailure = useRef<PollFailureState | undefined>(undefined);
+    const runQuery = useQuery<AiDeepResearchRun, ApiError>({
+        queryKey: [DEEP_RESEARCH_QUERY_KEY, projectUuid, runUuid],
+        queryFn: () =>
+            getDeepResearchRun(lightdashApi, projectUuid ?? '', runUuid ?? ''),
+        enabled: !!projectUuid && !!runUuid,
+        refetchInterval: (run) =>
+            getDeepResearchRunRefetchInterval(
+                run,
+                DEEP_RESEARCH_POLL_INTERVAL_MS,
+                Date.now(),
+                getPollFailureForQuery(pollFailure.current, queryIdentity),
+            ),
+        onSuccess: () => {
+            pollFailure.current = undefined;
+        },
+        onError: (error) => {
+            pollFailure.current = {
+                queryIdentity,
+                error,
+                failureCount:
+                    (getPollFailureForQuery(pollFailure.current, queryIdentity)
+                        ?.failureCount ?? 0) + 1,
+            };
+        },
+    });
+    const report = useMemo<DeepResearchReportView | undefined>(
+        () =>
+            runQuery.data
+                ? {
+                      uuid: runQuery.data.aiDeepResearchRunUuid,
+                      projectUuid: runQuery.data.projectUuid,
+                      agentUuid: runQuery.data.agentUuid,
+                      threadUuid: runQuery.data.aiThreadUuid,
+                      question: runQuery.data.prompt,
+                      completedAt: runQuery.data.completedAt,
+                      sourceCount: null,
+                      resultMarkdown: runQuery.data.resultMarkdown,
+                      isReportExpired: runQuery.data.isReportExpired,
+                      document: runQuery.data.document,
+                  }
+                : undefined,
+        [runQuery.data],
+    );
+
+    return { ...runQuery, data: report };
+};
+
+export const useCancelDeepResearchMutation = (
+    projectUuid: string,
+    runUuid: string,
+) => {
+    const lightdashApi = useLightdashApi();
+
+    const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
+    return useMutation<AiDeepResearchRun, ApiError>({
+        mutationFn: () =>
+            cancelDeepResearch(lightdashApi, projectUuid, runUuid),
+        onSuccess: (run) => {
+            queryClient.setQueryData(
+                [DEEP_RESEARCH_QUERY_KEY, projectUuid, runUuid],
+                run,
+            );
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Could not stop research',
+                apiError: error,
+            });
+        },
+    });
+};
+
+/**
+ * Re-executes the stored metric query behind a warehouse-backed report
+ * chart. Report charts use this as their only render path.
+ */
+export const useDeepResearchChartLiveQuery = ({
+    projectUuid,
+    runUuid,
+    chartKey,
+}: {
+    projectUuid: string;
+    runUuid: string;
+    chartKey: string;
+}) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<ApiAiAgentThreadMessageVizQuery, ApiError>({
+        queryKey: [
+            DEEP_RESEARCH_QUERY_KEY,
+            projectUuid,
+            runUuid,
+            'charts',
+            chartKey,
+            'live',
+        ],
+        queryFn: () =>
+            refreshDeepResearchChart(
+                lightdashApi,
+                projectUuid,
+                runUuid,
+                chartKey,
+            ),
+        refetchOnMount: 'always',
+        refetchOnWindowFocus: false,
+    });
+};
+
+export const useDeepResearchChartQuery = ({
+    projectUuid,
+    runUuid,
+    queryUuid,
+}: {
+    projectUuid: string;
+    runUuid: string;
+    queryUuid: string;
+}) => {
+    const lightdashApi = useLightdashApi();
+    return useQuery<AiDeepResearchChartData, ApiError>({
+        queryKey: [
+            DEEP_RESEARCH_QUERY_KEY,
+            projectUuid,
+            runUuid,
+            'charts',
+            queryUuid,
+        ],
+        queryFn: () =>
+            getDeepResearchChart(lightdashApi, projectUuid, runUuid, queryUuid),
+        staleTime: Infinity,
+        refetchOnWindowFocus: false,
+    });
+};
+
+export const useContinueDeepResearchMutation = ({
+    projectUuid,
+    agentUuid,
+    threadUuid,
+}: {
+    projectUuid: string;
+    agentUuid: string;
+    threadUuid: string;
+}) => useStartDeepResearchMutation({ projectUuid, agentUuid, threadUuid });

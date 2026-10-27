@@ -4,58 +4,97 @@ import {
     Droppable,
     type DropResult,
 } from '@hello-pangea/dnd';
+import {
+    getGranularityMapFromItems,
+    getReadableTextColor,
+} from '@lightdash/common';
 import { Box, Stack } from '@mantine/core';
 import { useCallback, type FC } from 'react';
-import { isPieVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import {
+    selectPieEditor,
+    selectPieGroupColorDefaults,
+    selectPieGroupFieldIds,
+    selectPieSortedGroupLabels,
+    selectPieValueOptionOverrideFlags,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
+import { usePieEditorActions } from '../../../hooks/usePieChartConfig';
+import {
+    useVisualizationInputs,
+    useVisualizationInputSelector,
+} from '../../LightdashVisualization/useVisualizationContext';
 import { ColorPaletteSection } from '../common/ColorPaletteSection';
 import { Config } from '../common/Config';
 import { GroupItem } from './GroupItem';
 import { ValueOptions } from './ValueOptions';
 
 export const Series: FC = () => {
-    const { visualizationConfig, colorPalette, getGroupColor } =
-        useVisualizationContext();
-
-    const isPieChartConfig = isPieVisualizationConfig(visualizationConfig);
-
-    const handleDragEnd = useCallback(
-        (result: DropResult) => {
-            if (!isPieChartConfig) return;
-
-            if (!result.destination) return;
-            if (result.source.index === result.destination.index) return;
-
-            visualizationConfig.chartConfig.groupSortChange(
-                result.source.index,
-                result.destination.index,
-            );
-        },
-        [visualizationConfig, isPieChartConfig],
+    const { colorPalette, getGroupColor, itemsMap } = useVisualizationInputs();
+    const groupFieldIds = useVisualizationInputSelector(selectPieGroupFieldIds);
+    const sortedGroupLabels = useVisualizationInputSelector(
+        selectPieSortedGroupLabels,
     );
-
-    if (!isPieChartConfig) return null;
-
+    const groupColorDefaults = useVisualizationInputSelector(
+        selectPieGroupColorDefaults,
+    );
     const {
-        groupFieldIds,
-        valueLabel,
-        valueLabelChange,
-        showValue,
-        toggleShowValue,
-        showPercentage,
-        toggleShowPercentage,
         isValueLabelOverriden,
         isShowValueOverriden,
         isShowPercentageOverriden,
-        sortedGroupLabels,
-        groupLabelOverrides,
+    } = useVisualizationSelector(selectPieValueOptionOverrideFlags);
+    const valueLabel = useVisualizationSelector(
+        (state) => selectPieEditor(state).valueLabel,
+    );
+    const valueLabelColor = useVisualizationSelector(
+        (state) => selectPieEditor(state).valueLabelColor,
+    );
+    const showValue = useVisualizationSelector(
+        (state) => selectPieEditor(state).showValue,
+    );
+    const showPercentage = useVisualizationSelector(
+        (state) => selectPieEditor(state).showPercentage,
+    );
+    const groupLabelOverrides = useVisualizationSelector(
+        (state) => selectPieEditor(state).groupLabelOverrides,
+    );
+    const groupColorOverrides = useVisualizationSelector(
+        (state) => selectPieEditor(state).groupColorOverrides,
+    );
+    const groupValueOptionOverrides = useVisualizationSelector(
+        (state) => selectPieEditor(state).groupValueOptionOverrides,
+    );
+    const {
+        groupSortChange,
+        valueLabelChange,
+        valueLabelColorChange,
+        toggleShowValue,
+        toggleShowPercentage,
         groupLabelChange,
-        groupColorOverrides,
-        groupColorDefaults,
         groupColorChange,
-        groupValueOptionOverrides,
         groupValueOptionChange,
-    } = visualizationConfig.chartConfig;
+    } = usePieEditorActions();
+
+    const granularityFields = Object.keys(getGranularityMapFromItems(itemsMap));
+
+    const handleDragEnd = useCallback(
+        (result: DropResult) => {
+            if (!result.destination) return;
+            if (result.source.index === result.destination.index) return;
+
+            groupSortChange(result.source.index, result.destination.index);
+        },
+        [groupSortChange],
+    );
+
+    const firstGroupLabel = sortedGroupLabels[0];
+    const firstGroupColor = firstGroupLabel
+        ? (groupColorOverrides[firstGroupLabel] ??
+          getGroupColor(groupFieldIds.join('_'), firstGroupLabel))
+        : colorPalette[0];
+    const automaticValueLabelColor =
+        valueLabel === 'inside' && firstGroupColor
+            ? getReadableTextColor(firstGroupColor)
+            : firstGroupColor;
 
     return (
         <Stack>
@@ -71,6 +110,10 @@ export const Series: FC = () => {
                         isShowPercentageOverriden={isShowPercentageOverriden}
                         valueLabel={valueLabel}
                         onValueLabelChange={valueLabelChange}
+                        valueLabelColor={valueLabelColor}
+                        defaultValueLabelColor={automaticValueLabelColor}
+                        swatches={colorPalette}
+                        onValueLabelColorChange={valueLabelColorChange}
                         showValue={showValue}
                         onToggleShowValue={toggleShowValue}
                         showPercentage={showPercentage}
@@ -118,6 +161,16 @@ export const Series: FC = () => {
                                                                     .draggableProps
                                                                     .style,
                                                                 top: 'auto',
+                                                                ...(draggableSnapshot.isDragging
+                                                                    ? {
+                                                                          backgroundColor:
+                                                                              'white',
+                                                                          borderRadius:
+                                                                              'var(--mantine-radius-sm)',
+                                                                          boxShadow:
+                                                                              'var(--mantine-shadow-sm)',
+                                                                      }
+                                                                    : {}),
                                                             }}
                                                             dragHandleProps={
                                                                 draggableProvided.dragHandleProps
@@ -126,21 +179,8 @@ export const Series: FC = () => {
                                                                 sortedGroupLabels.length ===
                                                                 1
                                                             }
-                                                            sx={(theme) =>
-                                                                draggableSnapshot.isDragging
-                                                                    ? {
-                                                                          backgroundColor:
-                                                                              'white',
-                                                                          borderRadius:
-                                                                              theme
-                                                                                  .radius
-                                                                                  .sm,
-                                                                          boxShadow:
-                                                                              theme
-                                                                                  .shadows
-                                                                                  .sm,
-                                                                      }
-                                                                    : {}
+                                                            granularityFields={
+                                                                granularityFields
                                                             }
                                                             swatches={
                                                                 colorPalette
@@ -187,6 +227,15 @@ export const Series: FC = () => {
                                                                 ]
                                                                     ?.showPercentage ??
                                                                 showPercentage
+                                                            }
+                                                            valueLabelColor={
+                                                                groupValueOptionOverrides[
+                                                                    groupLabel
+                                                                ]
+                                                                    ?.valueLabelColor
+                                                            }
+                                                            defaultValueLabelColor={
+                                                                valueLabelColor
                                                             }
                                                             onLabelChange={
                                                                 groupLabelChange

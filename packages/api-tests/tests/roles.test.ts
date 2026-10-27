@@ -3,10 +3,16 @@ import {
     SEED_GROUP,
     SEED_ORG_1,
     SEED_ORG_1_ADMIN,
+    SEED_ORG_1_EDITOR,
     SEED_PROJECT,
 } from '@lightdash/common';
 import { Body } from '../helpers/api-client';
-import { anotherLogin, login, loginWithPermissions } from '../helpers/auth';
+import {
+    anotherLogin,
+    login,
+    loginWithEmail,
+    loginWithPermissions,
+} from '../helpers/auth';
 
 type RoleResult = {
     roleUuid: string;
@@ -26,6 +32,7 @@ type ErrorBody = { status: string; error: { message: string } };
 
 const orgRolesApiUrl = '/api/v2/orgs';
 const projectRolesApiUrl = '/api/v2/projects';
+const apiUrl = '/api/v1';
 
 describe('Roles API Tests', () => {
     let admin: Awaited<ReturnType<typeof login>>;
@@ -120,9 +127,14 @@ describe('Roles API Tests', () => {
                 rolesToCleanup.push(roleUuid);
 
                 // Test: add scopes to the role
-                const scopeResp = await admin.post<Body<unknown>>(
-                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}/scopes`,
-                    { scopeNames: ['view_project', 'view_dashboard'] },
+                const scopeResp = await admin.patch<Body<unknown>>(
+                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}`,
+                    {
+                        scopes: {
+                            add: ['view_project', 'view_dashboard'],
+                            remove: [],
+                        },
+                    },
                 );
 
                 expect(scopeResp.status).toBe(200);
@@ -145,14 +157,17 @@ describe('Roles API Tests', () => {
                 rolesToCleanup.push(originalRoleUuid);
 
                 // Setup: add scopes to the original role
-                await admin.post<Body<unknown>>(
-                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${originalRoleUuid}/scopes`,
+                await admin.patch<Body<unknown>>(
+                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${originalRoleUuid}`,
                     {
-                        scopeNames: [
-                            'view_project',
-                            'view_dashboard',
-                            'create:Space',
-                        ],
+                        scopes: {
+                            add: [
+                                'view_project',
+                                'view_dashboard',
+                                'create:Space',
+                            ],
+                            remove: [],
+                        },
                     },
                 );
 
@@ -305,9 +320,14 @@ describe('Roles API Tests', () => {
             rolesToCleanup.push(roleUuid);
 
             // Add scopes to role
-            const scopeResp = await admin.post<Body<unknown>>(
-                `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}/scopes`,
-                { scopeNames: ['view_project', 'view_dashboard'] },
+            const scopeResp = await admin.patch<Body<unknown>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}`,
+                {
+                    scopes: {
+                        add: ['view_project', 'view_dashboard'],
+                        remove: [],
+                    },
+                },
             );
             expect(scopeResp.status).toBe(200);
             expect(scopeResp.body).toHaveProperty('status', 'ok');
@@ -391,9 +411,10 @@ describe('Roles API Tests', () => {
     describe('Unified Role Assignments', () => {
         const testUserUuid = SEED_ORG_1_ADMIN.user_uuid;
 
-        it('should reject custom role assignment at organization level', async () => {
+        it('should reject assigning a project-level custom role at organization level', async () => {
             const roleName = `User Assignment Role ${Date.now()}`;
 
+            // Roles created via this endpoint default to project level
             const createResp = await admin.post<Body<RoleResult>>(
                 `${orgRolesApiUrl}/${testOrgUuid}/roles`,
                 {
@@ -404,16 +425,17 @@ describe('Roles API Tests', () => {
             const { roleUuid } = createResp.body.results;
             rolesToCleanup.push(roleUuid);
 
-            // Try to assign custom role to user - should return 400 (only system roles allowed)
+            // Assign to a non-admin user so we hit the level check rather than
+            // the "organization must have at least one admin" guard
             const assignResp = await admin.post<ErrorBody>(
-                `${orgRolesApiUrl}/${testOrgUuid}/roles/assignments/user/${testUserUuid}`,
+                `${orgRolesApiUrl}/${testOrgUuid}/roles/assignments/user/${SEED_ORG_1_EDITOR.user_uuid}`,
                 { roleId: roleUuid },
                 { failOnStatusCode: false },
             );
 
             expect(assignResp.status).toBe(400);
             expect(assignResp.body.error.message).toContain(
-                'Only system roles can be assigned at organization level',
+                'can only be assigned at project level',
             );
         });
 
@@ -454,6 +476,155 @@ describe('Roles API Tests', () => {
                 { failOnStatusCode: false },
             );
             expect(deleteResp.status).toBe(404);
+        });
+    });
+
+    describe('Role sets (multiple roles)', () => {
+        type RoleSet = { systemRole: string | null; customRoleUuids: string[] };
+        const editorUuid = SEED_ORG_1_EDITOR.user_uuid;
+        const orgSetUrl = `${orgRolesApiUrl}/${testOrgUuid}/roles/assignments/user/${editorUuid}/set`;
+        const projectSetUrl = `${projectRolesApiUrl}/${SEED_PROJECT.project_uuid}/roles/assignments/user/${editorUuid}/set`;
+
+        afterEach(async () => {
+            // Restore the seeded editor's single org role and drop project access
+            await admin.post(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles/assignments/user/${editorUuid}`,
+                { roleId: 'editor' },
+                { failOnStatusCode: false },
+            );
+            await admin.delete(
+                `${projectRolesApiUrl}/${SEED_PROJECT.project_uuid}/roles/assignments/user/${editorUuid}`,
+                { failOnStatusCode: false },
+            );
+        });
+
+        const createOrgRole = async () => {
+            const resp = await admin.post<Body<RoleResult>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles`,
+                {
+                    name: `Extra org role ${Date.now()}`,
+                    level: 'organization',
+                    scopes: ['view:Organization'],
+                },
+            );
+            rolesToCleanup.push(resp.body.results.roleUuid);
+            return resp.body.results.roleUuid;
+        };
+
+        it('replaces and reads an organization role set, exposing hasMultipleRoles on legacy reads', async () => {
+            const roleUuid = await createOrgRole();
+
+            const before = await admin.get<Body<RoleSet>>(orgSetUrl);
+            expect(before.status).toBe(200);
+            expect(before.body.results).toEqual({
+                systemRole: 'editor',
+                customRoleUuids: [],
+            });
+
+            const put = await admin.put<Body<RoleSet>>(orgSetUrl, {
+                systemRole: 'editor',
+                customRoleUuids: [roleUuid, roleUuid],
+            });
+            expect(put.status).toBe(200);
+            expect(put.body.results).toEqual({
+                systemRole: 'editor',
+                customRoleUuids: [roleUuid],
+            });
+
+            const listing = await admin.get<
+                Body<(AssignmentResult & { hasMultipleRoles?: boolean })[]>
+            >(`${orgRolesApiUrl}/${testOrgUuid}/roles/assignments`);
+            const editorRow = listing.body.results.find(
+                (a) => a.assigneeId === editorUuid,
+            );
+            expect(editorRow).toMatchObject({
+                roleId: 'editor',
+                hasMultipleRoles: true,
+            });
+
+            // Legacy singular write replaces the whole set
+            await admin.post(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles/assignments/user/${editorUuid}`,
+                { roleId: 'editor' },
+            );
+            const after = await admin.get<Body<RoleSet>>(orgSetUrl);
+            expect(after.body.results).toEqual({
+                systemRole: 'editor',
+                customRoleUuids: [],
+            });
+        });
+
+        it('rejects empty, wrong-level and cross-tenant sets', async () => {
+            const empty = await admin.put<ErrorBody>(
+                orgSetUrl,
+                { systemRole: null, customRoleUuids: [] },
+                { failOnStatusCode: false },
+            );
+            expect(empty.status).toBe(400);
+
+            const projectRole = await admin.post<Body<RoleResult>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles`,
+                {
+                    name: `Project-level role ${Date.now()}`,
+                    level: 'project',
+                    scopes: ['view:Dashboard'],
+                },
+            );
+            rolesToCleanup.push(projectRole.body.results.roleUuid);
+            const wrongLevel = await admin.put<ErrorBody>(
+                orgSetUrl,
+                {
+                    systemRole: null,
+                    customRoleUuids: [projectRole.body.results.roleUuid],
+                },
+                { failOnStatusCode: false },
+            );
+            expect(wrongLevel.status).toBe(400);
+
+            const unknown = await admin.put<ErrorBody>(
+                orgSetUrl,
+                {
+                    systemRole: null,
+                    customRoleUuids: ['00000000-0000-4000-8000-000000000000'],
+                },
+                { failOnStatusCode: false },
+            );
+            expect(unknown.status).toBe(404);
+        });
+
+        it('replaces and reads a project role set for a user', async () => {
+            const projectRole = await admin.post<Body<RoleResult>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles`,
+                {
+                    name: `Extra project role ${Date.now()}`,
+                    level: 'project',
+                    scopes: ['view:Dashboard'],
+                },
+            );
+            rolesToCleanup.push(projectRole.body.results.roleUuid);
+
+            const put = await admin.put<Body<RoleSet>>(projectSetUrl, {
+                systemRole: 'viewer',
+                customRoleUuids: [projectRole.body.results.roleUuid],
+            });
+            expect(put.status).toBe(200);
+            expect(put.body.results).toEqual({
+                systemRole: 'viewer',
+                customRoleUuids: [projectRole.body.results.roleUuid],
+            });
+
+            const get = await admin.get<Body<RoleSet>>(projectSetUrl);
+            expect(get.body.results).toEqual(put.body.results);
+        });
+
+        it('forbids non-admins from replacing role sets', async () => {
+            const { client: editor } = await loginWithPermissions('editor', []);
+            const resp = await editor.put<ErrorBody>(
+                orgSetUrl,
+                { systemRole: 'admin', customRoleUuids: [] },
+                { failOnStatusCode: false },
+            );
+            expect(resp.status).toBe(403);
         });
     });
 
@@ -722,6 +893,100 @@ describe('Roles API Tests', () => {
                 'Custom role must have at least one scope',
             );
         });
+
+        it('should allow project-scoped custom role to create preview without copying content', async () => {
+            let previewProjectUuid: string | undefined;
+            const roleResp = await admin.post<Body<RoleResult>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles`,
+                {
+                    name: `Preview No Copy ${Date.now()}`,
+                    description: 'Preview role for permission testing',
+                    scopes: [
+                        'view:Project',
+                        'create:Project@preview',
+                        'create:Job',
+                        'manage:CompileProject',
+                        'view:JobStatus@self',
+                        'view:Job@self',
+                    ],
+                },
+            );
+            const { roleUuid } = roleResp.body.results;
+            rolesToCleanup.push(roleUuid);
+
+            const { client: member, email } = await loginWithPermissions(
+                'member',
+                [],
+            );
+            const me = await member.get<Body<{ userUuid: string }>>(
+                `${apiUrl}/user`,
+            );
+            const memberUserUuid = me.body.results.userUuid;
+
+            await admin.post<Body<AssignmentResult>>(
+                `${projectRolesApiUrl}/${SEED_PROJECT.project_uuid}/roles/assignments/user/${memberUserUuid}`,
+                { roleId: roleUuid },
+            );
+
+            const previewUser = await loginWithEmail(email);
+
+            try {
+                const seedCharts = await admin.get<Body<unknown[]>>(
+                    `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/charts`,
+                );
+                const seedDashboards = await admin.get<Body<unknown[]>>(
+                    `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/dashboards`,
+                );
+                expect(seedCharts.body.results.length).toBeGreaterThan(0);
+                expect(seedDashboards.body.results.length).toBeGreaterThan(0);
+
+                const resp = await previewUser.post<
+                    Body<{ projectUuid: string; compileJobUuid: string }>
+                >(
+                    `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/createPreview`,
+                    {
+                        name: `No Copy Preview ${Date.now()}`,
+                        copyContent: false,
+                    },
+                );
+
+                expect(resp.status).toBe(200);
+                previewProjectUuid = resp.body.results.projectUuid;
+                expect(previewProjectUuid).toBeDefined();
+
+                const previewCharts = await admin.get<Body<unknown[]>>(
+                    `${apiUrl}/projects/${previewProjectUuid}/charts`,
+                );
+                const previewDashboards = await admin.get<Body<unknown[]>>(
+                    `${apiUrl}/projects/${previewProjectUuid}/dashboards`,
+                );
+                const previewProject = await admin.get<
+                    Body<{ upstreamProjectUuid?: string | null }>
+                >(`${apiUrl}/projects/${previewProjectUuid}`);
+                const previewProjectAsCreator = await previewUser.get(
+                    `${apiUrl}/projects/${previewProjectUuid}`,
+                );
+                expect(previewCharts.body.results).toHaveLength(0);
+                expect(previewDashboards.body.results).toHaveLength(0);
+                expect(previewProject.body.results.upstreamProjectUuid).toBe(
+                    SEED_PROJECT.project_uuid,
+                );
+                expect(previewProjectAsCreator.status).toBe(200);
+            } finally {
+                if (previewProjectUuid) {
+                    await admin.delete(
+                        `/api/v1/org/projects/${previewProjectUuid}`,
+                        { failOnStatusCode: false },
+                    );
+                }
+                if (memberUserUuid) {
+                    await admin.delete(
+                        `${projectRolesApiUrl}/${SEED_PROJECT.project_uuid}/roles/assignments/user/${memberUserUuid}`,
+                        { failOnStatusCode: false },
+                    );
+                }
+            }
+        });
     });
 
     describe('Role Scopes Management', () => {
@@ -736,9 +1001,9 @@ describe('Roles API Tests', () => {
             );
 
             if (systemRole) {
-                const scopeResp = await admin.post<Body<unknown>>(
-                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${systemRole.roleUuid}/scopes`,
-                    { scopeNames: ['view:Dashboard'] },
+                const scopeResp = await admin.patch<Body<unknown>>(
+                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${systemRole.roleUuid}`,
+                    { scopes: { add: ['view:Dashboard'], remove: [] } },
                     { failOnStatusCode: false },
                 );
 
@@ -758,8 +1023,9 @@ describe('Roles API Tests', () => {
             );
 
             if (systemRole) {
-                const removeResp = await admin.delete(
-                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${systemRole.roleUuid}/scopes/create:Space`,
+                const removeResp = await admin.patch<Body<unknown>>(
+                    `${orgRolesApiUrl}/${testOrgUuid}/roles/${systemRole.roleUuid}`,
+                    { scopes: { add: [], remove: ['create:Space'] } },
                     { failOnStatusCode: false },
                 );
 
@@ -782,16 +1048,22 @@ describe('Roles API Tests', () => {
             rolesToCleanup.push(roleUuid);
 
             // Add scopes to role
-            const scopeResp = await admin.post<Body<unknown>>(
-                `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}/scopes`,
-                { scopeNames: ['view_project', 'view_dashboard'] },
+            const scopeResp = await admin.patch<Body<unknown>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}`,
+                {
+                    scopes: {
+                        add: ['view_project', 'view_dashboard'],
+                        remove: [],
+                    },
+                },
             );
             expect(scopeResp.status).toBe(200);
             expect(scopeResp.body).toHaveProperty('status', 'ok');
 
             // Remove a scope from role
-            const removeResp = await admin.delete(
-                `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}/scopes/view_project`,
+            const removeResp = await admin.patch<Body<unknown>>(
+                `${orgRolesApiUrl}/${testOrgUuid}/roles/${roleUuid}`,
+                { scopes: { add: [], remove: ['view_project'] } },
             );
             expect(removeResp.status).toBe(200);
             expect(removeResp.body).toHaveProperty('status', 'ok');

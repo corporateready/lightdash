@@ -1,8 +1,19 @@
-import { GetObjectCommand, S3, S3ServiceException } from '@aws-sdk/client-s3';
+import { GetObjectCommand, S3ServiceException } from '@aws-sdk/client-s3';
+import { type DataAppViewOutcome } from '@lightdash/common';
 import express, { type Router } from 'express';
+import { type Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import path from 'path';
 import { validate as isValidUuid } from 'uuid';
-import { type AppRuntimeConfig } from '../config/parseConfig';
+import { createS3ClientFromConfig } from '../clients/Aws/S3BaseClient';
+import {
+    type AppRuntimeConfig,
+    type LightdashSecrets,
+} from '../config/parseConfig';
+import {
+    appVersionAssetKey,
+    appVersionIndexHtmlKey,
+} from '../ee/services/AppGenerateService/appBundleStorage';
 import Logger from '../logging/logger';
 import {
     verifyPreviewToken,
@@ -28,36 +39,66 @@ const CONTENT_TYPE_BY_EXT: Record<string, string> = {
     '.map': 'application/json',
 };
 
-const buildCspHeader = (
+export const buildCspHeader = (
     config: AppRuntimeConfig,
     frameAncestors: string[],
+    browserImageOrigins: string[] = [],
 ): string => {
-    const { cdnOrigin, cspAllowedOrigins } = config;
+    const { cdnOrigin, cspAllowedOrigins, previewOrigin, lightdashOrigin } =
+        config;
 
-    const extra = cspAllowedOrigins.length
-        ? ` ${cspAllowedOrigins.join(' ')}`
-        : '';
+    // The preview iframe is sandboxed without `allow-same-origin`, so its
+    // document origin is opaque. WebKit/Safari resolves the CSP `'self'`
+    // keyword against that opaque origin — which matches nothing — and blocks
+    // the app's own scripts, styles, and fetches. Chromium/Firefox resolve
+    // `'self'` against the response URL's origin, so they load fine. Listing
+    // the serving origin explicitly alongside `'self'` makes the policy work
+    // in all three. The iframe is served from `previewOrigin` in production
+    // (cross-origin previews) and same-origin (`lightdashOrigin`) in dev.
+    const selfOrigin = previewOrigin || lightdashOrigin;
+
+    // Compose a source list, dropping the null cdnOrigin / empty entries.
+    const sources = (...parts: (string | false | null)[]): string =>
+        ["'self'", selfOrigin, ...parts, cdnOrigin]
+            .filter((s): s is string => Boolean(s))
+            .join(' ');
 
     const directives: string[] = [
         `default-src 'none'`,
-        `script-src 'self'${cdnOrigin ? ` ${cdnOrigin}` : ''}`,
-        `style-src 'self' 'unsafe-inline'${extra}${cdnOrigin ? ` ${cdnOrigin}` : ''}`,
+        // blob: in script-src is required for blob workers to EXECUTE — the
+        // inherited CSP checks the worker's own script against script-src,
+        // while worker-src below only gates its creation.
+        `script-src ${sources('blob:')}`,
+        `style-src ${sources("'unsafe-inline'", ...cspAllowedOrigins)}`,
         // Allow same-origin fetch so html-to-image can inline @font-face
         // sources and <img>/background URLs when capturing screenshots.
         // The iframe is sandboxed (`allow-scripts allow-modals`) with an
         // opaque origin, so any fetch it makes is uncredentialed and can't
         // exfiltrate user data — the postMessage bridge remains the only
         // path to the authenticated Lightdash API.
-        `connect-src 'self'${cdnOrigin ? ` ${cdnOrigin}` : ''}`,
-        `img-src 'self' data:${cdnOrigin ? ` ${cdnOrigin}` : ''}`,
-        `font-src 'self'${extra}${cdnOrigin ? ` ${cdnOrigin}` : ''}`,
+        `connect-src ${sources()}`,
+        // Many libraries (canvas-confetti, deck.gl, comlink) run animation or
+        // compute in workers created from blob: URLs. Blob workers execute the
+        // app's own already-running code and inherit this CSP, so allowing
+        // them adds no new network or exfiltration path. child-src is the
+        // worker fallback on older Safari.
+        `worker-src ${sources('blob:')}`,
+        `child-src ${sources('blob:')}`,
+        `img-src ${sources('data:', ...browserImageOrigins)}`,
+        `font-src ${sources(...cspAllowedOrigins)}`,
         `frame-ancestors ${frameAncestors.join(' ')}`,
         `object-src 'none'`,
-        // Constrain <base> to same origin instead of blocking it outright —
-        // html-to-image serializes the cloned DOM into an SVG <foreignObject>
-        // whose rendering can trip a base-uri check, and a `'none'` policy
-        // there aborts the whole screenshot.
-        `base-uri 'self'`,
+        // Constrain <base> to the serving origin instead of blocking it
+        // outright — html-to-image serializes the cloned DOM into an SVG
+        // <foreignObject> whose rendering can trip a base-uri check, and a
+        // `'none'` policy there aborts the whole screenshot. `'self'` alone
+        // fails under Safari's opaque sandbox origin (see above), so the
+        // explicit origin is listed here too.
+        `base-uri ${sources()}`,
+        // The iframe sandbox grants allow-forms so submit events reach app
+        // handlers; this keeps a native (un-prevented) submission from
+        // navigating anywhere, so forms cannot exfiltrate to external URLs.
+        `form-action 'none'`,
     ];
 
     return directives.join('; ');
@@ -81,19 +122,21 @@ const isPlausibleToken = (token: string): boolean =>
 
 export const createAppPreviewRouter = (
     config: AppRuntimeConfig,
-    lightdashSecret: string,
+    lightdashSecrets: LightdashSecrets,
     /**
-     * Frame-ancestor allowlist applied to every preview iframe. Matches the
-     * `/embed/*` policy (`'self' https://*`) plus the explicit domains in
-     * `LIGHTDASH_IFRAME_EMBEDDING_DOMAINS` — see App.ts. Both session and
-     * embed-minted tokens use the same list; the broader allowlist costs
-     * little since the iframe is sandboxed (`allow-scripts allow-modals`)
-     * with an opaque origin — any fetch it makes is uncredentialed, so
-     * authenticated backend traffic still only flows through the
-     * parent-mediated postMessage bridge.
+     * Same frame-ancestor allowlist as `/embed/*`, applied to both
+     * session- and embed-minted preview tokens.
      */
     frameAncestors: string[],
-    onPreviewView?: (payload: PreviewTokenPayload) => void,
+    onPreviewView?: (
+        payload: PreviewTokenPayload,
+        navigationId: string | null,
+    ) => void,
+    onPreviewOutcome?: (
+        payload: PreviewTokenPayload,
+        navigationId: string | null,
+        outcome: Extract<DataAppViewOutcome, 'html_loaded' | 'html_error'>,
+    ) => void,
 ): Router => {
     const router = express.Router({ strict: true });
 
@@ -116,26 +159,16 @@ export const createAppPreviewRouter = (
         });
     }
 
-    const s3 =
-        config.s3 !== null
-            ? new S3({
-                  region: config.s3.region,
-                  endpoint: config.s3.endpoint,
-                  forcePathStyle: config.s3.forcePathStyle,
-                  credentials:
-                      config.s3.accessKey && config.s3.secretKey
-                          ? {
-                                accessKeyId: config.s3.accessKey,
-                                secretAccessKey: config.s3.secretKey,
-                            }
-                          : undefined,
-              })
-            : null;
+    const s3 = config.s3 !== null ? createS3ClientFromConfig(config.s3) : null;
 
-    const cspHeader = buildCspHeader(config, frameAncestors);
-
-    const setSecurityHeaders = (res: express.Response): void => {
-        res.setHeader('Content-Security-Policy', cspHeader);
+    const setSecurityHeaders = (
+        res: express.Response,
+        payload: PreviewTokenPayload,
+    ): void => {
+        res.setHeader(
+            'Content-Security-Policy',
+            buildCspHeader(config, frameAncestors, payload.browserImageOrigins),
+        );
         res.removeHeader('X-Frame-Options');
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -143,8 +176,9 @@ export const createAppPreviewRouter = (
 
     const fetchFromS3 = async (
         s3Key: string,
+        abortSignal: AbortSignal,
     ): Promise<
-        | { ok: true; body: NodeJS.ReadableStream }
+        | { ok: true; body: Readable }
         | { ok: false; status: number; message: string }
     > => {
         if (!s3 || !config.s3) {
@@ -161,6 +195,7 @@ export const createAppPreviewRouter = (
                     Bucket: config.s3.bucket,
                     Key: s3Key,
                 }),
+                { abortSignal },
             );
 
             if (!response.Body) {
@@ -171,8 +206,9 @@ export const createAppPreviewRouter = (
                 };
             }
 
-            return { ok: true, body: response.Body as NodeJS.ReadableStream };
+            return { ok: true, body: response.Body as Readable };
         } catch (error) {
+            if (abortSignal.aborted) throw error;
             if (
                 error instanceof S3ServiceException &&
                 (error.$metadata?.httpStatusCode === 404 ||
@@ -189,6 +225,54 @@ export const createAppPreviewRouter = (
                 status: 502,
                 message: 'Failed to fetch app bundle',
             };
+        }
+    };
+
+    const streamFromS3 = async (
+        s3Key: string,
+        res: express.Response,
+        prepareResponse: () => void,
+    ): Promise<boolean> => {
+        const controller = new AbortController();
+        const cancel = () => {
+            if (!res.writableFinished) controller.abort();
+        };
+        res.once('close', cancel);
+
+        try {
+            const result = await fetchFromS3(s3Key, controller.signal);
+            if (!result.ok) {
+                if (!res.destroyed) {
+                    res.status(result.status).json({
+                        status: 'error',
+                        error: { message: result.message },
+                    });
+                }
+                return false;
+            }
+            if (res.destroyed) {
+                controller.abort();
+                result.body.destroy();
+                return false;
+            }
+
+            prepareResponse();
+            await pipeline(result.body, res, {
+                signal: controller.signal,
+            });
+            return true;
+        } catch (error) {
+            if (!controller.signal.aborted) {
+                Logger.error(
+                    `Failed to stream app bundle: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+            // SDK checksum wrappers don't destroy their underlying HTTP stream.
+            controller.abort();
+            res.destroy();
+            return false;
+        } finally {
+            res.removeListener('close', cancel);
         }
     };
 
@@ -214,8 +298,14 @@ export const createAppPreviewRouter = (
             return;
         }
 
+        // Canonical form only: "0002" and "2.0" both parse to 2, so the URL
+        // would disagree with the version the token authorises.
         const versionNum = Number(version);
-        if (!Number.isInteger(versionNum) || versionNum < 1) {
+        if (
+            !Number.isInteger(versionNum) ||
+            versionNum < 1 ||
+            String(versionNum) !== version
+        ) {
             res.status(400).json({
                 status: 'error',
                 error: { message: 'Version must be a positive integer' },
@@ -233,7 +323,7 @@ export const createAppPreviewRouter = (
 
         const result = verifyPreviewToken(
             token,
-            lightdashSecret,
+            lightdashSecrets,
             appUuid,
             versionNum,
         );
@@ -274,27 +364,42 @@ export const createAppPreviewRouter = (
         '/:appUuid/versions/:version/t/:token/',
         requireToken,
         async (req, res) => {
-            const { appUuid, version } = req.params;
-            const s3Key = `apps/${appUuid}/versions/${version}/index.html`;
-            const result = await fetchFromS3(s3Key);
-
-            if (!result.ok) {
-                res.status(result.status).json({
-                    status: 'error',
-                    error: { message: result.message },
-                });
-                return;
-            }
-
-            setSecurityHeaders(res);
-            res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            res.setHeader('Cache-Control', 'no-store');
-
-            onPreviewView?.(
-                res.locals.previewTokenPayload as PreviewTokenPayload,
+            const previewTokenPayload = res.locals
+                .previewTokenPayload as PreviewTokenPayload;
+            // Key off the token's version, not the URL's: it is the one the
+            // middleware validated and the token authorises.
+            const s3Key = appVersionIndexHtmlKey(
+                previewTokenPayload.appUuid,
+                previewTokenPayload.version,
             );
-
-            result.body.pipe(res);
+            const navigationId =
+                typeof req.query.navigationId === 'string' &&
+                isValidUuid(req.query.navigationId)
+                    ? req.query.navigationId
+                    : null;
+            const completed = await streamFromS3(s3Key, res, () => {
+                setSecurityHeaders(res, previewTokenPayload);
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                res.setHeader('Cache-Control', 'no-store');
+                // The MCP chart view fetches the document itself instead of framing this URL.
+                if (previewTokenPayload.viewContext === 'mcp') {
+                    res.setHeader('Access-Control-Allow-Origin', '*');
+                }
+                try {
+                    onPreviewView?.(previewTokenPayload, navigationId);
+                } catch {
+                    Logger.warn('Failed to record app HTML load');
+                }
+            });
+            try {
+                onPreviewOutcome?.(
+                    previewTokenPayload,
+                    navigationId,
+                    completed ? 'html_loaded' : 'html_error',
+                );
+            } catch {
+                Logger.warn('Failed to record app HTML outcome');
+            }
         },
     );
 
@@ -349,34 +454,29 @@ export const createAppPreviewRouter = (
                 return;
             }
 
-            const { appUuid, version } = req.params;
-            const s3Key = `apps/${appUuid}/versions/${version}/assets/${filename}`;
-            const result = await fetchFromS3(s3Key);
-
-            if (!result.ok) {
-                res.status(result.status).json({
-                    status: 'error',
-                    error: { message: result.message },
-                });
-                return;
-            }
-
+            const previewTokenPayload = res.locals
+                .previewTokenPayload as PreviewTokenPayload;
+            const s3Key = appVersionAssetKey(
+                previewTokenPayload.appUuid,
+                previewTokenPayload.version,
+                filename,
+            );
             const ext = path.extname(filename).toLowerCase();
             const contentType =
                 CONTENT_TYPE_BY_EXT[ext] || 'application/octet-stream';
 
-            // Allow cross-origin loading from sandboxed iframes (opaque origin).
-            // Safe because assets are static build artifacts, not user data.
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-            res.setHeader('Content-Type', contentType);
-            res.setHeader('X-Content-Type-Options', 'nosniff');
-            res.setHeader(
-                'Cache-Control',
-                'public, max-age=31536000, immutable',
-            );
-
-            result.body.pipe(res);
+            await streamFromS3(s3Key, res, () => {
+                // Allow cross-origin loading from sandboxed iframes (opaque origin).
+                // Safe because assets are static build artifacts, not user data.
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+                res.setHeader('Content-Type', contentType);
+                res.setHeader('X-Content-Type-Options', 'nosniff');
+                res.setHeader(
+                    'Cache-Control',
+                    'public, max-age=31536000, immutable',
+                );
+            });
         },
     );
 

@@ -1,48 +1,119 @@
 import {
+    AiAccessRefusal,
     AiAgent,
-    AiAgentDocumentSummary,
+    AiAgentDocumentContext,
+    AiDeepResearchBudget,
     AiMcpServer,
     AiMcpServerConnectionStatus,
+    AiWritebackAttribution,
+    ProjectContextEntry,
     WarehouseTypes,
+    type AgentSqlScope,
+    type AiDeepResearchActivity,
+    type AiDeepResearchExecutionContextSnapshot,
+    type AiDeepResearchPhase,
+    type AiDeepResearchRunStatus,
+    type AiDeepResearchWorkerFindings,
+    type AiDeepResearchWorkerResult,
+    type AiDeepResearchWorkerTask,
+    type AiDeepResearchWorkerTaskInput,
+    type AiSemanticChartArtifactConfig,
 } from '@lightdash/common';
 // eslint-disable-next-line import/extensions
 import { type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
-import { ModelMessage } from 'ai';
+import { type ModelMessage } from 'ai';
+import {
+    AiKeyManagement,
+    AiUsageChannel,
+    type AiUsageTokens,
+} from '../../../../analytics/aiUsage';
+import type { ConnectedAgentTool } from '../../../../services/AgentPermissionService/AgentPermissionService';
 import type { AiMcpCredentialPayload } from '../../../models/AiAgentModel';
+import type {
+    AiDecisionClient,
+    AiDecisionUsage,
+} from '../decisions/AiDecisionClient';
 import { AiModel, AiProvider } from '../models/types';
 import { AiAgentSkillReference } from '../skills/types';
+import type {
+    MemorySearchEntry,
+    ProjectContextSearchEntry,
+} from '../tools/memoryProjectContext';
+import type { ArtifactChartExportAccess } from '../utils/artifactChartAsCode';
 import {
-    CreateChangeFn,
+    AnalyzeFieldImpactFn,
+    ClosePullRequestFn,
+    ConsumePromptSteersFn,
+    CreateContentFn,
     CreateOrUpdateArtifactFn,
+    CreateScheduledDeliveryFn,
     DescribeWarehouseTableFn,
+    DiscoverReposFn,
     EditContentFn,
+    EditDbtProjectFn,
+    EditProjectContextFn,
+    ExploreRepoFn,
+    ExportCustomChartTypeImageFn,
     FindContentFn,
+    FindCustomChartTypesFn,
     FindExploresFn,
-    FindFieldFn,
+    GenerateDataAppFn,
     GetDashboardChartsFn,
-    GetExploreCompilerFn,
     GetExploreFn,
     GetKnowledgeDocumentContentFn,
+    GetProjectInfoFn,
+    GetProjectParameterDefinitionsFn,
     GetPromptFn,
+    GetPullRequestDiffFn,
     GetSavedChartFn,
+    GetSqlChartFn,
+    GetThreadComposerNodeColumnsFn,
+    GetVerifiedFieldUsageFn,
+    IsPromptInterruptedFn,
+    IsThreadSqlAutoApprovedFn,
+    IterateDataAppFn,
+    ListContentFn,
+    ListCustomChartTypesFn,
+    ListDataAppConnectionsFn,
+    ListDataAppThemesFn,
     ListExploresFn,
     ListKnowledgeDocumentsFn,
+    ListProjectsFn,
+    ListSqlApprovalDecisionsFn,
+    ListThreadComposerQueryNodesFn,
     ListWarehouseTablesFn,
+    ListWorkstreamsFn,
     LoadAgentSkillFn,
+    ReadAttachmentsFn,
     ReadContentFn,
+    ReadPinnedThreadFn,
+    RecordMcpToolCallFn,
+    RecordPromptDecisionFn,
     RecordSqlApprovalFn,
+    RegisterThreadComposerQueryNodesFn,
+    ResolveCustomChartTypeFn,
+    ResolveUrlFn,
     RunAsyncQueryFn,
+    RunComposerQueriesFn,
+    RunSavedChartQueryFn,
+    RunSqlChartQueryFn,
     RunSqlJobFn,
     SearchFieldValuesFn,
+    SearchSemanticLayerFn,
     SendFileFn,
     SendSlackBlocksFn,
+    StoreLoadoutFn,
     StoreReasoningFn,
+    StoreToolCallErrorFn,
     StoreToolCallFn,
     StoreToolResultsFn,
+    SyncDbtProjectFn,
     TrackEventFn,
     UpdateProgressFn,
     UpdatePromptFn,
     UpdateSlackMessageFn,
+    UpdateUserNameFn,
+    ValidateContentFn,
     WaitForSqlApprovalFn,
 } from './aiAgentDependencies';
 
@@ -62,11 +133,138 @@ export type UnavailableMcpServer = {
     status: AiMcpServerConnectionStatus;
 };
 
+export type AiAgentRequestingUserRole = {
+    name: string;
+    isTechnical: boolean;
+};
+
+export type AiAgentRequestingUser = {
+    name: string;
+    role: AiAgentRequestingUserRole | null;
+    groups: string[];
+};
+
+/** The resource a thread is bound to, resolved for the prompt. The resource is null once it no longer exists. */
+export type AiAgentThreadBindingContext =
+    | {
+          type: 'dashboard';
+          dashboard: { name: string; slug: string } | null;
+      }
+    | {
+          type: 'chart';
+          chart: { name: string; slug: string } | null;
+      };
+
+/**
+ * The structured role a deep-research call plays. Absent for the legacy
+ * single-loop behavior. The coordinator drives the run and may delegate narrow
+ * tasks to isolated workers; each worker hands its bounded packet back through
+ * a callback fired by its submission tool.
+ */
+export type AiDeepResearchExecutionRole =
+    | {
+          role: 'coordinator';
+          runTask: (
+              input: AiDeepResearchWorkerTaskInput,
+          ) => Promise<AiDeepResearchWorkerResult>;
+      }
+    | {
+          role: 'worker';
+          task: AiDeepResearchWorkerTask;
+          onFindings: (findings: AiDeepResearchWorkerFindings) => void;
+      };
+
+export type AiDeepResearchStepUsage = {
+    runUuid: string;
+    phase: AiDeepResearchPhase;
+    tokens: AiUsageTokens;
+};
+
+export type AiAgentExecutionConfig =
+    | {
+          mode: 'standard';
+          maxSteps: number;
+          /** Registered tool names the run may use; everything else is dropped. */
+          toolAllowlist?: ReadonlySet<string>;
+          budget?: never;
+          onStepUsage?: never;
+          research?: never;
+          parentToolCallId?: never;
+      }
+    | {
+          mode: 'deep_research';
+          runUuid: string;
+          phase: AiDeepResearchPhase;
+          maxSteps: number;
+          budget: AiDeepResearchBudget;
+          canUseRawSql: boolean;
+          initialTokenUsage: number;
+          resumeContext?: string;
+          onStepUsage?: (
+              usage: AiDeepResearchStepUsage,
+          ) => void | Promise<void>;
+          onExecutionContextResolved?: (
+              snapshot: AiDeepResearchExecutionContextSnapshot,
+          ) => void | Promise<void>;
+          research: AiDeepResearchExecutionRole;
+          /**
+           * Persists this call's tool activity as subagent children so it
+           * stays out of rebuilt model history; null keeps it top-level.
+           */
+          parentToolCallId?: string | null;
+      };
+
+export type AiAgentDeepResearchRunContext = {
+    uuid: string;
+    question: string;
+    status: AiDeepResearchRunStatus;
+    phase: AiDeepResearchPhase | null;
+    activity: AiDeepResearchActivity | null;
+    progressCurrent: number | null;
+    progressTotal: number | null;
+    startedAt: string | null;
+    elapsedSeconds: number;
+    hasReport: boolean;
+};
+
 export type AiAgentArgs = AnyAiModel & {
+    decisions?: AiDecisionClient;
+    decisionUsage?: AiDecisionUsage;
+    recordPromptDecision?: RecordPromptDecisionFn;
+    /** Finish a high-confidence simple data answer from validated query rows. */
+    enableDataAnswerFastResponse: boolean;
+    /** A chart-edit preflight found an active chart but could not safely apply it. */
+    forceChartMutationRouting?: boolean;
+    /** Authoritative active chart supplied when recent model history lacks a query call. */
+    chartMutationContext?: AiSemanticChartArtifactConfig;
+    /** Optional, provider-aware fast model used only for schema-constrained steps. */
+    toolCallModel?: {
+        model: AnyAiModel['model'];
+        providerOptions?: AnyAiModel['providerOptions'];
+        keyManagement: AiKeyManagement;
+    };
+    // Whether this turn runs on a Lightdash-managed or self-managed (BYO) key.
+    // Stamped by the model builder and carried through for usage analytics.
+    keyManagement: AiKeyManagement;
+    // Surface the thread was created from, carried through for usage analytics.
+    channel: AiUsageChannel;
+    // Viewer id from the embed token that sent the prompt; null outside embeds.
+    externalUserId: string | null;
     agentSettings: AiAgent;
-    knowledgeDocuments: AiAgentDocumentSummary[];
+    requestingUser: AiAgentRequestingUser | null;
+    threadBinding: AiAgentThreadBindingContext | null;
+    // User-supplied background set when the thread was created.
+    threadContext: string | null;
+    knowledgeDocuments: AiAgentDocumentContext[];
+    deepResearchRuns: AiAgentDeepResearchRunContext[];
+    projectContext: ProjectContextEntry[];
+    // Whether the project_context feature is on for this turn (Control = off).
+    projectContextEnabled: boolean;
+    aiAgentMemoryEnabled: boolean;
     mcpServers: AiAgentMcpServer[];
+    compactionSummary: string | null;
     messageHistory: ModelMessage[];
+    userQuestion?: string;
     promptUuid: string;
     threadUuid: string;
     organizationId: string;
@@ -75,21 +273,78 @@ export type AiAgentArgs = AnyAiModel & {
     telemetryEnabled: boolean;
     enableDataAccess: boolean;
     enableSelfImprovement: boolean;
+    enableContentTools: boolean;
+    enableDocuments: boolean;
+    // Data apps enabled + user may create them + content tools (trusted identity).
+    enableGenerateDataApp: boolean;
+    enableAiWriteback: boolean;
+    // Only on inside review-remediation work threads: lets the agent open/update
+    // the project_context.yml PR via the deterministic editProjectContext tool.
+    enableEditProjectContext: boolean;
+    // Which GitHub identity a writeback PR would be attributed to (advisory,
+    // resolved at prompt-assembly time). null when not applicable/unresolved.
+    writebackAttribution: AiWritebackAttribution | null;
+    enableRepoDiscovery: boolean;
+    // The thread owns at least one attached document, so readAttachments is
+    // registered.
+    enableReadAttachments: boolean;
+    enableFilterExpressions: boolean;
+    // dbt project root within the repo (from project_sub_path); '.' = repo root,
+    // null when repo discovery is off or the project is not git-backed.
+    repoFsRoot: string | null;
+    // Whether the repo host has server-side code search (GitHub yes, GitLab no).
+    // Drives whether the prompt tells the agent to use `search`.
+    repoFsSupportsCodeSearch: boolean;
     canRunSql: boolean;
+    // Whether the composer query tool is the query path: composer flags, data
+    // access and the agent's enableComposerQueries opt-in.
+    enableComposerQueries: boolean;
+    // Whether the user can save a generated dashboard anywhere in the project.
+    // Gates generateDashboard so the agent does not build one the user is then
+    // refused permission to keep.
+    canCreateDashboards: boolean;
     autoApproveSql: boolean;
     autoApproveSqlUserUuid: string | null;
+    // When the modern Slack streaming card is driving progress, tools render
+    // their state into the card instead of the legacy bolt-gif placeholder.
+    useSlackStreamCard: boolean;
+    // Originating Slack channel, so scheduling can target "this channel"
+    // without asking. Null for web and MCP prompts.
+    slackChannelId: string | null;
+    // Org Slack setting: reply with links only, never post query results
+    // (files, images or values in the answer) into Slack.
+    slackLinksOnly: boolean;
     warehouseType: WarehouseTypes | null;
     warehouseSchema: string | null;
-    availableSkills: AiAgentSkillReference[];
-    enableAgentRevamp: boolean;
+    warehouseConnections?: {
+        name: string;
+        warehouseConnectionUuid: string | null;
+        warehouseType: WarehouseTypes;
+        isOriginal: boolean;
+    }[];
+    /** Agent-available built-in skills; the run lists those in `loadout.skills`. */
+    builtInSkills: AiAgentSkillReference[];
+    /** Model-servable custom skills bound to the agent. */
+    customSkills: AiAgentSkillReference[];
+    modelReasoningEnabled: boolean | null;
 
-    findExploresFieldSearchSize: number;
-    findFieldsPageSize: number;
+    toolDescriptionMaxChars: number;
     getDashboardChartsPageSize: number;
     maxQueryLimit: number;
+    runSqlMaxLimit: number;
+    sqlScope?: AgentSqlScope | null;
+    /** Rows of a query result written into model context; the query keeps the rest. */
+    maxContextRows: number;
     siteUrl: string;
     canManageAgent: boolean;
     toolHints: string[];
+    execution: AiAgentExecutionConfig;
+    /**
+     * When true, the first tool hint is *forced* on the opening step
+     * (toolChoice), not just suggested — used by the review Build-fix run to
+     * guarantee the agent opens a PR via editDbtProject.
+     */
+    forceToolHints?: boolean;
 };
 
 export type PerformanceMetrics = {
@@ -103,38 +358,99 @@ export type PerformanceMetrics = {
     ) => void;
 };
 
+export type OnAiAccessRefusal = (refusal: AiAccessRefusal) => void;
+
 export type AiAgentDependencies = {
+    assertToolOperation: (
+        kind: 'agent_tool' | 'connected_mcp_tool',
+        key: string,
+        connectedTool?: ConnectedAgentTool,
+    ) => Promise<void>;
+    onAiAccessRefusal?: OnAiAccessRefusal;
+    chartExportArtifacts?: ArtifactChartExportAccess;
     listExplores: ListExploresFn;
+    getExplore: GetExploreFn;
+    getProjectParameterDefinitions: GetProjectParameterDefinitionsFn;
+    // The whole cached project_context document.
+    getProjectContextDocument: () => Promise<ProjectContextEntry[]>;
+    getAiAgentMemoryContextEntries: () => Promise<MemorySearchEntry[]>;
+    incrementAiAgentMemoryPulls: (
+        entries: ProjectContextSearchEntry[],
+    ) => Promise<void>;
+    listContent: ListContentFn;
     findContent: FindContentFn;
     readContent: ReadContentFn;
+    resolveUrl: ResolveUrlFn;
     editContent: EditContentFn;
+    recordSqlChartRefusal?: (
+        action: 'create' | 'update',
+        reasonCode: string,
+    ) => Promise<void>;
+    createContent: CreateContentFn;
+    createScheduledDelivery: CreateScheduledDeliveryFn;
+    updateUserName: UpdateUserNameFn;
+    validateContent: ValidateContentFn;
     getDashboardCharts: GetDashboardChartsFn;
     findExplores: FindExploresFn;
-    findFields: FindFieldFn;
-    getExplore: GetExploreFn;
-    getExploreCompiler: GetExploreCompilerFn;
+    listCustomChartTypes: ListCustomChartTypesFn;
+    findCustomChartTypes: FindCustomChartTypesFn;
+    resolveCustomChartType: ResolveCustomChartTypeFn;
+    getVerifiedFieldUsage: GetVerifiedFieldUsageFn;
+    searchSemanticLayer: SearchSemanticLayerFn;
+    analyzeFieldImpact: AnalyzeFieldImpactFn;
     runAsyncQuery: RunAsyncQueryFn;
+    runSavedChartQuery: RunSavedChartQueryFn;
+    runSqlChartQuery: RunSqlChartQueryFn;
     runSqlJob: RunSqlJobFn;
+    runComposerQueries: RunComposerQueriesFn;
     listWarehouseTables: ListWarehouseTablesFn;
     describeWarehouseTable: DescribeWarehouseTableFn;
     listKnowledgeDocuments: ListKnowledgeDocumentsFn;
     getKnowledgeDocumentContent: GetKnowledgeDocumentContentFn;
+    readPinnedThread: ReadPinnedThreadFn;
+    readAttachments: ReadAttachmentsFn;
     getSavedChart: GetSavedChartFn;
+    getSqlChart: GetSqlChartFn;
     getPrompt: GetPromptFn;
     sendFile: SendFileFn;
+    deferSlackVisualization?: import('./aiAgentDependencies').DeferSlackVisualizationFn;
+    exportCustomChartTypeImage: ExportCustomChartTypeImageFn;
     sendSlackBlocks: SendSlackBlocksFn;
     updateSlackMessage: UpdateSlackMessageFn;
     updatePrompt: UpdatePromptFn;
     updateProgress: UpdateProgressFn;
     storeToolCall: StoreToolCallFn;
+    storeToolCallError: StoreToolCallErrorFn;
     storeToolResults: StoreToolResultsFn;
+    recordMcpToolCall: RecordMcpToolCallFn;
     storeReasoning: StoreReasoningFn;
+    storeLoadout: StoreLoadoutFn;
+    isPromptInterrupted: IsPromptInterruptedFn;
+    consumePromptSteers: ConsumePromptSteersFn;
     searchFieldValues: SearchFieldValuesFn;
     trackEvent: TrackEventFn;
     createOrUpdateArtifact: CreateOrUpdateArtifactFn;
-    createChange: CreateChangeFn;
+    listThreadComposerQueryNodes: ListThreadComposerQueryNodesFn;
+    getThreadComposerNodeColumns: GetThreadComposerNodeColumnsFn;
+    registerThreadComposerQueryNodes: RegisterThreadComposerQueryNodesFn;
+    generateDataApp: GenerateDataAppFn;
+    iterateDataApp: IterateDataAppFn;
+    listDataAppThemes: ListDataAppThemesFn;
+    listDataAppConnections: ListDataAppConnectionsFn;
+    editDbtProject: EditDbtProjectFn;
+    editProjectContext: EditProjectContextFn;
+    syncDbtProject: SyncDbtProjectFn;
+    exploreRepo: ExploreRepoFn;
+    discoverRepos: DiscoverReposFn;
+    listWorkstreams: ListWorkstreamsFn;
+    closePullRequest: ClosePullRequestFn;
+    getPullRequestDiff: GetPullRequestDiffFn;
+    listProjects: ListProjectsFn;
+    getProjectInfo: GetProjectInfoFn;
     waitForSqlApproval: WaitForSqlApprovalFn;
     recordSqlApproval: RecordSqlApprovalFn;
+    isThreadSqlAutoApproved: IsThreadSqlAutoApprovedFn;
+    listSqlApprovalDecisions: ListSqlApprovalDecisionsFn;
     loadSkill: LoadAgentSkillFn;
     perf: PerformanceMetrics;
 };

@@ -11,7 +11,9 @@ import { describe, expect, it } from 'vitest';
 import {
     doesFilterApplyToTile,
     getFilterTileRelation,
+    getValidSqlColumnReferences,
     getTabsForFilterRule,
+    hasSavedFilterValueChanged,
 } from './index';
 
 // Helper to create a mock filter rule
@@ -45,6 +47,21 @@ const createMockTile = (uuid: string, tabUuid?: string): DashboardTile =>
         },
     }) satisfies DashboardTile;
 
+const createMockDataAppTile = (uuid: string, tabUuid?: string): DashboardTile =>
+    ({
+        uuid,
+        type: DashboardTileTypes.DATA_APP,
+        x: 0,
+        y: 0,
+        h: 1,
+        w: 1,
+        tabUuid,
+        properties: {
+            appUuid: 'app-1',
+            title: `Data App ${uuid}`,
+        },
+    }) satisfies DashboardTile;
+
 // Helper to create mock filterable fields
 const createMockFilterableField = (
     fieldId: string,
@@ -56,6 +73,72 @@ const createMockFilterableField = (
         fieldType: FieldType.DIMENSION,
         type: DimensionType.STRING,
     }) as FilterableDimension;
+
+describe('getValidSqlColumnReferences', () => {
+    it('drops SQL columns that cannot be represented as Select options', () => {
+        expect(
+            getValidSqlColumnReferences([
+                { reference: 'orders_id' },
+                { reference: undefined },
+                {},
+                { reference: null },
+                { reference: 'orders_total' },
+            ]),
+        ).toEqual(['orders_id', 'orders_total']);
+    });
+});
+
+describe('hasSavedFilterValueChanged', () => {
+    const anyValueRule = createMockFilterRule({ values: [], disabled: true });
+
+    it('treats an updated rule with includeNull: false as unchanged when the saved rule omits includeNull', () => {
+        expect(
+            hasSavedFilterValueChanged(anyValueRule, {
+                ...anyValueRule,
+                includeNull: false,
+            }),
+        ).toBe(false);
+    });
+
+    it('detects a null-only selection as a change', () => {
+        expect(
+            hasSavedFilterValueChanged(anyValueRule, {
+                ...anyValueRule,
+                disabled: false,
+                includeNull: true,
+            }),
+        ).toBe(true);
+    });
+
+    it('detects a null-only selection when the saved rule has no values array', () => {
+        const savedWithoutValues = createMockFilterRule({
+            values: undefined,
+            disabled: true,
+        });
+
+        expect(
+            hasSavedFilterValueChanged(savedWithoutValues, {
+                ...savedWithoutValues,
+                disabled: false,
+                includeNull: true,
+            }),
+        ).toBe(true);
+    });
+
+    it('treats a valueless disabled rule with null toggled off again as unchanged', () => {
+        const savedWithoutValues = createMockFilterRule({
+            values: undefined,
+            disabled: true,
+        });
+
+        expect(
+            hasSavedFilterValueChanged(savedWithoutValues, {
+                ...savedWithoutValues,
+                includeNull: false,
+            }),
+        ).toBe(false);
+    });
+});
 
 describe('getFilterTileRelation', () => {
     it('should return "auto" when no tileTargets configuration exists', () => {
@@ -108,6 +191,13 @@ describe('getFilterTileRelation', () => {
 describe('doesFilterApplyToTile', () => {
     const tile1 = createMockTile('tile-1', 'tab-1');
     const tile2 = createMockTile('tile-2', 'tab-2');
+
+    it('applies auto-targeted filters to Data App tiles with runtime query fields', () => {
+        const filterRule = createMockFilterRule({ tileTargets: undefined });
+        const dataAppTile = createMockDataAppTile('data-app-1', 'tab-1');
+
+        expect(doesFilterApplyToTile(filterRule, dataAppTile, {})).toBe(true);
+    });
 
     it('should return true when no tileTargets and tile has the filter field', () => {
         const filterRule = createMockFilterRule({ tileTargets: undefined });
@@ -253,6 +343,30 @@ describe('getTabsForFilterRule', () => {
         // tile-1 has field (tab-1), tile-3 has field (tab-2)
         // tile-2, tile-4 don't have field so tab-3 is excluded
         expect(result).toEqual(['tab-1', 'tab-2']);
+    });
+
+    it('includes a Data App tab by default and removes it when explicitly excluded', () => {
+        const dataAppTile = createMockDataAppTile('data-app-1', 'tab-2');
+
+        expect(
+            getTabsForFilterRule(
+                createMockFilterRule({ tileTargets: undefined }),
+                [dataAppTile],
+                sortedTabUuids,
+                {},
+            ),
+        ).toEqual(['tab-2']);
+
+        expect(
+            getTabsForFilterRule(
+                createMockFilterRule({
+                    tileTargets: { 'data-app-1': false },
+                }),
+                [dataAppTile],
+                sortedTabUuids,
+                {},
+            ),
+        ).toEqual([]);
     });
 
     it('should return empty when no tileTargets and no tiles have the field', () => {

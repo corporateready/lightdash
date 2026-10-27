@@ -8,19 +8,39 @@ import {
 } from '@lightdash/common';
 import execa from 'execa';
 import inquirer from 'inquirer';
+import {
+    getAgentConnectionChildEnvironment,
+    getAgentConnectionSelection,
+} from '../../credentials';
 import GlobalState from '../../globalState';
 import * as styles from '../../styles';
 
 const DBT_CORE_VERSION_REGEX = /installed:.*/;
-export const DBT_CLOUD_CLI_REGEX = /dbt Cloud CLI.*/;
+const DBT_CLOUD_CLI_REGEX = /dbt Cloud CLI.*/;
 const DBT_FUSION_VERSION_REGEX = /dbt-fusion.*/;
+const DBT_V2_VERSION_REGEX = /^dbt 2\.\d+\.\d+\S*/m;
 
 const getDbtCLIVersion = async () => {
+    // Callers that already know the dbt version (the Learn sandbox pins the
+    // binary server-side) pass it here so the CLI doesn't start a Python
+    // interpreter just to ask. Each `dbt --version` costs seconds on a small
+    // machine and one deploy asks four times.
+    const knownVersion = process.env.LIGHTDASH_DBT_VERSION?.trim();
+    if (knownVersion) {
+        return knownVersion;
+    }
     try {
-        const { all } = await execa('dbt', ['--version'], {
-            all: true,
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        const { all } = await (getAgentConnectionSelection() !== null
+            ? execa('dbt', ['--version'], {
+                  all: true,
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                  extendEnv: false,
+                  env: await getAgentConnectionChildEnvironment({}),
+              })
+            : execa('dbt', ['--version'], {
+                  all: true,
+                  stdio: ['pipe', 'pipe', 'pipe'],
+              }));
         const logs = all || '';
         const cloudVersion = logs.match(DBT_CLOUD_CLI_REGEX);
         if (cloudVersion) {
@@ -30,6 +50,11 @@ const getDbtCLIVersion = async () => {
         const fusionVersion = logs.match(DBT_FUSION_VERSION_REGEX);
         if (fusionVersion) {
             return fusionVersion[0]; // eg: dbt-fusion 2.0.0-preview.65
+        }
+
+        const v2Version = logs.match(DBT_V2_VERSION_REGEX);
+        if (v2Version) {
+            return v2Version[0]; // eg: dbt 2.0.6
         }
 
         const version = logs.match(DBT_CORE_VERSION_REGEX);
@@ -46,15 +71,15 @@ const isDbtCloudCLI = (version: string): boolean =>
     version.match(DBT_CLOUD_CLI_REGEX) !== null;
 
 const isDbtFusion = (version: string): boolean =>
-    version.match(DBT_FUSION_VERSION_REGEX) !== null;
+    version.match(DBT_FUSION_VERSION_REGEX) !== null ||
+    version.match(DBT_V2_VERSION_REGEX) !== null;
 
 const getSupportedDbtVersionOption = (
     version: string,
 ): DbtVersionOption | null => {
     if (version.match(DBT_CLOUD_CLI_REGEX))
         return DbtVersionOptionLatest.LATEST;
-    if (version.match(DBT_FUSION_VERSION_REGEX))
-        return DbtVersionOptionLatest.LATEST;
+    if (isDbtFusion(version)) return DbtVersionOptionLatest.LATEST;
     if (version.startsWith('1.4.')) return SupportedDbtVersions.V1_4;
     if (version.startsWith('1.5.')) return SupportedDbtVersions.V1_5;
     if (version.startsWith('1.6.')) return SupportedDbtVersions.V1_6;
@@ -63,6 +88,7 @@ const getSupportedDbtVersionOption = (
     if (version.startsWith('1.9.')) return SupportedDbtVersions.V1_9;
     if (version.startsWith('1.10.')) return SupportedDbtVersions.V1_10;
     if (version.startsWith('1.11.')) return SupportedDbtVersions.V1_11;
+    if (version.startsWith('1.12.')) return SupportedDbtVersions.V1_12;
 
     // No supported version found
     return null;
@@ -119,38 +145,6 @@ export const getDbtVersion = async (): Promise<DbtVersion> => {
         }
         spinner?.start();
         GlobalState.savePromptAnswer('useFallbackDbtVersion', true);
-    }
-
-    if (
-        isDbtCloudCLI(verboseVersion) &&
-        !GlobalState.getSavedPromptAnswer('useExperimentalDbtCloudCLI')
-    ) {
-        const message = `Support for dbt Cloud CLI is still experimental and might not work as expected.`;
-        const spinner = GlobalState.getActiveSpinner();
-        spinner?.stop();
-        if (GlobalState.isNonInteractive()) {
-            console.error(styles.warning(message));
-        } else {
-            const answers = await inquirer.prompt([
-                {
-                    type: 'confirm',
-                    name: 'isConfirm',
-                    message: `${styles.warning(
-                        message,
-                    )}\nDo you still want to continue?`,
-                },
-            ]);
-            if (!answers.isConfirm) {
-                console.error(
-                    styles.error(
-                        `Command using dbt cloud CLI has been canceled. Please consider using dbt core CLI for the best experience.`,
-                    ),
-                );
-                process.exit(1);
-            }
-        }
-        spinner?.start();
-        GlobalState.savePromptAnswer('useExperimentalDbtCloudCLI', true);
     }
 
     return {

@@ -5,24 +5,40 @@ import {
     isCustomSqlDimension,
     isDimension,
     isFilterRule,
-    parseDate,
     TimeFrames,
     timeframeToUnitOfTime,
+    unitOfTimeSupportsToDate,
     type BaseFilterRule,
+    type CurrentPeriodBounds,
     type DateFilterRule,
+    type DateFilterSettings,
+    type UnitOfTime,
 } from '@lightdash/common';
-import { Flex, NumberInput, Text } from '@mantine/core';
+import { Checkbox, Flex, Stack, Text } from '@mantine/core';
 import dayjs from 'dayjs';
 import { type FilterInputsProps } from '.';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
+import { NumberInput } from '../../NumberInput';
 import useFiltersContext from '../useFiltersContext';
 import { getFirstDayOfWeek } from '../utils/filterDateUtils';
 import { getPlaceholderByFilterTypeAndOperator } from '../utils/getPlaceholderByFilterTypeAndOperator';
+import classes from './DateFilterInputs.module.css';
+import {
+    getInvalidDateFilterValue,
+    parseFilterDateValue,
+} from './DateFilterInputs.utils';
 import DefaultFilterInputs from './DefaultFilterInputs';
 import FilterDatePicker from './FilterDatePicker';
 import FilterDateRangePicker from './FilterDateRangePicker';
 import FilterDateTimePicker from './FilterDateTimePicker';
 import FilterDateTimeRangePicker from './FilterDateTimeRangePicker';
 import FilterMonthAndYearPicker from './FilterMonthAndYearPicker';
+import FilterMultiDatePicker from './FilterMultiDatePicker';
+import {
+    getCoarseDateTimeFrame,
+    getStoredValueTimeFrame,
+    type MultiDateTimeFrame,
+} from './FilterMultiDatePicker.utils';
 import FilterPeriodToDateSelect from './FilterPeriodToDateSelect';
 import FilterQuarterPicker from './FilterQuarterPicker';
 import FilterUnitOfTimeAutoComplete from './FilterUnitOfTimeAutoComplete';
@@ -34,6 +50,7 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
 ) => {
     const { field, rule, onChange, popoverProps, disabled, filterType } = props;
     const { startOfWeek } = useFiltersContext();
+    const getUiString = useUiStrings();
 
     const isTimestamp =
         !field ||
@@ -44,15 +61,120 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
         throw new Error('DateFilterInputs expects a FilterRule');
     }
 
+    const isFilterRuleDisabled = rule.disabled && !rule.values;
+    // Only the equals/notEquals inputs take several values
     const placeholder = getPlaceholderByFilterTypeAndOperator({
         type: filterType,
         operator: rule.operator,
-        disabled: rule.disabled && !rule.values,
+        disabled: isFilterRuleDisabled,
+        singleValue: true,
+        getUiString,
     });
+    const multiDatePlaceholder = getPlaceholderByFilterTypeAndOperator({
+        type: filterType,
+        operator: rule.operator,
+        disabled: isFilterRuleDisabled,
+        singleValue: false,
+        getUiString,
+    });
+    const invalidDateFilterValue = getInvalidDateFilterValue(rule.values);
+
+    const renderMultiDatePicker = (timeFrame: MultiDateTimeFrame) => {
+        const storedTimeFrame = getStoredValueTimeFrame(timeFrame);
+
+        return (
+            <FilterMultiDatePicker
+                timeFrame={timeFrame}
+                disabled={disabled}
+                placeholder={multiDatePlaceholder}
+                firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
+                popoverProps={popoverProps}
+                data-autofocus
+                invalidValue={invalidDateFilterValue}
+                values={(rule.values ?? [])
+                    .map((value) =>
+                        parseFilterDateValue(value, storedTimeFrame),
+                    )
+                    .filter((value): value is Date => value !== null)}
+                onChange={(dates: Date[]) => {
+                    onChange({
+                        ...rule,
+                        values: dates.map((date) =>
+                            formatDate(date, storedTimeFrame),
+                        ),
+                    });
+                }}
+            />
+        );
+    };
+
+    const renderTimestampPicker = () => {
+        const value =
+            rule.values && rule.values[0] && !invalidDateFilterValue
+                ? dayjs(rule?.values?.[0]).toDate()
+                : dayjs().toDate();
+
+        return (
+            <FilterDateTimePicker
+                disabled={disabled}
+                placeholder={placeholder}
+                data-autofocus
+                withSeconds
+                // FIXME: mantine v7
+                // mantine does not set the first day of the week based on the locale
+                // so we need to do it manually and always pass it as a prop
+                firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
+                popoverProps={popoverProps}
+                invalidValue={invalidDateFilterValue}
+                value={value}
+                onChange={(v: Date | null) => {
+                    onChange({
+                        ...rule,
+                        // format as an ISO string, not for display
+                        values: v === null ? [] : [dayjs(v).format()],
+                    });
+                }}
+            />
+        );
+    };
 
     switch (rule.operator) {
+        // equals/notEquals match any of the values, so they accept a list of
+        // discrete values at whatever grain the field is
         case FilterOperator.EQUALS:
-        case FilterOperator.NOT_EQUALS:
+        case FilterOperator.NOT_EQUALS: {
+            if (isDimension(field) && field.timeInterval) {
+                const coarseTimeFrame = getCoarseDateTimeFrame(
+                    field.timeInterval,
+                );
+
+                if (coarseTimeFrame) {
+                    return coarseTimeFrame === TimeFrames.WEEK ? (
+                        <Flex align="center" gap="xs" w="100%">
+                            <Text
+                                c="dimmed"
+                                className={classes.weekPrefix}
+                                size="xs"
+                            >
+                                week commencing
+                            </Text>
+
+                            {renderMultiDatePicker(coarseTimeFrame)}
+                        </Flex>
+                    ) : (
+                        renderMultiDatePicker(coarseTimeFrame)
+                    );
+                }
+                // day-grain intervals get the day picker below; hour-grain
+                // and raw intervals are timestamp-typed
+            }
+
+            if (isTimestamp) {
+                return renderTimestampPicker();
+            }
+
+            return renderMultiDatePicker(TimeFrames.DAY);
+        }
         case FilterOperator.GREATER_THAN:
         case FilterOperator.GREATER_THAN_OR_EQUAL:
         case FilterOperator.LESS_THAN:
@@ -63,8 +185,8 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                         return (
                             <Flex align="center" gap="xs" w="100%">
                                 <Text
-                                    color="dimmed"
-                                    sx={{ whiteSpace: 'nowrap' }}
+                                    c="dimmed"
+                                    className={classes.weekPrefix}
                                     size="xs"
                                 >
                                     week commencing
@@ -74,13 +196,11 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                                     placeholder={placeholder}
                                     disabled={disabled}
                                     data-autofocus
+                                    invalidValue={invalidDateFilterValue}
                                     value={
                                         rule.values && rule.values[0]
-                                            ? parseDate(
-                                                  formatDate(
-                                                      rule.values[0],
-                                                      TimeFrames.WEEK,
-                                                  ),
+                                            ? parseFilterDateValue(
+                                                  rule.values[0],
                                                   TimeFrames.WEEK,
                                               )
                                             : null
@@ -112,18 +232,14 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                         return (
                             <FilterMonthAndYearPicker
                                 disabled={disabled}
-                                // FIXME: until mantine 7.4: https://github.com/mantinedev/mantine/issues/5401#issuecomment-1874906064
-                                // @ts-ignore
                                 placeholder={placeholder}
                                 data-autofocus
                                 popoverProps={popoverProps}
+                                invalidValue={invalidDateFilterValue}
                                 value={
                                     rule.values && rule.values[0]
-                                        ? parseDate(
-                                              formatDate(
-                                                  rule.values[0],
-                                                  TimeFrames.MONTH,
-                                              ),
+                                        ? parseFilterDateValue(
+                                              rule.values[0],
                                               TimeFrames.MONTH,
                                           )
                                         : null
@@ -141,7 +257,7 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                     case TimeFrames.QUARTER:
                         const ruleValue = rule.values?.[0];
                         const parsedValue = ruleValue
-                            ? parseDate(ruleValue, TimeFrames.DAY)
+                            ? parseFilterDateValue(ruleValue, TimeFrames.DAY)
                             : null;
                         return (
                             <FilterQuarterPicker
@@ -149,6 +265,7 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                                 placeholder={placeholder}
                                 data-autofocus
                                 popoverProps={popoverProps}
+                                invalidValue={invalidDateFilterValue}
                                 value={parsedValue}
                                 onChange={(newDate: Date) => {
                                     onChange({
@@ -164,18 +281,14 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                         return (
                             <FilterYearPicker
                                 disabled={disabled}
-                                // FIXME: until mantine 7.4: https://github.com/mantinedev/mantine/issues/5401#issuecomment-1874906064
-                                // @ts-ignore
                                 placeholder={placeholder}
                                 data-autofocus
                                 popoverProps={popoverProps}
+                                invalidValue={invalidDateFilterValue}
                                 value={
                                     rule.values && rule.values[0]
-                                        ? parseDate(
-                                              formatDate(
-                                                  rule.values[0],
-                                                  TimeFrames.YEAR,
-                                              ),
+                                        ? parseFilterDateValue(
+                                              rule.values[0],
                                               TimeFrames.YEAR,
                                           )
                                         : null
@@ -199,36 +312,7 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
             }
 
             if (isTimestamp) {
-                // For display only
-
-                let value =
-                    rule.values && rule.values[0]
-                        ? dayjs(rule?.values?.[0]).toDate()
-                        : dayjs().toDate(); // Create
-
-                return (
-                    <FilterDateTimePicker
-                        disabled={disabled}
-                        // FIXME: until mantine 7.4: https://github.com/mantinedev/mantine/issues/5401#issuecomment-1874906064
-                        // @ts-ignore
-                        placeholder={placeholder}
-                        data-autofocus
-                        withSeconds
-                        // FIXME: mantine v7
-                        // mantine does not set the first day of the week based on the locale
-                        // so we need to do it manually and always pass it as a prop
-                        firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
-                        popoverProps={popoverProps}
-                        value={value}
-                        onChange={(v: Date | null) => {
-                            onChange({
-                                ...rule,
-                                // format as an ISO string, not for display
-                                values: v === null ? [] : [dayjs(v).format()],
-                            });
-                        }}
-                    />
-                );
+                return renderTimestampPicker();
             }
 
             return (
@@ -241,10 +325,11 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                     firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
                     popoverProps={popoverProps}
                     data-autofocus
+                    invalidValue={invalidDateFilterValue}
                     value={
                         rule.values
-                            ? parseDate(
-                                  formatDate(rule.values[0], TimeFrames.DAY),
+                            ? parseFilterDateValue(
+                                  rule.values[0],
                                   TimeFrames.DAY,
                               )
                             : null
@@ -267,27 +352,24 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                 <Flex gap="xs" w="100%">
                     <NumberInput
                         size="xs"
-                        sx={{
-                            flexShrink: 1,
-                            flexGrow: 1,
-                            minWidth: 50,
-                        }}
+                        flex="1 1 auto"
+                        miw={50}
                         placeholder={placeholder}
                         disabled={disabled}
                         data-autofocus
                         value={isNaN(parsedValue) ? undefined : parsedValue}
                         min={0}
-                        onChange={(value) => {
+                        onNumberChange={(value) =>
                             onChange({
                                 ...rule,
-                                values: value === '' ? [] : [value],
-                            });
-                        }}
+                                values: value !== undefined ? [value] : [],
+                            })
+                        }
                     />
 
                     <FilterUnitOfTimeAutoComplete
                         disabled={disabled}
-                        sx={{ flexShrink: 1, flexGrow: 3 }}
+                        style={{ flexShrink: 1, flexGrow: 3 }}
                         isTimestamp={isTimestamp}
                         minUnitOfTime={
                             isDimension(field) && field.timeInterval
@@ -296,7 +378,9 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                         }
                         unitOfTime={rule.settings?.unitOfTime}
                         completed={rule.settings?.completed || false}
-                        withinPortal={popoverProps?.withinPortal}
+                        comboboxProps={{
+                            withinPortal: popoverProps?.withinPortal,
+                        }}
                         onDropdownOpen={popoverProps?.onOpen}
                         onDropdownClose={popoverProps?.onClose}
                         onChange={(value) =>
@@ -312,51 +396,107 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                 </Flex>
             );
         case FilterOperator.IN_THE_CURRENT:
-        case FilterOperator.NOT_IN_THE_CURRENT:
+        case FilterOperator.NOT_IN_THE_CURRENT: {
+            const currentSettings = rule.settings as
+                | DateFilterSettings
+                | undefined;
+            const currentUnit = currentSettings?.unitOfTime;
+            const isToDate =
+                currentUnit !== undefined &&
+                unitOfTimeSupportsToDate(currentUnit) &&
+                currentSettings?.toDate === true;
+            const isExcludeToday =
+                isToDate && currentSettings?.excludeToday === true;
+            const setCurrentSettings = (
+                unitOfTime: UnitOfTime,
+                bounds: CurrentPeriodBounds,
+            ) =>
+                onChange({
+                    ...rule,
+                    settings: {
+                        unitOfTime,
+                        completed: false,
+                        ...(bounds.toDate && { toDate: true }),
+                        ...(bounds.toDate &&
+                            bounds.excludeToday && { excludeToday: true }),
+                    },
+                });
             return (
-                <FilterUnitOfTimeAutoComplete
-                    w="100%"
-                    disabled={disabled}
-                    isTimestamp={isTimestamp}
-                    unitOfTime={rule.settings?.unitOfTime}
-                    minUnitOfTime={
-                        isDimension(field) && field.timeInterval
-                            ? timeframeToUnitOfTime(field.timeInterval)
-                            : undefined
-                    }
-                    showOptionsInPlural={false}
-                    showCompletedOptions={false}
-                    data-autofocus={!rule.settings?.unitOfTime || undefined}
-                    completed={false}
-                    withinPortal={popoverProps?.withinPortal}
-                    onDropdownOpen={popoverProps?.onOpen}
-                    onDropdownClose={popoverProps?.onClose}
-                    onChange={(value) =>
-                        onChange({
-                            ...rule,
-                            settings: {
-                                unitOfTime: value.unitOfTime,
-                                completed: false,
-                            },
-                        })
-                    }
-                />
+                <Stack gap="xs" w="100%">
+                    <FilterUnitOfTimeAutoComplete
+                        w="100%"
+                        disabled={disabled}
+                        isTimestamp={isTimestamp}
+                        unitOfTime={currentUnit}
+                        minUnitOfTime={
+                            isDimension(field) && field.timeInterval
+                                ? timeframeToUnitOfTime(field.timeInterval)
+                                : undefined
+                        }
+                        showOptionsInPlural={false}
+                        showCompletedOptions={false}
+                        showToDateOptions
+                        data-autofocus={!currentUnit || undefined}
+                        completed={false}
+                        toDate={isToDate}
+                        comboboxProps={{
+                            withinPortal: popoverProps?.withinPortal,
+                        }}
+                        onDropdownOpen={popoverProps?.onOpen}
+                        onDropdownClose={popoverProps?.onClose}
+                        onChange={(value) =>
+                            setCurrentSettings(value.unitOfTime, {
+                                toDate: value.toDate,
+                                excludeToday: value.toDate && isExcludeToday,
+                            })
+                        }
+                    />
+                    {isToDate && currentUnit !== undefined && (
+                        <Checkbox
+                            size="xs"
+                            label={getUiString(
+                                'filters.currentPeriod.includeToday',
+                            )}
+                            disabled={disabled}
+                            checked={!isExcludeToday}
+                            onChange={(e) =>
+                                setCurrentSettings(currentUnit, {
+                                    toDate: true,
+                                    excludeToday: !e.currentTarget.checked,
+                                })
+                            }
+                        />
+                    )}
+                </Stack>
             );
+        }
         case FilterOperator.IN_BETWEEN:
+            const invalidStartValue = getInvalidDateFilterValue(
+                rule.values?.[0] ? [rule.values[0]] : undefined,
+            );
+            const invalidEndValue = getInvalidDateFilterValue(
+                rule.values?.[1] ? [rule.values[1]] : undefined,
+            );
+
             if (isTimestamp) {
+                const startDate =
+                    rule.values?.[0] && !invalidStartValue
+                        ? dayjs(rule.values[0]).toDate()
+                        : null;
+                const endDate =
+                    rule.values?.[1] && !invalidEndValue
+                        ? dayjs(rule.values[1]).toDate()
+                        : null;
+
                 return (
                     <FilterDateTimeRangePicker
                         disabled={disabled}
                         data-autofocus
                         firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
-                        value={
-                            rule.values && rule.values[0] && rule.values[1]
-                                ? [
-                                      dayjs(rule.values[0]).toDate(),
-                                      dayjs(rule.values[1]).toDate(),
-                                  ]
-                                : null
-                        }
+                        startValue={startDate}
+                        endValue={endDate}
+                        invalidStartValue={invalidStartValue}
+                        invalidEndValue={invalidEndValue}
                         popoverProps={popoverProps}
                         onChange={(value: [Date, Date] | null) => {
                             onChange({
@@ -373,31 +513,24 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                 );
             }
 
+            const startDate = parseFilterDateValue(
+                rule.values?.[0],
+                TimeFrames.DAY,
+            );
+            const endDate = parseFilterDateValue(
+                rule.values?.[1],
+                TimeFrames.DAY,
+            );
+
             return (
                 <FilterDateRangePicker
                     disabled={disabled}
                     data-autofocus
                     firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
-                    value={
-                        rule.values && rule.values[0] && rule.values[1]
-                            ? [
-                                  parseDate(
-                                      formatDate(
-                                          rule.values[0],
-                                          TimeFrames.DAY,
-                                      ),
-                                      TimeFrames.DAY,
-                                  ),
-                                  parseDate(
-                                      formatDate(
-                                          rule.values[1],
-                                          TimeFrames.DAY,
-                                      ),
-                                      TimeFrames.DAY,
-                                  ),
-                              ]
-                            : null
-                    }
+                    startValue={startDate}
+                    endValue={endDate}
+                    invalidStartValue={invalidStartValue}
+                    invalidEndValue={invalidEndValue}
                     popoverProps={popoverProps}
                     onChange={(value: [Date, Date] | null) => {
                         onChange({
@@ -418,6 +551,7 @@ const DateFilterInputs = <T extends BaseFilterRule = DateFilterRule>(
                     disabled={disabled}
                     unitOfTime={rule.settings?.unitOfTime}
                     field={field}
+                    popoverProps={popoverProps}
                     onChange={(unitOfTime) =>
                         onChange({
                             ...rule,

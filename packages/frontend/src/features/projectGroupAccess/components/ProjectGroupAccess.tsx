@@ -18,20 +18,13 @@ import {
     Text,
     Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
-import {
-    IconArrowDown,
-    IconArrowsSort,
-    IconArrowUp,
-    IconPlus,
-    IconTrash,
-    IconUsersGroup,
-} from '@tabler/icons-react';
+} from '@mantine/core';
+import { IconPlus, IconTrash, IconUsersGroup } from '@tabler/icons-react';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
+    type ContentTableColumnDef,
 } from '../../../components/common/ContentTable';
 import MantineIcon from '../../../components/common/MantineIcon';
 import SuboptimalState from '../../../components/common/SuboptimalState/SuboptimalState';
@@ -48,6 +41,11 @@ import { useAbilityContext } from '../../../providers/Ability/useAbilityContext'
 import useApp from '../../../providers/App/useApp';
 import { TrackPage } from '../../../providers/Tracking/TrackingProvider';
 import { CategoryName, PageName, PageType } from '../../../types/Events';
+import { ProjectRoleSetCell } from '../../roleSets/components/ProjectRoleSetCell';
+import {
+    useMultipleRolesEnabled,
+    useReplaceProjectGroupRoleSetMutation,
+} from '../../roleSets/hooks/useRoleSets';
 import AddProjectGroupAccessModal from './AddProjectGroupAccessModal';
 import RevokeProjectGroupAccessModal from './RevokeProjectGroupAccessModal';
 
@@ -154,6 +152,16 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
         );
     }, [projectGroupRoleAssignments, projectUuid]);
 
+    const groupsWithExtraRoles = useMemo(
+        () =>
+            new Set(
+                (projectGroupRoleAssignments ?? [])
+                    .filter((assignment) => assignment.hasMultipleRoles)
+                    .map((assignment) => assignment.assigneeId),
+            ),
+        [projectGroupRoleAssignments],
+    );
+
     const { data: organizationRoles } = useOrganizationRoles();
 
     const rolesData = useMemo(() => {
@@ -163,7 +171,10 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
         const customRoles: { value: string; label: string }[] = [];
 
         organizationRoles.forEach(
-            (role: Pick<Role, 'roleUuid' | 'name' | 'ownerType'>) => {
+            (role: Pick<Role, 'roleUuid' | 'name' | 'ownerType' | 'level'>) => {
+                if (role.ownerType === 'user' && role.level !== 'project') {
+                    return;
+                }
                 const item = { value: role.roleUuid, label: role.name };
                 if (role.ownerType === 'system') {
                     systemRoles.push(item);
@@ -208,8 +219,12 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
 
     const { mutateAsync: removeProjectGroupAccess, isLoading: isDeleting } =
         useDeleteProjectGroupRoleAssignmentMutation(projectUuid);
+    const replaceRoleSetMutation =
+        useReplaceProjectGroupRoleSetMutation(projectUuid);
+    const multipleRolesEnabled = useMultipleRolesEnabled();
 
-    const isMutating = isSubmitting || isDeleting;
+    const isMutating =
+        isSubmitting || isDeleting || replaceRoleSetMutation.isLoading;
 
     const handleAddProjectGroupAccess = async (
         formData: CreateProjectGroupAccess,
@@ -288,8 +303,8 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
             .filter((row): row is EnrichedGroupRow => row !== null);
     }, [projectGroupAccessList, groups, allRoles]);
 
-    const columns: MRT_ColumnDef<EnrichedGroupRow>[] = useMemo(() => {
-        const cols: MRT_ColumnDef<EnrichedGroupRow>[] = [
+    const columns: ContentTableColumnDef<EnrichedGroupRow>[] = useMemo(() => {
+        const cols: ContentTableColumnDef<EnrichedGroupRow>[] = [
             {
                 accessorKey: 'groupUuid',
                 header: 'Group Name',
@@ -297,7 +312,7 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
                 size: 300,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconUsersGroup} color="ldGray.6" />
+                        <MantineIcon icon={IconUsersGroup} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -308,7 +323,7 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
                             <Text fw={600} fz="sm">
                                 {r.group.name}
                             </Text>
-                            <Badge variant="light" color="gray">
+                            <Badge>
                                 {r.group.members.length} member
                                 {r.group.members.length !== 1 ? 's' : ''}
                             </Badge>
@@ -323,6 +338,30 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
                 size: 300,
                 Cell: ({ row }) => {
                     const r = row.original;
+                    if (multipleRolesEnabled) {
+                        return (
+                            <ProjectRoleSetCell
+                                projectUuid={projectUuid}
+                                assignee={{
+                                    type: 'group',
+                                    uuid: r.groupUuid,
+                                    label: r.group.name,
+                                }}
+                                slotRoleId={r.currentRoleUuid}
+                                hasMultipleRoles={groupsWithExtraRoles.has(
+                                    r.groupUuid,
+                                )}
+                                organizationRoles={organizationRoles}
+                                disabled={isMutating || !canManageProjectAccess}
+                                onChange={(roleSet) =>
+                                    replaceRoleSetMutation.mutate({
+                                        groupUuid: r.groupUuid,
+                                        roleSet,
+                                    })
+                                }
+                            />
+                        );
+                    }
                     return (
                         <Select
                             id={`group-role-${r.groupUuid}`}
@@ -372,49 +411,28 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
         handleDelete,
         isMutating,
         rolesData,
+        multipleRolesEnabled,
+        organizationRoles,
+        projectUuid,
+        groupsWithExtraRoles,
+        replaceRoleSetMutation,
     ]);
 
     const table = useContentTable({
         columns,
         data: enrichedGroups,
         enableColumnResizing: false,
-        enableRowNumbers: false,
         enablePagination: true,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: false,
         enableRowVirtualization: false,
         enableTopToolbar: true,
         enableBottomToolbar: true,
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
-        mantineTableHeadRowProps: {
-            style: {
-                boxShadow: 'none',
-            },
-        },
         mantineTableContainerProps: {
             style: { maxHeight: 'calc(100dvh - 300px)' },
         },
         mantineTableProps: {
             highlightOnHover: true,
             withColumnBorders: Boolean(enrichedGroups.length),
-        },
-        mantinePaginationProps: {
-            showRowsPerPage: false,
         },
         mantineTableHeadCellProps: (props) => {
             const isLastColumn =
@@ -469,17 +487,6 @@ const ProjectGroupAccessComponent: FC<ProjectGroupAccessProps> = ({
                 )}
             </Group>
         ),
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
-        },
         state: {
             isLoading: isLoadingProjectGroupAccessList,
             density: 'xs',

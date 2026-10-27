@@ -1,0 +1,1940 @@
+import { ProjectType } from '@lightdash/common';
+import knex, { Knex } from 'knex';
+import { getTracker, MockClient, Tracker } from 'knex-mock-client';
+import {
+    AiAgentToolCallTableName,
+    AiPromptTableName,
+} from '../database/entities/ai';
+import { AiAgentMemoryTableName } from '../database/entities/aiAgentMemory';
+import {
+    AiAgentReviewClassifierRunTableName,
+    AiAgentReviewItemEventsTableName,
+    AiAgentReviewItemTableName,
+    AiAgentReviewRemediationEventsTableName,
+    AiAgentReviewRemediationTableName,
+    AiAgentTurnSignalTableName,
+} from '../database/entities/aiAgentReviewClassifier';
+import {
+    AiAgentReviewClassifierModel,
+    WRITEBACK_STALE_MS,
+} from './AiAgentReviewClassifierModel';
+
+const ORGANIZATION_UUID = '00000000-0000-0000-0000-000000000001';
+const PROJECT_UUID = '00000000-0000-0000-0000-000000000002';
+const AGENT_UUID = '00000000-0000-0000-0000-000000000003';
+const RUN_UUID = '00000000-0000-0000-0000-000000000006';
+const THREAD_UUID = '00000000-0000-0000-0000-000000000007';
+const PROMPT_UUID = '00000000-0000-0000-0000-000000000008';
+const TURN_SIGNAL_UUID = '00000000-0000-0000-0000-000000000009';
+const REMEDIATION_UUID = '00000000-0000-0000-0000-000000000010';
+const PULL_REQUEST_UUID = '00000000-0000-0000-0000-000000000011';
+const PREVIEW_PROJECT_UUID = '00000000-0000-0000-0000-000000000012';
+const USER_UUID = '00000000-0000-0000-0000-000000000013';
+const PREVIEW_AGENT_UUID = '00000000-0000-0000-0000-000000000013';
+const PREVIEW_THREAD_UUID = '00000000-0000-0000-0000-000000000014';
+const SEEN_AT = new Date('2026-05-26T10:00:00.000Z');
+const FINGERPRINT = 'ai_agent_review_item:fingerprint';
+
+const snapshot = {
+    capturedAt: '2026-05-26T10:00:00.000Z',
+    agentUpdatedAt: '2026-05-26T09:00:00.000Z',
+    settings: ['instructions' as const],
+    availableCapabilities: ['semantic_query' as const],
+    instructionHash: 'hash',
+    instructionSummary: 'Use finance definitions.',
+    knowledgeDocuments: [],
+    mcpServers: [],
+    skills: [],
+};
+
+const makeRunRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    ai_agent_review_run_uuid: RUN_UUID,
+    organization_uuid: ORGANIZATION_UUID,
+    status: 'queued',
+    review_agent_version: 'v1',
+    judge_prompt_hash: 'prompt-hash',
+    agent_config_snapshot_hash: null,
+    agent_config_snapshot: null,
+    agent_config_snapshot_agent_updated_at: null,
+    run_scope: {
+        type: 'backfill',
+        startedAt: '2026-05-26T00:00:00.000Z',
+        endedAt: '2026-05-27T00:00:00.000Z',
+    },
+    total_turns: 0,
+    processed_turns: 0,
+    signal_count: 0,
+    finding_count: 0,
+    review_item_count: 0,
+    error_message: null,
+    completed_at: null,
+    created_at: SEEN_AT,
+    updated_at: SEEN_AT,
+    ...overrides,
+});
+
+const makeTurnSignalRow = (
+    overrides: Partial<Record<string, unknown>> = {},
+) => ({
+    ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID,
+    ai_agent_review_run_uuid: RUN_UUID,
+    ai_prompt_uuid: PROMPT_UUID,
+    ai_thread_uuid: THREAD_UUID,
+    organization_uuid: ORGANIZATION_UUID,
+    project_uuid: PROJECT_UUID,
+    agent_uuid: AGENT_UUID,
+    interaction_source: 'app',
+    source_ref: {
+        source: 'app',
+        threadUuid: THREAD_UUID,
+        promptUuid: PROMPT_UUID,
+        appUrl: null,
+    },
+    signal: 'implicit_correction',
+    implicit_signal_sources: ['next_user_correction'],
+    confidence: 'high',
+    promoted_to_finding: true,
+    promotion_reason: 'User corrected the answer.',
+    tool_evidence_refs: [],
+    fingerprint: FINGERPRINT,
+    primary_root_cause: 'semantic_layer',
+    secondary_root_causes: ['project_context'],
+    subcategories: ['wrong_metric'],
+    fix_targets: ['semantic_yaml_patch'],
+    target_refs: [
+        {
+            type: 'metric',
+            modelName: 'orders',
+            metricName: 'total_completed_order_amount',
+        },
+    ],
+    evidence_excerpts: [
+        {
+            source: 'next_user_prompt',
+            text: 'No, use revenue not order count.',
+            redacted: false,
+        },
+    ],
+    recommendation: {
+        actionType: 'update_semantic_yaml',
+        title: 'Add revenue metric guidance',
+        rationale: 'The user corrected the metric choice.',
+        targetRefs: [],
+    },
+    owner_type: 'semantic_layer_owner',
+    review_item_title: 'Review revenue metric',
+    review_item_description: 'The agent selected order count for revenue.',
+    runtime_context_snapshot: {
+        userUuid: null,
+        canRunSql: false,
+        canManageAgent: false,
+    },
+    model_metadata: {
+        provider: 'openai',
+        model: 'gpt-5',
+    },
+    created_at: SEEN_AT,
+    ...overrides,
+});
+
+const makeRemediationRow = (
+    overrides: Partial<Record<string, unknown>> = {},
+) => ({
+    ai_agent_review_remediation_uuid: REMEDIATION_UUID,
+    fingerprint: FINGERPRINT,
+    organization_uuid: ORGANIZATION_UUID,
+    source_ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID,
+    source_prompt_uuid: PROMPT_UUID,
+    source_thread_uuid: THREAD_UUID,
+    source_project_uuid: PROJECT_UUID,
+    source_agent_uuid: AGENT_UUID,
+    work_thread_uuid: null,
+    pull_request_uuid: PULL_REQUEST_UUID,
+    linked_pr_url: 'https://github.com/acme/dbt/pull/42',
+    preview_project_uuid: PREVIEW_PROJECT_UUID,
+    preview_agent_uuid: PREVIEW_AGENT_UUID,
+    preview_thread_uuid: PREVIEW_THREAD_UUID,
+    status: 'preview_ready',
+    error_message: null,
+    retry_prompt: 'Show revenue',
+    created_by_user_uuid: null,
+    resolved_by_user_uuid: null,
+    resolved_at: null,
+    created_at: SEEN_AT,
+    updated_at: SEEN_AT,
+    updated_at_age_ms: 0,
+    ...overrides,
+});
+
+const turnSignal = {
+    subject: {
+        type: 'turn_review' as const,
+        assistantPromptUuid: PROMPT_UUID,
+        threadUuid: THREAD_UUID,
+        agentUuid: AGENT_UUID,
+        projectUuid: PROJECT_UUID,
+        organizationUuid: ORGANIZATION_UUID,
+    },
+    interactionSource: 'app' as const,
+    sourceRef: {
+        source: 'app' as const,
+        threadUuid: THREAD_UUID,
+        promptUuid: PROMPT_UUID,
+        appUrl: null,
+    },
+    signal: 'implicit_correction' as const,
+    implicitSignalSources: ['next_user_correction' as const],
+    confidence: 'medium' as const,
+    promotedToFinding: true,
+    promotionReason: 'User corrected the requested grouping.',
+    toolEvidenceRefs: [],
+    runtimeContextSnapshot: {
+        userUuid: null,
+        canRunSql: false,
+        canManageAgent: false,
+    },
+    modelMetadata: {
+        provider: 'openai',
+        model: 'gpt-5',
+    },
+};
+
+describe('AiAgentReviewClassifierModel', () => {
+    const database = knex({ client: MockClient, dialect: 'pg' });
+    const model = new AiAgentReviewClassifierModel({
+        database: database as unknown as Knex,
+    });
+    let tracker: Tracker;
+
+    beforeAll(() => {
+        tracker = getTracker();
+    });
+
+    afterEach(() => {
+        tracker.reset();
+    });
+
+    describe('listTurnReviewCandidates', () => {
+        it('excludes turns from preview projects', async () => {
+            tracker.on.select(AiPromptTableName).responseOnce([]);
+
+            await model.listTurnReviewCandidates({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            const [query] = tracker.history.select;
+            expect(query.sql).toContain('project_type');
+            expect(query.bindings).toContain(ProjectType.PREVIEW);
+        });
+
+        it('excludes remediation build-fix work threads', async () => {
+            tracker.on.select(AiPromptTableName).responseOnce([]);
+
+            await model.listTurnReviewCandidates({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            const [query] = tracker.history.select;
+            expect(query.sql).toContain(AiAgentReviewRemediationTableName);
+            expect(query.sql).toContain('work_thread_uuid');
+        });
+    });
+
+    it.each([
+        [undefined, 5],
+        [30, 30],
+        [100, 30],
+    ])(
+        'retains a bounded evidence pool before service ranking: %s',
+        async (limit, expected) => {
+            const rows = Array.from({ length: 40 }, (_, index) => ({
+                tool_call_id: `tool-${index}`,
+                tool_name: 'runQuery',
+                parent_tool_call_id: null,
+                created_at: new Date(SEEN_AT.getTime() + index),
+                tool_args: { metrics: ['revenue'] },
+                result: 'Query succeeded',
+            }));
+            tracker.on.select(AiAgentToolCallTableName).responseOnce(rows);
+            const evidence = await model['fetchSupportingEvidence'](
+                PROMPT_UUID,
+                'revenue',
+                null,
+                null,
+                limit,
+            );
+            expect(evidence).toHaveLength(expected!);
+            expect(evidence?.[0].toolCallId).toBe('tool-0');
+            expect(tracker.history.select[0].bindings).toContain(PROMPT_UUID);
+        },
+    );
+
+    describe('remediation events', () => {
+        it('emits a failed event when a remediation is marked failed', async () => {
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce(1);
+            tracker.on
+                .insert(AiAgentReviewRemediationEventsTableName)
+                .responseOnce([]);
+
+            await model.updateReviewRemediationStatus({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                status: 'failed',
+                errorMessage: 'Preview project failed to compile',
+            });
+
+            const [insert] = tracker.history.insert;
+            expect(insert.sql).toContain(
+                AiAgentReviewRemediationEventsTableName,
+            );
+            expect(insert.bindings).toContain('failed');
+            expect(
+                insert.bindings.some(
+                    (b: unknown) =>
+                        typeof b === 'string' &&
+                        b.includes('Preview project failed to compile'),
+                ),
+            ).toBe(true);
+        });
+
+        it('emits a resolved event with the resolving user as actor', async () => {
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce(1);
+            tracker.on
+                .insert(AiAgentReviewRemediationEventsTableName)
+                .responseOnce([]);
+
+            await model.updateReviewRemediationStatus({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                status: 'resolved',
+                resolvedByUserUuid: USER_UUID,
+            });
+
+            const [insert] = tracker.history.insert;
+            expect(insert.bindings).toContain('resolved');
+            expect(insert.bindings).toContain(USER_UUID);
+        });
+
+        it('does not emit an event when no remediation row matched', async () => {
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce(0);
+
+            await model.updateReviewRemediationStatus({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                status: 'failed',
+                errorMessage: 'boom',
+            });
+
+            expect(tracker.history.insert).toHaveLength(0);
+        });
+
+        it('does not emit events for non-terminal status updates', async () => {
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce(1);
+
+            await model.updateReviewRemediationStatus({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                status: 'running',
+            });
+
+            expect(tracker.history.insert).toHaveLength(0);
+        });
+
+        it('creates a moment event with an explicit occurred_at', async () => {
+            tracker.on
+                .insert(AiAgentReviewRemediationEventsTableName)
+                .responseOnce([]);
+            const occurredAt = new Date('2026-06-12T10:40:41.000Z');
+
+            await model.createRemediationEvent({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                event: {
+                    eventType: 'preview_compiled',
+                    payload: { previewProjectUuid: PROJECT_UUID },
+                },
+                occurredAt,
+            });
+
+            const [insert] = tracker.history.insert;
+            expect(insert.bindings).toContain('preview_compiled');
+            expect(insert.bindings).toContainEqual(occurredAt);
+        });
+
+        it('lists remediation events ordered by occurrence', async () => {
+            tracker.on
+                .select(AiAgentReviewRemediationEventsTableName)
+                .responseOnce([
+                    {
+                        ai_agent_review_remediation_event_uuid: 'event-1',
+                        ai_agent_review_remediation_uuid: REMEDIATION_UUID,
+                        organization_uuid: ORGANIZATION_UUID,
+                        event_type: 'pr_opened',
+                        occurred_at: SEEN_AT,
+                        payload: {
+                            prUrl: 'https://github.com/acme/dbt/pull/42',
+                            prNumber: 42,
+                        },
+                        created_by_user_uuid: null,
+                        created_at: SEEN_AT,
+                    },
+                ]);
+
+            const events = await model.listRemediationEvents({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            const [query] = tracker.history.select;
+            expect(query.sql).toContain('occurred_at');
+            expect(events).toEqual([
+                {
+                    uuid: 'event-1',
+                    remediationUuid: REMEDIATION_UUID,
+                    eventType: 'pr_opened',
+                    occurredAt: SEEN_AT,
+                    payload: {
+                        prUrl: 'https://github.com/acme/dbt/pull/42',
+                        prNumber: 42,
+                    },
+                    createdByUserUuid: null,
+                },
+            ]);
+        });
+    });
+
+    describe('review item events', () => {
+        it('inserts an issue event with the mapped columns', async () => {
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+            const occurredAt = new Date('2026-06-24T10:00:00.000Z');
+
+            await model.createReviewItemEvent({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                event: {
+                    eventType: 'status_changed',
+                    payload: {
+                        from: 'open',
+                        to: 'in_progress',
+                        dismissedReason: null,
+                    },
+                },
+                occurredAt,
+                createdByUserUuid: USER_UUID,
+            });
+
+            const [insert] = tracker.history.insert;
+            expect(insert.sql).toContain(AiAgentReviewItemEventsTableName);
+            expect(insert.bindings).toContain(FINGERPRINT);
+            expect(insert.bindings).toContain('status_changed');
+            expect(insert.bindings).toContain(USER_UUID);
+            expect(insert.bindings).toContainEqual(occurredAt);
+        });
+
+        it('lists issue events ordered by occurrence', async () => {
+            tracker.on.select(AiAgentReviewItemEventsTableName).responseOnce([
+                {
+                    ai_agent_review_item_event_uuid: 'event-1',
+                    fingerprint: FINGERPRINT,
+                    organization_uuid: ORGANIZATION_UUID,
+                    event_type: 'status_changed',
+                    occurred_at: SEEN_AT,
+                    payload: {
+                        from: 'open',
+                        to: 'in_progress',
+                        dismissedReason: null,
+                    },
+                    created_by_user_uuid: USER_UUID,
+                    created_at: SEEN_AT,
+                },
+            ]);
+
+            const events = await model.listReviewItemEvents({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            const [query] = tracker.history.select;
+            expect(query.sql).toContain('occurred_at');
+            expect(events).toEqual([
+                {
+                    uuid: 'event-1',
+                    fingerprint: FINGERPRINT,
+                    eventType: 'status_changed',
+                    occurredAt: SEEN_AT,
+                    payload: {
+                        from: 'open',
+                        to: 'in_progress',
+                        dismissedReason: null,
+                    },
+                    createdByUserUuid: USER_UUID,
+                },
+            ]);
+        });
+    });
+
+    describe('createRun', () => {
+        it('creates a review agent run with run-level config snapshot', async () => {
+            tracker.on
+                .insert(AiAgentReviewClassifierRunTableName)
+                .responseOnce([
+                    makeRunRow({
+                        agent_config_snapshot_hash: 'snapshot-hash',
+                        agent_config_snapshot: snapshot,
+                        agent_config_snapshot_agent_updated_at: SEEN_AT,
+                    }),
+                ]);
+
+            const result = await model.createRun({
+                organizationUuid: ORGANIZATION_UUID,
+                reviewAgentVersion: 'v1',
+                judgePromptHash: 'prompt-hash',
+                runScope: {
+                    type: 'backfill',
+                    startedAt: '2026-05-26T00:00:00.000Z',
+                    endedAt: '2026-05-27T00:00:00.000Z',
+                },
+                agentConfigSnapshotHash: 'snapshot-hash',
+                agentConfigSnapshot: snapshot,
+                agentConfigSnapshotAgentUpdatedAt: SEEN_AT,
+            });
+
+            expect(result.uuid).toBe(RUN_UUID);
+            expect(result.agentConfigSnapshotHash).toBe('snapshot-hash');
+            expect(result.agentConfigSnapshot).toEqual(snapshot);
+        });
+    });
+
+    describe('updateRun', () => {
+        it('updates run progress and completion fields', async () => {
+            tracker.on
+                .update(AiAgentReviewClassifierRunTableName)
+                .responseOnce([
+                    makeRunRow({
+                        status: 'completed',
+                        total_turns: 4,
+                        processed_turns: 4,
+                        signal_count: 2,
+                        finding_count: 1,
+                        review_item_count: 1,
+                        completed_at: SEEN_AT,
+                    }),
+                ]);
+
+            const result = await model.updateRun({
+                runUuid: RUN_UUID,
+                status: 'completed',
+                totalTurns: 4,
+                processedTurns: 4,
+                signalCount: 2,
+                findingCount: 1,
+                reviewItemCount: 1,
+                completedAt: SEEN_AT,
+            });
+
+            expect(result.status).toBe('completed');
+            expect(result.processedTurns).toBe(4);
+            expect(result.completedAt).toEqual(SEEN_AT);
+        });
+    });
+
+    describe('mapTurnReviewCandidate', () => {
+        it('maps app turns into review agent candidate input', () => {
+            const result = AiAgentReviewClassifierModel.mapTurnReviewCandidate({
+                ai_prompt_uuid: PROMPT_UUID,
+                ai_thread_uuid: THREAD_UUID,
+                organization_uuid: ORGANIZATION_UUID,
+                project_uuid: PROJECT_UUID,
+                agent_uuid: AGENT_UUID,
+                created_from: 'web_app',
+                prompt: 'Show airport volume by country',
+                response:
+                    'Country is not available. <ld-mem-cite id="airport-country"></ld-mem-cite>',
+                error_message: null,
+                human_score: null,
+                human_feedback: null,
+                prompt_created_at: SEEN_AT,
+                responded_at: SEEN_AT,
+                model_config: {
+                    modelName: 'gpt-5',
+                    modelProvider: 'openai',
+                },
+                token_usage: { totalTokens: 123 },
+                next_user_prompt_uuid: null,
+                next_user_prompt: null,
+                previous_turn_context: [
+                    {
+                        relation: 'previous',
+                        promptUuid: '00000000-0000-0000-0000-000000000012',
+                        userPrompt: 'Show total airport volume',
+                        assistantResponse:
+                            'Airport volume is calculated from scheduled flights. <ld-mem-cite id="airport-volume"/>',
+                        errorMessage: null,
+                        createdAt: SEEN_AT.toISOString(),
+                        respondedAt: SEEN_AT.toISOString(),
+                    },
+                ],
+                slack_channel_id: null,
+                slack_thread_ts: null,
+                prompt_slack_ts: null,
+                query_history_summaries: [],
+                supporting_evidence_summaries: [],
+                tool_outcomes: [
+                    {
+                        toolCallId: 'tool-call-1',
+                        toolName: 'proposeWriteback',
+                        status: 'success',
+                    },
+                ],
+                pending_approval_timeout: true,
+            });
+
+            expect(result.subject.assistantPromptUuid).toBe(PROMPT_UUID);
+            expect(result.interactionSource).toBe('app');
+            expect(result.assistantResponse).toBe('Country is not available. ');
+            expect(result.targetTurn.assistantResponse).toBe(
+                'Country is not available. ',
+            );
+            expect(result.contextTurns[0]?.assistantResponse).toBe(
+                'Airport volume is calculated from scheduled flights. ',
+            );
+            expect(result.tokenUsageTotal).toBe(123);
+            expect(result.toolOutcomes).toEqual([
+                {
+                    toolCallId: 'tool-call-1',
+                    toolName: 'proposeWriteback',
+                    status: 'success',
+                },
+            ]);
+            expect(result.pendingApprovalTimeout).toBe(true);
+        });
+    });
+
+    describe('listReviewItems', () => {
+        it('groups actionable signals into review item projections', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    fingerprint: FINGERPRINT,
+                    first_seen_at: new Date('2026-05-26T09:00:00.000Z'),
+                    last_seen_at: SEEN_AT,
+                    finding_count: '2',
+                },
+            ]);
+            tracker.on
+                .select(AiAgentTurnSignalTableName)
+                .responseOnce([makeTurnSignalRow()]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .select(AiAgentReviewRemediationTableName)
+                .responseOnce([]);
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result).toHaveLength(1);
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    uuid: FINGERPRINT,
+                    fingerprint: FINGERPRINT,
+                    title: 'Review revenue metric',
+                    status: 'triage',
+                    linkedPrUrl: null,
+                    prState: null,
+                    remediation: null,
+                    findingCount: 2,
+                }),
+            );
+            expect(result[0].latestFinding).toEqual(
+                expect.objectContaining({
+                    uuid: TURN_SIGNAL_UUID,
+                    promptUuid: PROMPT_UUID,
+                    targetRefs: [
+                        {
+                            type: 'metric',
+                            modelName: 'orders',
+                            metricName: 'total_completed_order_amount',
+                        },
+                    ],
+                }),
+            );
+        });
+
+        it('excludes hidden root causes from both the signal and manual queries, keeping unclassified rows', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+
+            await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            const [signalQuery, manualQuery] = tracker.history.select;
+            for (const query of [signalQuery, manualQuery]) {
+                expect(query.bindings).toContain('product_capability');
+                // NULL NOT IN (...) is unknown, so unclassified rows need the
+                // explicit IS NULL branch to stay visible.
+                expect(query.sql).toMatch(/primary_root_cause"? is null/i);
+            }
+        });
+
+        // The judge is told to reuse an existing item's key even when it assigns
+        // a different root cause, so a card kept alive by visible findings can
+        // have a hidden one as its most recent signal.
+        it('drops a card whose resolved root cause is hidden', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    fingerprint: FINGERPRINT,
+                    first_seen_at: SEEN_AT,
+                    last_seen_at: SEEN_AT,
+                    finding_count: '1',
+                },
+            ]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                makeTurnSignalRow({
+                    primary_root_cause: 'product_capability',
+                }),
+            ]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .select(AiAgentReviewRemediationTableName)
+                .responseOnce([]);
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result).toEqual([]);
+            // The latest-signal lookup is filtered too, so the card's face comes
+            // from its latest visible finding rather than the hidden one.
+            expect(tracker.history.select[1].bindings).toContain(
+                'product_capability',
+            );
+        });
+
+        it('overlays persisted human state and PR linkage onto the projection', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    fingerprint: FINGERPRINT,
+                    first_seen_at: SEEN_AT,
+                    last_seen_at: SEEN_AT,
+                    finding_count: '1',
+                },
+            ]);
+            tracker.on
+                .select(AiAgentTurnSignalTableName)
+                .responseOnce([makeTurnSignalRow()]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([
+                {
+                    ai_agent_review_item_uuid:
+                        '00000000-0000-0000-0000-000000000099',
+                    fingerprint: FINGERPRINT,
+                    organization_uuid: ORGANIZATION_UUID,
+                    project_uuid: PROJECT_UUID,
+                    agent_uuid: AGENT_UUID,
+                    status: 'resolved',
+                    dismissed_reason: null,
+                    assigned_to_user_uuid: null,
+                    linked_issue_url: null,
+                    linked_pr_url: 'https://github.com/acme/dbt/pull/42',
+                    pr_writeback_thread_uuid: null,
+                    pr_state: 'merged',
+                    status_updated_at: new Date('2026-05-28T10:00:00.000Z'),
+                    status_updated_by_user_uuid: null,
+                    created_at: SEEN_AT,
+                    updated_at: SEEN_AT,
+                    updated_at_age_ms: 0,
+                },
+            ]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .select(AiAgentReviewRemediationTableName)
+                .responseOnce([]);
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    status: 'resolved',
+                    linkedPrUrl: 'https://github.com/acme/dbt/pull/42',
+                    prState: 'merged',
+                    remediation: null,
+                }),
+            );
+        });
+
+        it('overlays the latest remediation onto the projection', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    fingerprint: FINGERPRINT,
+                    first_seen_at: SEEN_AT,
+                    last_seen_at: SEEN_AT,
+                    finding_count: '1',
+                },
+            ]);
+            tracker.on
+                .select(AiAgentTurnSignalTableName)
+                .responseOnce([makeTurnSignalRow()]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .select(AiAgentReviewRemediationTableName)
+                .responseOnce([makeRemediationRow()]);
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0].remediation).toEqual(
+                expect.objectContaining({
+                    uuid: REMEDIATION_UUID,
+                    fingerprint: FINGERPRINT,
+                    status: 'preview_ready',
+                    pullRequestUuid: PULL_REQUEST_UUID,
+                    linkedPrUrl: 'https://github.com/acme/dbt/pull/42',
+                    previewProjectUuid: PREVIEW_PROJECT_UUID,
+                    previewAgentUuid: PREVIEW_AGENT_UUID,
+                    previewThreadUuid: PREVIEW_THREAD_UUID,
+                    retryPrompt: 'Show revenue',
+                }),
+            );
+        });
+
+        it('filters by overlaid status', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+                statuses: ['resolved'],
+            });
+
+            expect(result).toHaveLength(0);
+        });
+
+        const makeReviewItemRow = (
+            overrides: Partial<Record<string, unknown>> = {},
+        ) => ({
+            ai_agent_review_item_uuid: '00000000-0000-0000-0000-000000000099',
+            fingerprint: FINGERPRINT,
+            organization_uuid: ORGANIZATION_UUID,
+            project_uuid: PROJECT_UUID,
+            agent_uuid: AGENT_UUID,
+            status: 'open',
+            dismissed_reason: null,
+            assigned_to_user_uuid: null,
+            linked_issue_url: null,
+            linked_pr_url: null,
+            pr_writeback_thread_uuid: null,
+            pr_state: null,
+            pr_writeback_status: 'running',
+            pr_writeback_message: 'Compiling project',
+            status_updated_at: SEEN_AT,
+            created_at: SEEN_AT,
+            updated_at: SEEN_AT,
+            updated_at_age_ms: 2 * 60 * 1000,
+            ...overrides,
+        });
+
+        const stubListQueries = (
+            itemRows: Record<string, unknown>[],
+            remediationRows: Record<string, unknown>[],
+        ) => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    fingerprint: FINGERPRINT,
+                    first_seen_at: SEEN_AT,
+                    last_seen_at: SEEN_AT,
+                    finding_count: '1',
+                },
+            ]);
+            tracker.on
+                .select(AiAgentTurnSignalTableName)
+                .responseOnce([makeTurnSignalRow()]);
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce(itemRows);
+            // listReviewItems also queries source='manual' rows; none here.
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .select(AiAgentReviewRemediationTableName)
+                .responseOnce(remediationRows);
+        };
+
+        it('keeps a fresh running writeback as running', async () => {
+            stubListQueries([makeReviewItemRow()], []);
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    prWritebackStatus: 'running',
+                    prWritebackMessage: 'Compiling project',
+                }),
+            );
+        });
+
+        it('keeps a running writeback at exactly the stale threshold as running', async () => {
+            stubListQueries(
+                [makeReviewItemRow({ updated_at_age_ms: WRITEBACK_STALE_MS })],
+                [],
+            );
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    prWritebackStatus: 'running',
+                    prWritebackMessage: 'Compiling project',
+                }),
+            );
+        });
+
+        it('presents a stale running writeback as timed out using the SQL-computed age', async () => {
+            stubListQueries(
+                [
+                    makeReviewItemRow({
+                        updated_at_age_ms: WRITEBACK_STALE_MS + 1,
+                    }),
+                ],
+                [],
+            );
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    prWritebackStatus: 'failed',
+                    prWritebackMessage: 'Writeback timed out',
+                }),
+            );
+        });
+
+        it('presents a stale queued writeback as timed out', async () => {
+            stubListQueries(
+                [
+                    makeReviewItemRow({
+                        pr_writeback_status: 'queued',
+                        pr_writeback_message: 'Queued',
+                        updated_at_age_ms: WRITEBACK_STALE_MS + 1,
+                    }),
+                ],
+                [],
+            );
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    prWritebackStatus: 'failed',
+                    prWritebackMessage: 'Writeback timed out',
+                }),
+            );
+        });
+
+        it('presents a stale running remediation as failed', async () => {
+            stubListQueries(
+                [],
+                [
+                    makeRemediationRow({
+                        status: 'running',
+                        updated_at_age_ms: WRITEBACK_STALE_MS + 1,
+                    }),
+                ],
+            );
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0].remediation).toEqual(
+                expect.objectContaining({
+                    status: 'failed',
+                    errorMessage: 'Writeback timed out',
+                }),
+            );
+        });
+
+        it('never presents a stale pr_open remediation as failed', async () => {
+            stubListQueries(
+                [],
+                [
+                    makeRemediationRow({
+                        status: 'pr_open',
+                        updated_at_age_ms: WRITEBACK_STALE_MS + 1,
+                    }),
+                ],
+            );
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0].remediation).toEqual(
+                expect.objectContaining({
+                    status: 'pr_open',
+                    errorMessage: null,
+                }),
+            );
+        });
+
+        it('keeps a fresh running remediation as running', async () => {
+            stubListQueries(
+                [],
+                [
+                    makeRemediationRow({
+                        status: 'running',
+                        updated_at_age_ms: 2 * 60 * 1000,
+                    }),
+                ],
+            );
+
+            const result = await model.listReviewItems({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result[0].remediation).toEqual(
+                expect.objectContaining({
+                    status: 'running',
+                    errorMessage: null,
+                }),
+            );
+        });
+    });
+
+    describe('failStaleReviewRemediation', () => {
+        it('fails the remediation in SQL only when active and past the stale threshold', async () => {
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce(0);
+
+            await model.failStaleReviewRemediation({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            const [update] = tracker.history.update;
+            expect(update.sql).toContain('make_interval');
+            expect(update.sql).toMatch(/"status" in \(\$\d+, \$\d+\)/);
+            expect(update.bindings).toEqual(
+                expect.arrayContaining([
+                    'failed',
+                    'Writeback timed out',
+                    'queued',
+                    'running',
+                    WRITEBACK_STALE_MS / 1000,
+                    REMEDIATION_UUID,
+                    ORGANIZATION_UUID,
+                ]),
+            );
+        });
+    });
+
+    describe('review remediations', () => {
+        it('creates a remediation for a review item finding', async () => {
+            tracker.on.insert(AiAgentReviewRemediationTableName).responseOnce([
+                makeRemediationRow({
+                    pull_request_uuid: null,
+                    linked_pr_url: undefined,
+                }),
+            ]);
+
+            const result = await model.createReviewRemediation({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                sourceFindingUuid: TURN_SIGNAL_UUID,
+                sourcePromptUuid: PROMPT_UUID,
+                sourceThreadUuid: THREAD_UUID,
+                sourceProjectUuid: PROJECT_UUID,
+                sourceAgentUuid: AGENT_UUID,
+                workThreadUuid: null,
+                retryPrompt: 'Show revenue',
+                createdByUserUuid: null,
+            });
+
+            expect(result).toEqual(
+                expect.objectContaining({
+                    uuid: REMEDIATION_UUID,
+                    fingerprint: FINGERPRINT,
+                    sourceFindingUuid: TURN_SIGNAL_UUID,
+                    sourcePromptUuid: PROMPT_UUID,
+                    sourceThreadUuid: THREAD_UUID,
+                    sourceProjectUuid: PROJECT_UUID,
+                    sourceAgentUuid: AGENT_UUID,
+                    linkedPrUrl: null,
+                    retryPrompt: 'Show revenue',
+                }),
+            );
+        });
+
+        it('links PR and preview thread state onto a remediation', async () => {
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce([]);
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce([]);
+            tracker.on
+                .update(AiAgentReviewRemediationTableName)
+                .responseOnce([]);
+
+            await model.setReviewRemediationPullRequest({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                pullRequestUuid: PULL_REQUEST_UUID,
+            });
+            await model.setReviewRemediationPreview({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                previewProjectUuid: PREVIEW_PROJECT_UUID,
+                previewAgentUuid: PREVIEW_AGENT_UUID,
+            });
+            await model.setReviewRemediationPreviewThread({
+                remediationUuid: REMEDIATION_UUID,
+                organizationUuid: ORGANIZATION_UUID,
+                previewProjectUuid: PREVIEW_PROJECT_UUID,
+                previewAgentUuid: PREVIEW_AGENT_UUID,
+                previewThreadUuid: PREVIEW_THREAD_UUID,
+            });
+
+            expect(tracker.history.update).toHaveLength(3);
+            expect(tracker.history.update[0].bindings).toContain(
+                PULL_REQUEST_UUID,
+            );
+            expect(tracker.history.update[1].bindings).toEqual(
+                expect.arrayContaining([
+                    PREVIEW_PROJECT_UUID,
+                    PREVIEW_AGENT_UUID,
+                ]),
+            );
+            expect(tracker.history.update[2].bindings).toEqual(
+                expect.arrayContaining([
+                    PREVIEW_PROJECT_UUID,
+                    PREVIEW_AGENT_UUID,
+                    PREVIEW_THREAD_UUID,
+                ]),
+            );
+        });
+
+        it('gets a single remediation with linked PR URL', async () => {
+            tracker.on
+                .select(AiAgentReviewRemediationTableName)
+                .responseOnce([makeRemediationRow()]);
+
+            const result = await model.getReviewRemediation({
+                organizationUuid: ORGANIZATION_UUID,
+                remediationUuid: REMEDIATION_UUID,
+            });
+
+            expect(result).toEqual(
+                expect.objectContaining({
+                    uuid: REMEDIATION_UUID,
+                    linkedPrUrl: 'https://github.com/acme/dbt/pull/42',
+                    previewProjectUuid: PREVIEW_PROJECT_UUID,
+                }),
+            );
+        });
+
+        it('gets prompt text for a retry prompt', async () => {
+            tracker.on
+                .select(AiPromptTableName)
+                .responseOnce([{ prompt: 'Show revenue' }]);
+
+            await expect(
+                model.getPromptText({
+                    organizationUuid: ORGANIZATION_UUID,
+                    promptUuid: PROMPT_UUID,
+                }),
+            ).resolves.toEqual('Show revenue');
+        });
+    });
+
+    describe('listReviewSignals', () => {
+        it('returns recent classifier signals with inline finding context', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    ...makeTurnSignalRow(),
+                    signal_created_at: SEEN_AT,
+                    run_scope: {
+                        type: 'live_event',
+                        eventType: 'response_saved',
+                        promptUuid: PROMPT_UUID,
+                        threadUuid: THREAD_UUID,
+                        projectUuid: PROJECT_UUID,
+                        agentUuid: AGENT_UUID,
+                    },
+                    prompt: 'Show revenue',
+                    response:
+                        'Revenue is order count. <ld-mem-cite id="revenue-definition"></ld-mem-cite>',
+                    error_message: null,
+                },
+            ]);
+
+            const result = await model.listReviewSignals({
+                organizationUuid: ORGANIZATION_UUID,
+            });
+
+            expect(result).toHaveLength(1);
+            const [query] = tracker.history.select;
+            expect(query.bindings).toContain('product_capability');
+            expect(query.sql).toMatch(/primary_root_cause"? is null/i);
+            expect(result[0]).toEqual(
+                expect.objectContaining({
+                    uuid: TURN_SIGNAL_UUID,
+                    runUuid: RUN_UUID,
+                    promptUuid: PROMPT_UUID,
+                    signal: 'implicit_correction',
+                    promotedToFinding: true,
+                    prompt: 'Show revenue',
+                    responsePreview: 'Revenue is order count. ',
+                    finding: expect.objectContaining({
+                        uuid: TURN_SIGNAL_UUID,
+                        reviewItemUuid: FINGERPRINT,
+                        primaryRootCause: 'semantic_layer',
+                    }),
+                }),
+            );
+        });
+    });
+
+    describe('createTurnSignal', () => {
+        const promotedFinding = {
+            primaryRootCause: 'semantic_layer' as const,
+            secondaryRootCauses: [],
+            subcategories: [],
+            fixTargets: [],
+            targetRefs: [],
+            evidenceExcerpts: [],
+            recommendation: null,
+            projectContextEntry: null,
+            skillProposal: null,
+            reviewItem: {
+                fingerprint: FINGERPRINT,
+                title: 'Review airports.country',
+                description: 'Country needs semantic clarification.',
+                ownerType: 'semantic_layer_owner' as const,
+            },
+        };
+
+        it('records a created issue event on first promotion of a fingerprint', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(0);
+            tracker.on
+                .insert(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID },
+                ]);
+            // No existing item for this fingerprint → first promotion.
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+
+            const result = await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal,
+                finding: promotedFinding,
+            });
+
+            expect(result.reviewItemOutcome).toBe('created');
+            const eventInserts = tracker.history.insert.filter((q) =>
+                q.sql.includes(AiAgentReviewItemEventsTableName),
+            );
+            expect(eventInserts).toHaveLength(1);
+            expect(eventInserts[0].bindings).toContain('created');
+        });
+
+        it('records a recurred issue event when the fingerprint already exists', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(0);
+            tracker.on
+                .insert(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID },
+                ]);
+            // Existing open item for this fingerprint → recurrence.
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce([{ status: 'open', dismissed_reason: null }]);
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+
+            const result = await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal,
+                finding: promotedFinding,
+            });
+
+            expect(result.reviewItemOutcome).toBe('recurred');
+            const eventInserts = tracker.history.insert.filter((q) =>
+                q.sql.includes(AiAgentReviewItemEventsTableName),
+            );
+            expect(eventInserts).toHaveLength(1);
+            expect(eventInserts[0].bindings).toContain('recurred');
+        });
+
+        it('persists a classified signal with inline finding fields', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(0);
+            tracker.on.insert(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID,
+                },
+            ]);
+            // No existing item for this fingerprint → nothing to reopen.
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+
+            const result = await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal,
+                finding: {
+                    primaryRootCause: 'semantic_layer',
+                    secondaryRootCauses: ['project_context'],
+                    subcategories: ['missing_dimension'],
+                    fixTargets: ['semantic_yaml_patch'],
+                    targetRefs: [
+                        {
+                            type: 'dimension',
+                            modelName: 'airports',
+                            dimensionName: 'country',
+                        },
+                    ],
+                    evidenceExcerpts: [
+                        {
+                            source: 'next_user_prompt',
+                            text: 'Country is not available here.',
+                            redacted: false,
+                        },
+                    ],
+                    recommendation: null,
+                    projectContextEntry: null,
+                    skillProposal: null,
+                    reviewItem: {
+                        fingerprint: FINGERPRINT,
+                        title: 'Review airports.country',
+                        description: 'Country needs semantic clarification.',
+                        ownerType: 'semantic_layer_owner',
+                    },
+                },
+            });
+
+            expect(result.turnSignalUuid).toBe(TURN_SIGNAL_UUID);
+            // Supersede: the turn's prior signal is deleted before the new one
+            // is inserted (one current signal per turn).
+            expect(tracker.history.delete).toHaveLength(1);
+            expect(tracker.history.delete[0].sql).toContain(
+                AiAgentTurnSignalTableName,
+            );
+            expect(tracker.history.insert).toHaveLength(3);
+            expect(tracker.history.insert[1].sql).toContain(
+                AiAgentReviewItemTableName,
+            );
+            expect(tracker.history.insert[2].sql).toContain(
+                AiAgentReviewItemEventsTableName,
+            );
+            // The supersede + item write are serialized behind a per-turn
+            // advisory lock so concurrent re-reviews cannot clobber each other.
+            expect(
+                [
+                    ...tracker.history.select,
+                    ...(tracker.history.any ?? []),
+                ].some((q) => q.sql.includes('pg_advisory_xact_lock')),
+            ).toBe(true);
+        });
+
+        it('does not upsert a review item when the turn is not promoted', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(0);
+            tracker.on.insert(AiAgentTurnSignalTableName).responseOnce([
+                {
+                    ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID,
+                },
+            ]);
+
+            const result = await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal: { ...turnSignal, promotedToFinding: false },
+                finding: null,
+            });
+
+            expect(result.reviewItemOutcome).toBeNull();
+            expect(tracker.history.insert).toHaveLength(1);
+            expect(tracker.history.insert[0].sql).toContain(
+                AiAgentTurnSignalTableName,
+            );
+        });
+
+        it('removes a now-orphaned pristine review item when a re-review drops the finding', async () => {
+            const ORPHAN_FINGERPRINT = 'ai_agent_review_item:orphan';
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            const supersededSelect = tracker.on.select(
+                AiAgentTurnSignalTableName,
+            );
+            // 1st select: fingerprints being superseded. 2nd: which remain backed.
+            supersededSelect.responseOnce([
+                { fingerprint: ORPHAN_FINGERPRINT },
+            ]);
+            supersededSelect.responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(1);
+            tracker.on
+                .insert(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID },
+                ]);
+            tracker.on.delete(AiAgentReviewItemTableName).responseOnce(1);
+
+            await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal: { ...turnSignal, promotedToFinding: false },
+                finding: null,
+            });
+
+            // No new item is written (the re-review is not a finding) ...
+            expect(tracker.history.insert).toHaveLength(1);
+            // ... and the orphaned item is deleted, guarded to pristine rows.
+            const itemDeletes = tracker.history.delete.filter((q) =>
+                q.sql.includes(AiAgentReviewItemTableName),
+            );
+            expect(itemDeletes).toHaveLength(1);
+            expect(itemDeletes[0].sql).toContain('status');
+            expect(itemDeletes[0].sql).toContain('assigned_to_user_uuid');
+            expect(itemDeletes[0].sql).toContain('linked_pr_url');
+            expect(itemDeletes[0].bindings).toContain(ORPHAN_FINGERPRINT);
+        });
+
+        it('keeps the review item when the finding is unchanged across a re-review', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            // Superseded fingerprint equals the new one → not an orphan.
+            tracker.on
+                .select(AiAgentTurnSignalTableName)
+                .responseOnce([{ fingerprint: FINGERPRINT }]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(1);
+            tracker.on
+                .insert(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID },
+                ]);
+            // Existing item is already open → no reopen.
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce([{ status: 'open', dismissed_reason: null }]);
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+
+            const result = await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal,
+                finding: {
+                    primaryRootCause: 'semantic_layer',
+                    secondaryRootCauses: [],
+                    subcategories: [],
+                    fixTargets: [],
+                    targetRefs: [],
+                    evidenceExcerpts: [],
+                    recommendation: null,
+                    projectContextEntry: null,
+                    skillProposal: null,
+                    reviewItem: {
+                        fingerprint: FINGERPRINT,
+                        title: 'Review airports.country',
+                        description: 'Country needs semantic clarification.',
+                        ownerType: 'semantic_layer_owner',
+                    },
+                },
+            });
+
+            // Same-turn re-review (supersede path) is neither created nor
+            // recurred — no ping.
+            expect(result.reviewItemOutcome).toBeNull();
+            // The item is re-touched (upsert), never deleted, since the
+            // fingerprint is stable across the re-review.
+            expect(
+                tracker.history.delete.filter((q) =>
+                    q.sql.includes(AiAgentReviewItemTableName),
+                ),
+            ).toHaveLength(0);
+        });
+
+        it('reopens a resolved review item when its finding recurs', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(0);
+            tracker.on
+                .insert(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID },
+                ]);
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce([{ status: 'resolved', dismissed_reason: null }]);
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+            tracker.on.update(AiAgentReviewItemTableName).responseOnce(1);
+
+            await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal,
+                finding: {
+                    primaryRootCause: 'semantic_layer',
+                    secondaryRootCauses: [],
+                    subcategories: [],
+                    fixTargets: [],
+                    targetRefs: [],
+                    evidenceExcerpts: [],
+                    recommendation: null,
+                    projectContextEntry: null,
+                    skillProposal: null,
+                    reviewItem: {
+                        fingerprint: FINGERPRINT,
+                        title: 'Review airports.country',
+                        description: 'Country needs semantic clarification.',
+                        ownerType: 'semantic_layer_owner',
+                    },
+                },
+            });
+
+            const itemUpdates = tracker.history.update.filter((q) =>
+                q.sql.includes(AiAgentReviewItemTableName),
+            );
+            expect(itemUpdates).toHaveLength(1);
+            expect(itemUpdates[0].bindings).toContain('open');
+            expect(itemUpdates[0].bindings).toContain(FINGERPRINT);
+        });
+
+        it('does not reopen an item dismissed as expected behavior', async () => {
+            tracker.on.any(/pg_advisory_xact_lock/).response([]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+            tracker.on.delete(AiAgentTurnSignalTableName).responseOnce(0);
+            tracker.on
+                .insert(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { ai_agent_review_turn_signal_uuid: TURN_SIGNAL_UUID },
+                ]);
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([
+                {
+                    status: 'dismissed',
+                    dismissed_reason: 'expected_behavior',
+                },
+            ]);
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+            tracker.on
+                .insert(AiAgentReviewItemEventsTableName)
+                .responseOnce([]);
+
+            await model.createTurnSignal({
+                runUuid: RUN_UUID,
+                turnSignal,
+                finding: {
+                    primaryRootCause: 'semantic_layer',
+                    secondaryRootCauses: [],
+                    subcategories: [],
+                    fixTargets: [],
+                    targetRefs: [],
+                    evidenceExcerpts: [],
+                    recommendation: null,
+                    projectContextEntry: null,
+                    skillProposal: null,
+                    reviewItem: {
+                        fingerprint: FINGERPRINT,
+                        title: 'Review airports.country',
+                        description: 'Country needs semantic clarification.',
+                        ownerType: 'semantic_layer_owner',
+                    },
+                },
+            });
+
+            expect(
+                tracker.history.update.filter((q) =>
+                    q.sql.includes(AiAgentReviewItemTableName),
+                ),
+            ).toHaveLength(0);
+        });
+    });
+
+    describe('findReviewItemDedupCandidates', () => {
+        it('joins candidate items to their latest signal and excludes duplicates', async () => {
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([
+                {
+                    fingerprint: FINGERPRINT,
+                    status: 'open',
+                    dismissed_reason: null,
+                },
+                {
+                    fingerprint: 'ai_agent_review_item:second',
+                    status: 'dismissed',
+                    dismissed_reason: 'expected_behavior',
+                },
+            ]);
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([
+                makeTurnSignalRow({
+                    fingerprint: FINGERPRINT,
+                    review_item_title: 'Revenue metric mismatch',
+                    primary_root_cause: 'semantic_layer',
+                    target_refs: [
+                        {
+                            type: 'metric',
+                            modelName: 'orders',
+                            metricName: 'revenue',
+                        },
+                    ],
+                }),
+            ]);
+
+            const result = await model.findReviewItemDedupCandidates({
+                organizationUuid: ORGANIZATION_UUID,
+                projectUuid: PROJECT_UUID,
+                limit: 30,
+            });
+
+            // Item order preserved; latest signal fields joined by fingerprint;
+            // an item without a signal falls back to null fields.
+            expect(result).toEqual([
+                {
+                    fingerprint: FINGERPRINT,
+                    title: 'Revenue metric mismatch',
+                    status: 'open',
+                    dismissedReason: null,
+                    primaryRootCause: 'semantic_layer',
+                    targetRefs: [
+                        {
+                            type: 'metric',
+                            modelName: 'orders',
+                            metricName: 'revenue',
+                        },
+                    ],
+                },
+                {
+                    fingerprint: 'ai_agent_review_item:second',
+                    title: null,
+                    status: 'dismissed',
+                    dismissedReason: 'expected_behavior',
+                    primaryRootCause: null,
+                    targetRefs: null,
+                },
+            ]);
+
+            const [itemQuery] = tracker.history.select;
+            expect(itemQuery.bindings).toEqual(
+                expect.arrayContaining([
+                    'triage',
+                    'open',
+                    'in_progress',
+                    'resolved',
+                    'dismissed',
+                ]),
+            );
+            expect(itemQuery.bindings).not.toContain('duplicate');
+            expect(itemQuery.sql).toContain('order by');
+            expect(itemQuery.bindings).toContain(30);
+        });
+
+        it('skips the signal lookup when no candidate items exist', async () => {
+            tracker.on.select(AiAgentReviewItemTableName).responseOnce([]);
+
+            const result = await model.findReviewItemDedupCandidates({
+                organizationUuid: ORGANIZATION_UUID,
+                projectUuid: PROJECT_UUID,
+                limit: 30,
+            });
+
+            expect(result).toEqual([]);
+            const signalQueries = tracker.history.select.filter((q) =>
+                q.sql.includes(AiAgentTurnSignalTableName),
+            );
+            expect(signalQueries).toHaveLength(0);
+        });
+    });
+
+    describe('getPromotedFingerprintScope', () => {
+        it('returns the latest promoted signal scope for a fingerprint', async () => {
+            tracker.on
+                .select(AiAgentTurnSignalTableName)
+                .responseOnce([
+                    { project_uuid: PROJECT_UUID, agent_uuid: AGENT_UUID },
+                ]);
+
+            const scope = await model.getPromotedFingerprintScope(
+                ORGANIZATION_UUID,
+                FINGERPRINT,
+            );
+
+            expect(scope).toEqual({
+                projectUuid: PROJECT_UUID,
+                agentUuid: AGENT_UUID,
+            });
+        });
+
+        it('returns null when no promoted signal matches', async () => {
+            tracker.on.select(AiAgentTurnSignalTableName).responseOnce([]);
+
+            const scope = await model.getPromotedFingerprintScope(
+                ORGANIZATION_UUID,
+                FINGERPRINT,
+            );
+
+            expect(scope).toBeNull();
+        });
+    });
+
+    describe('upsertReviewItemState', () => {
+        it('upserts state by fingerprint with an on-conflict merge', async () => {
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+
+            await model.upsertReviewItemState({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                projectUuid: PROJECT_UUID,
+                agentUuid: AGENT_UUID,
+                status: 'dismissed',
+                dismissedReason: 'expected_behavior',
+                statusUpdatedByUserUuid: '00000000-0000-0000-0000-0000000000aa',
+            });
+
+            expect(tracker.history.insert).toHaveLength(1);
+            expect(tracker.history.insert[0].sql).toContain('on conflict');
+            expect(tracker.history.insert[0].sql).toContain(
+                AiAgentReviewItemTableName,
+            );
+        });
+    });
+
+    describe('setReviewItemWritebackStatus', () => {
+        it('upserts writeback status and message by fingerprint', async () => {
+            tracker.on.insert(AiAgentReviewItemTableName).responseOnce([]);
+
+            await model.setReviewItemWritebackStatus({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                projectUuid: PROJECT_UUID,
+                agentUuid: AGENT_UUID,
+                status: 'running',
+                message: 'Discovering models',
+            });
+
+            expect(tracker.history.insert).toHaveLength(1);
+            expect(tracker.history.insert[0].sql).toContain('on conflict');
+            expect(tracker.history.insert[0].bindings).toContain(
+                'Discovering models',
+            );
+        });
+    });
+
+    describe('updateReviewItemWritebackProgress', () => {
+        it('guards against resurrecting a terminal row', async () => {
+            tracker.on.update(AiAgentReviewItemTableName).responseOnce(0);
+
+            await model.updateReviewItemWritebackProgress({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                message: 'Starting sandbox',
+            });
+
+            expect(tracker.history.update).toHaveLength(1);
+            const sql = tracker.history.update[0].sql.toLowerCase();
+            expect(sql).toContain('not in');
+            expect(tracker.history.update[0].bindings).toContain('completed');
+            expect(tracker.history.update[0].bindings).toContain('failed');
+        });
+    });
+
+    describe('reconcileReviewItemPrState', () => {
+        it('promotes an active source memory when its pull request merges', async () => {
+            tracker.on
+                .update(AiAgentReviewItemTableName)
+                .responseOnce([{ source_ai_agent_memory_uuid: USER_UUID }]);
+            tracker.on.update(AiAgentMemoryTableName).responseOnce(1);
+
+            await model.reconcileReviewItemPrState({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                status: 'resolved',
+                prState: 'merged',
+            });
+
+            expect(tracker.history.update).toHaveLength(2);
+            expect(tracker.history.update[0].sql).toContain(
+                AiAgentReviewItemTableName,
+            );
+            expect(tracker.history.update[0].bindings).toContain('resolved');
+            expect(tracker.history.update[0].bindings).toContain('merged');
+            expect(tracker.history.update[1].sql).toContain(
+                AiAgentMemoryTableName,
+            );
+            expect(tracker.history.update[1].bindings).toContain('active');
+            expect(tracker.history.update[1].bindings).toContain('promoted');
+        });
+
+        it('leaves the source memory untouched when the pull request closes', async () => {
+            tracker.on
+                .update(AiAgentReviewItemTableName)
+                .responseOnce([{ source_ai_agent_memory_uuid: USER_UUID }]);
+
+            await model.reconcileReviewItemPrState({
+                fingerprint: FINGERPRINT,
+                organizationUuid: ORGANIZATION_UUID,
+                status: 'open',
+                prState: 'closed',
+            });
+
+            expect(tracker.history.update).toHaveLength(1);
+            expect(tracker.history.update[0].bindings).toContain('open');
+            expect(tracker.history.update[0].bindings).toContain('closed');
+        });
+
+        it('resolves a merged item when its source memory is no longer active', async () => {
+            tracker.on
+                .update(AiAgentReviewItemTableName)
+                .responseOnce([{ source_ai_agent_memory_uuid: USER_UUID }]);
+            tracker.on.update(AiAgentMemoryTableName).responseOnce(0);
+
+            await expect(
+                model.reconcileReviewItemPrState({
+                    fingerprint: FINGERPRINT,
+                    organizationUuid: ORGANIZATION_UUID,
+                    status: 'resolved',
+                    prState: 'merged',
+                }),
+            ).resolves.toBeUndefined();
+
+            expect(tracker.history.update).toHaveLength(2);
+        });
+
+        it('resolves a merged item after its source memory was deleted', async () => {
+            tracker.on
+                .update(AiAgentReviewItemTableName)
+                .responseOnce([{ source_ai_agent_memory_uuid: null }]);
+
+            await expect(
+                model.reconcileReviewItemPrState({
+                    fingerprint: FINGERPRINT,
+                    organizationUuid: ORGANIZATION_UUID,
+                    status: 'resolved',
+                    prState: 'merged',
+                }),
+            ).resolves.toBeUndefined();
+
+            expect(tracker.history.update).toHaveLength(1);
+        });
+    });
+
+    describe('withReviewItemLinkedIssueLock', () => {
+        it('locks the row and stores the URL set by the callback', async () => {
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce([{ linked_issue_url: null }]);
+            tracker.on.update(AiAgentReviewItemTableName).responseOnce(1);
+
+            const seen: Array<string | null> = [];
+            await model.withReviewItemLinkedIssueLock(
+                {
+                    organizationUuid: ORGANIZATION_UUID,
+                    fingerprint: FINGERPRINT,
+                },
+                async (linkedIssueUrl, setLinkedIssueUrl) => {
+                    seen.push(linkedIssueUrl);
+                    await setLinkedIssueUrl(
+                        'https://linear.app/acme/issue/PRD-1',
+                    );
+                },
+            );
+
+            expect(seen).toEqual([null]);
+            expect(tracker.history.select[0].sql).toContain('for update');
+            expect(tracker.history.update).toHaveLength(1);
+            expect(tracker.history.update[0].bindings).toContain(
+                'https://linear.app/acme/issue/PRD-1',
+            );
+        });
+
+        it('hands the callback an existing URL without updating', async () => {
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce([
+                    { linked_issue_url: 'https://linear.app/acme/issue/PRD-1' },
+                ]);
+
+            const result = await model.withReviewItemLinkedIssueLock(
+                {
+                    organizationUuid: ORGANIZATION_UUID,
+                    fingerprint: FINGERPRINT,
+                },
+                async (linkedIssueUrl) => linkedIssueUrl,
+            );
+
+            expect(result).toBe('https://linear.app/acme/issue/PRD-1');
+            expect(tracker.history.update).toHaveLength(0);
+        });
+    });
+
+    describe('listUnlinkedReviewItemsForLinearExport', () => {
+        it('returns open items that have a project and no Linear URL', async () => {
+            tracker.on
+                .select(AiAgentReviewItemTableName)
+                .responseOnce([
+                    { fingerprint: FINGERPRINT, project_uuid: PROJECT_UUID },
+                ]);
+
+            await expect(
+                model.listUnlinkedReviewItemsForLinearExport({
+                    organizationUuid: ORGANIZATION_UUID,
+                    projectUuids: null,
+                }),
+            ).resolves.toEqual([
+                { fingerprint: FINGERPRINT, projectUuid: PROJECT_UUID },
+            ]);
+
+            const { sql } = tracker.history.select[0];
+            expect(sql).toContain(AiAgentReviewItemTableName);
+            expect(sql).toContain('linked_issue_url');
+            expect(tracker.history.select[0].bindings).toContain('triage');
+            expect(tracker.history.select[0].bindings).toContain('open');
+            expect(tracker.history.select[0].bindings).toContain('in_progress');
+        });
+
+        it('returns nothing when selected-project routing has no projects', async () => {
+            await expect(
+                model.listUnlinkedReviewItemsForLinearExport({
+                    organizationUuid: ORGANIZATION_UUID,
+                    projectUuids: [],
+                }),
+            ).resolves.toEqual([]);
+            expect(tracker.history.select).toHaveLength(0);
+        });
+    });
+});

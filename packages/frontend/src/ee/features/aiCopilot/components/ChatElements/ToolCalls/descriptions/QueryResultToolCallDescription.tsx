@@ -1,26 +1,29 @@
-import { type ToolRunQueryArgs } from '@lightdash/common';
-import { Group, Text } from '@mantine-8/core';
+import {
+    isCustomChartTypeSlugChartConfig,
+    type ToolRunQueryArgs,
+} from '@lightdash/common';
+import { Group, Text } from '@mantine/core';
 import type { FC } from 'react';
 import { ToolCallChip } from '../ToolCallChip';
 import { formatFieldName } from '../utils/formatFieldName';
 
-type QueryResultToolCallDescriptionProps = Pick<
-    ToolRunQueryArgs,
-    | 'title'
-    | 'queryConfig'
-    | 'chartConfig'
-    | 'customMetrics'
-    | 'tableCalculations'
->;
+type QueryResultToolCallDescriptionProps = {
+    title: ToolRunQueryArgs['title'];
+    queryConfig: ToolRunQueryArgs['queryConfig'];
+    chartConfig: ToolRunQueryArgs['chartConfig'];
+};
 
 export const QueryResultToolCallDescription: FC<
     QueryResultToolCallDescriptionProps
-> = ({ title, queryConfig, chartConfig, customMetrics, tableCalculations }) => {
+> = ({ title, queryConfig, chartConfig }) => {
     const dimensions = queryConfig?.dimensions || [];
     const metrics = queryConfig?.metrics || [];
-    const groupBy = chartConfig?.groupBy || [];
-    const customMetricsArray = customMetrics || [];
-    const tableCalculationsArray = tableCalculations || [];
+    const groupBy =
+        (!isCustomChartTypeSlugChartConfig(chartConfig) &&
+            chartConfig?.groupBy) ||
+        [];
+    const customMetricsArray = queryConfig?.customMetrics || [];
+    const tableCalculationsArray = queryConfig?.tableCalculations || [];
 
     // Separate dimensions into regular dimensions and groupBy dimensions
     const regularDimensions = dimensions.filter(

@@ -2,31 +2,43 @@ import {
     isChartValidationError,
     isFixableDashboardValidationError,
     ValidationErrorType,
+    ValidationSourceType,
     type ValidationErrorChartResponse,
     type ValidationErrorDashboardResponse,
-    type ValidationSourceType,
+    type ValidationErrorGroup,
 } from '@lightdash/common';
-import { Button, Group, Loader, Paper, Text } from '@mantine-8/core';
+import { Button, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { IconCheck } from '@tabler/icons-react';
-import { useCallback, useMemo, useState, type FC } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import useSearchParams from '../../hooks/useSearchParams';
 import {
+    useAllValidations,
     usePaginatedValidation,
     usePinnedValidation,
     useValidationMutation,
+    useValidationSummary,
 } from '../../hooks/validation/useValidation';
 import useApp from '../../providers/App/useApp';
 import MantineIcon from '../common/MantineIcon';
+import { SettingsPage } from '../common/Settings/SettingsPage';
+import { BulkDeleteContentModal } from './BulkDeleteContentModal';
+import {
+    dedupeContentItems,
+    getDeletableContentItem,
+    type ValidationContentItem,
+} from './utils/deletableContent';
+import { ValidationSummarySection } from './ValidationSummarySection';
 import { ValidatorTable } from './ValidatorTable';
 import { ChartConfigurationErrorModal } from './ValidatorTable/ChartConfigurationErrorModal';
 import { FixDashboardFilterModal } from './ValidatorTable/FixDashboardFilterModal';
 import { FixValidationErrorModal } from './ValidatorTable/FixValidationErrorModal';
 
-export const SettingsValidator: FC<{ projectUuid: string }> = ({
-    projectUuid,
-}) => {
+export const SettingsValidator: FC<{
+    projectUuid: string;
+    flush?: boolean;
+}> = ({ projectUuid, flush = false }) => {
     const [isValidating, setIsValidating] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [debouncedSearch] = useDebouncedValue(searchQuery, 300);
@@ -50,12 +62,20 @@ export const SettingsValidator: FC<{ projectUuid: string }> = ({
         void navigate({ pathname }, { replace: true });
     }, [navigate, pathname]);
 
+    const { data: summary } = useValidationSummary(projectUuid, user);
+    const [activeGroup, setActiveGroup] = useState<ValidationErrorGroup | null>(
+        null,
+    );
+
     const { data, isLoading, isFetching, isError, fetchNextPage } =
         usePaginatedValidation(projectUuid, user, {
             pageSize: 20,
             searchQuery: debouncedSearch || undefined,
             sourceTypes:
                 sourceTypeFilter.length > 0 ? sourceTypeFilter : undefined,
+            errorTypes: activeGroup ? [activeGroup.errorType] : undefined,
+            tableName: activeGroup?.tableName ?? undefined,
+            fieldName: activeGroup?.fieldName ?? undefined,
             includeChartConfigWarnings: showConfigWarnings,
         });
 
@@ -71,6 +91,57 @@ export const SettingsValidator: FC<{ projectUuid: string }> = ({
         useState<ValidationErrorChartResponse>();
     const [selectedDashboardError, setSelectedDashboardError] =
         useState<ValidationErrorDashboardResponse>();
+
+    // Bulk delete: from table row selection or from a summary group
+    const [rowSelection, setRowSelection] = useState<Record<string, boolean>>(
+        {},
+    );
+    const [selectionDeleteItems, setSelectionDeleteItems] = useState<
+        ValidationContentItem[] | null
+    >(null);
+    const [deleteGroup, setDeleteGroup] = useState<ValidationErrorGroup | null>(
+        null,
+    );
+    const { data: allValidations } = useAllValidations(
+        projectUuid,
+        deleteGroup !== null,
+    );
+
+    // Group delete targets charts referencing the model. Dashboards usually
+    // have other healthy tiles, so they stay for manual review.
+    const groupDeleteItems = useMemo(() => {
+        if (!deleteGroup || !allValidations) return null;
+        return dedupeContentItems(
+            allValidations.flatMap((validation) => {
+                if (
+                    validation.source !== ValidationSourceType.Chart ||
+                    !isChartValidationError(validation) ||
+                    validation.tableName !== deleteGroup.tableName
+                ) {
+                    return [];
+                }
+                const item = getDeletableContentItem(validation);
+                return item ? [item] : [];
+            }),
+        );
+    }, [deleteGroup, allValidations]);
+
+    const deleteModalItems = selectionDeleteItems ?? groupDeleteItems;
+
+    const closeDeleteModal = useCallback(() => {
+        setSelectionDeleteItems(null);
+        setDeleteGroup(null);
+    }, []);
+
+    // Selection references loaded rows, so clear it when the result set changes
+    useEffect(() => {
+        setRowSelection({});
+    }, [
+        debouncedSearch,
+        sourceTypeFilter,
+        showConfigWarnings,
+        activeGroup?.groupKey,
+    ]);
 
     const flatData = useMemo(
         () => data?.pages.flatMap((page) => page.data) ?? [],
@@ -96,11 +167,15 @@ export const SettingsValidator: FC<{ projectUuid: string }> = ({
 
     // Check if filters are active to determine if we should always show the table
     const hasActiveFilters =
-        searchQuery !== '' || sourceTypeFilter.length > 0 || showConfigWarnings;
+        searchQuery !== '' ||
+        sourceTypeFilter.length > 0 ||
+        showConfigWarnings ||
+        activeGroup !== null;
 
-    return (
+    const content = (
         <>
             <FixValidationErrorModal
+                key={selectedValidationError?.validationUuid}
                 validationError={selectedValidationError}
                 allValidationErrors={flatData}
                 onClose={() => {
@@ -120,11 +195,113 @@ export const SettingsValidator: FC<{ projectUuid: string }> = ({
                     setSelectedConfigError(undefined);
                 }}
             />
-            <Group gap="md" justify="space-between" mb="md">
-                <Text c="dimmed">
-                    Use the project validator to check what content is broken in
-                    your project.
-                </Text>
+            <BulkDeleteContentModal
+                projectUuid={projectUuid}
+                items={deleteModalItems ?? []}
+                opened={deleteModalItems !== null}
+                onClose={closeDeleteModal}
+                onDeleted={() => setRowSelection({})}
+            />
+            <Stack
+                gap="sm"
+                // Walkthrough result marker for manage:Validation: the
+                // report, holding the seeded chart's broken field once the
+                // run is done. The run button shows its loader until then.
+                data-tour-scope="manage:Validation"
+                data-tour-step="1"
+                data-tour-route="/generalSettings/projectManagement/:projectUuid/validator"
+                data-tour-label="See what the validator found"
+                data-tour-docs="workflow/validating-your-content.mdx#intro:1-2"
+                data-tour-return="none"
+                data-tour-busy='[data-tour-anchor="validation-running"]'
+                data-tour-resultdocs="workflow/validating-your-content.mdx#what-content-is-included-in-the-validation:1"
+            >
+                {summary && (
+                    <ValidationSummarySection
+                        summary={summary}
+                        activeGroupKey={activeGroup?.groupKey ?? null}
+                        onToggleGroup={(group) =>
+                            setActiveGroup((current) =>
+                                current?.groupKey === group.groupKey
+                                    ? null
+                                    : group,
+                            )
+                        }
+                        onDeleteGroup={setDeleteGroup}
+                    />
+                )}
+                {isLoading ? (
+                    <Paper shadow="sm">
+                        <Group justify="center" gap="xs" p="md">
+                            <Loader color="gray" />
+                        </Group>
+                    </Paper>
+                ) : flatData.length > 0 ||
+                  pinnedValidation ||
+                  hasActiveFilters ? (
+                    <ValidatorTable
+                        data={deduplicatedData}
+                        projectUuid={projectUuid}
+                        onSelectValidationError={(validationError) => {
+                            if (isChartValidationError(validationError)) {
+                                if (
+                                    validationError.errorType ===
+                                    ValidationErrorType.ChartConfiguration
+                                ) {
+                                    setSelectedConfigError(validationError);
+                                } else {
+                                    setSelectedValidationError(validationError);
+                                }
+                            } else if (
+                                isFixableDashboardValidationError(
+                                    validationError,
+                                )
+                            ) {
+                                setSelectedDashboardError(validationError);
+                            }
+                        }}
+                        isFetching={isFetching}
+                        isLoading={isLoading}
+                        isError={isError}
+                        totalDBRowCount={totalDBRowCount}
+                        fetchNextPage={fetchNextPage}
+                        pinnedValidation={pinnedValidation}
+                        onUnpin={handleUnpin}
+                        searchQuery={searchQuery}
+                        setSearchQuery={setSearchQuery}
+                        sourceTypeFilter={sourceTypeFilter}
+                        setSourceTypeFilter={setSourceTypeFilter}
+                        showConfigWarnings={showConfigWarnings}
+                        setShowConfigWarnings={setShowConfigWarnings}
+                        lastValidatedAt={lastValidatedAt}
+                        flush={flush}
+                        rowSelection={rowSelection}
+                        setRowSelection={setRowSelection}
+                        onBulkDelete={setSelectionDeleteItems}
+                    />
+                ) : (
+                    <Paper shadow="sm">
+                        <Group justify="center" gap="xs" p="md">
+                            <MantineIcon icon={IconCheck} color="green" />
+                            <Text fw={500} c="ldGray.7">
+                                No validation errors found
+                            </Text>
+                        </Group>
+                    </Paper>
+                )}
+            </Stack>
+        </>
+    );
+
+    if (flush) {
+        return content;
+    }
+
+    return (
+        <SettingsPage
+            title="Validator"
+            description="Find content errors and issues across this project."
+            actions={
                 <Button
                     size="xs"
                     onClick={() => {
@@ -132,62 +309,27 @@ export const SettingsValidator: FC<{ projectUuid: string }> = ({
                         validateProject();
                     }}
                     loading={isValidating}
+                    // Named only while the run is in progress: the busy
+                    // surface the walkthrough's closing step waits on.
+                    data-tour-anchor={
+                        isValidating ? 'validation-running' : undefined
+                    }
+                    data-tour-scope="manage:Validation"
+                    data-tour-step="2"
+                    data-tour-route="/generalSettings/projectManagement/:projectUuid/validator"
+                    data-tour-label="Click Run validation"
+                    data-tour-title="Find broken content with the validator"
+                    data-tour-interactive="true"
+                    // Admins land on Connection settings, learners on the
+                    // Validator: the sidebar link works for both.
+                    data-tour-via='[data-tour-nav="settings"] >> [data-tour-nav="project-settings"] >> [data-tour-nav="validator"]'
+                    data-tour-docs="workflow/validating-your-content.mdx#how-can-i-validate-my-content:1"
                 >
                     Run validation
                 </Button>
-            </Group>
-
-            {isLoading ? (
-                <Paper withBorder shadow="sm">
-                    <Group justify="center" gap="xs" p="md">
-                        <Loader color="gray" />
-                    </Group>
-                </Paper>
-            ) : flatData.length > 0 || pinnedValidation || hasActiveFilters ? (
-                <ValidatorTable
-                    data={deduplicatedData}
-                    projectUuid={projectUuid}
-                    onSelectValidationError={(validationError) => {
-                        if (isChartValidationError(validationError)) {
-                            if (
-                                validationError.errorType ===
-                                ValidationErrorType.ChartConfiguration
-                            ) {
-                                setSelectedConfigError(validationError);
-                            } else {
-                                setSelectedValidationError(validationError);
-                            }
-                        } else if (
-                            isFixableDashboardValidationError(validationError)
-                        ) {
-                            setSelectedDashboardError(validationError);
-                        }
-                    }}
-                    isFetching={isFetching}
-                    isLoading={isLoading}
-                    isError={isError}
-                    totalDBRowCount={totalDBRowCount}
-                    fetchNextPage={fetchNextPage}
-                    pinnedValidation={pinnedValidation}
-                    onUnpin={handleUnpin}
-                    searchQuery={searchQuery}
-                    setSearchQuery={setSearchQuery}
-                    sourceTypeFilter={sourceTypeFilter}
-                    setSourceTypeFilter={setSourceTypeFilter}
-                    showConfigWarnings={showConfigWarnings}
-                    setShowConfigWarnings={setShowConfigWarnings}
-                    lastValidatedAt={lastValidatedAt}
-                />
-            ) : (
-                <Paper withBorder shadow="sm">
-                    <Group justify="center" gap="xs" p="md">
-                        <MantineIcon icon={IconCheck} color="green" />
-                        <Text fw={500} c="ldGray.7">
-                            No validation errors found
-                        </Text>
-                    </Group>
-                </Paper>
-            )}
-        </>
+            }
+        >
+            {content}
+        </SettingsPage>
     );
 };

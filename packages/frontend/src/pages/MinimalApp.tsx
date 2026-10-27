@@ -1,21 +1,30 @@
-import { FeatureFlags } from '@lightdash/common';
-import { Box, Loader, Stack, Text } from '@mantine-8/core';
-import { useDebouncedValue } from '@mantine-8/hooks';
+import {
+    DELIVERY_CAPTURE_GLOBAL,
+    FeatureFlags,
+    QueryExecutionContext,
+    type DeliveryCaptureManifest,
+} from '@lightdash/common';
+import { Box, Loader, Stack, Text } from '@mantine/core';
+import { useDebouncedValue } from '@mantine/hooks';
 import { IconAppsOff } from '@tabler/icons-react';
-import { useCallback, useState } from 'react';
-import { Navigate, useParams } from 'react-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Navigate, useParams, useSearchParams } from 'react-router';
 import ScreenshotReadyIndicator from '../components/common/ScreenshotReadyIndicator';
 import SuboptimalState from '../components/common/SuboptimalState/SuboptimalState';
 import ForbiddenPanel from '../components/ForbiddenPanel';
 import AppIframePreview from '../features/apps/AppIframePreview';
+import { createDeliveryCaptureAccumulator } from '../features/apps/deliveryCapture/deliveryCaptureAccumulator';
+import { getVisiblePreviewTokenError } from '../features/apps/hooks/previewTokenQueryOptions';
 import { useAppPreviewToken } from '../features/apps/hooks/useAppPreviewToken';
 import { type QueryEvent } from '../features/apps/hooks/useAppSdkBridge';
+import { useAppVersion } from '../features/apps/hooks/useAppVersion';
 import { useGetApp } from '../features/apps/hooks/useGetApp';
 import { usePreviewOrigin } from '../features/apps/previewOrigin';
+import { useProjectUuid } from '../hooks/useProjectUuid';
 import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 
 /**
- * How long the app must be quiet (iframe loaded, zero in-flight queries) before
+ * How long the app must be quiet (SDK alive, zero in-flight queries) before
  * we consider it ready for screenshot. Apps that fire a series of queries can
  * briefly hit zero in-flight between requests; this debounce avoids signalling
  * ready in those gaps.
@@ -23,42 +32,106 @@ import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 const APP_QUIET_DEBOUNCE_MS = 1_500;
 
 /**
+ * Fallback: when the iframe has been loaded this long without the SDK
+ * announcing `lightdash:sdk:screenshot-available`, treat it as alive
+ * anyway. Covers apps generated before that announce shipped in the
+ * template — their bundle still loads and runs queries, it just never
+ * tells us. Without this fallback those scheduled deliveries would time
+ * out at 60s every run.
+ */
+const SDK_ALIVE_FALLBACK_MS = 8_000;
+
+/**
  * Chrome-stripped variant of AppPreviewTest used by the headless browser
- * for scheduled-delivery screenshots. Always renders the latest ready
- * version — no version pinning, consistent with chart/dashboard schedulers.
+ * for server-side renders. Renders the latest ready version, consistent with
+ * chart/dashboard schedulers, unless `?version=` asks for a specific one —
+ * that version is rendered only if it is ready, with no fallback to another.
  *
  * Mounts a `ScreenshotReadyIndicator` once the iframe has loaded and all
  * SDK-bridge queries have settled — the backend `UnfurlService` waits on
  * that signal before triggering the screenshot.
  */
 export default function MinimalApp() {
-    const { projectUuid, appUuid } = useParams<{
-        projectUuid: string;
-        appUuid: string;
-    }>();
+    const { appUuid } = useParams();
+    const projectUuid = useProjectUuid();
+    const [searchParams] = useSearchParams();
+    const captureModeParam = searchParams.get('captureMode');
+    const captureMode: 'delivery' | 'preview' | null =
+        captureModeParam === 'delivery' || captureModeParam === 'preview'
+            ? captureModeParam
+            : null;
+    const deliveryCapture = useMemo(
+        () => (captureMode ? createDeliveryCaptureAccumulator() : undefined),
+        [captureMode],
+    );
+    // The published manifest doubles as the "already published" flag.
+    const [manifest, setManifest] = useState<DeliveryCaptureManifest | null>(
+        null,
+    );
 
     const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
 
     const appQuery = useGetApp(projectUuid, appUuid);
-    const latestReadyVersion = appQuery.data?.pages[0]?.versions.find(
-        (v) => v.status === 'ready',
-    )?.version;
+    // Authoritative across ALL versions — the ready version may be older than
+    // the fetched page of versions, so never scan `versions` for it.
+    const latestReadyVersion =
+        appQuery.data?.pages[0]?.latestReadyVersion ?? undefined;
+
+    const versionParam = searchParams.get('version');
+    const isVersionRequested = versionParam !== null;
+    const requestedVersion =
+        versionParam !== null && /^[1-9]\d*$/.test(versionParam)
+            ? Number(versionParam)
+            : undefined;
+    const requestedVersionQuery = useAppVersion(
+        projectUuid,
+        appUuid,
+        requestedVersion,
+    );
+    const isRequestedVersionLoading =
+        requestedVersion !== undefined && requestedVersionQuery.isLoading;
+    const readyRequestedVersion =
+        requestedVersionQuery.data?.status === 'ready'
+            ? requestedVersion
+            : undefined;
+    const version = isVersionRequested
+        ? readyRequestedVersion
+        : latestReadyVersion;
 
     const {
         data: token,
         isLoading: isTokenLoading,
         error: tokenError,
-    } = useAppPreviewToken(projectUuid, appUuid, latestReadyVersion);
+    } = useAppPreviewToken(projectUuid, appUuid, version, 'delivery');
 
     const previewOrigin = usePreviewOrigin();
 
     const [iframeLoaded, setIframeLoaded] = useState(false);
+    const [loadEpoch, setLoadEpoch] = useState(0);
+    const [sdkAlive, setSdkAlive] = useState(false);
+    const [sdkAliveFallback, setSdkAliveFallback] = useState(false);
     const [activeQueryIds, setActiveQueryIds] = useState<Set<string>>(
         () => new Set(),
     );
+    const [pendingCaptureCount, setPendingCaptureCount] = useState(0);
 
     const handleIframeLoad = useCallback(() => {
         setIframeLoaded(true);
+        // Every load (initial or same-identity reload) starts a new quiet
+        // epoch: the deliveryRender flag was just re-sent, and publish must
+        // wait a full quiet window for the reloaded app to react to it.
+        setLoadEpoch((epoch) => epoch + 1);
+        if (deliveryCapture) {
+            deliveryCapture.reset();
+            setManifest(null);
+            delete (window as unknown as Record<string, unknown>)[
+                DELIVERY_CAPTURE_GLOBAL
+            ];
+        }
+    }, [deliveryCapture]);
+
+    const handleScreenshotAvailable = useCallback((available: boolean) => {
+        setSdkAlive(available);
     }, []);
 
     const handleQueryEvent = useCallback((event: QueryEvent) => {
@@ -74,14 +147,100 @@ export default function MinimalApp() {
         });
     }, []);
 
-    // Debounced ready signal: only true once the iframe has loaded AND
-    // in-flight query count has been zero for APP_QUIET_DEBOUNCE_MS. Apps
-    // that fire a series of queries can briefly hit zero in-flight between
-    // requests; the debounce avoids signalling ready in those gaps.
-    const [isReady] = useDebouncedValue(
-        iframeLoaded && activeQueryIds.size === 0,
+    // Start the fallback clock once the iframe load event fires. The
+    // about:blank load fires first and we accept that — the fallback is
+    // a long backstop, not a precise SDK-bootstrap proxy. If the SDK
+    // announces before the timer fires, sdkAlive carries us; if not,
+    // sdkAliveFallback kicks in for old-template apps that never announce.
+    useEffect(() => {
+        if (!iframeLoaded) return;
+        const timer = setTimeout(
+            () => setSdkAliveFallback(true),
+            SDK_ALIVE_FALLBACK_MS,
+        );
+        return () => clearTimeout(timer);
+    }, [iframeLoaded]);
+
+    // In capture modes the accumulator — not the QueryEvent projection — is
+    // the delivery contract: a `/query/chart` POST is in-flight there before
+    // any QueryEvent exists for it, so readiness must consume it too.
+    useEffect(() => {
+        if (!deliveryCapture) return;
+        return deliveryCapture.subscribe(setPendingCaptureCount);
+    }, [deliveryCapture]);
+
+    // Debounced ready signal: only true once the SDK has announced (or the
+    // fallback timer has elapsed) AND in-flight query count has been zero
+    // for APP_QUIET_DEBOUNCE_MS. Gating on the SDK announce — not the
+    // iframe load — keeps the indicator from mounting in the window
+    // between iframe HTML load and the SDK bundle bootstrapping, which
+    // was the root cause of blank/mid-animation screenshots.
+    // A load epoch "settles" once APP_QUIET_DEBOUNCE_MS has passed since the
+    // last iframe load event — i.e. the deliveryRender flag (sent on load)
+    // has had a full quiet window for the app to react to it.
+    const [settledLoadEpoch] = useDebouncedValue(
+        loadEpoch,
         APP_QUIET_DEBOUNCE_MS,
     );
+    const loadEpochSettled = iframeLoaded && settledLoadEpoch === loadEpoch;
+
+    const [isReady] = useDebouncedValue(
+        (sdkAlive || sdkAliveFallback) &&
+            // Capture modes: the deliveryRender flag rides the ready message
+            // sent on iframe load, but the SDK announces (and the quiet clock
+            // starts) at bundle boot — before load. Requiring a settled load
+            // epoch gives the app a full quiet window AFTER the flag on every
+            // load — including same-identity reloads, where sdkAlive never
+            // flips — else an empty just-reset manifest can publish first.
+            (!captureMode || loadEpochSettled) &&
+            activeQueryIds.size === 0 &&
+            // Always 0 outside capture modes (no accumulator, no subscription).
+            pendingCaptureCount === 0,
+        APP_QUIET_DEBOUNCE_MS,
+    );
+
+    // Publishes the captured manifest to the window global exactly once per
+    // settle, before the indicator (which UnfurlService waits on) can mount.
+    // The un-debounced guards matter on reload: `isReady` lags the underlying
+    // condition by the debounce window, so without them a stale `true` could
+    // publish the just-reset accumulator before the new epoch settles.
+    useEffect(() => {
+        if (!isReady || !captureMode || !deliveryCapture || manifest !== null)
+            return;
+        if (
+            !loadEpochSettled ||
+            activeQueryIds.size > 0 ||
+            pendingCaptureCount > 0
+        )
+            return;
+        let cancelled = false;
+        void deliveryCapture
+            .getManifest()
+            .then((captured) => {
+                if (cancelled) return;
+                (window as unknown as Record<string, unknown>)[
+                    DELIVERY_CAPTURE_GLOBAL
+                ] = captured;
+                setManifest(captured);
+            })
+            // A rejection here would otherwise leave the indicator unmounted
+            // until the render times out, with nothing in the logs.
+            .catch((e) =>
+                console.error('[delivery-capture] manifest publish failed', e),
+            );
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        isReady,
+        captureMode,
+        deliveryCapture,
+        manifest,
+        loadEpochSettled,
+        activeQueryIds,
+        pendingCaptureCount,
+    ]);
+    const indicatorReady = captureMode ? isReady && manifest !== null : isReady;
 
     if (dataAppsFlag.isLoading) return null;
     if (!dataAppsFlag.data?.enabled) {
@@ -91,16 +250,18 @@ export default function MinimalApp() {
         return <div>Missing route params</div>;
     }
 
+    const visibleTokenError = getVisiblePreviewTokenError(tokenError, !!token);
     const isForbidden =
         appQuery.error?.error?.statusCode === 403 ||
-        tokenError?.error?.statusCode === 403;
+        requestedVersionQuery.error?.error?.statusCode === 403 ||
+        visibleTokenError?.error?.statusCode === 403;
     if (isForbidden) {
         return <ForbiddenPanel />;
     }
 
     const isNotFound =
         appQuery.error?.error?.statusCode === 404 ||
-        tokenError?.error?.statusCode === 404;
+        visibleTokenError?.error?.statusCode === 404;
     if (isNotFound) {
         return (
             <Box mt="30vh">
@@ -113,20 +274,23 @@ export default function MinimalApp() {
         );
     }
 
-    if (!appQuery.isLoading && !appQuery.error && !latestReadyVersion) {
+    const versionError = appQuery.error ?? requestedVersionQuery.error;
+    const isVersionLoading = appQuery.isLoading || isRequestedVersionLoading;
+    if (!isVersionLoading && !versionError && version === undefined) {
         return (
-            <Stack align="center" justify="center" h="100vh">
-                <Text c="red" size="sm">
-                    No ready version found for this app
-                </Text>
-            </Stack>
+            <Box h="100vh">
+                <SuboptimalState
+                    icon={IconAppsOff}
+                    title="No ready version"
+                    description="This data app hasn't finished building yet."
+                />
+            </Box>
         );
     }
 
     const isLoading =
-        appQuery.isLoading ||
-        (latestReadyVersion !== undefined && isTokenLoading);
-    const error = appQuery.error ?? tokenError;
+        isVersionLoading || (version !== undefined && isTokenLoading);
+    const error = versionError ?? visibleTokenError;
 
     if (isLoading) {
         return (
@@ -147,20 +311,41 @@ export default function MinimalApp() {
     }
 
     const previewUrl = token
-        ? `${previewOrigin}/api/apps/${appUuid}/versions/${latestReadyVersion}/t/${token}/#transport=postMessage&projectUuid=${projectUuid}`
+        ? `${previewOrigin}/api/apps/${appUuid}/versions/${version}/t/${token}/#transport=postMessage&projectUuid=${projectUuid}`
         : undefined;
-    if (!previewUrl) return null;
+    if (!previewUrl || !token) return null;
 
     return (
         <Box pos="relative" h="100vh" w="100%">
             <AppIframePreview
                 src={previewUrl}
+                previewToken={token}
                 expectedPreviewOrigin={previewOrigin}
-                identityKey={`${appUuid}:${latestReadyVersion}`}
+                projectUuid={projectUuid}
+                appUuid={appUuid}
+                identityKey={`${appUuid}:${version}`}
                 onIframeLoad={handleIframeLoad}
                 onQueryEvent={handleQueryEvent}
+                onScreenshotAvailabilityChange={handleScreenshotAvailable}
+                deliveryCapture={deliveryCapture}
+                // Both capture modes need every tab's data mounted: the
+                // slice-2 picker preview must show the same query set the
+                // delivery would produce, not just the visible tab's.
+                captureRender={captureMode !== null ? true : undefined}
+                invalidateCache={captureMode === 'delivery' ? true : undefined}
+                queryContextOverride={
+                    captureMode === 'delivery'
+                        ? QueryExecutionContext.SCHEDULED_DELIVERY
+                        : undefined
+                }
+                // Seeds the app from ?state= so scheduled deliveries with a
+                // saved app state screenshot that view, not the default one.
+                urlStateSync
+                // Scheduled renders must not depend on the headless browser's
+                // stored theme preference.
+                forceColorScheme="light"
             />
-            {isReady && (
+            {indicatorReady && (
                 <ScreenshotReadyIndicator
                     tilesTotal={1}
                     tilesReady={1}

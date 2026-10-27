@@ -1,11 +1,18 @@
-import { type AbilityBuilder } from '@casl/ability';
+import { Ability, AbilityBuilder } from '@casl/ability';
 import {
     type OrganizationMemberProfile,
     type OrganizationMemberRole,
 } from '../types/organizationMemberProfile';
 import { ProjectType } from '../types/projects';
 import { SpaceMemberRole } from '../types/space';
-import { type MemberAbility } from './types';
+import { getPermissionsFromAbilityRules } from './abilityPermissions';
+import { AGENT_DEFAULT_CAPABILITY_SUBJECTS } from './agentCapabilityScopes';
+import {
+    DEVELOPER_EMBED_SUBJECTS,
+    INTERACTIVE_VIEWER_EMBED_SUBJECTS,
+    VIEWER_EMBED_SUBJECTS,
+    type MemberAbility,
+} from './types';
 
 const applyOrganizationMemberDynamicAbilities = ({
     role,
@@ -28,6 +35,9 @@ export const applyOrganizationMemberStaticAbilities: Record<
     ) => void
 > = {
     member(member, { can }) {
+        can('view', 'Learn', {
+            organizationUuid: member.organizationUuid,
+        });
         can('view', 'OrganizationMemberProfile', {
             organizationUuid: member.organizationUuid,
         });
@@ -39,8 +49,28 @@ export const applyOrganizationMemberStaticAbilities: Record<
         });
     },
     viewer(member, { can }) {
+        AGENT_DEFAULT_CAPABILITY_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                organizationUuid: member.organizationUuid,
+            });
+        });
         applyOrganizationMemberStaticAbilities.member(member, { can });
+        VIEWER_EMBED_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                organizationUuid: member.organizationUuid,
+            });
+        });
         can('view', 'Dashboard', {
+            organizationUuid: member.organizationUuid,
+            inheritsFromOrgOrProject: true,
+        });
+        can('view', 'Document', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: { userUuid: member.userUuid },
+            },
+        });
+        can('view', 'Document', {
             organizationUuid: member.organizationUuid,
             inheritsFromOrgOrProject: true,
         });
@@ -65,16 +95,6 @@ export const applyOrganizationMemberStaticAbilities: Record<
             inheritsFromOrgOrProject: true,
         });
         can('view', 'Space', {
-            organizationUuid: member.organizationUuid,
-            access: {
-                $elemMatch: { userUuid: member.userUuid },
-            },
-        });
-        can('view', 'DataApp', {
-            organizationUuid: member.organizationUuid,
-            inheritsFromOrgOrProject: true,
-        });
-        can('view', 'DataApp', {
             organizationUuid: member.organizationUuid,
             access: {
                 $elemMatch: { userUuid: member.userUuid },
@@ -111,6 +131,11 @@ export const applyOrganizationMemberStaticAbilities: Record<
     },
     interactive_viewer(member, { can }) {
         applyOrganizationMemberStaticAbilities.viewer(member, { can });
+        INTERACTIVE_VIEWER_EMBED_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                organizationUuid: member.organizationUuid,
+            });
+        });
         can('create', 'Job');
         can('view', 'Job', { userUuid: member.userUuid });
         can('view', 'UnderlyingData', {
@@ -148,6 +173,17 @@ export const applyOrganizationMemberStaticAbilities: Record<
                 },
             },
         });
+        can('manage', 'Document', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: {
+                    userUuid: member.userUuid,
+                    role: {
+                        $in: [SpaceMemberRole.EDITOR, SpaceMemberRole.ADMIN],
+                    },
+                },
+            },
+        });
         can('manage', 'SavedChart', {
             organizationUuid: member.organizationUuid,
             access: {
@@ -203,11 +239,18 @@ export const applyOrganizationMemberStaticAbilities: Record<
                 },
             },
         });
-        // Create personal data apps; once created, the user can also view
-        // and manage their own. Moving an app into a space is gated
-        // separately by the target space's manage rule.
-        can('create', 'DataApp', {
+        // View data apps shared org/project-wide or in spaces the user can
+        // access. Gated at interactive-viewer (not viewer) for parity with
+        // manage:Explore — plain viewers don't get data app access.
+        can('view', 'DataApp', {
             organizationUuid: member.organizationUuid,
+            inheritsFromOrgOrProject: true,
+        });
+        can('view', 'DataApp', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: { userUuid: member.userUuid },
+            },
         });
         can('view', 'DataApp', {
             organizationUuid: member.organizationUuid,
@@ -216,6 +259,12 @@ export const applyOrganizationMemberStaticAbilities: Record<
         can('manage', 'DataApp', {
             organizationUuid: member.organizationUuid,
             createdByUserUuid: member.userUuid,
+        });
+        // View admin-enabled external connections to link them when building a
+        // data app. Managing (create/edit/delete) stays admin-only.
+        can('view', 'ExternalConnection', {
+            organizationUuid: member.organizationUuid,
+            allowDataAppBuilderLinking: true,
         });
 
         can('manage', 'Space', {
@@ -231,16 +280,28 @@ export const applyOrganizationMemberStaticAbilities: Record<
         can('view', 'AiAgent', {
             organizationUuid: member.organizationUuid,
         });
+        can('view', 'OrganizationAiAgent', {
+            organizationUuid: member.organizationUuid,
+        });
         can('view', 'AiAgentDocument', {
             organizationUuid: member.organizationUuid,
         });
+        can('view', 'AiAgentSkill', {
+            organizationUuid: member.organizationUuid,
+        });
         can('create', 'AiAgentThread', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('view', 'ContentVerification', {
             organizationUuid: member.organizationUuid,
         });
     },
     editor(member, { can }) {
         applyOrganizationMemberStaticAbilities.interactive_viewer(member, {
             can,
+        });
+        can('create', 'DataApp', {
+            organizationUuid: member.organizationUuid,
         });
         can('manage', 'Space', {
             organizationUuid: member.organizationUuid,
@@ -265,12 +326,26 @@ export const applyOrganizationMemberStaticAbilities: Record<
         can('manage', 'MetricsTree', {
             organizationUuid: member.organizationUuid,
         });
+        can('manage', 'ExternalSource', {
+            organizationUuid: member.organizationUuid,
+        });
         can('view', 'OrganizationWarehouseCredentials', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('view', 'ContentAsCode', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('create', 'ContentAsCode', {
             organizationUuid: member.organizationUuid,
         });
     },
     developer(member, { can }) {
         applyOrganizationMemberStaticAbilities.editor(member, { can });
+        DEVELOPER_EMBED_SUBJECTS.forEach((resource) => {
+            can('view', resource, {
+                organizationUuid: member.organizationUuid,
+            });
+        });
         can('manage', 'PreAggregation', {
             organizationUuid: member.organizationUuid,
         });
@@ -281,6 +356,9 @@ export const applyOrganizationMemberStaticAbilities: Record<
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'CustomFields', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('view', 'CompiledSql', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'CustomSqlTableCalculations', {
@@ -307,12 +385,30 @@ export const applyOrganizationMemberStaticAbilities: Record<
                 },
             },
         });
+        can('promote', 'SavedChart', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: {
+                    userUuid: member.userUuid,
+                    role: SpaceMemberRole.ADMIN,
+                },
+            },
+        });
         can('promote', 'Dashboard', {
             organizationUuid: member.organizationUuid,
             access: {
                 $elemMatch: {
                     userUuid: member.userUuid,
                     role: SpaceMemberRole.EDITOR,
+                },
+            },
+        });
+        can('promote', 'Dashboard', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: {
+                    userUuid: member.userUuid,
+                    role: SpaceMemberRole.ADMIN,
                 },
             },
         });
@@ -341,24 +437,76 @@ export const applyOrganizationMemberStaticAbilities: Record<
         can('manage', 'ContentAsCode', {
             organizationUuid: member.organizationUuid,
         });
+        // Redundant with the broad grant above, but kept so the system
+        // role mirrors the `manage:ContentAsCode@self` scope a custom role
+        // would carry without full `manage:ContentAsCode`.
+        can('manage', 'ContentAsCode', {
+            organizationUuid: member.organizationUuid,
+            type: ProjectType.PREVIEW,
+            createdByUserUuid: member.userUuid,
+        });
+        can('create', 'DataApp', {
+            organizationUuid: member.organizationUuid,
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: member.userUuid,
+        });
+        can('manage', 'DataApp', {
+            organizationUuid: member.organizationUuid,
+            projectType: ProjectType.PREVIEW,
+            projectCreatedByUserUuid: member.userUuid,
+        });
         can('view', 'JobStatus', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'AiAgent', {
             organizationUuid: member.organizationUuid,
         });
+        can('manage', 'OrganizationAiAgent', {
+            organizationUuid: member.organizationUuid,
+        });
         can('manage', 'AiAgentDocument', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('manage', 'AiAgentSkill', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'AiAgentThread', {
             organizationUuid: member.organizationUuid,
             userUuid: member.userUuid,
         });
+        can('manage', 'ContentVerification', {
+            organizationUuid: member.organizationUuid,
+        });
+        // Paired with manage:ContentVerification: anyone who can unverify
+        // content can already bypass the edit lock, so grant it outright.
+        can('manage', 'VerifiedContent', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('create', 'AiDeepResearch', {
+            organizationUuid: member.organizationUuid,
+        });
     },
     admin(member, { can }) {
         applyOrganizationMemberStaticAbilities.developer(member, { can });
 
+        can('view', 'Roadmap', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('manage', 'Roadmap', {
+            organizationUuid: member.organizationUuid,
+        });
+
         can('manage', 'DataApp', {
+            organizationUuid: member.organizationUuid,
+        });
+
+        // Adding custom npm dependencies is a supply-chain capability gated
+        // above ordinary data-app management — admins only by default.
+        can('manage', 'DataAppDependency', {
+            organizationUuid: member.organizationUuid,
+        });
+
+        can('manage', 'ExternalConnection', {
             organizationUuid: member.organizationUuid,
         });
 
@@ -366,11 +514,10 @@ export const applyOrganizationMemberStaticAbilities: Record<
             organizationUuid: member.organizationUuid,
         });
 
-        can('manage', 'ContentVerification', {
+        can('manage', 'Dashboard', {
             organizationUuid: member.organizationUuid,
         });
-
-        can('manage', 'Dashboard', {
+        can('manage', 'Document', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'Space', {
@@ -396,13 +543,22 @@ export const applyOrganizationMemberStaticAbilities: Record<
         can('manage', 'Organization', {
             organizationUuid: member.organizationUuid,
         });
+        can('manage', 'OrganizationColorPalette', {
+            organizationUuid: member.organizationUuid,
+        });
         can('view', 'Analytics', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('view', 'SystemAnalytics', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'OrganizationMemberProfile', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'PinnedItems', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('manage', 'ProjectHomepage', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'Group', {
@@ -415,6 +571,9 @@ export const applyOrganizationMemberStaticAbilities: Record<
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'AiAgentThread', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('view', 'AiAgentThreadContext', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'ScheduledDeliveries', {
@@ -434,6 +593,22 @@ export const applyOrganizationMemberStaticAbilities: Record<
             isActive: true,
         });
     },
+};
+
+/** Canonical action/subject footprint emitted by a system organization role. */
+export const getOrganizationMemberRolePermissions = (
+    role: OrganizationMemberRole,
+): string[] => {
+    const builder = new AbilityBuilder<MemberAbility>(Ability);
+    applyOrganizationMemberStaticAbilities[role](
+        {
+            organizationUuid: 'delegation-validation-organization',
+            userUuid: 'delegation-validation-user',
+        },
+        builder,
+    );
+
+    return getPermissionsFromAbilityRules(builder.rules);
 };
 
 export type OrganizationMemberAbilitiesArgs = {

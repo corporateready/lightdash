@@ -1,7 +1,7 @@
 import { ChartType, type Filters } from '@lightdash/common';
 import type { ExplorerSliceState } from '../../features/explorer/store/explorerSlice';
-import { EMPTY_CARTESIAN_CHART_CONFIG } from '../../hooks/cartesianChartConfig/useCartesianChartConfig';
 import { ExplorerSection } from './types';
+import { createEmptyTableChartConfig } from './utils';
 
 // Helper to create default query execution state
 export const defaultQueryExecution: ExplorerSliceState['queryExecution'] = {
@@ -10,12 +10,15 @@ export const defaultQueryExecution: ExplorerSliceState['queryExecution'] = {
     queryUuidHistory: [],
     unpivotedQueryUuidHistory: [],
     pendingFetch: false,
+    pendingCostConfirmation: null,
 };
 
 const defaultFilters: Filters = {};
 
 export const defaultState: ExplorerSliceState = {
     isVisualizationConfigOpen: false,
+    chartSidebarStep: 'configure',
+    chartTypeAuthoring: null,
     isEditMode: false,
     isMinimal: false,
     parameterReferences: [],
@@ -41,8 +44,8 @@ export const defaultState: ExplorerSliceState = {
             columnOrder: [],
         },
         chartConfig: {
-            type: ChartType.CARTESIAN,
-            config: EMPTY_CARTESIAN_CHART_CONFIG,
+            type: ChartType.TABLE,
+            config: createEmptyTableChartConfig(),
         },
     },
     modals: {

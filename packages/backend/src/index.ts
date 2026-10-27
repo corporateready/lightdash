@@ -1,21 +1,31 @@
+import './tracing/bootstrap'; // Must run before modules that can load Knex
 import { getErrorMessage } from '@lightdash/common';
 import App from './App';
 import { lightdashConfig } from './config/lightdashConfig';
 import { getEnterpriseAppArguments } from './ee';
 import knexConfig from './knexfile';
 import Logger from './logging/logger';
+import { installProcessExitLogging } from './logging/processExit';
+import { getProcessTimezoneWarning } from './utils/processTimezone';
 
 // trigger BE tests
 
 // Winston (handleExceptions/handleRejections in winston.ts) owns structured logging
 // for both events. Logger uses exitOnError: false so rejections are tolerated.
 // We still want uncaught exceptions to terminate — process state may be corrupt.
-process.on('uncaughtException', () => {
-    process.exit(1);
-});
+installProcessExitLogging();
 
 (async () => {
     try {
+        const timezoneWarning = getProcessTimezoneWarning({
+            enableTimezoneSupport:
+                lightdashConfig.query.enableTimezoneSupport !== false,
+            timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+        });
+        if (timezoneWarning) {
+            Logger.warn(timezoneWarning);
+        }
+
         const app = new App({
             lightdashConfig,
             port: process.env.PORT || 8080,

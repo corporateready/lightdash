@@ -3,22 +3,21 @@ import { renderHook } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createExplorerStore } from '../features/explorer/store';
+import { Limit } from '../components/ExportResults/types';
+import {
+    createExplorerStore,
+    explorerActions,
+} from '../features/explorer/store';
 import { useExplorerQuery } from './useExplorerQuery';
 import { useExplorerQueryManager } from './useExplorerQueryManager';
 import {
     executeQueryAndWaitForResults,
     useCancelQuery,
 } from './useQueryResults';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
 
 // Mock the hooks that depend on external APIs
 vi.mock('./useExplore', () => ({
     useExplore: vi.fn(() => ({ data: null })),
-}));
-
-vi.mock('./useServerOrClientFeatureFlag', () => ({
-    useServerFeatureFlag: vi.fn(() => ({ data: { enabled: false } })),
 }));
 
 vi.mock('./parameters/useParameters', () => ({
@@ -93,15 +92,13 @@ const buildManagerMock = (overrides: Partial<ManagerMock> = {}): ManagerMock =>
         ...overrides,
     }) as unknown as ManagerMock;
 
-const createWrapper = () => {
+const createWrapper = (store = createExplorerStore()) => {
     const queryClient = new QueryClient({
         defaultOptions: {
             queries: { retry: false },
             mutations: { retry: false },
         },
     });
-    const store = createExplorerStore();
-
     return ({ children }: { children: React.ReactNode }) => (
         <QueryClientProvider client={queryClient}>
             <Provider store={store}>
@@ -120,9 +117,6 @@ describe('useExplorerQuery', () => {
         } as never);
         vi.mocked(useCancelQuery).mockReturnValue({
             mutate: vi.fn(),
-        } as never);
-        vi.mocked(useServerFeatureFlag).mockReturnValue({
-            data: { enabled: false },
         } as never);
     });
 
@@ -167,11 +161,11 @@ describe('useExplorerQuery', () => {
 
     describe('getDownloadQueryUuid pivotConfiguration leak (#19117)', () => {
         // https://github.com/lightdash/lightdash/issues/19117 / PR #19115
-        // Repro: with USE_SQL_PIVOT_RESULTS enabled and a chart that has a
-        // pivotConfiguration in validQueryArgs, calling Download CSV with
-        // exportPivotedResults=false used to spread pivotConfiguration into
-        // the download query — producing CSVs with empty columns where
-        // pivoted dimensions used to be.
+        // Repro: with a chart that has a pivotConfiguration in
+        // validQueryArgs, calling Download CSV with exportPivotedResults=false
+        // used to spread pivotConfiguration into the download query —
+        // producing CSVs with empty columns where pivoted dimensions used to
+        // be.
         // Expectation: when exportPivotedResults is false, the download
         // query payload must explicitly set pivotConfiguration to undefined
         // (and pivotResults to false), regardless of what validQueryArgs
@@ -192,6 +186,46 @@ describe('useExplorerQuery', () => {
             pivotConfiguration,
         } as never;
 
+        it('reuses the visible pivot query only for flat table rows', async () => {
+            vi.mocked(useExplorerQueryManager).mockReturnValue(
+                buildManagerMock({
+                    validQueryArgs,
+                    queryResults: {
+                        queryUuid: 'visible-query',
+                        totalResults: 2,
+                    } as never,
+                    unpivotedQueryResults: {
+                        queryUuid: 'raw-query',
+                        totalResults: 2,
+                    } as never,
+                }),
+            );
+            const store = createExplorerStore();
+            store.dispatch(
+                explorerActions.setUnpivotedQueryArgs(validQueryArgs),
+            );
+            const { result } = renderHook(() => useExplorerQuery(), {
+                wrapper: createWrapper(store),
+            });
+
+            await expect(
+                result.current.getDownloadQueryUuid(2, false, Limit.TABLE),
+            ).resolves.toBe('visible-query');
+            expect(executeQueryAndWaitForResults).not.toHaveBeenCalled();
+
+            await expect(
+                result.current.getDownloadQueryUuid(2, false, Limit.CUSTOM),
+            ).resolves.toBe('download-uuid');
+            expect(executeQueryAndWaitForResults).toHaveBeenCalledWith(
+                expect.anything(),
+                expect.objectContaining({
+                    csvLimit: 2,
+                    pivotResults: false,
+                    pivotConfiguration: undefined,
+                }),
+            );
+        });
+
         it('omits pivotConfiguration from the download query when exportPivotedResults is false', async () => {
             vi.mocked(useExplorerQueryManager).mockReturnValue(
                 buildManagerMock({
@@ -205,11 +239,6 @@ describe('useExplorerQuery', () => {
                     } as never,
                 }),
             );
-            // USE_SQL_PIVOT_RESULTS feature flag enabled — the worst-case
-            // path where the leak manifested in production.
-            vi.mocked(useServerFeatureFlag).mockReturnValue({
-                data: { enabled: true },
-            } as never);
 
             const { result } = renderHook(() => useExplorerQuery(), {
                 wrapper: createWrapper(),
@@ -222,7 +251,7 @@ describe('useExplorerQuery', () => {
 
             expect(executeQueryAndWaitForResults).toHaveBeenCalledTimes(1);
             const callArg = vi.mocked(executeQueryAndWaitForResults).mock
-                .calls[0][0];
+                .calls[0][1];
             expect(callArg).not.toBeNull();
 
             // The leak prevention: pivotConfiguration must be explicitly
@@ -234,7 +263,7 @@ describe('useExplorerQuery', () => {
             expect(callArg).toHaveProperty('csvLimit', 50);
         });
 
-        it('preserves pivotConfiguration in the download query when exportPivotedResults is true and the SQL pivot flag is enabled', async () => {
+        it('preserves pivotConfiguration in the download query when exportPivotedResults is true', async () => {
             vi.mocked(useExplorerQueryManager).mockReturnValue(
                 buildManagerMock({
                     validQueryArgs,
@@ -247,9 +276,6 @@ describe('useExplorerQuery', () => {
                     } as never,
                 }),
             );
-            vi.mocked(useServerFeatureFlag).mockReturnValue({
-                data: { enabled: true },
-            } as never);
 
             const { result } = renderHook(() => useExplorerQuery(), {
                 wrapper: createWrapper(),
@@ -259,45 +285,12 @@ describe('useExplorerQuery', () => {
 
             expect(executeQueryAndWaitForResults).toHaveBeenCalledTimes(1);
             const callArg = vi.mocked(executeQueryAndWaitForResults).mock
-                .calls[0][0];
+                .calls[0][1];
             expect(callArg).toMatchObject({
                 pivotResults: true,
                 pivotConfiguration,
                 csvLimit: 50,
             });
-        });
-
-        it('omits pivotConfiguration when SQL pivot flag is disabled even if exportPivotedResults is requested', async () => {
-            // shouldPivot = exportPivotedResults && useSqlPivotResults.enabled.
-            // Locks the second half of that ternary — flag-off should also
-            // strip the configuration.
-            vi.mocked(useExplorerQueryManager).mockReturnValue(
-                buildManagerMock({
-                    validQueryArgs,
-                    queryResults: {
-                        queryUuid: 'current-uuid',
-                        totalResults: 100,
-                        isFetchingFirstPage: false,
-                        isFetchingAllPages: false,
-                        error: null,
-                    } as never,
-                }),
-            );
-            vi.mocked(useServerFeatureFlag).mockReturnValue({
-                data: { enabled: false },
-            } as never);
-
-            const { result } = renderHook(() => useExplorerQuery(), {
-                wrapper: createWrapper(),
-            });
-
-            await result.current.getDownloadQueryUuid(50, true);
-
-            expect(executeQueryAndWaitForResults).toHaveBeenCalledTimes(1);
-            const callArg = vi.mocked(executeQueryAndWaitForResults).mock
-                .calls[0][0];
-            expect(callArg).toHaveProperty('pivotConfiguration', undefined);
-            expect(callArg).toHaveProperty('pivotResults', false);
         });
     });
 });

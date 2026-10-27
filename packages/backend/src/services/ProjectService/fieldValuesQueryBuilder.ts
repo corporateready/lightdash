@@ -1,20 +1,68 @@
 import {
+    AuthorizationError,
     FilterOperator,
     findFieldByIdInExplore,
+    ForbiddenError,
+    getDimensionMapFromTables,
+    getFilterAutocompleteLabelDimension,
     getItemId,
     isDimension,
     isExploreError,
     isFilterRule,
     NotFoundError,
     ParameterError,
+    searchFilterAutocompleteValues,
+    type Account,
     type AndFilterGroup,
+    type CompiledDimension,
     type Dimension,
     type Explore,
     type ExploreError,
+    type FilterAutocompleteValue,
     type FilterGroupItem,
     type MetricQuery,
+    type UserAttributeValueMap,
 } from '@lightdash/common';
 import { v4 as uuidv4 } from 'uuid';
+import {
+    auditAndFilterExplore,
+    auditFieldAttributeAccess,
+} from '../UserAttributesService/userAttributeAudit';
+
+const FIELD_VALUES_FORBIDDEN_MESSAGE =
+    'You do not have permission to search values for this field';
+
+/** Dimensions visible to the caller after user-attribute filtering; a gated
+ *  base table surfaces as ForbiddenError rather than AuthorizationError. */
+const getVisibleDimensionsForField = (
+    account: Account,
+    projectUuid: string,
+    explore: Explore,
+    userAttributes: UserAttributeValueMap,
+    fieldId: string,
+): Record<string, CompiledDimension> => {
+    let visibleExplore: Explore;
+    try {
+        visibleExplore = auditAndFilterExplore({
+            account,
+            projectUuid,
+            explore,
+            userAttributes,
+        });
+    } catch (e) {
+        if (e instanceof AuthorizationError) {
+            throw new ForbiddenError(FIELD_VALUES_FORBIDDEN_MESSAGE);
+        }
+        throw e;
+    }
+    auditFieldAttributeAccess({
+        account,
+        projectUuid,
+        explore: visibleExplore,
+        fieldIds: [fieldId],
+    });
+    return getDimensionMapFromTables(visibleExplore.tables);
+};
 
 type ExploreResolver = {
     findExploreByTableName(
@@ -25,9 +73,44 @@ type ExploreResolver = {
         projectUuid: string,
         table: string,
     ): Promise<Explore | ExploreError | undefined>;
+    findExploreContainingTable(
+        projectUuid: string,
+        table: string,
+    ): Promise<Explore | ExploreError | undefined>;
 };
 
+const parseFieldValuesLimit = (limit: unknown, maxLimit: number): number => {
+    if (
+        typeof limit !== 'number' ||
+        !Number.isSafeInteger(limit) ||
+        limit < 0
+    ) {
+        throw new ParameterError('Query limit must be a non-negative integer');
+    }
+
+    if (limit > maxLimit) {
+        throw new ParameterError(`Query limit can not exceed ${maxLimit}`);
+    }
+
+    return limit;
+};
+
+/**
+ * Field ids are `${table}_${name}`. When a join alias resolves to the aliased
+ * model's own explore, ids that carry the alias prefix must be rewritten to
+ * that explore's base table or they will not be found in it.
+ */
+const remapJoinAliasFieldId = (
+    fieldId: string,
+    alias: string,
+    baseTable: string,
+): string =>
+    fieldId.startsWith(`${alias}_`)
+        ? `${baseTable}_${fieldId.slice(alias.length + 1)}`
+        : fieldId;
+
 export async function getFieldValuesMetricQuery({
+    account,
     projectUuid,
     table,
     initialFieldId,
@@ -36,24 +119,34 @@ export async function getFieldValuesMetricQuery({
     maxLimit,
     filters,
     exploreResolver,
+    userAttributes,
+    authorizeInitialExplore,
 }: {
+    account: Account;
     projectUuid: string;
     table: string;
     initialFieldId: string;
     search: string;
-    limit: number;
+    limit: unknown;
     maxLimit: number;
     filters: AndFilterGroup | undefined;
     exploreResolver: ExploreResolver;
+    userAttributes: UserAttributeValueMap;
+    authorizeInitialExplore?: (explore: Explore) => void;
 }): Promise<{
     metricQuery: MetricQuery;
     explore: Explore;
     field: Dimension;
+    initialExplore: Explore;
+    initialField: Dimension;
     fieldId: string;
+    labelFieldId: string | null;
+    /** Non-null when the field's config turns warehouse fetching off: the
+     *  curated values matching the search (empty when none are configured).
+     *  Callers must serve these instead of running the metric query. */
+    staticResults: FilterAutocompleteValue[] | null;
 }> {
-    if (limit > maxLimit) {
-        throw new ParameterError(`Query limit can not exceed ${maxLimit}`);
-    }
+    const parsedLimit = parseFieldValuesLimit(limit, maxLimit);
 
     if (!table) {
         throw new ParameterError(
@@ -66,14 +159,26 @@ export async function getFieldValuesMetricQuery({
         table,
     );
     let fieldId = initialFieldId;
+    let joinAliasBaseTable: string | undefined;
     if (!explore) {
         explore = await exploreResolver.findJoinAliasExplore(
             projectUuid,
             table,
         );
         if (explore && !isExploreError(explore)) {
-            fieldId = initialFieldId.replace(table, explore.baseTable);
+            joinAliasBaseTable = explore.baseTable;
+            fieldId = remapJoinAliasFieldId(
+                initialFieldId,
+                table,
+                joinAliasBaseTable,
+            );
         }
+    }
+    if (!explore) {
+        explore = await exploreResolver.findExploreContainingTable(
+            projectUuid,
+            table,
+        );
     }
 
     if (!explore) {
@@ -82,29 +187,164 @@ export async function getFieldValuesMetricQuery({
         throw new NotFoundError(`Explore ${table} has errors`);
     }
 
-    const field = findFieldByIdInExplore(explore, fieldId);
+    const initialExplore = explore;
+    authorizeInitialExplore?.(initialExplore);
+    const initialField = findFieldByIdInExplore(initialExplore, fieldId);
 
-    if (!field) {
+    if (!initialField) {
         throw new NotFoundError(`Can't dimension with id: ${fieldId}`);
     }
 
-    if (!isDimension(field)) {
+    if (!isDimension(initialField)) {
         throw new ParameterError(
-            `Searching by field is only available for dimensions, but ${fieldId} is a ${field.type}`,
+            `Searching by field is only available for dimensions, but ${fieldId} is a ${initialField.type}`,
         );
     }
 
+    // Attribute-gated tables/dimensions must not be enumerable, including
+    // through curated (static) values.
+    let visibleDimensions = getVisibleDimensionsForField(
+        account,
+        projectUuid,
+        initialExplore,
+        userAttributes,
+        fieldId,
+    );
+    if (!(fieldId in visibleDimensions)) {
+        throw new ForbiddenError(FIELD_VALUES_FORBIDDEN_MESSAGE);
+    }
+
+    const { filterAutocomplete } = initialField;
+    const staticResults =
+        filterAutocomplete && !filterAutocomplete.fetchFromWarehouse
+            ? searchFilterAutocompleteValues(
+                  filterAutocomplete.values ?? [],
+                  search,
+              ).slice(0, parsedLimit)
+            : null;
+
+    // Curated values answer the search on their own, so the lookup source is
+    // only resolved when we would otherwise query the warehouse.
+    const optionsFromDimension = staticResults
+        ? undefined
+        : filterAutocomplete?.optionsFromDimension;
+
+    let field = initialField;
+    if (optionsFromDimension) {
+        const { model, dimension } = optionsFromDimension;
+        const sourceExplore =
+            (await exploreResolver.findExploreByTableName(
+                projectUuid,
+                model,
+            )) ??
+            (await exploreResolver.findJoinAliasExplore(projectUuid, model));
+        if (!sourceExplore) {
+            throw new NotFoundError(
+                `Filter autocomplete for ${getItemId(
+                    initialField,
+                )} reads options from model '${model}', which has no explore (hidden models and seeds can't be used as a source)`,
+            );
+        }
+        if (isExploreError(sourceExplore)) {
+            throw new NotFoundError(
+                `Filter autocomplete for ${getItemId(
+                    initialField,
+                )} reads options from model '${model}', whose explore has errors`,
+            );
+        }
+
+        explore = sourceExplore;
+        // An explore's name can differ from the table it is built on.
+        fieldId = getItemId({
+            table: sourceExplore.baseTable,
+            name: dimension,
+        });
+        const sourceField = findFieldByIdInExplore(explore, fieldId);
+        if (!sourceField) {
+            throw new NotFoundError(
+                `Filter autocomplete options source '${model}.${dimension}' does not exist`,
+            );
+        }
+        if (!isDimension(sourceField)) {
+            throw new ParameterError(
+                `Filter autocomplete options source must be a dimension, but ${fieldId} is a ${sourceField.type}`,
+            );
+        }
+        visibleDimensions = getVisibleDimensionsForField(
+            account,
+            projectUuid,
+            sourceExplore,
+            userAttributes,
+            fieldId,
+        );
+        if (!(fieldId in visibleDimensions)) {
+            throw new ForbiddenError(FIELD_VALUES_FORBIDDEN_MESSAGE);
+        }
+        field = sourceField;
+    }
+
+    let labelFieldId: string | null = null;
+    const labelDimension = staticResults
+        ? undefined
+        : getFilterAutocompleteLabelDimension(filterAutocomplete);
+    if (labelDimension) {
+        const candidateLabelFieldId = getItemId({
+            table: field.table,
+            name: labelDimension,
+        });
+        if (candidateLabelFieldId !== getItemId(field)) {
+            const resolvedLabelField = findFieldByIdInExplore(
+                explore,
+                candidateLabelFieldId,
+            );
+            if (!resolvedLabelField) {
+                throw new NotFoundError(
+                    `Can't find label dimension '${labelDimension}' in table '${field.table}'`,
+                );
+            }
+            if (!isDimension(resolvedLabelField)) {
+                throw new ParameterError(
+                    `Label field must be a dimension, but ${candidateLabelFieldId} is a ${resolvedLabelField.type}`,
+                );
+            }
+            if (!(candidateLabelFieldId in visibleDimensions)) {
+                throw new ForbiddenError(FIELD_VALUES_FORBIDDEN_MESSAGE);
+            }
+            labelFieldId = candidateLabelFieldId;
+        }
+    }
+
+    // Autocomplete ignores the field's caseSensitive setting.
+    const searchFilter: FilterGroupItem = labelFieldId
+        ? {
+              id: uuidv4(),
+              or: [
+                  {
+                      id: uuidv4(),
+                      target: { fieldId: labelFieldId },
+                      operator: FilterOperator.INCLUDE,
+                      values: [search],
+                      caseSensitive: false,
+                  },
+                  {
+                      id: uuidv4(),
+                      target: { fieldId },
+                      operator: FilterOperator.INCLUDE,
+                      values: [search],
+                      caseSensitive: false,
+                  },
+              ],
+          }
+        : {
+              id: uuidv4(),
+              target: { fieldId },
+              operator: FilterOperator.INCLUDE,
+              values: [search],
+              caseSensitive: false,
+          };
+    const sortFieldId = labelFieldId ?? getItemId(field);
     const autocompleteDimensionFilters: FilterGroupItem[] = [
-        {
-            id: uuidv4(),
-            target: {
-                fieldId,
-            },
-            operator: FilterOperator.INCLUDE,
-            values: [search],
-            // Autocomplete ignores the field's caseSensitive setting.
-            caseSensitive: false,
-        },
+        searchFilter,
         {
             id: uuidv4(),
             target: {
@@ -114,26 +354,46 @@ export async function getFieldValuesMetricQuery({
             values: [],
         },
     ];
-    if (filters) {
+    if (filters && !optionsFromDimension) {
         if (!Array.isArray(filters.and)) {
             throw new ParameterError(
                 'Filters must include an "and" array of filter rules',
             );
         }
-        const filtersCompatibleWithExplore = filters.and.filter(
+        // Sibling dashboard filters arrive with the same join alias prefix as
+        // the value field, so they need the same remap to survive the check.
+        const siblingFilters = joinAliasBaseTable
+            ? filters.and.map((filter) =>
+                  isFilterRule(filter)
+                      ? {
+                            ...filter,
+                            target: {
+                                ...filter.target,
+                                fieldId: remapJoinAliasFieldId(
+                                    filter.target.fieldId,
+                                    table,
+                                    joinAliasBaseTable,
+                                ),
+                            },
+                        }
+                      : filter,
+              )
+            : filters.and;
+        // Restricting to visible dimensions also stops gated dimensions being
+        // probed through sibling filters.
+        const filtersCompatibleWithExplore = siblingFilters.filter(
             (filter) =>
                 isFilterRule(filter) &&
-                findFieldByIdInExplore(
-                    explore as Explore,
-                    filter.target.fieldId,
-                ),
+                filter.target.fieldId in visibleDimensions,
         );
         autocompleteDimensionFilters.push(...filtersCompatibleWithExplore);
     }
 
     const metricQuery: MetricQuery = {
         exploreName: explore.name,
-        dimensions: [getItemId(field)],
+        dimensions: labelFieldId
+            ? [getItemId(field), labelFieldId]
+            : [getItemId(field)],
         metrics: [],
         filters: {
             dimensions: {
@@ -144,12 +404,21 @@ export async function getFieldValuesMetricQuery({
         tableCalculations: [],
         sorts: [
             {
-                fieldId: getItemId(field),
+                fieldId: sortFieldId,
                 descending: false,
             },
         ],
-        limit,
+        limit: parsedLimit,
     };
 
-    return { metricQuery, explore, field, fieldId };
+    return {
+        metricQuery,
+        explore,
+        field,
+        initialExplore,
+        initialField,
+        fieldId,
+        labelFieldId,
+        staticResults,
+    };
 }

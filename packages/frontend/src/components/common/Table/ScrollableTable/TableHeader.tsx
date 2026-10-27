@@ -1,10 +1,11 @@
 import { Draggable } from '@hello-pangea/dnd';
-import { isCustomDimension, isDimension, isField } from '@lightdash/common';
+import { isField, isTableCalculation } from '@lightdash/common';
 import { Tooltip, useMantineTheme } from '@mantine/core';
 import { flexRender } from '@tanstack/react-table';
 import isEqual from 'lodash/isEqual';
 import React, { useEffect, type FC } from 'react';
 import { ROW_NUMBER_COLUMN_ID } from '../constants';
+import { getGroupedDimensionColumnIds } from '../getGroupedDimensionColumnIds';
 import {
     Th,
     ThActionsContainer,
@@ -19,6 +20,22 @@ interface TableHeaderProps {
     minimal?: boolean;
     showSubtotals?: boolean;
 }
+
+/**
+ * Walkthrough result for manage:CustomSqlTableCalculations: the new column's
+ * header in the results table (absent until a calculation exists).
+ */
+const tableCalculationTourProps = {
+    'data-tour-anchor': 'table-calculation-column',
+    'data-tour-scope': 'manage:CustomSqlTableCalculations',
+    'data-tour-step': '1',
+    'data-tour-route': '/projects/:projectUuid/saved/:savedQueryUuid/edit',
+    'data-tour-label': 'The calculation is a new column',
+    'data-tour-docs':
+        'explore/table-calculations.mdx#when-to-use-table-calculations:3',
+    'data-tour-return': 'none',
+    'data-tour-resultdocs': 'explore/table-calculations.mdx#intro:1',
+};
 
 const TableHeader: FC<TableHeaderProps> = ({
     minimal = false,
@@ -35,25 +52,10 @@ const TableHeader: FC<TableHeaderProps> = ({
 
     useEffect(() => {
         if (showSubtotals) {
-            const groupedColumns = columns
-                .filter((col) => {
-                    const item = col.meta?.item;
-                    return (
-                        item && (isDimension(item) || isCustomDimension(item))
-                    );
-                })
-                .map((col) => col.id);
-
-            const sortedColumns = table
-                .getState()
-                .columnOrder.reduce<string[]>((acc, sortedId) => {
-                    return groupedColumns.includes(sortedId)
-                        ? [...acc, sortedId]
-                        : acc;
-                }, [])
-                // The last dimension column essentially groups rows for each unique value in that column.
-                // Grouping on it would result in many useless expandable groups containing just one item.
-                .slice(0, -1);
+            const sortedColumns = getGroupedDimensionColumnIds(
+                columns,
+                table.getState().columnOrder,
+            );
 
             if (!isEqual(sortedColumns, table.getState().grouping)) {
                 table.setGrouping(sortedColumns);
@@ -88,15 +90,24 @@ const TableHeader: FC<TableHeaderProps> = ({
                                 meta?.item && isField(meta.item)
                                     ? meta.item.description
                                     : undefined;
+                            const tooltipContext = meta?.headerContext;
+                            const tooltipDetails = [
+                                tooltipContext,
+                                tooltipDescription,
+                            ].filter((detail): detail is string => !!detail);
                             const tooltipLabel =
-                                titleLabel && tooltipDescription ? (
+                                titleLabel && tooltipDetails.length > 0 ? (
                                     <>
                                         {titleLabel}
-                                        <br />
-                                        {tooltipDescription}
+                                        {tooltipDetails.map((detail) => (
+                                            <React.Fragment key={detail}>
+                                                <br />
+                                                {detail}
+                                            </React.Fragment>
+                                        ))}
                                     </>
                                 ) : (
-                                    (titleLabel ?? tooltipDescription)
+                                    (titleLabel ?? tooltipDetails[0])
                                 );
                             const canResize =
                                 onColumnWidthChange &&
@@ -116,6 +127,10 @@ const TableHeader: FC<TableHeaderProps> = ({
                                             theme.colors.ldGray[0],
                                     }}
                                     className={meta?.className}
+                                    {...(meta?.item &&
+                                    isTableCalculation(meta.item)
+                                        ? tableCalculationTourProps
+                                        : {})}
                                 >
                                     <Draggable
                                         draggableId={header.id}
@@ -145,11 +160,8 @@ const TableHeader: FC<TableHeaderProps> = ({
                                                     }}
                                                 >
                                                     <Tooltip
-                                                        withinPortal
-                                                        variant="xs"
                                                         openDelay={500}
                                                         maw={400}
-                                                        multiline
                                                         label={tooltipLabel}
                                                         position="top"
                                                         disabled={

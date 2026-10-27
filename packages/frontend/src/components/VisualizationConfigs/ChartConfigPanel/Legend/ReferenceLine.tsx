@@ -26,7 +26,7 @@ import {
     Stack,
     TextInput,
     type TextInputProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconLayoutAlignLeft,
     IconLayoutAlignRight,
@@ -34,6 +34,10 @@ import {
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import { useCallback, useMemo, useState, type FC } from 'react';
+import {
+    selectCartesianLayout,
+    useVisualizationSelector,
+} from '../../../../features/visualization/store';
 import FieldSelect from '../../../common/FieldSelect';
 import FilterDatePicker from '../../../common/Filters/FilterInputs/FilterDatePicker';
 import FilterMonthAndYearPicker from '../../../common/Filters/FilterInputs/FilterMonthAndYearPicker';
@@ -42,8 +46,7 @@ import FilterYearPicker from '../../../common/Filters/FilterInputs/FilterYearPic
 import { getFirstDayOfWeek } from '../../../common/Filters/utils/filterDateUtils';
 import MantineIcon from '../../../common/MantineIcon';
 import { type ReferenceLineField } from '../../../common/ReferenceLine';
-import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import { useVisualizationInputs } from '../../../LightdashVisualization/useVisualizationContext';
 import ColorSelector from '../../ColorSelector';
 import { AccordionControl } from '../../common/AccordionControl';
 import { Config } from '../../common/Config';
@@ -182,6 +185,7 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
     return (
         <TextInput
             {...inputProps}
+            size="xs"
             disabled={
                 (!isNumericItem(field) &&
                     // We treat untyped table calculations as numeric
@@ -213,16 +217,10 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
     updateReferenceLine,
     removeReferenceLine,
 }) => {
-    const { visualizationConfig, colorPalette } = useVisualizationContext();
-
-    const isCartesianChart =
-        isCartesianVisualizationConfig(visualizationConfig);
+    const { colorPalette } = useVisualizationInputs();
+    const dirtyLayout = useVisualizationSelector(selectCartesianLayout);
 
     const fieldsInAxes = useMemo(() => {
-        if (!isCartesianChart) return [];
-
-        const { dirtyLayout } = visualizationConfig.chartConfig;
-
         const fieldNames = [
             dirtyLayout?.xField,
             ...(dirtyLayout?.yField || []),
@@ -238,7 +236,7 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
                 (isNumericItem(item) || isDateItem(item))
             );
         });
-    }, [isCartesianChart, items, visualizationConfig]);
+    }, [items, dirtyLayout]);
 
     const markLineKey = useMemo(() => {
         return referenceLine.data.xAxis !== undefined ? 'xAxis' : 'yAxis';
@@ -434,7 +432,7 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
                             }}
                         />
                         <Group wrap="nowrap" flex="1" gap="sm">
-                            <Config.Label style={{ whiteSpace: 'nowrap' }}>
+                            <Config.Label className={classes.positionLabel}>
                                 Position
                             </Config.Label>
                             <SegmentedControl

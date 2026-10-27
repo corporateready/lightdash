@@ -2,31 +2,37 @@ import {
     FeatureFlags,
     getItemId,
     getItemLabelWithoutTableName,
-    isCustomDimension,
-    isDimension,
-    isMetric,
-    isTableCalculation,
     MapChartLocation,
     MapChartType,
 } from '@lightdash/common';
 import {
+    TextInput,
     Group,
     Loader,
+    Stack,
     SegmentedControl,
     Select,
-    Stack,
     Switch,
-    TextInput,
 } from '@mantine/core';
 import { memo, useEffect, useMemo, type FC } from 'react';
+import {
+    selectMapAvailableFields,
+    selectMapEditor,
+    selectMapLatitudeFieldId,
+    selectMapLongitudeFieldId,
+    useVisualizationSelector,
+} from '../../../features/visualization/store';
 import {
     findMatchingProperty,
     useGeoJsonProperties,
 } from '../../../hooks/useGeoJsonProperties';
+import { useMapEditorActions } from '../../../hooks/useMapChartConfig';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import FieldSelect from '../../common/FieldSelect';
-import { isMapVisualizationConfig } from '../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import {
+    useVisualizationInputs,
+    useVisualizationInputSelector,
+} from '../../LightdashVisualization/useVisualizationContext';
 import { Config } from '../common/Config';
 import MapFieldConfiguration from './MapFieldConfiguration';
 
@@ -90,36 +96,47 @@ const findLocationField = (
 };
 
 export const Layout: FC = memo(() => {
-    const { visualizationConfig, itemsMap } = useVisualizationContext();
-
-    const isMapConfig = isMapVisualizationConfig(visualizationConfig);
+    const { itemsMap } = useVisualizationInputs();
+    const availableFields = useVisualizationInputSelector(
+        selectMapAvailableFields,
+    );
+    const latitudeFieldId = useVisualizationInputSelector(
+        selectMapLatitudeFieldId,
+    );
+    const longitudeFieldId = useVisualizationInputSelector(
+        selectMapLongitudeFieldId,
+    );
+    const mapType = useVisualizationSelector(
+        (state) => selectMapEditor(state).mapType,
+    );
+    const customGeoJsonUrl = useVisualizationSelector(
+        (state) => selectMapEditor(state).customGeoJsonUrl,
+    );
+    const storedLocationType = useVisualizationSelector(
+        (state) => selectMapEditor(state).locationType,
+    );
+    const locationFieldId = useVisualizationSelector(
+        (state) => selectMapEditor(state).locationFieldId,
+    );
+    const geoJsonPropertyKey = useVisualizationSelector(
+        (state) => selectMapEditor(state).geoJsonPropertyKey,
+    );
+    const {
+        setMapType,
+        setCustomGeoJsonUrl,
+        setLocationType,
+        setLatitudeFieldId,
+        setLongitudeFieldId,
+        setLocationFieldId,
+        setGeoJsonPropertyKey,
+        autoFillAreaLocation,
+    } = useMapEditorActions();
 
     const hexbinFlag = useServerFeatureFlag(FeatureFlags.HexbinMap);
     const isHexbinEnabled = hexbinFlag.data?.enabled ?? false;
 
-    // Get all available fields for selection (dimensions, metrics, and table calculations)
-    const availableFields = useMemo(() => {
-        if (!itemsMap) return [];
-
-        return Object.values(itemsMap).filter(
-            (item) =>
-                isDimension(item) ||
-                isCustomDimension(item) ||
-                isMetric(item) ||
-                isTableCalculation(item),
-        );
-    }, [itemsMap]);
-
-    // Extract chart config for use in hooks (before early return)
-    const chartConfig = useMemo(
-        () => (isMapConfig ? visualizationConfig.chartConfig : null),
-        [isMapConfig, visualizationConfig.chartConfig],
-    );
-
     // Build proxied URL for custom GeoJSON (for fetching properties)
     const proxiedGeoJsonUrl = useMemo(() => {
-        if (!chartConfig) return null;
-        const { mapType, customGeoJsonUrl } = chartConfig.validConfig;
         if (mapType !== MapChartLocation.CUSTOM || !customGeoJsonUrl) {
             return null;
         }
@@ -134,7 +151,7 @@ export const Layout: FC = memo(() => {
             )}`;
         }
         return customGeoJsonUrl; // Local path
-    }, [chartConfig]);
+    }, [mapType, customGeoJsonUrl]);
 
     // Fetch GeoJSON properties for custom maps
     const {
@@ -152,44 +169,34 @@ export const Layout: FC = memo(() => {
         }));
     }, [geoJsonPropertiesData]);
 
-    // Extract chart config values (only valid when isMapConfig is true)
-    const validConfig = chartConfig?.validConfig;
-    const setLocationFieldId = chartConfig?.setLocationFieldId;
-    const setGeoJsonPropertyKey = chartConfig?.setGeoJsonPropertyKey;
-
-    // Auto-fill location field when map type changes (only if not already set)
+    // Editor-only auto-fill, so saved area charts render as stored
     useEffect(() => {
         if (
-            !validConfig ||
-            !setLocationFieldId ||
-            !setGeoJsonPropertyKey ||
-            !itemsMap
+            !itemsMap ||
+            storedLocationType !== MapChartType.AREA ||
+            locationFieldId
         ) {
             return;
         }
-
-        if (
-            validConfig.locationType === MapChartType.AREA &&
-            !validConfig.locationFieldId
-        ) {
-            const autoField = findLocationField(itemsMap, validConfig.mapType);
-            if (autoField) {
-                setLocationFieldId(autoField);
-                // Also set the appropriate geoJsonPropertyKey based on map type
-                if (validConfig.mapType === MapChartLocation.USA) {
-                    setGeoJsonPropertyKey('code');
-                } else {
-                    // World map uses ISO3 by default
-                    setGeoJsonPropertyKey('ISO3166-1-Alpha-3');
-                }
-            }
+        const autoField = findLocationField(itemsMap, mapType);
+        if (autoField) {
+            autoFillAreaLocation(
+                autoField,
+                mapType === MapChartLocation.USA ? 'code' : 'ISO3166-1-Alpha-3',
+            );
         }
-    }, [validConfig, itemsMap, setLocationFieldId, setGeoJsonPropertyKey]);
+    }, [
+        itemsMap,
+        storedLocationType,
+        locationFieldId,
+        mapType,
+        autoFillAreaLocation,
+    ]);
 
     // Get the label for locationFieldId (for auto-matching property to column)
     const locationFieldLabel = useMemo(() => {
-        if (!validConfig?.locationFieldId || !itemsMap) return undefined;
-        const item = itemsMap[validConfig.locationFieldId];
+        if (!locationFieldId || !itemsMap) return undefined;
+        const item = itemsMap[locationFieldId];
         if (!item) return undefined;
         return 'label' in item
             ? item.label
@@ -198,16 +205,14 @@ export const Layout: FC = memo(() => {
               : 'name' in item
                 ? (item as { name: string }).name
                 : undefined;
-    }, [validConfig?.locationFieldId, itemsMap]);
+    }, [locationFieldId, itemsMap]);
 
-    // Auto-fill geoJsonPropertyKey when custom GeoJSON properties are loaded
+    // Auto-fill geoJsonPropertyKey once the fetched custom GeoJSON properties land
     useEffect(() => {
         if (
-            !validConfig ||
-            !setGeoJsonPropertyKey ||
             !geoJsonPropertiesData ||
-            validConfig.mapType !== MapChartLocation.CUSTOM ||
-            validConfig.geoJsonPropertyKey // Already set, don't override
+            mapType !== MapChartLocation.CUSTOM ||
+            geoJsonPropertyKey // Already set, don't override
         ) {
             return;
         }
@@ -226,27 +231,12 @@ export const Layout: FC = memo(() => {
             setGeoJsonPropertyKey(suggestedProperty);
         }
     }, [
-        validConfig,
+        mapType,
+        geoJsonPropertyKey,
         geoJsonPropertiesData,
         locationFieldLabel,
         setGeoJsonPropertyKey,
     ]);
-
-    if (!isMapConfig || !chartConfig) {
-        return null;
-    }
-
-    const { latitudeFieldId, longitudeFieldId } = chartConfig.validConfig;
-
-    const {
-        validConfig: config,
-        setMapType,
-        setCustomGeoJsonUrl,
-        setLocationType,
-        setLatitudeFieldId,
-        setLongitudeFieldId,
-        setLocationFieldId: setLocationField,
-    } = chartConfig;
 
     const mapTypeOptions = [
         { value: MapChartLocation.WORLD, label: 'World' },
@@ -254,9 +244,9 @@ export const Layout: FC = memo(() => {
     ];
 
     // Get region field config based on map type
-    const regionFieldConfig = getRegionFieldConfig(config.mapType);
+    const regionFieldConfig = getRegionFieldConfig(mapType);
 
-    const locationType = config.locationType || MapChartType.SCATTER;
+    const locationType = storedLocationType || MapChartType.SCATTER;
 
     // Show the Hexbin option whenever either: the feature flag is enabled, the
     // flag is still loading (hides the flag fetch from the user — otherwise
@@ -277,23 +267,17 @@ export const Layout: FC = memo(() => {
             ? [{ value: MapChartType.HEXBIN, label: 'Hexbin' }]
             : []),
     ];
-    const isCustomMap = config.mapType === MapChartLocation.CUSTOM;
+    const isCustomMap = mapType === MapChartLocation.CUSTOM;
 
     // Get selected field objects
-    const latitudeField = itemsMap
-        ? config.latitudeFieldId
-            ? itemsMap[config.latitudeFieldId]
-            : undefined
+    const latitudeField = latitudeFieldId
+        ? itemsMap?.[latitudeFieldId]
         : undefined;
-    const longitudeField = itemsMap
-        ? config.longitudeFieldId
-            ? itemsMap[config.longitudeFieldId]
-            : undefined
+    const longitudeField = longitudeFieldId
+        ? itemsMap?.[longitudeFieldId]
         : undefined;
-    const locationField = itemsMap
-        ? config.locationFieldId
-            ? itemsMap[config.locationFieldId]
-            : undefined
+    const locationField = locationFieldId
+        ? itemsMap?.[locationFieldId]
         : undefined;
 
     // Show Values section for scatter, area, and hexbin maps (not heatmap)
@@ -332,6 +316,7 @@ export const Layout: FC = memo(() => {
                 <Config.Section>
                     <Config.Heading>Map Type</Config.Heading>
                     <SegmentedControl
+                        size="xs"
                         data={locationTypeOptions}
                         value={locationType}
                         onChange={(value) =>
@@ -350,7 +335,7 @@ export const Layout: FC = memo(() => {
                 <Config>
                     <Config.Section>
                         <Config.Heading>Coordinates</Config.Heading>
-                        <Group spacing="md" grow>
+                        <Group gap="md" grow>
                             <FieldSelect
                                 label="Latitude"
                                 placeholder="Select field"
@@ -393,6 +378,7 @@ export const Layout: FC = memo(() => {
                             <Config.Heading>Location</Config.Heading>
 
                             <Switch
+                                size="xs"
                                 label="Custom region"
                                 checked={isCustomMap}
                                 onChange={(e) => {
@@ -408,9 +394,10 @@ export const Layout: FC = memo(() => {
                             {isCustomMap ? (
                                 <>
                                     <TextInput
+                                        size="xs"
                                         label="Custom GeoJSON URL"
                                         placeholder="https://example.com/map.geojson"
-                                        value={config.customGeoJsonUrl || ''}
+                                        value={customGeoJsonUrl || ''}
                                         onChange={(e) =>
                                             setCustomGeoJsonUrl(
                                                 e.currentTarget.value ||
@@ -422,7 +409,7 @@ export const Layout: FC = memo(() => {
                                         label="Map join field"
                                         description="Property from geojson file to join on"
                                         placeholder={
-                                            !config.customGeoJsonUrl
+                                            !customGeoJsonUrl
                                                 ? 'Enter URL first'
                                                 : isLoadingProperties
                                                   ? 'Loading...'
@@ -431,16 +418,14 @@ export const Layout: FC = memo(() => {
                                                     : 'Select property'
                                         }
                                         data={propertyOptions}
-                                        value={
-                                            config.geoJsonPropertyKey || null
-                                        }
+                                        value={geoJsonPropertyKey || null}
                                         onChange={(value) =>
-                                            setGeoJsonPropertyKey?.(
+                                            setGeoJsonPropertyKey(
                                                 value || undefined,
                                             )
                                         }
                                         disabled={
-                                            !config.customGeoJsonUrl ||
+                                            !customGeoJsonUrl ||
                                             isLoadingProperties ||
                                             propertyOptions.length === 0
                                         }
@@ -460,12 +445,11 @@ export const Layout: FC = memo(() => {
                                 </>
                             ) : (
                                 <Select
+                                    allowDeselect={false}
                                     label="Map region"
                                     disabled={isCustomMap}
                                     data={mapTypeOptions}
-                                    value={
-                                        config.mapType || MapChartLocation.WORLD
-                                    }
+                                    value={mapType || MapChartLocation.WORLD}
                                     onChange={(value) =>
                                         setMapType(
                                             (value as MapChartLocation) ||
@@ -486,7 +470,7 @@ export const Layout: FC = memo(() => {
                                 items={availableFields}
                                 description={regionFieldConfig.description}
                                 onChange={(newField) =>
-                                    setLocationField(
+                                    setLocationFieldId(
                                         newField
                                             ? getItemId(newField)
                                             : undefined,

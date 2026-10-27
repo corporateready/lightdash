@@ -1,15 +1,49 @@
 import {
+    assertUnreachable,
     type DashboardChartTile,
     type DashboardFilters,
+    type DashboardSqlChartTile,
+    type DashboardTile,
+    type DateZoom,
     isDashboardChartTileType,
+    isDashboardSqlChartTile,
 } from '@lightdash/common';
-import { useQueryClient } from '@tanstack/react-query';
+import { isCancelledError, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useParams } from 'react-router';
-import { type StreamPart } from '../../ee/features/aiCopilot/store/aiAgentThreadStreamSlice';
-import { useAiAgentStoreSelector } from '../../ee/features/aiCopilot/store/hooks';
+import { scrollToDashboardTile } from '../../components/common/Dashboard/scrollToDashboardTile';
+import { setCurrentDashboard } from '../../ee/features/aiCopilot/store/aiAgentLauncherSlice';
+import {
+    addActiveTabToDashboardRuntimeOverrides,
+    getDashboardParametersValuesMap,
+    getNonDefaultDashboardRuntimeOverrides,
+} from '../../ee/features/aiCopilot/store/dashboardPageContext';
+import {
+    useAiAgentStoreDispatch,
+    useAiAgentStoreSelector,
+} from '../../ee/features/aiCopilot/store/hooks';
+import { getHandledAgentToolCallIds } from '../../ee/features/aiCopilot/streaming/handledAgentToolCalls';
+import { useAiAgentProjectStreamParts } from '../../ee/features/aiCopilot/streaming/useAiAgentThreadStreamQuery';
+import {
+    selectActiveTab,
+    selectDashboardTiles,
+    selectDateZoomGranularity,
+    selectIsDateZoomDisabled,
+    selectParameterValues,
+    useDashboardAllFilters,
+    useDashboardSelector,
+    useDefaultDateZoomGranularity,
+} from '../../features/dashboard/store';
 import { getDashboard } from '../../hooks/dashboard/useDashboard';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import { getSavedQuery } from '../../hooks/useSavedQuery';
+import { useLightdashApi } from '../LightdashApi/useLightdashApi';
+import {
+    type DashboardAiAgentChartRef,
+    type DashboardAiAgentChartTiles,
+    getDashboardTilesForChart,
+    planDashboardAiAgentChanges,
+} from './dashboardAiAgentChangePlanner';
 import useDashboardContext from './useDashboardContext';
 
 const emptyFilters: DashboardFilters = {
@@ -18,236 +52,433 @@ const emptyFilters: DashboardFilters = {
     tableCalculations: [],
 };
 
-type ToolOutput = {
-    metadata?: {
-        status?: 'success' | 'error';
-    };
-};
+const isSavedSqlChartQueryForCharts = (
+    queryKey: readonly unknown[],
+    savedSqlUuids: string[],
+) =>
+    queryKey[0] === 'savedSqlChart' &&
+    typeof queryKey[1] === 'string' &&
+    savedSqlUuids.includes(queryKey[1]);
 
-type ToolCallPart = Extract<StreamPart, { type: 'toolCall' }>;
-type EditContentToolArgs = {
-    type?: 'dashboard' | 'chart';
-    slug?: string;
-};
-
-const isToolOutput = (value: unknown): value is ToolOutput =>
-    typeof value === 'object' && value !== null;
-
-const isFinalEditContentToolCall = (part: StreamPart): part is ToolCallPart =>
-    part.type === 'toolCall' &&
-    part.toolName === 'editContent' &&
-    part.isPreliminary === false &&
-    part.toolOutput !== undefined;
-
-const getEditContentToolArgs = (
-    value: unknown,
-): EditContentToolArgs | undefined =>
-    typeof value === 'object' && value !== null
-        ? (value as EditContentToolArgs)
-        : undefined;
+const isSameChartRef = (
+    a: DashboardAiAgentChartRef | null,
+    b: DashboardAiAgentChartRef | null,
+) => a?.type === b?.type && a?.slug === b?.slug;
 
 const DashboardAiAgentContextBridge = () => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
-    const { projectUuid, dashboardUuid } = useParams<{
-        projectUuid: string;
-        dashboardUuid: string;
-    }>();
-    const dashboard = useDashboardContext((c) => c.dashboard);
-    const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
-    const dashboardTabs = useDashboardContext((c) => c.dashboardTabs);
-    const dashboardFilters = useDashboardContext((c) => c.dashboardFilters);
-    const dashboardTemporaryFilters = useDashboardContext(
-        (c) => c.dashboardTemporaryFilters,
+    // useDashboardQuery/saved_dashboard_query use UUID-or-slug; useDashboardChartReadyQuery/dashboard_chart_ready_query uses dashboard.uuid.
+    const { dashboardUuid: dashboardUuidOrSlug, mode } = useParams();
+    const projectUuid = useProjectUuid();
+    const isEditMode = mode === 'edit';
+    const dispatch = useAiAgentStoreDispatch();
+    const dashboardRefreshRequest = useAiAgentStoreSelector(
+        (state) => state.aiAgentLauncher.dashboardRefreshRequest,
     );
+    const dashboard = useDashboardContext((c) => c.dashboard);
+    const includeUnpublishedDraft = useDashboardContext(
+        (c) => c.includeUnpublishedDraft,
+    );
+    const activeTab = useDashboardSelector(selectActiveTab);
+    const allFilters = useDashboardAllFilters();
+    const originalDashboardFilters = dashboard?.filters ?? emptyFilters;
+    const parameterValues = useDashboardSelector(selectParameterValues);
+    const dateZoomGranularity = useDashboardSelector(selectDateZoomGranularity);
+    const defaultDateZoomGranularity = useDefaultDateZoomGranularity();
+    const isDateZoomDisabled = useDashboardSelector(selectIsDateZoomDisabled);
+    const dashboardTiles = useDashboardSelector(selectDashboardTiles);
     const setDashboardTiles = useDashboardContext((c) => c.setDashboardTiles);
     const setDashboardTabs = useDashboardContext((c) => c.setDashboardTabs);
     const setDashboardFilters = useDashboardContext(
         (c) => c.setDashboardFilters,
     );
-    const setOriginalDashboardFilters = useDashboardContext(
-        (c) => c.setOriginalDashboardFilters,
-    );
     const setDashboardTemporaryFilters = useDashboardContext(
         (c) => c.setDashboardTemporaryFilters,
     );
 
-    const activeThreadId = useAiAgentStoreSelector(
-        (state) => state.aiAgentLauncher.activeThreadId,
-    );
-    const activeThreadParts = useAiAgentStoreSelector((state) =>
-        activeThreadId
-            ? (state.aiAgentThreadStream[activeThreadId]?.parts ?? [])
-            : [],
-    );
+    const activeThreadParts = useAiAgentProjectStreamParts(projectUuid);
 
-    const handledToolCallIdsRef = useRef<Set<string>>(new Set());
+    const pendingChartToFocusRef = useRef<DashboardAiAgentChartRef | null>(
+        null,
+    );
+    const focusRequestIdRef = useRef(0);
+    const handledRefreshRequestIdRef = useRef(0);
 
     const currentDashboardSlug = dashboard?.slug;
-    const dashboardQueryKey = useMemo(
-        () => ['saved_dashboard_query', dashboardUuid, projectUuid],
-        [dashboardUuid, projectUuid],
+    const currentDashboardUuid = dashboard?.uuid;
+    const defaultParameterValues = useMemo(
+        () => getDashboardParametersValuesMap(dashboard?.parameters ?? {}),
+        [dashboard?.parameters],
     );
-
-    const relevantResults = useMemo(
-        () => activeThreadParts.filter(isFinalEditContentToolCall),
-        [activeThreadParts],
+    const defaultDateZoom = useMemo<DateZoom | null>(
+        () =>
+            defaultDateZoomGranularity && !isDateZoomDisabled
+                ? { granularity: defaultDateZoomGranularity }
+                : null,
+        [defaultDateZoomGranularity, isDateZoomDisabled],
     );
-
-    const refreshDashboard = useCallback(async () => {
-        if (!projectUuid || !dashboardUuid) return;
-
-        console.log(
-            '[DashboardAiAgentContextBridge] invalidating dashboard query',
-            {
-                slug: currentDashboardSlug,
-                queryKey: dashboardQueryKey,
-                before: {
-                    tiles: dashboardTiles,
-                    tabs: dashboardTabs,
-                    filters: dashboardFilters,
-                    temporaryFilters: dashboardTemporaryFilters,
-                },
-            },
-        );
-
-        const freshDashboard = await queryClient.fetchQuery({
-            queryKey: dashboardQueryKey,
-            queryFn: () => getDashboard(dashboardUuid, projectUuid),
+    const effectiveDateZoom = useMemo<DateZoom | null>(
+        () =>
+            dateZoomGranularity ? { granularity: dateZoomGranularity } : null,
+        [dateZoomGranularity],
+    );
+    const dashboardRuntimeOverrides = useMemo(() => {
+        const nonDefaultRuntimeOverrides =
+            getNonDefaultDashboardRuntimeOverrides({
+                defaultFilters: originalDashboardFilters,
+                effectiveFilters: allFilters,
+                defaultParameters: defaultParameterValues,
+                effectiveParameters: parameterValues,
+                defaultDateZoom,
+                effectiveDateZoom,
+            });
+        return addActiveTabToDashboardRuntimeOverrides({
+            activeTab,
+            runtimeOverrides: nonDefaultRuntimeOverrides,
         });
-
-        console.log(
-            '[DashboardAiAgentContextBridge] applying fresh dashboard state',
-            {
-                slug: currentDashboardSlug,
-                after: {
-                    tiles: freshDashboard.tiles,
-                    tabs: freshDashboard.tabs,
-                    filters: freshDashboard.filters,
-                },
-            },
-        );
-
-        setDashboardTiles(freshDashboard.tiles);
-        setDashboardTabs(freshDashboard.tabs);
-        setDashboardFilters(freshDashboard.filters);
-        setOriginalDashboardFilters(freshDashboard.filters);
-        setDashboardTemporaryFilters(emptyFilters);
     }, [
-        currentDashboardSlug,
-        dashboardFilters,
-        dashboardQueryKey,
-        dashboardTabs,
-        dashboardTemporaryFilters,
-        dashboardTiles,
-        dashboardUuid,
-        projectUuid,
-        queryClient,
-        setDashboardFilters,
-        setDashboardTabs,
-        setDashboardTemporaryFilters,
-        setDashboardTiles,
-        setOriginalDashboardFilters,
+        activeTab,
+        allFilters,
+        defaultDateZoom,
+        defaultParameterValues,
+        effectiveDateZoom,
+        originalDashboardFilters,
+        parameterValues,
     ]);
+    const dashboardQueryKey = useMemo(
+        () => [
+            'saved_dashboard_query',
+            dashboardUuidOrSlug,
+            projectUuid,
+            includeUnpublishedDraft,
+        ],
+        [dashboardUuidOrSlug, projectUuid, includeUnpublishedDraft],
+    );
 
-    const refreshChartTiles = useCallback(
-        async (chartSlug: string) => {
-            if (!projectUuid || !dashboardUuid) return;
+    const scrollToTile = useCallback((tile: DashboardTile) => {
+        const focusRequestId = (focusRequestIdRef.current += 1);
 
-            const matchingTiles = (dashboardTiles ?? []).filter(
-                (tile): tile is DashboardChartTile =>
-                    isDashboardChartTileType(tile) &&
-                    tile.properties.chartSlug === chartSlug &&
-                    !!tile.properties.savedChartUuid,
-            );
+        window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
+                if (focusRequestId !== focusRequestIdRef.current) return;
+                scrollToDashboardTile(tile.uuid);
+            });
+        });
+    }, []);
 
-            if (matchingTiles.length === 0) return;
+    const refreshSavedChartTiles = useCallback(
+        async (tiles: DashboardChartTile[]) => {
+            if (!projectUuid || !currentDashboardUuid) return;
 
             const savedChartUuids = [
                 ...new Set(
-                    matchingTiles
+                    tiles
                         .map((tile) => tile.properties.savedChartUuid)
                         .filter((uuid): uuid is string => !!uuid),
                 ),
             ];
-
-            console.log(
-                '[DashboardAiAgentContextBridge] refreshing chart tiles',
-                {
-                    slug: chartSlug,
-                    savedChartUuids,
-                    tileUuids: matchingTiles.map((tile) => tile.uuid),
-                },
-            );
+            if (savedChartUuids.length === 0) return;
 
             await Promise.all(
                 savedChartUuids.map(async (savedChartUuid) => {
-                    const freshChart = await queryClient.fetchQuery({
-                        queryKey: ['saved_query', savedChartUuid, projectUuid],
-                        queryFn: () =>
-                            getSavedQuery(savedChartUuid, projectUuid),
+                    const queryKey = [
+                        'saved_query',
+                        savedChartUuid,
+                        projectUuid,
+                        includeUnpublishedDraft,
+                    ];
+                    await queryClient.cancelQueries({ queryKey, exact: true });
+                    await queryClient.invalidateQueries({
+                        queryKey,
+                        refetchType: 'none',
                     });
 
+                    const freshChart = await queryClient
+                        .fetchQuery({
+                            queryKey,
+                            queryFn: () =>
+                                getSavedQuery(
+                                    lightdashApi,
+                                    savedChartUuid,
+                                    projectUuid,
+                                    includeUnpublishedDraft,
+                                ),
+                        })
+                        .catch((error: unknown) => {
+                            if (isCancelledError(error)) return null;
+                            throw error;
+                        });
+                    if (!freshChart) return;
+
                     queryClient.setQueryData(
-                        ['saved_query', freshChart.slug, projectUuid],
+                        [
+                            'saved_query',
+                            freshChart.slug,
+                            projectUuid,
+                            includeUnpublishedDraft,
+                        ],
                         freshChart,
                     );
                 }),
             );
+        },
+        [
+            currentDashboardUuid,
+            lightdashApi,
+            projectUuid,
+            queryClient,
+            includeUnpublishedDraft,
+        ],
+    );
 
-            await queryClient.resetQueries({
+    // Tile results are keyed on the chart's last update, so refetching the chart reruns its results.
+    const refreshSqlChartTiles = useCallback(
+        async (tiles: DashboardSqlChartTile[]) => {
+            const savedSqlUuids = [
+                ...new Set(
+                    tiles
+                        .map((tile) => tile.properties.savedSqlUuid)
+                        .filter((uuid): uuid is string => !!uuid),
+                ),
+            ];
+            if (savedSqlUuids.length === 0) return;
+
+            await queryClient.invalidateQueries({
                 predicate: (query) =>
-                    query.queryKey[0] === 'dashboard_chart_ready_query' &&
-                    query.queryKey[2] !== null &&
-                    savedChartUuids.includes(query.queryKey[2] as string) &&
-                    query.queryKey[3] === dashboardUuid,
+                    isSavedSqlChartQueryForCharts(
+                        query.queryKey,
+                        savedSqlUuids,
+                    ),
             });
         },
-        [dashboardTiles, dashboardUuid, projectUuid, queryClient],
+        [queryClient],
+    );
+
+    const refreshTiles = useCallback(
+        async (chartTiles: DashboardAiAgentChartTiles) => {
+            switch (chartTiles.type) {
+                case 'chart':
+                    return refreshSavedChartTiles(chartTiles.tiles);
+                case 'sql_chart':
+                    return refreshSqlChartTiles(chartTiles.tiles);
+                default:
+                    return assertUnreachable(
+                        chartTiles,
+                        'Unknown dashboard chart tiles',
+                    );
+            }
+        },
+        [refreshSavedChartTiles, refreshSqlChartTiles],
+    );
+
+    const refreshChartTilesFromTiles = useCallback(
+        async (
+            chart: DashboardAiAgentChartRef,
+            tiles: DashboardTile[] | undefined,
+            options?: { focusTile?: boolean },
+        ) => {
+            const chartTiles = getDashboardTilesForChart(tiles ?? [], chart);
+            if (chartTiles.tiles.length === 0) return;
+
+            await refreshTiles(chartTiles);
+
+            if (options?.focusTile) {
+                scrollToTile(chartTiles.tiles[0]);
+            }
+        },
+        [refreshTiles, scrollToTile],
+    );
+
+    const refreshDashboard = useCallback(
+        async (chartToFocus: DashboardAiAgentChartRef | null) => {
+            if (!projectUuid || !dashboardUuidOrSlug) return false;
+
+            await queryClient.cancelQueries({
+                queryKey: dashboardQueryKey,
+                exact: true,
+            });
+            await queryClient.invalidateQueries({
+                queryKey: dashboardQueryKey,
+                refetchType: 'none',
+            });
+
+            const freshDashboard = await queryClient
+                .fetchQuery({
+                    queryKey: dashboardQueryKey,
+                    queryFn: () =>
+                        getDashboard(
+                            lightdashApi,
+                            dashboardUuidOrSlug,
+                            projectUuid,
+                            includeUnpublishedDraft,
+                        ),
+                })
+                .catch((error: unknown) => {
+                    if (isCancelledError(error)) return null;
+                    throw error;
+                });
+            if (!freshDashboard) return false;
+
+            setDashboardTiles(freshDashboard.tiles);
+            setDashboardTabs(freshDashboard.tabs);
+            setDashboardFilters(freshDashboard.filters);
+            setDashboardTemporaryFilters(emptyFilters);
+
+            await Promise.all([
+                refreshSavedChartTiles(
+                    freshDashboard.tiles.filter(isDashboardChartTileType),
+                ),
+                refreshSqlChartTiles(
+                    freshDashboard.tiles.filter(isDashboardSqlChartTile),
+                ),
+            ]);
+
+            if (chartToFocus) {
+                const [tileToFocus] = getDashboardTilesForChart(
+                    freshDashboard.tiles,
+                    chartToFocus,
+                ).tiles;
+                if (tileToFocus) {
+                    scrollToTile(tileToFocus);
+                    return true;
+                }
+            }
+
+            return false;
+        },
+        [
+            dashboardQueryKey,
+            dashboardUuidOrSlug,
+            lightdashApi,
+            projectUuid,
+            includeUnpublishedDraft,
+            queryClient,
+            refreshSavedChartTiles,
+            refreshSqlChartTiles,
+            scrollToTile,
+            setDashboardFilters,
+            setDashboardTabs,
+            setDashboardTemporaryFilters,
+            setDashboardTiles,
+        ],
+    );
+
+    const refreshChartTiles = useCallback(
+        async (
+            chart: DashboardAiAgentChartRef,
+            options?: { focusTile?: boolean },
+        ) => refreshChartTilesFromTiles(chart, dashboardTiles, options),
+        [dashboardTiles, refreshChartTilesFromTiles],
     );
 
     useEffect(() => {
-        if (!currentDashboardSlug) return;
+        if (
+            !currentDashboardSlug ||
+            !currentDashboardUuid ||
+            !projectUuid ||
+            !dashboardUuidOrSlug
+        )
+            return;
 
-        for (const part of relevantResults) {
-            if (handledToolCallIdsRef.current.has(part.toolCallId)) continue;
+        const handledToolCallIds = getHandledAgentToolCallIds(
+            `dashboard:${currentDashboardUuid}`,
+        );
+        const plan = planDashboardAiAgentChanges({
+            parts: activeThreadParts,
+            handledToolCallIds,
+            currentDashboardSlug,
+            pendingChartToFocus: pendingChartToFocusRef.current,
+        });
 
-            handledToolCallIdsRef.current.add(part.toolCallId);
+        for (const toolCallId of plan.handledToolCallIds) {
+            handledToolCallIds.add(toolCallId);
+        }
+        pendingChartToFocusRef.current = plan.pendingChartToFocus;
 
-            const toolArgs = getEditContentToolArgs(part.toolArgs);
-
-            if (toolArgs?.type !== 'dashboard' && toolArgs?.type !== 'chart') {
-                continue;
-            }
-
-            const toolOutput = part.toolOutput;
-            if (
-                !isToolOutput(toolOutput) ||
-                toolOutput.metadata?.status !== 'success' ||
-                !projectUuid ||
-                !dashboardUuid
-            ) {
-                continue;
-            }
-
-            switch (toolArgs.type) {
-                case 'chart':
-                    if (!toolArgs.slug) continue;
-                    void refreshChartTiles(toolArgs.slug);
-                    continue;
-                case 'dashboard':
-                    if (toolArgs.slug !== currentDashboardSlug) continue;
-                    void refreshDashboard();
-                    continue;
+        for (const action of plan.actions) {
+            switch (action.type) {
+                case 'refreshChart':
+                    void refreshChartTiles(action.chart, {
+                        focusTile: action.focusTile,
+                    });
+                    break;
+                case 'refreshDashboard':
+                    void refreshDashboard(action.focusChart).then((focused) => {
+                        if (
+                            focused &&
+                            isSameChartRef(
+                                pendingChartToFocusRef.current,
+                                action.focusChart,
+                            )
+                        ) {
+                            pendingChartToFocusRef.current = null;
+                        }
+                    });
+                    break;
             }
         }
     }, [
+        activeThreadParts,
         currentDashboardSlug,
-        dashboardUuid,
+        currentDashboardUuid,
+        dashboardUuidOrSlug,
         projectUuid,
-        relevantResults,
         refreshChartTiles,
         refreshDashboard,
     ]);
+
+    useEffect(() => {
+        if (!projectUuid || !currentDashboardUuid || !dashboard || isEditMode) {
+            dispatch(setCurrentDashboard(null));
+            return;
+        }
+        dispatch(
+            setCurrentDashboard({
+                projectUuid,
+                uuid: currentDashboardUuid,
+                name: dashboard.name,
+                activeTabUuid: activeTab?.uuid ?? null,
+                runtimeOverrides: dashboardRuntimeOverrides,
+            }),
+        );
+    }, [
+        dispatch,
+        projectUuid,
+        currentDashboardUuid,
+        dashboard,
+        activeTab?.uuid,
+        dashboardRuntimeOverrides,
+        isEditMode,
+    ]);
+
+    useEffect(
+        () => () => {
+            dispatch(setCurrentDashboard(null));
+        },
+        [dispatch],
+    );
+
+    useEffect(() => {
+        if (!dashboardRefreshRequest) return;
+        if (
+            dashboardRefreshRequest.requestId <=
+            handledRefreshRequestIdRef.current
+        )
+            return;
+        if (dashboardRefreshRequest.dashboardUuid !== currentDashboardUuid)
+            return;
+
+        handledRefreshRequestIdRef.current = dashboardRefreshRequest.requestId;
+        void refreshDashboard(
+            dashboardRefreshRequest.focusChartSlug
+                ? {
+                      type: 'chart',
+                      slug: dashboardRefreshRequest.focusChartSlug,
+                  }
+                : null,
+        );
+    }, [dashboardRefreshRequest, currentDashboardUuid, refreshDashboard]);
 
     return null;
 };

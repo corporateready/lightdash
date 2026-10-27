@@ -84,6 +84,8 @@ lightdash lint --format json
 
 ## Download & Upload Content
 
+For resource coverage, project versus organization scope, complete snapshots, and safe agent workflows, read [Content as Code](./content-as-code-reference.md) before using these commands.
+
 ```bash
 # Download all charts and dashboards
 lightdash download
@@ -106,51 +108,123 @@ lightdash upload --charts my-chart --dashboards my-dashboard
 
 # Upload dashboard with all its referenced charts
 lightdash upload --dashboards my-dashboard --include-charts
+
+# Download or upload every organization resource, including Data App themes
+lightdash download --organization
+lightdash upload --organization
+
+# Data-app external connections (enterprise; secrets via env var — see Content as Code)
+lightdash download --include-external-connections
+LIGHTDASH_EXTERNAL_CONNECTION_SECRET_STRIPE_API=sk-... lightdash upload --external-connections stripe-api
 ```
 
-**Verification on upload:** chart and dashboard YAML files include a `verified` boolean. Set `verified: true` or `verified: false` to verify/unverify on upload; omit the field to leave the current verification state unchanged. Only admins can change verification — non-admin uploads silently skip this field.
+## Data Apps (Enterprise)
 
-## Delete Content
-
-Permanently delete charts and dashboards from the server and remove their local YAML files.
+Data apps are multi-file bundles under `apps/<app-folder>/` with a `lightdash-app.yml` manifest. See [Content as Code](./content-as-code-reference.md) for how the selection flags combine.
 
 ```bash
-# Delete a chart by slug
-lightdash delete -c my-chart
+# Download ONE specific app (ref = slug, app URL, or UUID) — complete command, do NOT add --include-apps
+lightdash download --apps revenue-explorer
 
-# Delete a dashboard by slug
-lightdash delete -d my-dashboard
+# Download all apps in the project (capped at 50; raise the cap with --apps-limit)
+lightdash download --include-apps
+lightdash download --include-apps --apps-limit 100
 
-# Delete multiple items at once
-lightdash delete -c chart1 chart2 -d dashboard1
+# Download only apps, skipping charts, dashboards, and spaces
+lightdash download --apps-only
 
-# Delete by UUID
-lightdash delete -c abc123-def456
+# Upload one app (slug = the app folder name, URL, or UUID) / every app folder on disk
+lightdash upload --apps revenue-explorer
+lightdash upload --include-apps
 
-# Delete by URL
-lightdash delete -c "https://app.lightdash.cloud/projects/xxx/saved/abc123"
+# Choose the space (slug or UUID) for apps this upload CREATES — existing apps keep their space
+lightdash upload --apps revenue-explorer --app-space sales
 
-# Skip confirmation prompt (use with caution)
-lightdash delete -c my-chart --force
+# Create a new app (fresh slug) instead of updating the app referenced by lightdash-app.yml
+lightdash upload --apps revenue-explorer --create-new
 
-# Use custom path for local files
-lightdash delete -c my-chart --path ./custom-lightdash
+# Non-interactive upload of an app that declares custom npm dependencies
+lightdash upload --apps revenue-explorer --allow-custom-dependencies
+```
 
-# Delete from a specific project
-lightdash delete -c my-chart --project <project-uuid>
+### Local App Development
+
+```bash
+# Scaffold a new app under ./lightdash/apps/
+lightdash apps create "Revenue Explorer"
+
+# Run an app locally against a real Lightdash instance, authenticated as you
+lightdash apps preview ./lightdash/apps/revenue-explorer
+
+# Validate source, manifest, dependencies, and semantic-layer references
+lightdash apps validate ./lightdash/apps/revenue-explorer
+lightdash apps validate --build   # add the Cloud-parity Vite production build
+lightdash apps validate --live    # validate against fresh project explores instead of the downloaded snapshot
+```
+
+Every created or downloaded app bundle includes its own skills (`developing-data-apps-locally` and `lightdash-data-app`) — read them before editing app source.
+
+## Custom Chart Types (Enterprise)
+
+Custom chart types are reusable visualizations built in Chart Studio, stored as bundles under `chart-types/<slug>/`. See [Content as Code](./content-as-code-reference.md#custom-chart-types-enterprise) for how the selection flags combine.
+
+```bash
+# Scaffold a new chart type under ./lightdash/chart-types/
+lightdash apps create "Radial Gauge" --chart-type
+
+# Download ONE chart type (ref = slug, URL, or UUID) — complete command, do NOT add --include-chart-types
+lightdash download --chart-types radial-gauge
+
+# Download all chart types in the project (capped at 50; raise the cap with --chart-types-limit)
+lightdash download --include-chart-types
+lightdash download --chart-types-only   # chart types only, skipping charts, dashboards, and spaces
+
+# From inside chart-types/<slug>/: validate, then upload (../.. is the content root)
+lightdash apps validate --build
+lightdash upload --chart-types radial-gauge --path ../..
+
+# Upload every chart type folder on disk
+lightdash upload --include-chart-types
+```
+
+Every created or downloaded chart type folder includes `AGENTS.md` and its own skills (`reusable-visualization` and `developing-chart-types-locally`). Read them before editing chart type source.
+
+## SQL Runner
+
+### Warehouse catalog
+
+Discover databases, schemas, and tables using the currently selected project's server-side warehouse credentials. The default output is a terminal table; use `--json` for deterministic machine-readable output.
+
+```bash
+# List all warehouse tables
+lightdash warehouse-catalog
+
+# Filter by exact database and schema names
+lightdash warehouse-catalog --database analytics --schema public
+
+# Return deterministic JSON for an agent or script
+lightdash warehouse-catalog --schema public --json
+
+# Include fields and Lightdash types for one fully qualified table
+lightdash warehouse-catalog --database analytics --schema public --table orders --include-fields --json
+
+# Refetch warehouse metadata and refresh the server cache before listing
+lightdash warehouse-catalog --refresh
 ```
 
 **Options:**
 
-- `-c, --charts <charts...>` - Chart slugs, UUIDs, or URLs to delete
-- `-d, --dashboards <dashboards...>` - Dashboard slugs, UUIDs, or URLs to delete
-- `-f, --force` - Skip confirmation prompt
-- `-p, --path <path>` - Custom path where local chart-as-code files are stored
-- `--project <uuid>` - Specify a project UUID
+- `--database <name>` - Filter by exact database name
+- `--schema <name>` - Filter by exact schema name
+- `--table <name>` - Filter by exact table name
+- `--include-fields` - Include fields and Lightdash types; requires all three filters
+- `--refresh` - Refetch warehouse metadata and refresh the server catalog cache before listing
+- `--json` - Output deterministic JSON instead of a terminal table
+- `--verbose` - Show detailed API request output
 
-**Warning:** The delete command will warn you if any charts being deleted are referenced by dashboards.
+The command requires a project selected with `lightdash config set-project` and never returns warehouse credentials or secret connection metadata.
 
-## SQL Runner
+### Run SQL
 
 Execute raw SQL queries against the warehouse using the current project's credentials.
 
@@ -247,18 +321,21 @@ lightdash set-warehouse --project-dir ./dbt --profiles-dir ./profiles --assume-y
 
 ## Command Summary
 
-| Command               | Purpose                          |
-| --------------------- | -------------------------------- |
-| `lightdash login`     | Authenticate with Lightdash      |
-| `lightdash config`    | Manage project selection         |
-| `lightdash deploy`    | Sync semantic layer to Lightdash |
-| `lightdash upload`    | Upload charts/dashboards         |
-| `lightdash download`  | Download charts/dashboards       |
-| `lightdash delete`    | Remove charts/dashboards         |
-| `lightdash preview`   | Create temporary test project    |
-| `lightdash validate`  | Validate against server          |
-| `lightdash lint`      | Validate YAML locally            |
-| `lightdash generate`  | Generate YAML from dbt models    |
-| `lightdash sql`       | Run SQL queries                  |
-| `lightdash run-chart` | Execute chart YAML query         |
-| `lightdash set-warehouse` | Update project warehouse connection |
+| Command                       | Purpose                                          |
+| ----------------------------- | ------------------------------------------------ |
+| `lightdash login`             | Authenticate with Lightdash                      |
+| `lightdash config`            | Manage project selection                         |
+| `lightdash deploy`            | Sync semantic layer to Lightdash                 |
+| `lightdash upload`            | Upload project or organization content as code   |
+| `lightdash download`          | Download project or organization content as code |
+| `lightdash preview`           | Create temporary test project                    |
+| `lightdash validate`          | Validate against server                          |
+| `lightdash lint`              | Validate YAML locally                            |
+| `lightdash generate`          | Generate YAML from dbt models                    |
+| `lightdash warehouse-catalog` | Discover warehouse tables and fields             |
+| `lightdash sql`               | Run SQL queries                                  |
+| `lightdash run-chart`         | Execute chart YAML query                         |
+| `lightdash set-warehouse`     | Update project warehouse connection              |
+| `lightdash apps create`       | Scaffold a new data app locally (enterprise)     |
+| `lightdash apps preview`      | Run a data app locally against a real instance   |
+| `lightdash apps validate`     | Validate data app source and references          |

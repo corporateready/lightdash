@@ -89,6 +89,50 @@ In CI, the release-driven jobs in `.github/workflows/post-release.yml` handle pu
 automatically — they tag each release as `lightdash-data-app:<version>` (and rolling
 `:latest`), rebuilding the image only when this folder or `packages/query-sdk/` changed.
 
+## Cloud Run gateway image
+
+Each Lightdash release publishes a prebuilt `linux/amd64` gateway image to
+Docker Hub from `.github/workflows/post-release.yml`:
+
+```bash
+docker pull lightdash/lightdash-data-app-sandbox-cloud-run:<lightdash-version>
+```
+
+Use the tag matching your deployed Lightdash version; `:latest` tracks the most
+recent release. Copy it into your own registry and deploy it with the
+[Cloud Run sandbox deployment instructions](https://docs.lightdash.com/self-host/customize-deployment/sandboxes#google-cloud-run-sandboxes-self-hosted-preview).
+Custom npm dependencies in data apps still install at build time from the hosts in
+`LIGHTDASH_APP_DEPENDENCY_REGISTRY_HOSTS`.
+
+To build the image yourself instead, use the Node version in `.nvmrc` and pnpm version in the root `package.json`.
+Install repository dependencies with `sfw pnpm install --frozen-lockfile` from
+its root (`npm install -g sfw` installs the dependency firewall if needed).
+Docker with Buildx must be running.
+
+From the repository root:
+
+```bash
+# Build for local inspection
+./sandboxes/data-apps/build-cloud-run-image.sh lightdash-sandbox-gateway:local --load
+
+# Build and push to your authenticated registry
+./sandboxes/data-apps/build-cloud-run-image.sh \
+  <registry>/<project>/lightdash-sandbox-gateway:<lightdash-version> --push
+```
+
+The script builds and packs the SDK from the checkout on every invocation,
+includes the pinned ComputeSDK gateway, and cleans up its temporary build context.
+Additional arguments are passed to `docker buildx build`. Use a checkout matching
+both your deployed Lightdash version and the image tag. The script builds an
+image only; follow the [Cloud Run sandbox deployment instructions](https://docs.lightdash.com/self-host/customize-deployment/sandboxes#google-cloud-run-sandboxes-self-hosted-preview)
+to deploy and configure the service.
+
+E2B and local Docker builds use the same `pack-query-sdk.sh` helper, so old SDK
+archives are replaced when rebuilding after an upgrade.
+
+Run `bash sandboxes/data-apps/test-build-cloud-run-image.sh` from the repository
+root to check image assembly and failure handling without Docker or network access.
+
 ## Related
 
 - **GLITCH-270** — E2B sandbox that runs this scaffold in production

@@ -1,4 +1,4 @@
-import { Badge, rem, type BadgeProps } from '@mantine-8/core';
+import { Badge, rem, type BadgeProps } from '@mantine/core';
 import type { FC, ReactNode } from 'react';
 import TruncatedText from '../../../../../../components/common/TruncatedText';
 
@@ -29,20 +29,23 @@ export const ToolCallChip: FC<ToolCallChipProps> = ({
     ...rest
 }) => (
     <Badge
-        color="gray"
-        variant="light"
+        component="span"
         size="xs"
-        radius="sm"
         maw={maxWidth}
         {...rest}
         style={{
             textTransform: 'none',
             fontWeight: 400,
-            ...(typeof style === 'object' && style !== null ? style : {}),
+            ...(typeof style === 'object' &&
+            style !== null &&
+            !Array.isArray(style)
+                ? style
+                : {}),
         }}
     >
         {typeof children === 'string' ? (
             <TruncatedText
+                inline
                 maxWidth={maxWidth}
                 fz="inherit"
                 c="inherit"

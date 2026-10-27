@@ -1,6 +1,5 @@
 import { subject } from '@casl/ability';
 import {
-    assertUnreachable,
     ProjectType,
     WarehouseTypes,
     type OrganizationProject,
@@ -23,11 +22,10 @@ import {
     SegmentedControl,
     Stack,
     Text,
-    Title,
     Tooltip,
     UnstyledButton,
     useMantineTheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconCalendarTime,
     IconCheck,
@@ -41,6 +39,7 @@ import {
     IconTrash,
     IconUser,
 } from '@tabler/icons-react';
+import clsx from 'clsx';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
 import {
@@ -53,10 +52,11 @@ import {
     ContentTableSearchInput,
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
+    type ContentTableColumnDef,
 } from '../../common/ContentTable';
 import MantineIcon from '../../common/MantineIcon';
 import MantineModal from '../../common/MantineModal';
+import { SettingsPage } from '../../common/Settings/SettingsPage';
 import {
     getWarehouseIcon,
     getWarehouseLabel,
@@ -64,12 +64,10 @@ import {
 import { ProjectDeleteModal } from '../DeleteProjectPanel/DeleteProjectModal';
 import { ProjectDeleteInBulkModal } from '../DeleteProjectPanel/ProjectDeleteInBulkModal';
 import classes from './ProjectManagementPanel.module.css';
-
-enum ProjectTypeFilter {
-    ALL = 'all',
-    DEFAULT = 'default',
-    PREVIEW = 'preview',
-}
+import {
+    matchesProjectTypeFilter,
+    ProjectTypeFilter,
+} from './projectTypeFilter';
 
 const WAREHOUSE_LABELS: Record<WarehouseTypes, string> = {
     [WarehouseTypes.BIGQUERY]: 'BigQuery',
@@ -80,7 +78,7 @@ const WAREHOUSE_LABELS: Record<WarehouseTypes, string> = {
     [WarehouseTypes.TRINO]: 'Trino',
     [WarehouseTypes.CLICKHOUSE]: 'ClickHouse',
     [WarehouseTypes.ATHENA]: 'Athena',
-    [WarehouseTypes.DUCKDB]: 'MotherDuck',
+    [WarehouseTypes.DUCKDB]: 'DuckDB',
 };
 
 const CopyableCommand: FC<{ label: string; command: string }> = ({
@@ -99,15 +97,12 @@ const CopyableCommand: FC<{ label: string; command: string }> = ({
                             block
                             fz="xs"
                             p="xs"
-                            className={
+                            className={clsx(
+                                classes.copyableCommand,
                                 copied
                                     ? classes.copyFlashActive
-                                    : classes.copyFlash
-                            }
-                            style={{
-                                cursor: 'pointer',
-                                wordBreak: 'break-all',
-                            }}
+                                    : classes.copyFlash,
+                            )}
                         >
                             <Group
                                 gap="xs"
@@ -121,6 +116,7 @@ const CopyableCommand: FC<{ label: string; command: string }> = ({
                                     icon={copied ? IconCheck : IconCopy}
                                     size="sm"
                                     color={copied ? 'teal.6' : 'ldGray.5'}
+                                    className={classes.copyIcon}
                                 />
                             </Group>
                         </Code>
@@ -196,27 +192,45 @@ const ProjectManagementPanel: FC = () => {
         }));
     }, [projects]);
 
+    // Deleting the org's training playground takes every learner's copy
+    // with it, so it is offered to org admins only (the same permission
+    // Enable Learn needs); other projects follow the delete ability alone.
+    const canDeleteProject = useCallback(
+        (project: OrganizationProject) => {
+            if (!user.data) return false;
+            const canDelete = user.data.ability.can(
+                'delete',
+                subject('Project', {
+                    type: project.type,
+                    projectUuid: project.projectUuid,
+                    organizationUuid: user.data.organizationUuid,
+                    createdByUserUuid: project.createdByUserUuid,
+                }),
+            );
+            if (project.type !== ProjectType.TRAINING) return canDelete;
+            return (
+                canDelete &&
+                user.data.ability.can(
+                    'manage',
+                    subject('Organization', {
+                        organizationUuid: user.data.organizationUuid,
+                    }),
+                )
+            );
+        },
+        [user.data],
+    );
+
     const filteredProjects = useMemo(() => {
         return projects.filter((project) => {
             const matchesSearch =
                 !search ||
                 project.name.toLowerCase().includes(search.toLowerCase());
 
-            const matchesType = (() => {
-                switch (activeFilter) {
-                    case ProjectTypeFilter.DEFAULT:
-                        return project.type === ProjectType.DEFAULT;
-                    case ProjectTypeFilter.PREVIEW:
-                        return project.type === ProjectType.PREVIEW;
-                    case ProjectTypeFilter.ALL:
-                        return true;
-                    default:
-                        return assertUnreachable(
-                            activeFilter,
-                            `Unknown filter: ${activeFilter}`,
-                        );
-                }
-            })();
+            const matchesType = matchesProjectTypeFilter(
+                activeFilter,
+                project.type,
+            );
 
             const matchesWarehouse =
                 selectedWarehouses.length === 0 ||
@@ -237,17 +251,50 @@ const ProjectManagementPanel: FC = () => {
         });
     }, [projects, activeFilter, search, selectedWarehouses, selectedCreators]);
 
-    const allSelectedProjects = useMemo(() => {
-        return selectedProjects
-            .map((uuid) => projects.find((p) => p.projectUuid === uuid))
-            .filter((p): p is OrganizationProject => !!p);
-    }, [projects, selectedProjects]);
+    const selectedUuids = useMemo(
+        () => new Set(selectedProjects),
+        [selectedProjects],
+    );
 
-    const handleSelectAll = useCallback(() => {
-        setSelectedProjects(
+    // A selection can outlive a filter change, so bulk actions only ever act
+    // on selected projects that are still in view.
+    const visibleSelectedProjects = useMemo(
+        () =>
+            filteredProjects.filter((project) =>
+                selectedUuids.has(project.projectUuid),
+            ),
+        [filteredProjects, selectedUuids],
+    );
+
+    const selectableProjects = useMemo(
+        () => filteredProjects.filter(canDeleteProject),
+        [filteredProjects, canDeleteProject],
+    );
+
+    const allVisibleSelected =
+        selectableProjects.length > 0 &&
+        selectableProjects.every((project) =>
+            selectedUuids.has(project.projectUuid),
+        );
+
+    // The header checkbox reflects and toggles only the rows in view;
+    // selections hidden by a filter are left untouched.
+    const handleToggleSelectAll = useCallback(() => {
+        const visibleUuids = new Set(
             filteredProjects.map((project) => project.projectUuid),
         );
-    }, [filteredProjects]);
+        setSelectedProjects((prev) => {
+            const hidden = prev.filter((uuid) => !visibleUuids.has(uuid));
+            return allVisibleSelected
+                ? hidden
+                : [
+                      ...hidden,
+                      ...selectableProjects.map(
+                          (project) => project.projectUuid,
+                      ),
+                  ];
+        });
+    }, [filteredProjects, selectableProjects, allVisibleSelected]);
 
     const handleDeleteInBulk = useCallback(() => {
         setDeletingProjectInBulk(true);
@@ -274,7 +321,7 @@ const ProjectManagementPanel: FC = () => {
         [lastProjectUuid, navigate, updateActiveProjectMutation],
     );
 
-    const columns: MRT_ColumnDef<OrganizationProject>[] = useMemo(
+    const columns: ContentTableColumnDef<OrganizationProject>[] = useMemo(
         () => [
             {
                 id: 'select',
@@ -283,25 +330,22 @@ const ProjectManagementPanel: FC = () => {
                 enableSorting: false,
                 Header: () =>
                     activeFilter === ProjectTypeFilter.PREVIEW ? (
-                        <Button
-                            variant="subtle"
-                            size="compact-xs"
-                            onClick={handleSelectAll}
-                        >
-                            Select all
-                        </Button>
+                        <Center>
+                            <Checkbox
+                                aria-label="Select all projects"
+                                checked={allVisibleSelected}
+                                indeterminate={
+                                    !allVisibleSelected &&
+                                    visibleSelectedProjects.length > 0
+                                }
+                                disabled={selectableProjects.length === 0}
+                                onChange={handleToggleSelectAll}
+                            />
+                        </Center>
                     ) : null,
                 Cell: ({ row }) => {
                     const project = row.original;
-                    const canDelete = user.data?.ability.can(
-                        'delete',
-                        subject('Project', {
-                            type: project.type,
-                            projectUuid: project.projectUuid,
-                            organizationUuid: user.data?.organizationUuid,
-                            createdByUserUuid: project.createdByUserUuid,
-                        }),
-                    );
+                    const canDelete = canDeleteProject(project);
                     return (
                         <Center>
                             <Checkbox
@@ -327,7 +371,7 @@ const ProjectManagementPanel: FC = () => {
                 size: 200,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconTextCaption} color="ldGray.6" />
+                        <MantineIcon icon={IconTextCaption} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -341,13 +385,14 @@ const ProjectManagementPanel: FC = () => {
                                 {project.name}
                             </Text>
                             {isCurrentProject && (
-                                <Badge variant="light" size="xs">
-                                    Current
-                                </Badge>
+                                <Badge size="xs">Current</Badge>
                             )}
                             {project.type === ProjectType.PREVIEW && (
-                                <Badge size="xs" variant="light">
-                                    Preview
+                                <Badge size="xs">Preview</Badge>
+                            )}
+                            {project.type === ProjectType.TRAINING && (
+                                <Badge size="xs" color="grape" flex="none">
+                                    Playground
                                 </Badge>
                             )}
                         </Group>
@@ -361,7 +406,7 @@ const ProjectManagementPanel: FC = () => {
                 size: 140,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconDatabase} color="ldGray.6" />
+                        <MantineIcon icon={IconDatabase} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -384,7 +429,7 @@ const ProjectManagementPanel: FC = () => {
                                     <MantineIcon
                                         icon={IconDatabase}
                                         size="xs"
-                                        color="ldGray.6"
+                                        color="dimmed"
                                     />
                                 </Avatar>
                             )}
@@ -402,7 +447,7 @@ const ProjectManagementPanel: FC = () => {
                 size: 150,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconUser} color="ldGray.6" />
+                        <MantineIcon icon={IconUser} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -419,7 +464,7 @@ const ProjectManagementPanel: FC = () => {
                 size: 120,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconClock} color="ldGray.6" />
+                        <MantineIcon icon={IconClock} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -437,7 +482,7 @@ const ProjectManagementPanel: FC = () => {
                 size: 120,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconCalendarTime} color="ldGray.6" />
+                        <MantineIcon icon={IconCalendarTime} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -473,26 +518,16 @@ const ProjectManagementPanel: FC = () => {
                             projectUuid: project.projectUuid,
                         }),
                     );
-                    const canDelete = user.data?.ability.can(
-                        'delete',
-                        subject('Project', {
-                            type: project.type,
-                            projectUuid: project.projectUuid,
-                            organizationUuid: user.data?.organizationUuid,
-                            createdByUserUuid: project.createdByUserUuid,
-                        }),
-                    );
+                    const canDelete = canDeleteProject(project);
 
                     return (
                         <Menu
-                            withinPortal
                             position="bottom-end"
                             withArrow
                             arrowPosition="center"
-                            shadow="md"
                         >
                             <Menu.Target>
-                                <ActionIcon variant="subtle" color="gray">
+                                <ActionIcon>
                                     <MantineIcon icon={IconDots} />
                                 </ActionIcon>
                             </Menu.Target>
@@ -568,13 +603,17 @@ const ProjectManagementPanel: FC = () => {
         ],
         [
             activeFilter,
+            allVisibleSelected,
             handleProjectSettingsClick,
             handleSelect,
-            handleSelectAll,
+            handleToggleSelectAll,
             lastProjectUuid,
+            selectableProjects.length,
             selectedProjects,
             user.data?.ability,
+            canDeleteProject,
             user.data?.organizationUuid,
+            visibleSelectedProjects.length,
         ],
     );
 
@@ -595,13 +634,10 @@ const ProjectManagementPanel: FC = () => {
     const table = useContentTable({
         columns,
         data: filteredProjects,
-        enableColumnActions: false,
-        enableColumnFilters: false,
         enablePagination: false,
         enableSorting: true,
         enableTopToolbar: true,
         enableBottomToolbar: false,
-        enableGlobalFilter: false,
         mantinePaperProps: {
             shadow: undefined,
             style: {
@@ -611,11 +647,6 @@ const ProjectManagementPanel: FC = () => {
                 display: 'flex',
                 flexDirection: 'column' as const,
                 overflow: 'hidden',
-            },
-        },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
             },
         },
         mantineTableHeadCellProps: {
@@ -648,17 +679,22 @@ const ProjectManagementPanel: FC = () => {
         },
         renderTopToolbar: () => (
             <Group
+                className={classes.toolbar}
                 justify="space-between"
                 p={`${theme.spacing.sm} ${theme.spacing.md}`}
                 wrap="nowrap"
             >
-                <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                    <Tooltip
-                        withinPortal
-                        variant="xs"
-                        label="Search by project name"
-                    >
+                <Group
+                    className={classes.filters}
+                    gap="xs"
+                    wrap="nowrap"
+                    flex={1}
+                    miw={0}
+                >
+                    <Tooltip label="Search by project name">
                         <ContentTableSearchInput
+                            className={classes.search}
+                            aria-label="Search projects"
                             placeholder="Search projects..."
                             value={search}
                             onChange={setSearch}
@@ -669,12 +705,11 @@ const ProjectManagementPanel: FC = () => {
                         orientation="vertical"
                         w={1}
                         h={20}
-                        style={{ alignSelf: 'center' }}
+                        visibleFrom="sm"
                     />
 
                     <SegmentedControl
                         size="xs"
-                        radius="md"
                         value={activeFilter}
                         onChange={handleFilterChange}
                         classNames={{
@@ -686,10 +721,7 @@ const ProjectManagementPanel: FC = () => {
                             {
                                 value: ProjectTypeFilter.ALL,
                                 label: (
-                                    <Tooltip
-                                        label="Show all projects"
-                                        withinPortal
-                                    >
+                                    <Tooltip label="Show all projects">
                                         <Box>
                                             <Text fz="xs" fw={500}>
                                                 All
@@ -701,10 +733,7 @@ const ProjectManagementPanel: FC = () => {
                             {
                                 value: ProjectTypeFilter.DEFAULT,
                                 label: (
-                                    <Tooltip
-                                        label="Show only standard projects"
-                                        withinPortal
-                                    >
+                                    <Tooltip label="Show only standard projects">
                                         <Box>
                                             <Text fz="xs" fw={500}>
                                                 Projects
@@ -716,10 +745,7 @@ const ProjectManagementPanel: FC = () => {
                             {
                                 value: ProjectTypeFilter.PREVIEW,
                                 label: (
-                                    <Tooltip
-                                        label="Show only preview projects"
-                                        withinPortal
-                                    >
+                                    <Tooltip label="Show only preview projects">
                                         <Box>
                                             <Text fz="xs" fw={500}>
                                                 Preview
@@ -728,31 +754,32 @@ const ProjectManagementPanel: FC = () => {
                                     </Tooltip>
                                 ),
                             },
+                            {
+                                value: ProjectTypeFilter.TRAINING,
+                                label: (
+                                    <Tooltip label="Show only the training playground Learn created">
+                                        <Box>
+                                            <Text fz="xs" fw={500}>
+                                                Training
+                                            </Text>
+                                        </Box>
+                                    </Tooltip>
+                                ),
+                            },
                         ]}
                     />
 
-                    <Divider
-                        orientation="vertical"
-                        w={1}
-                        h={20}
-                        style={{ alignSelf: 'center' }}
-                    />
+                    <Divider orientation="vertical" w={1} h={20} />
 
                     {/* Warehouse filter */}
                     <Popover width={220} position="bottom-start">
                         <Popover.Target>
-                            <Tooltip
-                                withinPortal
-                                variant="xs"
-                                label="Filter by warehouse"
-                            >
+                            <Tooltip label="Filter by warehouse">
                                 <Button
                                     h={32}
                                     c="foreground"
-                                    fw={500}
                                     fz="sm"
                                     variant="default"
-                                    radius="md"
                                     px="sm"
                                     className={
                                         selectedWarehouses.length > 0
@@ -788,7 +815,7 @@ const ProjectManagementPanel: FC = () => {
                         </Popover.Target>
                         <Popover.Dropdown p="sm">
                             <Stack gap={4}>
-                                <Text fz="xs" c="ldGray.9" fw={600}>
+                                <Text fz="xs" fw={600}>
                                     Filter by warehouse:
                                 </Text>
                                 <ScrollArea.Autosize
@@ -842,18 +869,12 @@ const ProjectManagementPanel: FC = () => {
                     {availableCreators.length > 0 && (
                         <Popover width={250} position="bottom-start">
                             <Popover.Target>
-                                <Tooltip
-                                    withinPortal
-                                    variant="xs"
-                                    label="Filter by creator"
-                                >
+                                <Tooltip label="Filter by creator">
                                     <Button
                                         h={32}
                                         c="foreground"
-                                        fw={500}
                                         fz="sm"
                                         variant="default"
-                                        radius="md"
                                         px="sm"
                                         className={
                                             selectedCreators.length > 0
@@ -889,7 +910,7 @@ const ProjectManagementPanel: FC = () => {
                             </Popover.Target>
                             <Popover.Dropdown p="sm">
                                 <Stack gap={4}>
-                                    <Text fz="xs" c="ldGray.9" fw={600}>
+                                    <Text fz="xs" fw={600}>
                                         Filter by creator:
                                     </Text>
                                     <ScrollArea.Autosize
@@ -945,23 +966,18 @@ const ProjectManagementPanel: FC = () => {
                     )}
                 </Group>
 
-                <Group gap="sm" wrap="nowrap" style={{ flexShrink: 0 }}>
+                <Group gap="sm" wrap="nowrap" flex="0 0 auto">
                     {hasActiveFilters && (
                         <Tooltip label="Clear all filters">
-                            <ActionIcon
-                                variant="subtle"
-                                size="sm"
-                                color="gray"
-                                onClick={resetAllFilters}
-                            >
+                            <ActionIcon size="sm" onClick={resetAllFilters}>
                                 <MantineIcon icon={IconTrash} />
                             </ActionIcon>
                         </Tooltip>
                     )}
-                    {selectedProjects.length > 0 && (
+                    {visibleSelectedProjects.length > 0 && (
                         <>
                             <Text size="sm" c="dimmed">
-                                {selectedProjects.length} selected
+                                {visibleSelectedProjects.length} selected
                             </Text>
                             <Button
                                 size="xs"
@@ -979,29 +995,27 @@ const ProjectManagementPanel: FC = () => {
         ),
     });
 
-    if (isLoadingProjects || isLoadingLastProject) return null;
-
-    if (projects.length === 0) {
+    if (!isLoadingProjects && !isLoadingLastProject && projects.length === 0) {
         return <Navigate to="/createProject" />;
     }
 
     return (
-        <Stack mb="lg">
-            <Group justify="space-between">
-                <Title order={5}>Project Management</Title>
-
-                {user.data?.ability.can(
+        <SettingsPage
+            title="All projects"
+            description="Manage projects, connections, access, and project lifecycle."
+            actions={
+                user.data?.ability.can(
                     'create',
                     subject('Project', {
                         organizationUuid: user.data?.organizationUuid,
                     }),
                 ) && (
-                    <Button component={Link} to="/createProject">
-                        Create new
+                    <Button size="xs" component={Link} to="/createProject">
+                        Create project
                     </Button>
-                )}
-            </Group>
-
+                )
+            }
+        >
             <ContentTable table={table} />
 
             {deletingProjectUuid ? (
@@ -1016,9 +1030,9 @@ const ProjectManagementPanel: FC = () => {
             {deletingProjectInBulk && (
                 <ProjectDeleteInBulkModal
                     currentProjectUuid={lastProjectUuid ?? null}
-                    opened={selectedProjects.length > 0}
+                    opened={visibleSelectedProjects.length > 0}
                     onClose={handleCloseDeleteInBulk}
-                    projects={allSelectedProjects}
+                    projects={visibleSelectedProjects}
                 />
             )}
 
@@ -1027,7 +1041,7 @@ const ProjectManagementPanel: FC = () => {
                 onClose={() => setCliProject(undefined)}
                 title={`CLI reference: ${cliProject?.name ?? ''}`}
                 icon={IconTerminal2}
-                size="lg"
+                size="xl"
             >
                 {cliProject && (
                     <Stack gap="md">
@@ -1041,7 +1055,7 @@ const ProjectManagementPanel: FC = () => {
                         />
                         <CopyableCommand
                             label="Start a preview from this project"
-                            command={`lightdash start-preview --project ${cliProject.projectUuid}`}
+                            command={`LIGHTDASH_PROJECT=${cliProject.projectUuid} lightdash start-preview --name <name>`}
                         />
                         <CopyableCommand
                             label="Validate this project"
@@ -1054,7 +1068,7 @@ const ProjectManagementPanel: FC = () => {
                     </Stack>
                 )}
             </MantineModal>
-        </Stack>
+        </SettingsPage>
     );
 };
 

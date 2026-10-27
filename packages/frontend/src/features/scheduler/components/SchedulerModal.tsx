@@ -6,20 +6,11 @@ import {
     type SchedulerRun,
     type SchedulerRunLog,
 } from '@lightdash/common';
-import {
-    ActionIcon,
-    Box,
-    Button,
-    Group,
-    Loader,
-    Stack,
-    TextInput,
-} from '@mantine-8/core';
-import { IconBell, IconSearch, IconSend, IconX } from '@tabler/icons-react';
+import { Group, Modal, Paper, Stack, Text, useMatches } from '@mantine/core';
+import { IconBell, IconSend } from '@tabler/icons-react';
 import { type UseInfiniteQueryResult } from '@tanstack/react-query';
 import React, { useCallback, useMemo, useState, type FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
-import MantineModal from '../../../components/common/MantineModal';
 import DocumentationHelpButton from '../../../components/DocumentationHelpButton';
 import RunDetailsModal from '../../../components/SchedulersView/RunDetailsModal';
 import { useGetSlackChannelName } from '../../../hooks/slack/useGetSlackChannelName';
@@ -27,9 +18,10 @@ import useToaster from '../../../hooks/toaster/useToaster';
 import { useActiveProjectUuid } from '../../../hooks/useActiveProject';
 import { useFetchRunLogs } from '../hooks/useScheduler';
 import { States } from '../utils';
+import classes from './SchedulerForm/layout/SchedulerDeliveryModal.module.css';
+import { SchedulerList } from './SchedulerForm/layout/SchedulerList';
 import { SchedulerModalCreateOrEdit } from './SchedulerModalCreateOrEdit';
 import SchedulerRunsHistoryModal from './SchedulerRunsHistoryModal';
-import SchedulersList from './SchedulersList';
 
 type HistoryContext = {
     schedulerUuid: string;
@@ -45,8 +37,12 @@ const SchedulersModal: FC<
         | 'createMutation'
         | 'isChart'
         | 'isApp'
+        | 'currentAppState'
+        | 'capturedQueryCount'
         | 'currentParameterValues'
         | 'availableParameters'
+        | 'filterableFieldsByTileUuid'
+        | 'hiddenFilterableFieldIds'
     > & {
         name: string;
         onClose?: () => void;
@@ -59,10 +55,17 @@ const SchedulersModal: FC<
         >;
         /** If provided, opens directly in edit mode for this scheduler */
         initialSchedulerUuid?: string;
+        /** Opens directly in create mode, skipping the list. */
+        defaultCreate?: boolean;
+        /** Create-mode only: pre-fills the new delivery. */
+        initialFormValues?: React.ComponentProps<
+            typeof SchedulerModalCreateOrEdit
+        >['initialFormValues'];
         searchQuery?: string;
         onSearchQueryChange?: (searchQuery: string | undefined) => void;
     }
 > = ({
+    name,
     resourceUuid,
     schedulersQuery,
     createMutation,
@@ -71,15 +74,27 @@ const SchedulersModal: FC<
     isApp = false,
     isThresholdAlert,
     itemsMap,
+    currentAppState,
+    capturedQueryCount,
     currentParameterValues,
     availableParameters,
+    filterableFieldsByTileUuid,
+    hiddenFilterableFieldIds,
     onClose = () => {},
     initialSchedulerUuid,
+    defaultCreate = false,
+    initialFormValues,
     searchQuery,
     onSearchQueryChange,
 }) => {
+    const compact = useMatches({ base: true, sm: false });
     const [modalState, setModalState] = useState<States>(
-        initialSchedulerUuid ? States.EDIT : States.LIST,
+        // eslint-disable-next-line no-nested-ternary
+        initialSchedulerUuid
+            ? States.EDIT
+            : defaultCreate
+              ? States.CREATE
+              : States.LIST,
     );
     const [schedulerUuidToEdit, setSchedulerUuidToEdit] = useState<
         string | undefined
@@ -92,12 +107,6 @@ const SchedulersModal: FC<
     const [childLogsMap, setChildLogsMap] = useState<
         Map<string, SchedulerRunLog[]>
     >(new Map());
-
-    const { isFetching, isInitialLoading, data } = schedulersQuery;
-    const hasSchedulers =
-        (data?.pages.flatMap((page) => page.data) ?? []).length > 0;
-    const showSearchBar =
-        onSearchQueryChange && (Boolean(searchQuery) || hasSchedulers);
 
     const handleViewHistory = useCallback((scheduler: SchedulerAndTargets) => {
         const ctx: HistoryContext | null = scheduler.dashboardUuid
@@ -164,99 +173,76 @@ const SchedulersModal: FC<
         [childLogsMap, fetchRunLogsMutation, showToastError],
     );
 
-    const Actions = () => {
-        if (modalState === States.LIST) {
-            return (
-                <Group>
-                    <Button variant="default" onClick={onClose}>
-                        Cancel
-                    </Button>
-                    <Button onClick={() => setModalState(States.CREATE)}>
-                        Create new
-                    </Button>
-                </Group>
-            );
-        }
-
-        return null;
-    };
-
     if (modalState === States.LIST) {
         return (
-            <MantineModal
+            <Modal.Root
                 opened={isOpen}
                 onClose={onClose}
-                size="xl"
-                title={isThresholdAlert ? 'Alerts' : 'Scheduled deliveries'}
-                icon={isThresholdAlert ? IconBell : IconSend}
-                headerActions={
-                    isThresholdAlert ? (
-                        <DocumentationHelpButton
-                            href="https://docs.lightdash.com/guides/how-to-create-alerts"
-                            pos="relative"
-                            top="2px"
-                        />
-                    ) : (
-                        <DocumentationHelpButton
-                            href="https://docs.lightdash.com/guides/how-to-create-scheduled-deliveries"
-                            pos="relative"
-                            top="2px"
-                        />
-                    )
-                }
-                modalBodyProps={{ bg: 'background' }}
-                actions={<Actions />}
-                cancelLabel={false}
+                size={880}
+                fullScreen={compact}
+                centered
             >
-                <Stack gap="md" mih={220}>
-                    {showSearchBar && (
-                        <TextInput
-                            placeholder={`Search ${
-                                isThresholdAlert
-                                    ? 'alerts'
-                                    : 'scheduled deliveries'
-                            }...`}
-                            leftSection={<MantineIcon icon={IconSearch} />}
-                            rightSection={
-                                isFetching && !isInitialLoading ? (
-                                    <Loader size={14} />
-                                ) : (
-                                    searchQuery && (
-                                        <ActionIcon
-                                            onClick={() =>
-                                                onSearchQueryChange?.(undefined)
-                                            }
-                                            variant="transparent"
-                                            size="xs"
-                                            color="ldGray.5"
-                                        >
-                                            <MantineIcon icon={IconX} />
-                                        </ActionIcon>
-                                    )
-                                )
-                            }
-                            value={searchQuery ?? ''}
-                            onChange={(e) =>
-                                onSearchQueryChange?.(
-                                    e.currentTarget.value || undefined,
-                                )
-                            }
-                        />
-                    )}
-                    <Box>
-                        <SchedulersList
+                <Modal.Overlay />
+                <Modal.Content>
+                    <div className={classes.content}>
+                        <Group
+                            className={classes.header}
+                            px="xl"
+                            py="md"
+                            justify="space-between"
+                            wrap="nowrap"
+                        >
+                            <Group gap="sm" wrap="nowrap">
+                                <Paper p="6px" radius="md">
+                                    <MantineIcon
+                                        icon={
+                                            isThresholdAlert
+                                                ? IconBell
+                                                : IconSend
+                                        }
+                                        size="md"
+                                    />
+                                </Paper>
+                                <Stack gap={0}>
+                                    <span className={classes.headerTitle}>
+                                        {isThresholdAlert
+                                            ? 'Alerts'
+                                            : 'Scheduled deliveries'}
+                                    </span>
+                                    <Text
+                                        size="xs"
+                                        className={classes.subtitle}
+                                    >
+                                        {name}
+                                    </Text>
+                                </Stack>
+                            </Group>
+                            <Group gap="xs" wrap="nowrap">
+                                <DocumentationHelpButton
+                                    href={
+                                        isThresholdAlert
+                                            ? 'https://docs.lightdash.com/guides/how-to-create-alerts'
+                                            : 'https://docs.lightdash.com/guides/how-to-create-scheduled-deliveries'
+                                    }
+                                />
+                                <Modal.CloseButton aria-label="Close scheduled deliveries" />
+                            </Group>
+                        </Group>
+                        <SchedulerList
                             schedulersQuery={schedulersQuery}
-                            isThresholdAlertList={isThresholdAlert}
-                            isSearching={Boolean(searchQuery)}
+                            isThresholdAlert={!!isThresholdAlert}
+                            searchQuery={searchQuery}
+                            onSearchQueryChange={onSearchQueryChange}
+                            onCreate={() => setModalState(States.CREATE)}
                             onEdit={(schedulerUuid) => {
                                 setModalState(States.EDIT);
                                 setSchedulerUuidToEdit(schedulerUuid);
                             }}
                             onViewHistory={handleViewHistory}
                         />
-                    </Box>
-                </Stack>
-            </MantineModal>
+                    </div>
+                </Modal.Content>
+            </Modal.Root>
         );
     }
 
@@ -264,8 +250,12 @@ const SchedulersModal: FC<
         return (
             <SchedulerModalCreateOrEdit
                 resourceUuid={resourceUuid}
+                resourceName={name}
                 schedulerUuidToEdit={
                     modalState === States.EDIT ? schedulerUuidToEdit : undefined
+                }
+                initialFormValues={
+                    modalState === States.CREATE ? initialFormValues : undefined
                 }
                 createMutation={createMutation}
                 onClose={onClose}
@@ -274,8 +264,12 @@ const SchedulersModal: FC<
                 isApp={isApp}
                 isThresholdAlert={isThresholdAlert}
                 itemsMap={itemsMap}
+                currentAppState={currentAppState}
+                capturedQueryCount={capturedQueryCount}
                 currentParameterValues={currentParameterValues}
                 availableParameters={availableParameters}
+                filterableFieldsByTileUuid={filterableFieldsByTileUuid}
+                hiddenFilterableFieldIds={hiddenFilterableFieldIds}
             />
         );
     }

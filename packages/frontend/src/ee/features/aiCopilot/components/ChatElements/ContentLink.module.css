@@ -17,6 +17,7 @@
     margin-right: var(--mantine-spacing-two);
     line-height: 1;
     min-width: 0;
+    max-width: 100%;
 }
 
 .contentLink:hover {
@@ -27,6 +28,20 @@
     border-color: light-dark(
         var(--mantine-color-ldGray-3),
         var(--mantine-color-ldGray-4)
+    );
+}
+
+/* Non-interactive reference chip (e.g. file/repository) — same chrome, but no
+   pointer or hover since there is nowhere to navigate. */
+.static {
+    cursor: default;
+}
+
+.static:hover {
+    background-color: transparent !important;
+    border-color: light-dark(
+        var(--mantine-color-ldGray-2),
+        var(--mantine-color-ldGray-3)
     );
 }
 
@@ -49,11 +64,46 @@
     );
 }
 
-.sqlRunnerLinkButton {
-    --button-bg: light-dark(
-        var(--mantine-color-white),
+.contentLink[data-app-active='true'] {
+    background-color: light-dark(
+        color-mix(
+            in srgb,
+            var(--mantine-color-orange-6) 3.5%,
+            var(--mantine-color-white)
+        ),
         var(--mantine-color-dark-6)
+    ) !important;
+    border-color: light-dark(
+        color-mix(
+            in srgb,
+            var(--mantine-color-orange-6) 18%,
+            var(--mantine-color-ldGray-2)
+        ),
+        var(--mantine-color-ldGray-3)
     );
+}
+
+.contentLink[data-chart-active='true'] {
+    background-color: light-dark(
+        color-mix(
+            in srgb,
+            var(--mantine-color-blue-6) 3.5%,
+            var(--mantine-color-white)
+        ),
+        var(--mantine-color-dark-6)
+    ) !important;
+    border-color: light-dark(
+        color-mix(
+            in srgb,
+            var(--mantine-color-blue-6) 18%,
+            var(--mantine-color-ldGray-2)
+        ),
+        var(--mantine-color-ldGray-3)
+    );
+}
+
+.sqlRunnerLinkButton {
+    --button-bg: var(--mantine-color-body);
     --button-hover: light-dark(
         var(--mantine-color-ldGray-0),
         var(--mantine-color-dark-5)
@@ -62,8 +112,7 @@
         var(--mantine-color-ldGray-8),
         var(--mantine-color-ldGray-1)
     );
-    --button-bd: 1px solid
-        light-dark(var(--mantine-color-ldGray-3), var(--mantine-color-dark-4));
+    --button-bd: 1px solid var(--mantine-color-ldGray-3);
 
     box-shadow: 0 1px 2px
         light-dark(rgba(15, 23, 42, 0.04), rgba(0, 0, 0, 0.22));

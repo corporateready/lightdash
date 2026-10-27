@@ -11,8 +11,9 @@ import {
     useMutation,
     useQueryClient,
 } from '@tanstack/react-query';
-import { lightdashApi } from '../../../api';
+import { type LightdashApi } from '../../../api';
 import useToaster from '../../../hooks/toaster/useToaster';
+import { useLightdashApi } from '../../../providers/LightdashApi/useLightdashApi';
 
 // Apps use a flat (non-paginated) list endpoint — schedule counts per app
 // are expected to be small. We wrap the response in the same paginated
@@ -21,11 +22,22 @@ import useToaster from '../../../hooks/toaster/useToaster';
 type AppSchedulersPage = KnexPaginatedData<SchedulerAndTargets[]>;
 
 const getAppSchedulers = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     appUuid: string,
+    includeLatestRun?: boolean,
 ): Promise<AppSchedulersPage> => {
+    const params = new URLSearchParams();
+
+    if (includeLatestRun) {
+        params.set('includeLatestRun', 'true');
+    }
+
+    const queryString = params.toString();
     const results = await lightdashApi<ApiAppSchedulersResponse['results']>({
-        url: `/ee/projects/${projectUuid}/apps/${appUuid}/schedulers`,
+        url: `/ee/projects/${projectUuid}/apps/${appUuid}/schedulers${
+            queryString ? `?${queryString}` : ''
+        }`,
         method: 'GET',
         body: undefined,
     });
@@ -43,22 +55,33 @@ const getAppSchedulers = async (
 export type UseAppSchedulersParams = {
     projectUuid: string;
     appUuid: string;
+    includeLatestRun?: boolean;
 };
 
 export const useAppSchedulers = ({
     projectUuid,
     appUuid,
-}: UseAppSchedulersParams) =>
-    useInfiniteQuery<AppSchedulersPage, ApiError>({
-        queryKey: ['app_schedulers', appUuid],
-        queryFn: () => getAppSchedulers(projectUuid, appUuid),
+    includeLatestRun,
+}: UseAppSchedulersParams) => {
+    const lightdashApi = useLightdashApi();
+    return useInfiniteQuery<AppSchedulersPage, ApiError>({
+        queryKey: ['app_schedulers', appUuid, includeLatestRun],
+        queryFn: () =>
+            getAppSchedulers(
+                lightdashApi,
+                projectUuid,
+                appUuid,
+                includeLatestRun,
+            ),
         getNextPageParam: () => undefined, // single-page wrapper
         keepPreviousData: true,
         refetchOnWindowFocus: false,
         enabled: !!appUuid && !!projectUuid,
     });
+};
 
 const createAppScheduler = (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     appUuid: string,
     data: CreateSchedulerAndTargetsWithoutIds,
@@ -70,6 +93,7 @@ const createAppScheduler = (
     });
 
 export const useAppSchedulerCreateMutation = (projectUuid: string) => {
+    const lightdashApi = useLightdashApi();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<
@@ -78,7 +102,7 @@ export const useAppSchedulerCreateMutation = (projectUuid: string) => {
         { resourceUuid: string; data: CreateSchedulerAndTargetsWithoutIds }
     >(
         ({ resourceUuid, data }) =>
-            createAppScheduler(projectUuid, resourceUuid, data),
+            createAppScheduler(lightdashApi, projectUuid, resourceUuid, data),
         {
             mutationKey: ['create_app_scheduler'],
             onSuccess: async (_, variables) => {

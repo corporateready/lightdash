@@ -13,7 +13,11 @@ import {
     Text,
     Tooltip,
     UnstyledButton,
-} from '@mantine-8/core';
+    ActionIcon,
+    Popover,
+    useMatches,
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import {
     IconCheck,
     IconClock,
@@ -27,9 +31,11 @@ import {
 import dayjs from 'dayjs';
 import { type FC } from 'react';
 import { Link } from 'react-router';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
 import { useTimeAgo } from '../../../hooks/useTimeAgo';
 import MantineIcon from '../MantineIcon';
 import InfoRow from '../PageHeader/InfoRow';
+import ViewsCountPopover from '../ViewsCountPopover';
 import { DashboardList } from './DashboardList';
 import styles from './ResourceInfoPopup.module.css';
 
@@ -40,7 +46,7 @@ const versionStatusLabel = (status: AppVersionStatus): string => {
     return status;
 };
 
-type Props = {
+export type ResourceInfoPopupProps = {
     resourceUuid: string;
     withChartData?: boolean;
     title?: string;
@@ -51,11 +57,32 @@ type Props = {
     spaceUuid?: string | null;
     projectUuid: string;
     viewStats?: number;
+    viewStatsResourceType?: 'chart' | 'dashboard';
     firstViewedAt?: Date | string | null;
     latestVersion?: { number: number; status: AppVersionStatus } | null;
 };
 
-export const ResourceInfoPopup: FC<Props> = ({
+const hasResourceInfoContent = ({
+    title,
+    description,
+    slug,
+    withChartData = false,
+    updatedAt,
+    viewStats,
+    spaceName,
+    spaceUuid,
+    latestVersion,
+}: ResourceInfoPopupProps) =>
+    !!title ||
+    !!description ||
+    !!slug ||
+    !!withChartData ||
+    !!updatedAt ||
+    viewStats !== undefined ||
+    !!(spaceName && spaceUuid) ||
+    !!latestVersion;
+
+export const ResourceInfoPopupContent: FC<ResourceInfoPopupProps> = ({
     resourceUuid,
     title,
     description,
@@ -65,10 +92,14 @@ export const ResourceInfoPopup: FC<Props> = ({
     spaceUuid,
     projectUuid,
     viewStats,
+    viewStatsResourceType,
     firstViewedAt,
     withChartData = false,
     latestVersion,
 }) => {
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
     const timeAgo = useTimeAgo(updatedAt ?? new Date());
     const label =
         firstViewedAt && viewStats
@@ -83,144 +114,186 @@ export const ResourceInfoPopup: FC<Props> = ({
         !!latestVersion;
     const shouldShowDivider =
         !!slug && (hasMetadataRows || !!description || withChartData);
-    const hasContent =
-        !!title ||
-        !!description ||
-        !!slug ||
-        !!withChartData ||
-        !!updatedAt ||
-        viewStats !== undefined ||
-        !!(spaceName && spaceUuid) ||
-        !!latestVersion;
-
-    if (!hasContent) return null;
+    if (
+        !hasResourceInfoContent({
+            resourceUuid,
+            title,
+            description,
+            slug,
+            updatedAt,
+            spaceName,
+            spaceUuid,
+            projectUuid,
+            viewStats,
+            firstViewedAt,
+            withChartData,
+            latestVersion,
+        })
+    )
+        return null;
 
     return (
-        <HoverCard offset={-1} position="bottom" shadow="md" withinPortal>
+        <Stack gap="sm">
+            {(title || description) && (
+                <Box>
+                    {title && (
+                        <Text fz="sm" fw={600} mb={4}>
+                            {title}
+                        </Text>
+                    )}
+                    {description && (
+                        <Text fz="xs" c="dimmed" className={styles.preLineText}>
+                            {description}
+                        </Text>
+                    )}
+                </Box>
+            )}
+
+            <Stack gap={10}>
+                {updatedAt && (
+                    <InfoRow icon={IconClock} label="Last modified">
+                        {timeAgo}
+                    </InfoRow>
+                )}
+
+                {viewStats !== undefined ? (
+                    <InfoRow icon={IconEye} label="Views">
+                        <ViewsCountPopover
+                            resourceType={viewStatsResourceType}
+                            resourceUuid={resourceUuid}
+                            projectUuid={projectUuid}
+                            views={viewStats}
+                            fallbackTooltip={label}
+                        >
+                            {viewStats.toLocaleString()}
+                        </ViewsCountPopover>
+                    </InfoRow>
+                ) : null}
+
+                {spaceName && spaceUuid && (
+                    <InfoRow icon={IconFolder} label="Space">
+                        <Anchor
+                            component={Link}
+                            to={`/projects/${projectUrlIdentifier}/spaces/${spaceUuid}`}
+                            fz="xs"
+                            fw={500}
+                        >
+                            {spaceName}
+                        </Anchor>
+                    </InfoRow>
+                )}
+
+                {latestVersion && (
+                    <Group gap={6} wrap="nowrap">
+                        <MantineIcon
+                            icon={IconHistory}
+                            color="dimmed"
+                            size={14}
+                        />
+                        <Text fz="xs" c="dimmed" fw={600}>
+                            Version {latestVersion.number} (
+                            {versionStatusLabel(latestVersion.status)})
+                        </Text>
+                    </Group>
+                )}
+
+                {withChartData && (
+                    <DashboardList
+                        resourceItemId={resourceUuid}
+                        projectUuid={projectUuid}
+                    />
+                )}
+
+                {shouldShowDivider && <Divider mb={4} />}
+
+                {slug && (
+                    <InfoRow icon={IconHash} label="Slug">
+                        <CopyButton value={slug}>
+                            {({ copied, copy }) => (
+                                <Tooltip
+                                    position="top-start"
+                                    label={copied ? 'Copied slug' : 'Copy slug'}
+                                >
+                                    <UnstyledButton onClick={copy}>
+                                        <Group gap={6} wrap="nowrap">
+                                            <Text
+                                                fz="xs"
+                                                fw={500}
+                                                ff="monospace"
+                                            >
+                                                {slug}
+                                            </Text>
+                                            <MantineIcon
+                                                icon={
+                                                    copied
+                                                        ? IconCheck
+                                                        : IconCopy
+                                                }
+                                                color="dimmed"
+                                                size="sm"
+                                            />
+                                        </Group>
+                                    </UnstyledButton>
+                                </Tooltip>
+                            )}
+                        </CopyButton>
+                    </InfoRow>
+                )}
+            </Stack>
+        </Stack>
+    );
+};
+
+export const ResourceInfoPopup: FC<ResourceInfoPopupProps> = (props) => {
+    const compact = useMatches(
+        { base: true, sm: false },
+        { getInitialValueInEffect: false },
+    );
+    const [opened, { toggle, close }] = useDisclosure(false);
+    if (!hasResourceInfoContent(props)) return null;
+
+    if (compact)
+        return (
+            <Popover
+                opened={opened}
+                onClose={close}
+                width="min(320px, calc(100vw - 24px))"
+                position="bottom"
+                withArrow
+            >
+                <Popover.Target>
+                    <ActionIcon
+                        variant="subtle"
+                        color="gray"
+                        size="lg"
+                        aria-label="Content details"
+                        aria-expanded={opened}
+                        onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            toggle();
+                        }}
+                    >
+                        <MantineIcon icon={IconInfoCircle} />
+                    </ActionIcon>
+                </Popover.Target>
+                <Popover.Dropdown>
+                    <ResourceInfoPopupContent {...props} />
+                </Popover.Dropdown>
+            </Popover>
+        );
+
+    return (
+        <HoverCard offset={-1} position="bottom">
             <HoverCard.Target>
-                <MantineIcon icon={IconInfoCircle} color="ldGray.6" />
+                <MantineIcon icon={IconInfoCircle} color="dimmed" />
             </HoverCard.Target>
             <HoverCard.Dropdown
                 w={320}
                 p="md"
                 className={styles.resourceInfoOverlay}
             >
-                <Stack gap="sm">
-                    {(title || description) && (
-                        <Box>
-                            {title && (
-                                <Text fz="sm" fw={600} c="ldGray.9" mb={4}>
-                                    {title}
-                                </Text>
-                            )}
-                            {description && (
-                                <Text
-                                    fz="xs"
-                                    c="dimmed"
-                                    className={styles.preLineText}
-                                >
-                                    {description}
-                                </Text>
-                            )}
-                        </Box>
-                    )}
-
-                    <Stack gap={10}>
-                        {updatedAt && (
-                            <InfoRow icon={IconClock} label="Last modified">
-                                {timeAgo}
-                            </InfoRow>
-                        )}
-
-                        {viewStats !== undefined ? (
-                            <InfoRow icon={IconEye} label="Views">
-                                <Tooltip
-                                    position="top-start"
-                                    label={label}
-                                    disabled={!viewStats || !firstViewedAt}
-                                >
-                                    <span>{viewStats.toLocaleString()}</span>
-                                </Tooltip>
-                            </InfoRow>
-                        ) : null}
-
-                        {spaceName && spaceUuid && (
-                            <InfoRow icon={IconFolder} label="Space">
-                                <Anchor
-                                    component={Link}
-                                    to={`/projects/${projectUuid}/spaces/${spaceUuid}`}
-                                    fz={12}
-                                    fw={500}
-                                >
-                                    {spaceName}
-                                </Anchor>
-                            </InfoRow>
-                        )}
-
-                        {latestVersion && (
-                            <Group gap={6} wrap="nowrap">
-                                <MantineIcon
-                                    icon={IconHistory}
-                                    color="ldGray.6"
-                                    size={14}
-                                />
-                                <Text fz="xs" c="ldGray.6" fw={600}>
-                                    Version {latestVersion.number} (
-                                    {versionStatusLabel(latestVersion.status)})
-                                </Text>
-                            </Group>
-                        )}
-
-                        {withChartData && (
-                            <DashboardList
-                                resourceItemId={resourceUuid}
-                                projectUuid={projectUuid}
-                            />
-                        )}
-
-                        {shouldShowDivider && <Divider mb={4} />}
-
-                        {slug && (
-                            <InfoRow icon={IconHash} label="Slug">
-                                <CopyButton value={slug}>
-                                    {({ copied, copy }) => (
-                                        <Tooltip
-                                            position="top-start"
-                                            label={
-                                                copied
-                                                    ? 'Copied slug'
-                                                    : 'Copy slug'
-                                            }
-                                            withArrow
-                                        >
-                                            <UnstyledButton onClick={copy}>
-                                                <Group gap={6} wrap="nowrap">
-                                                    <Text
-                                                        fz={11}
-                                                        fw={500}
-                                                        c="ldGray.9"
-                                                        ff="monospace"
-                                                    >
-                                                        {slug}
-                                                    </Text>
-                                                    <MantineIcon
-                                                        icon={
-                                                            copied
-                                                                ? IconCheck
-                                                                : IconCopy
-                                                        }
-                                                        color="ldGray.6"
-                                                        size="sm"
-                                                    />
-                                                </Group>
-                                            </UnstyledButton>
-                                        </Tooltip>
-                                    )}
-                                </CopyButton>
-                            </InfoRow>
-                        )}
-                    </Stack>
-                </Stack>
+                <ResourceInfoPopupContent {...props} />
             </HoverCard.Dropdown>
         </HoverCard>
     );

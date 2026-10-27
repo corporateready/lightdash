@@ -3,11 +3,24 @@ import {
     JWT_HEADER_NAME,
     type ApiError,
 } from '@lightdash/common';
-import { EMBED_KEY, type InMemoryEmbed } from '../ee/providers/Embed/types';
-import { getFromInMemoryStorage } from './inMemoryStorage';
+import { type InMemoryEmbed } from '../ee/providers/Embed/types';
+
+const LIGHTDASH_SDK_INSTANCE_URL_LOCAL_STORAGE_KEY =
+    '__lightdash_sdk_instance_url';
+
+export const resolveRequestUrl = (url: string) => {
+    const sdkInstanceUrl = sessionStorage.getItem(
+        LIGHTDASH_SDK_INSTANCE_URL_LOCAL_STORAGE_KEY,
+    );
+
+    return new URL(url, sdkInstanceUrl ?? window.location.origin).toString();
+};
 
 // To be reused across all hooks that need to fetch SQL query results
-export const getResultsFromStream = async <T>(url: string | undefined) => {
+export const getResultsFromStream = async <T>(
+    url: string | undefined,
+    embed: InMemoryEmbed | undefined,
+) => {
     try {
         if (!url) {
             throw new Error('No URL provided');
@@ -15,14 +28,13 @@ export const getResultsFromStream = async <T>(url: string | undefined) => {
         // Embed iframes need the JWT on every fetch — there is no session
         // cookie. Mirror lightdashApi's finalizeHeaders so streamed result
         // reads aren't rejected with 401.
-        const embed = getFromInMemoryStorage<InMemoryEmbed>(EMBED_KEY);
         const headers: Record<string, string> = {
             Accept: 'application/json',
         };
         if (embed?.token) {
             headers[JWT_HEADER_NAME] = embed.token;
         }
-        const response = await fetch(url, {
+        const response = await fetch(resolveRequestUrl(url), {
             method: 'GET',
             headers,
         });

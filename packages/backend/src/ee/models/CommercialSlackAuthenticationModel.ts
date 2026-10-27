@@ -5,42 +5,40 @@ import {
 } from '@lightdash/common';
 import { SlackAuthTokensTableName } from '../../database/entities/slackAuthentication';
 import { SlackAuthenticationModel } from '../../models/SlackAuthenticationModel';
+import { AiRouterTableName } from '../database/entities/aiRouter';
 import { SlackChannelProjectMappingsTableName } from '../database/entities/slackChannelProjectMappings';
 
 export class CommercialSlackAuthenticationModel extends SlackAuthenticationModel {
-    async getOrganizationUuidFromTeamId(teamId: string) {
-        const row = await this.database(SlackAuthTokensTableName)
-            .leftJoin(
-                'organizations',
-                'slack_auth_tokens.organization_id',
-                'organizations.organization_id',
-            )
-            .select('organization_uuid')
-            .where('slack_team_id', teamId)
-            .first();
-
-        if (!row) {
-            throw new Error('Could not find organization');
-        }
-
-        return row.organization_uuid;
-    }
-
     async getInstallationFromOrganizationUuid(
         organizationUuid: string,
-    ): Promise<Omit<SlackSettings, 'hasRequiredScopes'> | undefined> {
+    ): Promise<
+        | (Omit<SlackSettings, 'hasRequiredScopes' | 'features'> & {
+              appId: string | null;
+          })
+        | undefined
+    > {
         const [row] = await this.database(SlackAuthTokensTableName)
             .leftJoin(
                 'organizations',
                 'slack_auth_tokens.organization_id',
                 'organizations.organization_id',
             )
-            .select('*')
-            .where('organization_uuid', organizationUuid);
+            .leftJoin(
+                AiRouterTableName,
+                `${AiRouterTableName}.organization_uuid`,
+                'organizations.organization_uuid',
+            )
+            .select(
+                'slack_auth_tokens.*',
+                'organizations.organization_uuid',
+                `${AiRouterTableName}.project_uuids as ai_router_project_uuids`,
+            )
+            .where('organizations.organization_uuid', organizationUuid);
 
         if (row === undefined) return undefined;
 
         const slackSettings = {
+            appId: row.installation?.appId ?? null,
             createdAt: row.created_at,
             slackTeamName: row.installation?.team?.name || 'Slack',
             organizationUuid: row.organization_uuid,
@@ -50,9 +48,15 @@ export class CommercialSlackAuthenticationModel extends SlackAuthenticationModel
             appProfilePhotoUrl: row.app_profile_photo_url ?? undefined,
             aiThreadAccessConsent: row.ai_thread_access_consent ?? false,
             aiRequireOAuth: row.ai_require_oauth,
+            aiLinksOnly: row.ai_links_only ?? false,
             aiMultiAgentChannelId: row.ai_multi_agent_channel_id ?? undefined,
-            aiMultiAgentProjectUuids: row.ai_multi_agent_project_uuids ?? null,
+            aiMultiAgentProjectUuids:
+                row.ai_router_project_uuids &&
+                row.ai_router_project_uuids.length > 0
+                    ? row.ai_router_project_uuids
+                    : null,
             unfurlsEnabled: row.unfurls_enabled ?? true,
+            aiAgentsEnabled: row.ai_agents_enabled ?? true,
         };
 
         const slackChannelProjectMappingRows = await this.database(
@@ -108,18 +112,19 @@ export class CommercialSlackAuthenticationModel extends SlackAuthenticationModel
             slackChannelProjectMappings,
             aiThreadAccessConsent,
             aiRequireOAuth,
+            aiLinksOnly,
             aiMultiAgentChannelId,
             aiMultiAgentProjectUuids,
             unfurlsEnabled,
+            aiAgentsEnabled,
         }: SlackAppCustomSettings,
     ) {
         const organizationId = await this.getOrganizationId(organizationUuid);
 
-        // Convert empty array to null for text[] column
         const projectUuidsToSave =
             aiMultiAgentProjectUuids && aiMultiAgentProjectUuids.length > 0
                 ? aiMultiAgentProjectUuids
-                : null;
+                : [];
 
         await this.database.transaction(async (trx) => {
             await trx(SlackAuthTokensTableName)
@@ -128,11 +133,25 @@ export class CommercialSlackAuthenticationModel extends SlackAuthenticationModel
                     app_profile_photo_url: appProfilePhotoUrl,
                     ai_thread_access_consent: aiThreadAccessConsent ?? false,
                     ai_require_oauth: aiRequireOAuth ?? false,
+                    ai_links_only: aiLinksOnly ?? false,
                     ai_multi_agent_channel_id: aiMultiAgentChannelId ?? null,
-                    ai_multi_agent_project_uuids: projectUuidsToSave,
                     unfurls_enabled: unfurlsEnabled,
+                    ai_agents_enabled: aiAgentsEnabled,
                 })
                 .where('organization_id', organizationId);
+
+            if (aiMultiAgentChannelId) {
+                await trx(AiRouterTableName)
+                    .insert({
+                        organization_uuid: organizationUuid,
+                        project_uuids: projectUuidsToSave,
+                    })
+                    .onConflict('organization_uuid')
+                    .merge({
+                        project_uuids: projectUuidsToSave,
+                        updated_at: trx.fn.now(),
+                    });
+            }
 
             const insertItems = slackChannelProjectMappings?.map((mapping) => ({
                 organization_uuid: organizationUuid,

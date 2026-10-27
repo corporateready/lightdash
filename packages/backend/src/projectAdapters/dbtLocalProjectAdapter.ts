@@ -12,10 +12,15 @@ type DbtLocalProjectAdapterArgs = {
     target: string | undefined;
     profileName?: string | undefined;
     environment?: Record<string, string>;
+    environmentVariableAllowlist: string[];
+    explicitCredentials: boolean;
     cachedWarehouse: CachedWarehouse;
     dbtVersion: SupportedDbtVersions;
     selector?: string;
     analytics?: LightdashAnalytics;
+    gitConfigGlobalPath?: string;
+    dbtDepsErrorHint?: string;
+    partialParseBaselinePath: string | null;
 };
 
 export class DbtLocalProjectAdapter extends DbtBaseProjectAdapter {
@@ -27,18 +32,28 @@ export class DbtLocalProjectAdapter extends DbtBaseProjectAdapter {
         target,
         profileName,
         environment,
+        environmentVariableAllowlist,
+        explicitCredentials,
         cachedWarehouse,
         dbtVersion,
         selector,
+        gitConfigGlobalPath,
+        dbtDepsErrorHint,
+        partialParseBaselinePath,
     }: DbtLocalProjectAdapterArgs) {
         const dbtClient = new DbtCliClient({
             dbtProjectDirectory: projectDir,
             dbtProfilesDirectory: profilesDir,
             environment: environment || {},
+            environmentVariableAllowlist,
+            explicitCredentials,
             profileName,
             target,
             dbtVersion,
             selector,
+            gitConfigGlobalPath,
+            dbtDepsErrorHint,
+            partialParseBaselinePath,
         });
         super(
             dbtClient,

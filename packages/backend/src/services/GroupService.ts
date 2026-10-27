@@ -1,21 +1,30 @@
 import { subject } from '@casl/ability';
 import {
+    Account,
+    ApiGroupAsCodeUpsertResponse,
+    assertRegisteredAccount,
     FeatureFlags,
     ForbiddenError,
     Group,
+    GroupAsCode,
     GroupMember,
     GroupMembership,
     GroupWithMembers,
-    LightdashUser,
+    isAccount,
+    ParameterError,
     ProjectGroupAccess,
     ProjectMemberRole,
+    PromotionAction,
+    RegisteredAccount,
     SessionUser,
     UpdateGroupWithMembers,
+    validateEmail,
 } from '@lightdash/common';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
 import { UpdateDBProjectGroupAccess } from '../database/entities/projectGroupAccess';
 import { GroupsModel } from '../models/GroupsModel';
 import { ProjectModel } from '../models/ProjectModel/ProjectModel';
+import { assertHumanManagedMutation } from './AgentPermissionService/assertHumanManagedMutation';
 import { BaseService } from './BaseService';
 import { FeatureFlagService } from './FeatureFlag/FeatureFlagService';
 
@@ -43,9 +52,173 @@ export class GroupsService extends BaseService {
         this.featureFlagService = args.featureFlagService;
     }
 
+    private validateGroupsAsCodeAccess(
+        account: Account,
+        organizationUuid: string,
+    ): asserts account is RegisteredAccount {
+        assertRegisteredAccount(account);
+        if (account.organization.organizationUuid !== organizationUuid) {
+            throw new ForbiddenError();
+        }
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('Group', { organizationUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+    }
+
+    private static validateGroupAsCode(group: GroupAsCode): GroupAsCode {
+        if (
+            typeof group !== 'object' ||
+            group === null ||
+            Array.isArray(group)
+        ) {
+            throw new ParameterError('Group as code must be an object');
+        }
+        const unknownKeys = Object.keys(group).filter(
+            (key) => !['version', 'name', 'members'].includes(key),
+        );
+        if (unknownKeys.length > 0) {
+            throw new ParameterError(
+                `Unknown group fields: ${unknownKeys.sort().join(', ')}`,
+            );
+        }
+        if (group.version !== 1) {
+            throw new ParameterError(
+                `Unsupported group as-code version ${group.version}`,
+            );
+        }
+        if (
+            typeof group.name !== 'string' ||
+            group.name.length === 0 ||
+            group.name !== group.name.trim()
+        ) {
+            throw new ParameterError(
+                'Group name must be non-empty and must not have surrounding whitespace',
+            );
+        }
+        if (!Array.isArray(group.members)) {
+            throw new ParameterError('Group members must be an array');
+        }
+        const normalizedMembers = group.members.map((email) => {
+            if (typeof email !== 'string' || !validateEmail(email)) {
+                throw new ParameterError(
+                    `Invalid group member email: ${email}`,
+                );
+            }
+            return email.toLowerCase();
+        });
+        const duplicateEmails = normalizedMembers.filter(
+            (email, index) => normalizedMembers.indexOf(email) !== index,
+        );
+        if (duplicateEmails.length > 0) {
+            throw new ParameterError(
+                `Duplicate group member emails: ${[...new Set(duplicateEmails)]
+                    .sort()
+                    .join(', ')}`,
+            );
+        }
+        return {
+            version: 1,
+            name: group.name,
+            members: normalizedMembers.sort(),
+        };
+    }
+
+    async getGroupsAsCode(
+        account: Account,
+        organizationUuid: string,
+    ): Promise<GroupAsCode[]> {
+        this.validateGroupsAsCodeAccess(account, organizationUuid);
+        if (!(await this.isGroupServiceEnabled(account))) {
+            throw new ForbiddenError('Group service is not enabled');
+        }
+
+        const { data: groups } = await this.groupsModel.find({
+            organizationUuid,
+        });
+        const { data: members } = await this.groupsModel.findGroupMembers({
+            organizationUuid,
+            groupUuids: groups.map((group) => group.uuid),
+        });
+        const membersByGroupUuid = members.reduce<Map<string, string[]>>(
+            (map, member) => {
+                const groupMembers = map.get(member.groupUuid) ?? [];
+                groupMembers.push(member.email.toLowerCase());
+                map.set(member.groupUuid, groupMembers);
+                return map;
+            },
+            new Map(),
+        );
+
+        return groups
+            .map((group) => ({
+                version: 1 as const,
+                name: group.name,
+                members: (membersByGroupUuid.get(group.uuid) ?? []).sort(),
+            }))
+            .sort((left, right) => left.name.localeCompare(right.name));
+    }
+
+    async upsertGroupAsCode(
+        account: Account,
+        organizationUuid: string,
+        groupInput: GroupAsCode,
+    ): Promise<ApiGroupAsCodeUpsertResponse['results']> {
+        await assertHumanManagedMutation({
+            organizationUuid: account.organization.organizationUuid,
+            ability: account.user.ability,
+            oauth: account.authentication.type === 'oauth',
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
+        this.validateGroupsAsCodeAccess(account, organizationUuid);
+        if (!(await this.isGroupServiceEnabled(account))) {
+            throw new ForbiddenError('Group service is not enabled');
+        }
+
+        const group = GroupsService.validateGroupAsCode(groupInput);
+        const result = await this.groupsModel.upsertGroupAsCode({
+            organizationUuid,
+            name: group.name,
+            memberEmails: group.members,
+            actorUserUuid: account.user.userUuid,
+        });
+
+        if (result.action !== PromotionAction.NO_CHANGES) {
+            this.analytics.track({
+                userId: account.user.userUuid,
+                event:
+                    result.action === PromotionAction.CREATE
+                        ? 'group.created'
+                        : 'group.updated',
+                properties: {
+                    organizationId: organizationUuid,
+                    groupId: result.groupUuid,
+                    name: group.name,
+                    countUsersInGroup: group.members.length,
+                    viaSso: false,
+                    context: 'content_as_code',
+                },
+            });
+        }
+
+        return { action: result.action };
+    }
+
     private async isGroupServiceEnabled(
-        user: Pick<LightdashUser, 'userUuid' | 'organizationUuid'>,
+        accountOrUser: RegisteredAccount | SessionUser,
     ): Promise<boolean> {
+        const user = isAccount(accountOrUser)
+            ? {
+                  userUuid: accountOrUser.user.userUuid,
+                  organizationUuid: accountOrUser.organization.organizationUuid,
+              }
+            : accountOrUser;
         const featureFlag = await this.featureFlagService.get({
             user,
             featureFlagId: FeatureFlags.UserGroupsEnabled,
@@ -53,10 +226,18 @@ export class GroupsService extends BaseService {
         return featureFlag.enabled;
     }
 
+    /** @deprecated Only used by the deprecated add-user-to-group endpoint; use update with the full member set instead. */
     async addGroupMember(
         user: SessionUser,
         member: GroupMembership,
     ): Promise<GroupMembership | undefined> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }
@@ -101,10 +282,18 @@ export class GroupsService extends BaseService {
         return groupMembership;
     }
 
+    /** @deprecated Only used by the deprecated remove-user-from-group endpoint; use update with the full member set instead. */
     async removeGroupMember(
         user: SessionUser,
         member: GroupMembership,
     ): Promise<boolean> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }
@@ -149,6 +338,13 @@ export class GroupsService extends BaseService {
     }
 
     async delete(user: SessionUser, groupUuid: string): Promise<void> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }
@@ -223,6 +419,13 @@ export class GroupsService extends BaseService {
         groupUuid: string,
         update: UpdateGroupWithMembers,
     ): Promise<Group | GroupWithMembers> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }
@@ -263,6 +466,7 @@ export class GroupsService extends BaseService {
         return updatedGroup;
     }
 
+    /** @deprecated Only used by the deprecated group members endpoint; use get with includeMembers instead. */
     async getGroupMembers(
         user: SessionUser,
         groupUuid: string,
@@ -290,10 +494,18 @@ export class GroupsService extends BaseService {
         return group.members;
     }
 
+    /** @deprecated Only used by the deprecated group project access endpoint; use RolesService.upsertProjectGroupRoleAssignment instead. */
     async addProjectAccess(
         user: SessionUser,
         { groupUuid, projectUuid, role }: ProjectGroupAccess,
     ): Promise<ProjectGroupAccess> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }
@@ -345,6 +557,7 @@ export class GroupsService extends BaseService {
         };
     }
 
+    /** @deprecated Only used by the deprecated group project access endpoint; use RolesService.deleteProjectRoleAssignment instead. */
     async removeProjectAccess(
         user: SessionUser,
         {
@@ -352,6 +565,13 @@ export class GroupsService extends BaseService {
             projectUuid,
         }: Pick<ProjectGroupAccess, 'groupUuid' | 'projectUuid'>,
     ) {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }
@@ -398,6 +618,7 @@ export class GroupsService extends BaseService {
         return removed;
     }
 
+    /** @deprecated Only used by the deprecated group project access endpoint; use RolesService.updateProjectRoleAssignment instead. */
     async updateProjectAccess(
         user: SessionUser,
         {
@@ -406,6 +627,13 @@ export class GroupsService extends BaseService {
         }: Pick<ProjectGroupAccess, 'groupUuid' | 'projectUuid'>,
         updateAttributes: UpdateDBProjectGroupAccess,
     ): Promise<ProjectGroupAccess> {
+        await assertHumanManagedMutation({
+            organizationUuid: user.organizationUuid,
+            ability: user.ability,
+            oauth: false,
+            database: this.groupsModel.database,
+            featureFlagModel: this.featureFlagService,
+        });
         if (!(await this.isGroupServiceEnabled(user))) {
             throw new ForbiddenError('Group service is not enabled');
         }

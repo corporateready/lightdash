@@ -1,7 +1,9 @@
-import { type AppVersionStatus } from '../ee/apps/types';
+import { type AppVersionStatus, type DataAppTemplate } from '../ee/apps/types';
 import { type ContentVerificationInfo } from './contentVerification';
+import { type DashboardOwner } from './dashboard';
 import type { KnexPaginatedData } from './knex-paginate';
 import { type ChartKind } from './savedCharts';
+import { type SpaceMemberRole } from './space';
 import { type SessionUser } from './user';
 
 export enum ContentType {
@@ -9,6 +11,7 @@ export enum ContentType {
     DASHBOARD = 'dashboard',
     SPACE = 'space',
     DATA_APP = 'data_app',
+    DOCUMENT = 'document',
 }
 
 export interface Content {
@@ -46,6 +49,7 @@ export interface Content {
     } | null;
     views: number;
     firstViewedAt: Date | null;
+    lastViewedAt?: Date | null;
     verification: ContentVerificationInfo | null;
 }
 
@@ -53,6 +57,7 @@ export enum ContentSortByColumns {
     NAME = 'name',
     SPACE_NAME = 'space_name',
     LAST_UPDATED_AT = 'last_updated_at',
+    VIEWS = 'views',
 }
 
 // Chart types
@@ -64,6 +69,9 @@ export enum ChartSourceType {
 
 export interface ChartContent extends Content {
     contentType: ContentType.CHART;
+    // Roles the viewer holds on this resource through direct grants; empty
+    // when they reach it through its space (or the feature is off).
+    directAccessRoles: SpaceMemberRole[];
     source: ChartSourceType;
     chartKind: ChartKind;
     dashboard: {
@@ -76,18 +84,40 @@ export interface ChartContent extends Content {
 
 export interface DashboardContent extends Content {
     contentType: ContentType.DASHBOARD;
+    directAccessRoles: SpaceMemberRole[];
+    owner: DashboardOwner | null;
+}
+
+export interface DocumentContentItem extends Omit<Content, 'space'> {
+    contentType: ContentType.DOCUMENT;
+    directAccessRoles: SpaceMemberRole[];
+    owner: DashboardOwner | null;
+    // Personal Documents have no space until they are moved into one.
+    space: {
+        uuid: string;
+        name: string;
+    } | null;
 }
 
 // Data App types
 
-export interface DataAppContent extends Content {
+export interface DataAppContent extends Omit<Content, 'space' | 'pinnedList'> {
     contentType: ContentType.DATA_APP;
+    directAccessRoles: SpaceMemberRole[];
+    // Personal apps have no space until their creator moves them into one.
+    space: {
+        uuid: string;
+        name: string;
+    } | null;
     latestVersionNumber: number | null;
     latestVersionStatus: AppVersionStatus | null;
+    latestReadyVersionNumber: number | null;
     pinnedList: {
         uuid: string;
         order: number;
     } | null;
+    // 'data_app_viz' marks a reusable chart-type viz rather than a standalone app.
+    template: DataAppTemplate | null;
 }
 
 export interface SpaceContentBase extends Content {
@@ -97,6 +127,7 @@ export interface SpaceContentBase extends Content {
     chartCount: number;
     childSpaceCount: number;
     appCount: number;
+    documentCount: number;
     pinnedList: {
         uuid: string;
         order: number;
@@ -116,6 +147,7 @@ export type SummaryContentBase =
     | ChartContent
     | DashboardContent
     | SpaceContentBase
+    | DocumentContentItem
     | DataAppContent;
 
 // What the API returns (spaces enriched with access data)
@@ -123,6 +155,7 @@ export type SummaryContent =
     | ChartContent
     | DashboardContent
     | SpaceContent
+    | DocumentContentItem
     | DataAppContent;
 
 // API types
@@ -163,6 +196,10 @@ type ItemPayload =
     | {
           uuid: string;
           contentType: ContentType.DATA_APP;
+      }
+    | {
+          uuid: string;
+          contentType: ContentType.DOCUMENT;
       };
 
 export type ContentAction = ContentActionMove | ContentActionDelete;
@@ -177,6 +214,22 @@ export type ApiContentBulkActionBody<T extends ContentAction = ContentAction> =
         content: ItemPayload[];
         action: T;
     };
+
+export type ContentBulkDeleteSkippedItem = {
+    uuid: string;
+    contentType: ContentType;
+    reason: string;
+};
+
+export type ContentBulkDeleteResults = {
+    deletedCount: number;
+    skipped: ContentBulkDeleteSkippedItem[];
+};
+
+export type ApiContentBulkDeleteResponse = {
+    status: 'ok';
+    results: ContentBulkDeleteResults;
+};
 
 export interface BulkActionable<Tx extends unknown> {
     moveToSpace: (

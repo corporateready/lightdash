@@ -1,10 +1,11 @@
 import {
     type ContentType,
+    type DataAppVizsFilter,
     type DeletedContentItem,
     type DeletedContentWithDescendants,
     type KnexPaginatedData,
 } from '@lightdash/common';
-import { lightdashApi } from '../../../api';
+import { type LightdashApi } from '../../../api';
 
 export type DeletedContentApiParams = {
     projectUuids: string[];
@@ -13,6 +14,7 @@ export type DeletedContentApiParams = {
     search?: string;
     contentTypes?: ContentType[];
     deletedByUserUuids?: string[];
+    dataAppVizsFilter?: DataAppVizsFilter;
 };
 
 type DeletedContentApiResponse = KnexPaginatedData<
@@ -20,6 +22,7 @@ type DeletedContentApiResponse = KnexPaginatedData<
 >;
 
 export async function getDeletedContent(
+    lightdashApi: LightdashApi,
     params: DeletedContentApiParams,
 ): Promise<DeletedContentApiResponse> {
     const searchParams = new URLSearchParams();
@@ -52,6 +55,10 @@ export async function getDeletedContent(
         );
     }
 
+    if (params.dataAppVizsFilter) {
+        searchParams.set('dataAppVizsFilter', params.dataAppVizsFilter);
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return lightdashApi<any>({
         url: `/content/deleted?${searchParams.toString()}`,
@@ -62,6 +69,7 @@ export async function getDeletedContent(
 }
 
 export function restoreDeletedContent(
+    lightdashApi: LightdashApi,
     projectUuid: string,
     item: DeletedContentItem,
 ): Promise<undefined> {
@@ -74,6 +82,7 @@ export function restoreDeletedContent(
 }
 
 export function permanentlyDeleteContent(
+    lightdashApi: LightdashApi,
     projectUuid: string,
     item: DeletedContentItem,
 ): Promise<undefined> {

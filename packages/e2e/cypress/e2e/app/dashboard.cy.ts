@@ -5,6 +5,50 @@ describe('Dashboard', () => {
         cy.login();
     });
 
+    it('keeps a chart tile title in place on hover', () => {
+        cy.visit('/projects/jaffle-shop/dashboards/jaffle-dashboard/view');
+
+        cy.findByRole('link', {
+            name: 'How much revenue do we have per payment method?',
+        })
+            .scrollIntoView()
+            .then(($title) => {
+                const initialRect = $title[0].getBoundingClientRect();
+                const initialContainerRect =
+                    $title[0].parentElement?.getBoundingClientRect();
+                const initialCardRect = $title
+                    .closest('.mantine-Card-root')[0]
+                    .getBoundingClientRect();
+
+                cy.wrap($title).trigger('mouseover');
+                cy.wrap($title).should('have.attr', 'data-hovered', 'true');
+                cy.wrap($title).should(($hoveredTitle) => {
+                    const hoveredRect =
+                        $hoveredTitle[0].getBoundingClientRect();
+                    const hoveredContainerRect =
+                        $hoveredTitle[0].parentElement?.getBoundingClientRect();
+                    const hoveredCardRect = $hoveredTitle
+                        .closest('.mantine-Card-root')[0]
+                        .getBoundingClientRect();
+
+                    expect(
+                        hoveredRect.left - hoveredCardRect.left,
+                    ).to.be.closeTo(
+                        initialRect.left - initialCardRect.left,
+                        0.5,
+                    );
+                    expect(hoveredRect.top - hoveredCardRect.top).to.be.closeTo(
+                        initialRect.top - initialCardRect.top,
+                        0.5,
+                    );
+                    expect(hoveredContainerRect?.height).to.be.closeTo(
+                        initialContainerRect?.height ?? 0,
+                        0.5,
+                    );
+                });
+            });
+    });
+
     it('Should see dashboard', () => {
         cy.visit(`/projects/${SEED_PROJECT.project_uuid}/dashboards`);
 
@@ -55,8 +99,7 @@ describe('Dashboard', () => {
         // Add filter
         cy.contains('Add filter').click();
 
-        cy.findByTestId('FilterConfiguration/FieldSelect').click();
-        cy.findByTestId('FilterConfiguration/FieldSelectSearch')
+        cy.findByTestId('FilterConfiguration/FieldSelect')
             .click()
             .type('payment');
         cy.wait(200);
@@ -163,7 +206,7 @@ describe('Dashboard', () => {
         cy.findByRole('option', {
             name: 'How much revenue do we have per payment method?',
         }).click();
-        cy.findByRole('dialog').get('.mantine-MultiSelect-input').click(); // Close dropdown
+        cy.findByRole('dialog').findByRole('textbox').type('{esc}');
         cy.findByText('Add').click();
         cy.findByText('How much revenue do we have per payment method?').should(
             'exist',
@@ -181,9 +224,9 @@ describe('Dashboard', () => {
         cy.findByText('Payment method').click();
         cy.findByText('Unique payment count').click();
         cy.findByText('Save chart').click();
-        cy.findByTestId('ChartCreateModal/NameInput').type(
-            `What's the number of unique payments per payment method?`,
-        );
+        cy.findByTestId('ChartCreateModal/NameInput')
+            .clear()
+            .type(`What's the number of unique payments per payment method?`);
         cy.findByText('Save').click();
         cy.findByText(
             `Success! What's the number of unique payments per payment method? was added to Title`,
@@ -194,8 +237,7 @@ describe('Dashboard', () => {
 
         // Add filter Payment method is credit_card and apply
         cy.contains('Add filter').click();
-        cy.findByTestId('FilterConfiguration/FieldSelect').click();
-        cy.findByTestId('FilterConfiguration/FieldSelectSearch')
+        cy.findByTestId('FilterConfiguration/FieldSelect')
             .click()
             .type('payment');
         cy.wait(200);
@@ -233,9 +275,9 @@ describe('Dashboard', () => {
         cy.findByText('Payment method').click();
         cy.findByText('Total revenue').click();
         cy.findByText('Save chart').click();
-        cy.findByTestId('ChartCreateModal/NameInput').type(
-            `What's the total revenue per payment method?`,
-        );
+        cy.findByTestId('ChartCreateModal/NameInput')
+            .clear()
+            .type(`What's the total revenue per payment method?`);
         cy.findByText('Save').click();
         cy.findByText(
             `Success! What's the total revenue per payment method? was added to Title`,
@@ -250,21 +292,22 @@ describe('Dashboard', () => {
         // Check tile targets are correct and all charts have that filter applied
         cy.contains('Payment method is credit_card').click();
         cy.findAllByRole('tab').eq(1).click();
-        cy.get(
-            '[data-testid="DashboardFilterConfiguration/ChartTiles"] .mantine-Checkbox-body',
-        ).should('have.length', 4); // 3 checkboxes for the 3 charts + `select all` checkbox
-        cy.get(
-            '[data-testid="DashboardFilterConfiguration/ChartTiles"] .mantine-Checkbox-body',
-        ).each(($el) => {
-            cy.wrap($el).find('input[checked]').should('have.length', 1);
-        });
+        cy.get('[data-testid="DashboardFilterConfiguration/ChartTiles"]')
+            .findAllByRole('checkbox')
+            .should('have.length', 4) // 3 checkboxes for the 3 charts + `select all` checkbox
+            .each(($checkbox) => {
+                cy.wrap($checkbox).should('be.checked');
+            });
 
         // Remove filter from first chart - saved chart
-        cy.get(
-            '[data-testid="DashboardFilterConfiguration/ChartTiles"] .mantine-Checkbox-body',
-        )
+        cy.get('[data-testid="DashboardFilterConfiguration/ChartTiles"]')
+            .findAllByRole('checkbox')
             .eq(1)
-            .click();
+            .click({ force: true });
+        cy.get('[data-testid="DashboardFilterConfiguration/ChartTiles"]')
+            .findAllByRole('checkbox')
+            .eq(1)
+            .should('not.be.checked');
         cy.contains('button', 'Apply').click({ force: true });
 
         // Saved chart should have no filter applied
@@ -291,9 +334,9 @@ describe('Dashboard', () => {
         cy.findByText('Payment method').click();
         cy.findByText('Amount').click();
         cy.findByText('Save chart').click();
-        cy.findByTestId('ChartCreateModal/NameInput').type(
-            `Stg Payments (payment method x amount)?`,
-        );
+        cy.findByTestId('ChartCreateModal/NameInput')
+            .clear()
+            .type(`Stg Payments (payment method x amount)?`);
         cy.findByText('Save').click();
         cy.findByText(
             `Success! Stg Payments (payment method x amount)? was added to Title`,
@@ -305,9 +348,9 @@ describe('Dashboard', () => {
         // Open filter popover  and check that all charts have the filter applied except for the new one (which is referencing another explore)
         cy.contains('Payment method is credit_card').click(); // Note: disable React strict mode in local dev to avoid error in this line
         cy.findAllByRole('tab').eq(1).click();
-        cy.get(
-            '[data-testid="DashboardFilterConfiguration/ChartTiles"] .mantine-Checkbox-body',
-        ).should('have.length', 5); // 4 checkboxes for the 4 charts + `select all` checkbox
+        cy.get('[data-testid="DashboardFilterConfiguration/ChartTiles"]')
+            .findAllByRole('checkbox')
+            .should('have.length', 5); // 4 checkboxes for the 4 charts + `select all` checkbox
 
         // Enable filter for the new chart (Stg payments - different explore)
         // Checking the box auto-selects a default field via matchFieldByTypeAndName
@@ -316,8 +359,8 @@ describe('Dashboard', () => {
         )
             .contains('Stg Payments (payment method x amount)?')
             .closest('[data-testid="tile-filter-item"]')
-            .find('.mantine-Checkbox-body')
-            .click();
+            .findByRole('checkbox')
+            .check({ force: true });
         cy.get(
             '[data-testid="DashboardFilterConfiguration/ChartTiles"] [data-testid="tile-filter-item"]',
         )
@@ -370,9 +413,9 @@ describe('Dashboard', () => {
         cy.findByText('Payment method').click();
         cy.findByText('Unique payment count').click();
         cy.findByText('Save chart').click();
-        cy.findByTestId('ChartCreateModal/NameInput').type(
-            `What's the number of unique payments per payment method?`,
-        );
+        cy.findByTestId('ChartCreateModal/NameInput')
+            .clear()
+            .type(`What's the number of unique payments per payment method?`);
         cy.findByText('Save').click();
 
         cy.findByText('Save changes').click();
@@ -424,8 +467,7 @@ describe('Dashboard', () => {
         // Add filter
         cy.contains('Add filter').click();
 
-        cy.findByTestId('FilterConfiguration/FieldSelect').click();
-        cy.findByTestId('FilterConfiguration/FieldSelectSearch')
+        cy.findByTestId('FilterConfiguration/FieldSelect')
             .click()
             .type('payment');
         cy.wait(200);

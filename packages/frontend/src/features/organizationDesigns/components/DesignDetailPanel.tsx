@@ -1,4 +1,7 @@
 import {
+    checkThemeLimits,
+    getThemeTotalBytes,
+    MAX_THEME_TOTAL_BYTES,
     type ApiOrganizationDesign,
     type ApiOrganizationDesignFile,
 } from '@lightdash/common';
@@ -6,6 +9,7 @@ import {
     ActionIcon,
     Badge,
     Box,
+    Button,
     Center,
     Divider,
     Group,
@@ -17,13 +21,16 @@ import {
     TextInput,
     Title,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { IconCheck, IconDownload, IconTrash } from '@tabler/icons-react';
 import { useEffect, useRef, useState, type FC } from 'react';
+import Callout from '../../../components/common/Callout';
 import MantineIcon from '../../../components/common/MantineIcon';
+import MantineModal from '../../../components/common/MantineModal';
 import {
     useClearDefaultOrganizationDesign,
+    useDeleteAllDesignFiles,
     useDeleteDesignFile,
     useOrganizationDesign,
     useSetDefaultOrganizationDesign,
@@ -59,19 +66,18 @@ const FileRow: FC<{
     const downloadUrl = `/api/v1/org/designs/${designUuid}/files/${file.fileUuid}`;
     return (
         <Group justify="space-between" wrap="nowrap" gap="sm">
-            <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
+            <Group gap="xs" wrap="nowrap" flex={1} miw={0}>
                 <Badge
                     color={KIND_COLORS[file.kind] ?? 'gray'}
-                    variant="light"
                     size="sm"
-                    style={{ flexShrink: 0 }}
+                    flex="0 0 auto"
                 >
                     {file.kind}
                 </Badge>
                 <Text size="sm" truncate>
                     {file.filename}
                 </Text>
-                <Text size="xs" c="ldGray.6" style={{ flexShrink: 0 }}>
+                <Text size="xs" c="dimmed" flex="0 0 auto">
                     {formatBytes(file.sizeBytes)}
                 </Text>
             </Group>
@@ -82,8 +88,6 @@ const FileRow: FC<{
                         href={downloadUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        variant="subtle"
-                        color="gray"
                         aria-label={`Download ${file.filename}`}
                     >
                         <MantineIcon icon={IconDownload} />
@@ -91,7 +95,6 @@ const FileRow: FC<{
                 </Tooltip>
                 <Tooltip label="Delete" position="top">
                     <ActionIcon
-                        variant="subtle"
                         color="red"
                         onClick={onDelete}
                         loading={deleting}
@@ -113,22 +116,33 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
     const setDefault = useSetDefaultOrganizationDesign();
     const clearDefault = useClearDefaultOrganizationDesign();
     const deleteFile = useDeleteDesignFile();
+    const deleteAllFiles = useDeleteAllDesignFiles();
 
     const form = useForm({
         initialValues: {
             name: design.name,
             description: design.description ?? '',
+            extraInstructions: design.extraInstructions ?? '',
         },
     });
     const [pendingDeleteUuid, setPendingDeleteUuid] = useState<string | null>(
         null,
     );
+    const [clearFilesOpen, setClearFilesOpen] = useState(false);
+
+    // Theme size guardrail: files are streamed into the sandbox on each build,
+    // so an oversized theme times out when applied. Surface the budget as it fills.
+    const totalBytes = getThemeTotalBytes(design.files);
+    const limitViolation = checkThemeLimits(design.files);
+    const nearLimit = totalBytes >= MAX_THEME_TOTAL_BYTES * 0.8;
 
     const trimmedName = form.values.name.trim();
     const trimmedDescription = form.values.description.trim();
+    const trimmedExtraInstructions = form.values.extraInstructions.trim();
     const hasUnsavedChanges =
         trimmedName !== design.name ||
-        trimmedDescription !== (design.description ?? '');
+        trimmedDescription !== (design.description ?? '') ||
+        trimmedExtraInstructions !== (design.extraInstructions ?? '');
     const canSave = hasUnsavedChanges && trimmedName.length > 0;
 
     const updateMutate = updateDesign.mutate;
@@ -143,11 +157,19 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
                 data: {
                     name: trimmedName,
                     description: trimmedDescription || null,
+                    extraInstructions: trimmedExtraInstructions || null,
                 },
             });
         }, AUTOSAVE_DELAY_MS);
         return () => clearTimeout(timer);
-    }, [canSave, designUuid, trimmedName, trimmedDescription, updateMutate]);
+    }, [
+        canSave,
+        designUuid,
+        trimmedName,
+        trimmedDescription,
+        trimmedExtraInstructions,
+        updateMutate,
+    ]);
 
     // Latest values held in a ref so the unmount cleanup can flush the most
     // recent edits even if the debounce hasn't fired yet.
@@ -155,12 +177,14 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
         design,
         trimmedName,
         trimmedDescription,
+        trimmedExtraInstructions,
         mutate: updateMutate,
     });
     latestRef.current = {
         design,
         trimmedName,
         trimmedDescription,
+        trimmedExtraInstructions,
         mutate: updateMutate,
     };
 
@@ -172,13 +196,23 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
                 design: d,
                 trimmedName: n,
                 trimmedDescription: dsc,
+                trimmedExtraInstructions: ex,
                 mutate,
             } = latestRef.current;
             if (!n) return;
-            if (n === d.name && dsc === (d.description ?? '')) return;
+            if (
+                n === d.name &&
+                dsc === (d.description ?? '') &&
+                ex === (d.extraInstructions ?? '')
+            )
+                return;
             mutate({
                 designUuid: d.designUuid,
-                data: { name: n, description: dsc || null },
+                data: {
+                    name: n,
+                    description: dsc || null,
+                    extraInstructions: ex || null,
+                },
             });
         };
     }, []);
@@ -188,7 +222,7 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
             return (
                 <>
                     <Loader size={12} />
-                    <Text size="xs" c="ldGray.6">
+                    <Text size="xs" c="dimmed">
                         Saving…
                     </Text>
                 </>
@@ -196,7 +230,7 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
         }
         if (hasUnsavedChanges) {
             return (
-                <Text size="xs" c="ldGray.6">
+                <Text size="xs" c="dimmed">
                     Unsaved changes
                 </Text>
             );
@@ -205,7 +239,7 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
             return (
                 <>
                     <MantineIcon icon={IconCheck} size={14} color="green.6" />
-                    <Text size="xs" c="ldGray.6">
+                    <Text size="xs" c="dimmed">
                         Saved
                     </Text>
                 </>
@@ -233,14 +267,23 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
                     label="Description"
                     minRows={3}
                     autosize
+                    description="For users selecting a theme"
                     {...form.getInputProps('description')}
+                />
+                <Textarea
+                    label="Extra instructions"
+                    description="These will be passed to the agent alongside any markdown files. These can be any instructions you want included."
+                    placeholder="e.g. Use sentence case for all headings. Prefer dense layouts over generous whitespace."
+                    minRows={4}
+                    autosize
+                    {...form.getInputProps('extraInstructions')}
                 />
 
                 <Divider />
 
                 <Box>
                     <Title order={6}>Default</Title>
-                    <Text size="sm" c="ldGray.6" mt={4}>
+                    <Text size="sm" c="dimmed" mt={4}>
                         The default theme is automatically applied to new
                         content. Individual items can override it.
                     </Text>
@@ -267,18 +310,66 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
             {/* Right column: files */}
             <Stack gap="md" flex={1}>
                 <Box>
-                    <Title order={6}>Files</Title>
-                    <Text size="sm" c="ldGray.6" mt={4}>
+                    <Group justify="space-between" align="baseline">
+                        <Title order={6}>Files</Title>
+                        <Group gap="xs" align="baseline">
+                            <Text
+                                size="xs"
+                                c={limitViolation ? 'red.6' : 'ldGray.6'}
+                            >
+                                {design.files.length} files ·{' '}
+                                {formatBytes(totalBytes)} /{' '}
+                                {formatBytes(MAX_THEME_TOTAL_BYTES)}
+                            </Text>
+                            {design.files.length > 0 && (
+                                <Button
+                                    variant="subtle"
+                                    color="red"
+                                    size="compact-xs"
+                                    leftSection={
+                                        <MantineIcon
+                                            icon={IconTrash}
+                                            size={12}
+                                        />
+                                    }
+                                    onClick={() => setClearFilesOpen(true)}
+                                >
+                                    Delete all
+                                </Button>
+                            )}
+                        </Group>
+                    </Group>
+                    <Text size="sm" c="dimmed" mt={4}>
                         Drag &amp; drop CSS, font, image, or markdown
                         instruction files. They&apos;ll be picked up
                         automatically wherever this theme is applied.
                     </Text>
                 </Box>
 
-                <DesignFileUpload designUuid={design.designUuid} />
+                {(limitViolation || nearLimit) && (
+                    <Callout variant="warning">
+                        {limitViolation
+                            ? `This theme is over the ${formatBytes(
+                                  MAX_THEME_TOTAL_BYTES,
+                              )} limit (currently ${formatBytes(
+                                  totalBytes,
+                              )}). Apps won't apply it until you remove some assets.`
+                            : `This theme is getting large (${formatBytes(
+                                  totalBytes,
+                              )} of ${formatBytes(
+                                  MAX_THEME_TOTAL_BYTES,
+                              )}). Large themes are slower to generate and can fail to apply — keep only the assets you need.`}
+                    </Callout>
+                )}
+
+                <DesignFileUpload
+                    designUuid={design.designUuid}
+                    themeName={design.name}
+                    existingFiles={design.files}
+                />
 
                 {design.files.length === 0 ? (
-                    <Text size="sm" c="ldGray.6" ta="center" py="md">
+                    <Text size="sm" c="dimmed" ta="center" py="md">
                         No files yet.
                     </Text>
                 ) : (
@@ -310,6 +401,26 @@ const DesignForm: FC<{ design: ApiOrganizationDesign }> = ({ design }) => {
                     </Stack>
                 )}
             </Stack>
+
+            <MantineModal
+                opened={clearFilesOpen}
+                onClose={() => setClearFilesOpen(false)}
+                variant="delete"
+                title="Delete all files"
+                description={`Are you sure you want to delete all ${design.files.length} files from "${design.name}"?`}
+                size="md"
+                confirmLoading={deleteAllFiles.isLoading}
+                onConfirm={() =>
+                    deleteAllFiles.mutate(design.designUuid, {
+                        onSuccess: () => setClearFilesOpen(false),
+                    })
+                }
+            >
+                <span>
+                    The theme itself is kept, along with its description, extra
+                    instructions, and anything already using it.
+                </span>
+            </MantineModal>
         </Group>
     );
 };
@@ -327,7 +438,7 @@ export const DesignDetailPanel: FC<Props> = ({ designUuid }) => {
     }
 
     if (!design) {
-        return <Text c="ldGray.6">Theme not found.</Text>;
+        return <Text c="dimmed">Theme not found.</Text>;
     }
 
     return <DesignForm key={design.designUuid} design={design} />;

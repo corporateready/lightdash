@@ -1,94 +1,122 @@
-export const MCP_ANALYST_PROMPT = `# Lightdash MCP Tools — Usage Guidelines
+import type { AiAgent } from '@lightdash/common';
 
-## Query Building Workflow
+const FILTER_EXPRESSION_SKILL_REMINDER =
+    '- Before writing filter expressions, read the shared skill referenced by run_metric_query and search_field_values';
 
-1. **Find explores first**: Use \`find_explores\` with a natural language search query to discover relevant data models
-   - Review the \`topMatchingFields\` to understand which explores match
-   - If multiple explores match with similar scores, ask the user which data source they mean
-2. **Get fields**: Use \`find_fields\` for the chosen explore to see all available dimensions and metrics
-   - Read field labels, descriptions, and hints carefully — hints are written specifically for AI guidance
-   - Never invent field IDs; only use exact values returned by \`find_fields\`
-   - Search for business terms, not technical field names
-   - Use multiple search queries in one call to find related fields efficiently
-   - Look for both dimensions (for grouping) and metrics (for aggregation)
-3. **Search field values**: Use \`search_field_values\` to discover valid filter values for a dimension
-4. **Run queries**: Use \`run_metric_query\` to execute queries and generate visualizations
-5. **Find content**: Use \`find_content\` to search for existing dashboards and charts
-
-## Critical Rules
-
-### Explore Selection
-- When the user's query contains a domain word matching an explore name, use that explore
-- When multiple explores match, check \`usageInCharts\` to find the most commonly used one
-- If still ambiguous, ask the user which data source they want — do NOT guess
-
-### When to Use run_sql vs run_metric_query
-- **Prefer \`run_metric_query\`** for standard analysis — it leverages the semantic layer and ensures consistent metric definitions
-- **Use \`run_sql\`** only for ad-hoc queries, cross-table joins not modeled in explores, or when the user explicitly requests raw SQL
-- \`run_sql\` defaults to 500 rows (max 5000) — use the \`limit\` parameter to control result size
-- Use the SQL dialect appropriate for the connected warehouse
-
-### Time Filtering
-- If the user mentions ANY time period, you MUST add a date filter — do not rely on sort + limit
-- Use the \`inThePast\` operator for relative windows
-- Date fields from joined tables work identically in filters
-
-### Field Usage
-- Never mix fields from different explores in a single query
-- Any field used for sorting MUST be included in dimensions, metrics, or table calculations
-- When similar field names exist in base and joined tables, match to the query's semantic level
-
-### Pagination
-- Page parameters must be numbers (e.g., \`1\`) — never use \`NaN\` or \`"null"\`
-
-### Visualization
-- Supported types: table, bar, horizontal_bar, line, scatter, pie, funnel
-- For time series: use \`line\` with \`xAxisType: 'time'\`
-- For categorical comparisons: use \`bar\` or \`horizontal_bar\`
-- For single values or detailed data: use \`table\`
-- Always provide axis labels
-
-### Table Calculations
-Use table calculations for:
-- Aggregating already-aggregated metrics (e.g., average of monthly totals)
-- Row comparisons: % of total, period-over-period change, rankings, running totals
-- "Top N per group" patterns: create \`row_number\` with \`partitionBy\`, then filter
-
-### Custom Metrics
-- Use when the explore lacks a needed aggregation
-- Always confirm the metric doesn't already exist via \`find_fields\` first
-- Reference using the pattern \`table_metricname\`
+// Only offered to sessions whose tools/list actually includes run_sql
+// (gated on manage:SqlRunner).
+const RUN_SQL_GUIDANCE = `- Prefer \`run_metric_query\` for standard analysis; its semantic-layer metric definitions stay consistent. Use \`run_sql\`, in the connected warehouse's SQL dialect, only for ad-hoc queries, cross-table joins not modeled in explores, or explicit raw-SQL requests; it defaults to 500 rows (max 5000), adjustable with \`limit\`
 `;
 
-export const getMcpAnalystPromptWithContext = (context: {
-    agentName: string | null;
-    instruction: string | null;
-    explores: string[];
-    verifiedQuestions: string[];
+const RUN_SQL_GUIDANCE_SHORT = `- Prefer \`run_metric_query\`; use \`run_sql\`, in the warehouse's SQL dialect, for ad-hoc queries, unmodeled joins or explicit raw SQL (500 rows by default, max 5000 via \`limit\`)
+`;
+
+const AGENT_CONNECT_RULE = `- If a query tool refuses with a connect link, show it, ask the person to open it once, then retry the same call
+`;
+
+const RAW_SQL_WORKFLOW_GUIDANCE = `For a complete raw SQL query, follow step 0, then skip steps 1–3 and call \`run_sql\`. If raw SQL lacks table or column identifiers, ask for them; \`grep_fields\` and \`get_metadata\` cover only modeled Explores.
+
+`;
+
+const CONTENT_ONLY_PROMPT = `# Lightdash MCP — Saved Content Mode
+
+This session cannot run queries. Answer from saved content the user can access.
+
+1. \`get_context\`: pick the project
+2. \`find_content\`: search 2–4 short keyword queries FIRST, before any conclusion about what is available
+3. \`read_content\`: confirm what the best match shows and get its link — it returns definitions, not data values, so link the user to the numbers
+4. \`list_content\`: browse spaces when search misses
+
+Rules:
+- Never say information is unavailable before searching saved content
+- No workarounds: never suggest raw SQL, elevated permissions, tools not in this session, or UI actions the user may not have (editing or exploring charts)
+- If nothing matches, say so plainly
+`;
+
+const buildSqlOnlyPrompt = (
+    agentIdentityEnabled: boolean,
+): string => `# Lightdash MCP — SQL Runner Mode
+
+Governed metric execution (\`run_metric_query\`) is not available in this session, so the semantic layer cannot answer questions here. \`run_sql\` is the only way to execute queries.
+
+## Query Workflow
+
+0. **Get started with context**: Call \`get_context\` first and select the relevant project
+1. **Confirm the schema**: Semantic-layer discovery tools are not available in this session. If the user's request does not include the warehouse tables and columns you need, ask for the missing identifiers — never guess or invent them
+2. **Run queries**: Call \`run_sql\` with the raw SQL
+   - Defaults to 500 rows (max 5000) — use the \`limit\` parameter to control result size
+   - Use the SQL dialect appropriate for the connected warehouse
+3. **Poll long-running queries**: If a query returns \`status: "running"\`, call \`get_query_result\` with the \`queryUuid\` until it returns done/error/cancelled/expired
+4. **Browse content**: Use \`list_content\` to browse accessible spaces and \`find_content\` to search dashboards, charts, and Data Apps — \`read_content\` returns definitions and links, not data values
+
+## Rules
+
+- When an answer depends on governed metric definitions, prefer linking the user to existing saved content over re-deriving the metric in SQL
+${agentIdentityEnabled ? AGENT_CONNECT_RULE : ''}`;
+
+const buildMcpAnalystPrompt = (
+    runSqlEnabled: boolean,
+    filterExpressionsEnabled: boolean,
+    documentsEnabled: boolean,
+    agentIdentityEnabled: boolean,
+): string => {
+    const runSqlGuidance = agentIdentityEnabled
+        ? RUN_SQL_GUIDANCE_SHORT
+        : RUN_SQL_GUIDANCE;
+    return `## Query Building Workflow
+
+${runSqlEnabled ? RAW_SQL_WORKFLOW_GUIDANCE : ''}0. \`get_context\`: select the project, and the agent when agent-scoped.
+1. \`grep_fields\`: discover fields and select one explore at the right grain.
+2. \`get_metadata\`: confirm metadata before querying; use only exact field IDs returned by discovery.
+3. \`search_field_values\`: find valid filter values when needed.
+4. \`run_metric_query\`: query governed metrics.
+5. \`get_query_result\`: poll running queries; never resubmit the original query.
+6. \`render_chart\`: render completed metric queries when a chart is wanted.
+7. \`list_content\`: browse accessible content.
+8. \`find_content\`: search dashboards, charts, ${documentsEnabled ? 'Data Apps, and Documents' : 'and Data Apps'}.
+
+## Rules
+
+- \`run_metric_query\` is registered for this session; if your catalogue lacks it, your client cached an outdated tool list — say so and ask the user to reconnect${runSqlEnabled ? '; never substitute `run_sql` for it' : ''}
+- Prefer the explore whose name matches a domain word in the question if \`grep_fields\` finds relevant fields there; among several fits, choose the one whose dimensions and metrics match the intended grain. If still ambiguous, ask the user which to use; never guess
+${runSqlEnabled ? runSqlGuidance : ''}${filterExpressionsEnabled ? `${FILTER_EXPRESSION_SKILL_REMINDER}\n` : ''}- Never mix fields from different explores in one query; sort only by selected dimensions, metrics, or table calculations; when base and joined tables have similar field names, use the one at the query's semantic level
+${agentIdentityEnabled ? AGENT_CONNECT_RULE : ''}`;
+};
+
+export const getMcpAnalystPrompt = ({
+    runSqlEnabled,
+    runMetricQueryEnabled,
+    filterExpressionsEnabled,
+    documentsEnabled,
+    agentIdentityEnabled = false,
+}: {
+    runSqlEnabled: boolean;
+    runMetricQueryEnabled: boolean;
+    filterExpressionsEnabled: boolean;
+    documentsEnabled: boolean;
+    agentIdentityEnabled?: boolean;
 }): string => {
-    const sections: string[] = [MCP_ANALYST_PROMPT];
-
-    if (context.agentName) {
-        sections.push(`## Active Agent: ${context.agentName}`);
+    if (!runSqlEnabled && !runMetricQueryEnabled) {
+        return CONTENT_ONLY_PROMPT;
     }
-
-    if (context.instruction) {
-        sections.push(
-            `## Agent Instructions\nFollow these domain-specific rules:\n${context.instruction}`,
-        );
+    if (!runMetricQueryEnabled) {
+        return buildSqlOnlyPrompt(agentIdentityEnabled);
     }
+    return buildMcpAnalystPrompt(
+        runSqlEnabled,
+        filterExpressionsEnabled,
+        documentsEnabled,
+        agentIdentityEnabled,
+    );
+};
 
-    if (context.explores.length > 0) {
-        sections.push(
-            `## Available Explores\nThe active agent has access to these explores. Prefer these when searching:\n${context.explores.map((e) => `- ${e}`).join('\n')}`,
-        );
-    }
-
-    if (context.verifiedQuestions.length > 0) {
-        sections.push(
-            `## Verified Questions\nThese are curated example queries that demonstrate correct usage of the data model. Use them as patterns for building similar queries:\n${context.verifiedQuestions.map((q) => `- "${q}"`).join('\n')}`,
-        );
-    }
-
-    return sections.join('\n\n');
+export const getMcpPinnedAgentPrompt = (
+    agent: Pick<AiAgent, 'uuid' | 'name' | 'instruction'>,
+): string => {
+    const instruction = agent.instruction?.trim();
+    const pin = `## Pinned agent
+This connection is pinned to the "${agent.name}" agent (agentUuid ${agent.uuid}). The server applies its scope to every project-scoped tool, so agentUuid can be omitted, and refuses any other agentUuid. route_agent and list_agents return this agent only.`;
+    return instruction
+        ? `${pin}\n\nInstructions from this agent's configuration:\n${instruction}`
+        : pin;
 };

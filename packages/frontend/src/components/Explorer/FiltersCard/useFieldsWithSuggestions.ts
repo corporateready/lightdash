@@ -1,10 +1,12 @@
 import {
     convertAdditionalMetric,
     DimensionType,
+    getFields,
+    getFilterAutocompleteLabelDimension,
     getItemId,
     getResultValueArray,
-    getVisibleFields,
     isCustomSqlDimension,
+    isDimension,
     isFilterableField,
     type AdditionalMetric,
     type CustomDimension,
@@ -22,6 +24,7 @@ interface FieldsWithSuggestionsHookParams {
     customDimensions: CustomDimension[] | undefined;
     additionalMetrics: AdditionalMetric[] | undefined;
     tableCalculations: TableCalculation[] | undefined;
+    includeHiddenFields: boolean;
 }
 
 export type FieldWithSuggestions = FilterableField & {
@@ -36,6 +39,7 @@ export const useFieldsWithSuggestions = ({
     customDimensions,
     additionalMetrics,
     tableCalculations,
+    includeHiddenFields,
 }: FieldsWithSuggestionsHookParams) => {
     const [fieldsWithSuggestions, setFieldsWithSuggestions] =
         useState<FieldsWithSuggestions>({});
@@ -43,7 +47,9 @@ export const useFieldsWithSuggestions = ({
     useEffect(() => {
         if (exploreData) {
             setFieldsWithSuggestions((prev) => {
-                const visibleFields = getVisibleFields(exploreData);
+                const exploreFields = getFields(exploreData).filter(
+                    ({ hidden }) => includeHiddenFields || !hidden,
+                );
                 const customMetrics = (additionalMetrics || []).reduce<
                     Metric[]
                 >((acc, additionalMetric) => {
@@ -59,7 +65,7 @@ export const useFieldsWithSuggestions = ({
                 }, []);
 
                 return [
-                    ...visibleFields,
+                    ...exploreFields,
                     ...(customDimensions || []),
                     ...customMetrics,
                     ...(tableCalculations || []),
@@ -69,7 +75,17 @@ export const useFieldsWithSuggestions = ({
                         const type = isCustomSqlDimension(field)
                             ? field.dimensionType
                             : field.type;
-                        if (type === DimensionType.STRING) {
+                        // A label dimension must always fetch labelled values from
+                        // the warehouse; harvesting raw result values masks the labels.
+                        const hasLabelDimension =
+                            isDimension(field) &&
+                            !!getFilterAutocompleteLabelDimension(
+                                field.filterAutocomplete,
+                            );
+                        if (
+                            type === DimensionType.STRING &&
+                            !hasLabelDimension
+                        ) {
                             const currentSuggestions =
                                 prev[getItemId(field)]?.suggestions || [];
                             const newSuggestions: string[] =
@@ -109,6 +125,7 @@ export const useFieldsWithSuggestions = ({
         additionalMetrics,
         tableCalculations,
         customDimensions,
+        includeHiddenFields,
     ]);
 
     return fieldsWithSuggestions;

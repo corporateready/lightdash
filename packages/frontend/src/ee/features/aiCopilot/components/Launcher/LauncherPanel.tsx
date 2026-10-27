@@ -1,9 +1,44 @@
-import { type AiAgentSummary } from '@lightdash/common';
-import { Center, Group, Loader, Stack, Text } from '@mantine-8/core';
-import { useState, type CSSProperties, type FC } from 'react';
+import {
+    type AiAgentSummary,
+    type AiPromptContext,
+    type AiPromptContextInput,
+} from '@lightdash/common';
+import {
+    Avatar,
+    Badge,
+    Box,
+    Button,
+    Center,
+    Group,
+    Loader,
+    Stack,
+    Text,
+} from '@mantine/core';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useState,
+    type CSSProperties,
+    type FC,
+} from 'react';
+import { createPath, useLocation, useNavigate } from 'react-router';
 import { LightdashUserAvatar } from '../../../../../components/Avatar';
 import useApp from '../../../../../providers/App/useApp';
+import { findRetryableDeepResearchRun } from '../../deepResearch/deepResearchRegistry';
+import { runDeepResearchAgain } from '../../deepResearch/runAgain';
+import {
+    type DeepResearchRunRegistration,
+    type StartDeepResearchArgs,
+} from '../../deepResearch/types';
 import { useAiAgentSqlModeAvailable } from '../../hooks/useAiAgentSqlModeAvailable';
+import { useDashboardPageContextCuration } from '../../hooks/useDashboardPageContextCuration';
+import {
+    useStartDeepResearchForThreadMutation,
+    useStartDeepResearchMutation,
+    useTrackDeepResearchFollowUp,
+} from '../../hooks/useDeepResearch';
+import { useDeepResearchAccess } from '../../hooks/useDeepResearchAccess';
 import { usePendingThreadRefetch } from '../../hooks/usePendingThreadRefetch';
 import { usePinnedContext } from '../../hooks/usePinnedContext';
 import {
@@ -11,6 +46,8 @@ import {
     useCreateAgentThreadMessageMutation,
     useCreateAgentThreadMutation,
 } from '../../hooks/useProjectAiAgents';
+import { useRefreshDocumentOnAgentSave } from '../../hooks/useRefreshDocumentOnAgentSave';
+import { useThreadModel } from '../../hooks/useThreadModel';
 import { openPanel } from '../../store/aiAgentLauncherSlice';
 import {
     selectThreadSqlMode,
@@ -20,17 +57,32 @@ import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
 } from '../../store/hooks';
+import { type AiAgentToolResult } from '../../types';
+import { getDashboardNavigationUrlFromContentToolResult } from '../../utils/contentToolResultNavigation';
 import { AiAgentNewThreadMcpConnections } from '../AiAgentNewThreadMcpConnections';
 import { AgentChatDisplay } from '../ChatElements/AgentChatDisplay';
 import { AgentChatInput } from '../ChatElements/AgentChatInput';
+import { contextItemsToContentMentionSuggestions } from '../ChatElements/contentMentions';
+import { getPromptContextItemKey } from '../ChatElements/contentReferenceUtils';
 import { PinnedContextCard } from '../PinnedContextCard/PinnedContextCard';
 import styles from './AiAgentsLauncher.module.css';
+import {
+    getConcreteLauncherAgent,
+    isLauncherAutoAgent,
+    type LauncherSelectedAgent,
+} from './launcherAgentSelection';
+import { LauncherAnalysisTeaser } from './LauncherAnalysisTeaser';
+import { LauncherPanelFrame } from './LauncherPanelFrame';
 import { PanelHeader } from './PanelHeader';
+import {
+    useAiAgentLauncherRouter,
+    type LauncherRouterCandidate,
+} from './useAiAgentLauncherRouter';
 import { useLauncherDock } from './useLauncherDock';
 
 type Props = {
     projectUuid: string;
-    agent: AiAgentSummary | null;
+    agent: LauncherSelectedAgent;
     agents: AiAgentSummary[];
     activeThreadId: string | null;
     style?: CSSProperties;
@@ -45,7 +97,7 @@ export const LauncherPanel: FC<Props> = ({
 }) => {
     if (!agent) {
         return (
-            <div className={styles.panel} style={style}>
+            <LauncherPanelFrame style={style}>
                 <PanelHeader
                     projectUuid={projectUuid}
                     agent={null}
@@ -56,11 +108,11 @@ export const LauncherPanel: FC<Props> = ({
                 <Center className={styles.panelBody}>
                     <Loader size="sm" color="gray" />
                 </Center>
-            </div>
+            </LauncherPanelFrame>
         );
     }
 
-    return activeThreadId ? (
+    return activeThreadId && !isLauncherAutoAgent(agent) ? (
         <ExistingThreadPanel
             projectUuid={projectUuid}
             agent={agent}
@@ -80,10 +132,11 @@ export const LauncherPanel: FC<Props> = ({
 
 const NewThreadPanel: FC<{
     projectUuid: string;
-    agent: AiAgentSummary;
+    agent: NonNullable<LauncherSelectedAgent>;
     agents: AiAgentSummary[];
     style?: CSSProperties;
 }> = ({ projectUuid, agent, agents, style }) => {
+    const navigate = useNavigate();
     const dispatch = useAiAgentStoreDispatch();
     const pendingContext = useAiAgentStoreSelector(
         (state) => state.aiAgentLauncher.pendingContext,
@@ -91,30 +144,91 @@ const NewThreadPanel: FC<{
 
     const chartUuid = pendingContext?.chartUuid;
     const dashboardUuid = pendingContext?.dashboardUuid;
+    const dataAppUuid = pendingContext?.dataAppUuid;
+    const documentUuid = pendingContext?.documentUuid;
 
     const { addItem: addDockItem } = useLauncherDock(projectUuid);
+    const isAuto = isLauncherAutoAgent(agent);
+    const concreteAgent = getConcreteLauncherAgent(agent);
+    const canStartDeepResearch = useDeepResearchAccess(projectUuid);
 
-    const { contextInput, previewItems } = usePinnedContext({
+    const {
+        contextInput,
+        previewItems,
+        contentMentionItems,
+        isReady: isPinnedContextReady,
+    } = usePinnedContext({
         projectUuid,
-        chartUuid,
-        dashboardUuid,
+        chartUuidOrSlug: chartUuid,
+        dashboardUuidOrSlug: dashboardUuid,
+        dataAppUuidOrSlug: dataAppUuid,
+        documentUuid,
     });
+    const { curateContext } = useDashboardPageContextCuration({
+        previousContext: contextInput,
+        projectUuid,
+    });
+    const {
+        context: contextInputWithPageContext = [],
+        optimisticContext: previewItemsWithPageContext = [],
+    } = useMemo(
+        () =>
+            curateContext({
+                context: contextInput,
+                optimisticContext: previewItems,
+            }),
+        [contextInput, curateContext, previewItems],
+    );
+
+    const sqlModeAvailable = useAiAgentSqlModeAvailable(projectUuid);
+    // New threads have no uuid yet — keep the toggle in local state and seed
+    // the per-thread slice entry once the thread is created.
+    const [sqlModeOverride, setSqlModeOverride] = useState<boolean>();
+    const sqlMode = sqlModeOverride ?? concreteAgent?.enableSqlMode ?? true;
+    const getSqlModeForAgent = useCallback(
+        (agentUuid: string) =>
+            sqlModeOverride ??
+            agents.find((candidate) => candidate.uuid === agentUuid)
+                ?.enableSqlMode ??
+            true,
+        [agents, sqlModeOverride],
+    );
+    useEffect(() => {
+        setSqlModeOverride(undefined);
+    }, [concreteAgent?.uuid]);
+    const [composerSeed, setComposerSeed] = useState<string | null>(null);
+    const dispatchToStore = useAiAgentStoreDispatch();
+    const refreshDocumentOnAgentSave =
+        useRefreshDocumentOnAgentSave(projectUuid);
+    const handleToolResult = useCallback(
+        (toolResult: AiAgentToolResult) => {
+            refreshDocumentOnAgentSave(toolResult);
+            const dashboardUrl = getDashboardNavigationUrlFromContentToolResult(
+                projectUuid,
+                toolResult,
+            );
+            if (!dashboardUrl) return;
+
+            void navigate(dashboardUrl, { viewTransition: true });
+        },
+        [navigate, projectUuid, refreshDocumentOnAgentSave],
+    );
 
     const { mutateAsync: createAgentThread, isLoading: isCreatingThread } =
-        useCreateAgentThreadMutation(agent.uuid, projectUuid, {
+        useCreateAgentThreadMutation(projectUuid, {
             // Launcher does its own routing via panels/dock — skip the default
             // page navigation that other surfaces want.
             skipNavigation: true,
             onCreated: (thread) => {
                 addDockItem({
                     threadId: thread.uuid,
-                    agentUuid: agent.uuid,
+                    agentUuid: thread.agentUuid,
                     title: thread.firstMessage.message,
                 });
                 dispatch(
                     openPanel({
                         threadId: thread.uuid,
-                        agentUuid: agent.uuid,
+                        agentUuid: thread.agentUuid,
                     }),
                 );
                 // Seed the per-thread mode slice with the user's choice so
@@ -122,42 +236,106 @@ const NewThreadPanel: FC<{
                 dispatchToStore(
                     setThreadSqlMode({
                         threadUuid: thread.uuid,
-                        enabled: sqlModeAvailable && sqlMode,
+                        enabled:
+                            sqlModeAvailable &&
+                            getSqlModeForAgent(thread.agentUuid),
                     }),
                 );
             },
+            onToolResult: handleToolResult,
         });
+    const startDeepResearch =
+        useStartDeepResearchForThreadMutation(projectUuid);
 
-    const sqlModeAvailable = useAiAgentSqlModeAvailable(projectUuid);
-    // New threads have no uuid yet — keep the toggle in local state and seed
-    // the per-thread slice entry once the thread is created.
-    const [sqlMode, setSqlMode] = useState(false);
-    const dispatchToStore = useAiAgentStoreDispatch();
+    const handleStartDeepResearch = useCallback(
+        async ({ question }: StartDeepResearchArgs) => {
+            if (
+                !concreteAgent ||
+                !isPinnedContextReady ||
+                !canStartDeepResearch
+            ) {
+                return;
+            }
+            const thread = await createAgentThread({
+                agentUuid: concreteAgent.uuid,
+                prompt: question,
+                context: contextInputWithPageContext,
+                optimisticContext: previewItemsWithPageContext,
+                skipAgentResponse: true,
+            });
+            await startDeepResearch.mutateAsync({
+                question,
+                agentUuid: concreteAgent.uuid,
+                threadUuid: thread.uuid,
+                promptUuid: thread.firstMessage.uuid,
+            });
+        },
+        [
+            concreteAgent,
+            canStartDeepResearch,
+            contextInputWithPageContext,
+            createAgentThread,
+            isPinnedContextReady,
+            previewItemsWithPageContext,
+            startDeepResearch,
+        ],
+    );
 
-    const handleSubmit = ({
-        message,
-        toolHints,
-    }: {
-        message: string;
-        toolHints: string[];
-    }) => {
-        void createAgentThread({
-            prompt: message,
-            context: contextInput.length > 0 ? contextInput : undefined,
-            optimisticContext:
-                previewItems.length > 0 ? previewItems : undefined,
-            enableSqlMode: sqlModeAvailable && sqlMode,
+    const createThreadForAgent = useCallback(
+        async ({
+            agentUuid,
+            context,
+            message,
+            optimisticContext,
             toolHints,
-        });
-    };
+        }: {
+            agentUuid: string;
+            context?: AiPromptContextInput;
+            message: string;
+            optimisticContext?: AiPromptContext;
+            toolHints: string[];
+        }) => {
+            return createAgentThread({
+                agentUuid,
+                prompt: message,
+                context,
+                optimisticContext,
+                enableSqlMode:
+                    sqlModeAvailable && getSqlModeForAgent(agentUuid),
+                toolHints,
+            });
+        },
+        [createAgentThread, getSqlModeForAgent, sqlModeAvailable],
+    );
+
+    const {
+        confirmPick,
+        handleSubmit,
+        isLocked,
+        isPickingAgent,
+        sortedCandidates,
+    } = useAiAgentLauncherRouter({
+        agent,
+        agents,
+        contextInput: contextInputWithPageContext,
+        createThreadForAgent,
+        isCreatingThread,
+        isPinnedContextReady,
+        previewItems: previewItemsWithPageContext,
+        projectUuid,
+    });
+    const displayName = isAuto ? 'Auto' : agent.name;
+    const description = isAuto
+        ? 'Routes each new question to the best-fit agent'
+        : agent.description;
 
     return (
-        <div className={styles.panel} style={style}>
+        <LauncherPanelFrame style={style}>
             <PanelHeader
                 projectUuid={projectUuid}
                 agent={agent}
                 agents={agents}
-                title={agent.name}
+                title={displayName}
                 threadId={null}
             />
             <div className={styles.panelBody}>
@@ -168,60 +346,128 @@ const NewThreadPanel: FC<{
                     gap="xs"
                     px="md"
                 >
-                    <LightdashUserAvatar
-                        size="lg"
-                        name={agent.name}
-                        src={agent.imageUrl}
-                    />
+                    {isAuto ? (
+                        <Avatar size="lg" color="ldGray" radius="xl">
+                            <Text size="sm" fw={600} c="dimmed">
+                                AI
+                            </Text>
+                        </Avatar>
+                    ) : (
+                        <LightdashUserAvatar
+                            size="lg"
+                            name={agent.name}
+                            src={agent.imageUrl}
+                        />
+                    )}
                     <Text size="sm" fw={500}>
-                        {agent.name}
+                        {displayName}
                     </Text>
-                    {agent.description && (
+                    {description && (
                         <Text size="xs" c="dimmed" ta="center" maw={360}>
-                            {agent.description}
+                            {description}
                         </Text>
                     )}
+                    <LauncherAnalysisTeaser projectUuid={projectUuid} />
                 </Stack>
-                <Stack px="md" pb="xs">
-                    <AiAgentNewThreadMcpConnections
-                        projectUuid={projectUuid}
-                        agentUuid={agent.uuid}
-                    />
-                </Stack>
-                {previewItems.length > 0 && (
+                {concreteAgent && (
+                    <Stack px="md" pb="xs">
+                        <AiAgentNewThreadMcpConnections
+                            projectUuid={projectUuid}
+                            agentUuid={concreteAgent.uuid}
+                            onSuggestedPrompt={setComposerSeed}
+                        />
+                    </Stack>
+                )}
+                {previewItemsWithPageContext.length > 0 && (
                     <Stack gap="xxs" px="md" pb="xs">
                         <Text size="xs" fw={600} c="dimmed" tt="uppercase">
                             Pinned context
                         </Text>
                         <Group gap="xs" wrap="wrap">
-                            {previewItems.map((item) => (
+                            {previewItemsWithPageContext.map((item) => (
                                 <PinnedContextCard
-                                    key={`${item.type}-${
-                                        item.type === 'chart'
-                                            ? item.chartUuid
-                                            : item.dashboardUuid
-                                    }`}
+                                    key={getPromptContextItemKey(item)}
                                     item={item}
                                     projectUuid={projectUuid}
+                                    previewScope={null}
                                 />
                             ))}
                         </Group>
                     </Stack>
                 )}
+                {isPickingAgent && (
+                    <LauncherAgentPicker
+                        candidates={sortedCandidates}
+                        onPick={confirmPick}
+                    />
+                )}
                 <AgentChatInput
+                    accessCalloutVariant="inline"
+                    key={composerSeed ?? 'composer'}
+                    defaultValue={composerSeed ?? undefined}
                     onSubmit={handleSubmit}
-                    loading={isCreatingThread}
-                    placeholder={`Ask ${agent.name} anything...`}
+                    onStartDeepResearch={
+                        concreteAgent && canStartDeepResearch
+                            ? handleStartDeepResearch
+                            : undefined
+                    }
+                    loading={isLocked}
+                    disabled={!isPinnedContextReady || isPickingAgent}
+                    placeholder={`Ask ${displayName} anything...`}
                     projectUuid={projectUuid}
-                    agentUuid={agent.uuid}
+                    agentUuid={concreteAgent?.uuid}
                     fullWidth
-                    sqlMode={sqlModeAvailable ? sqlMode : undefined}
-                    onSqlModeChange={sqlModeAvailable ? setSqlMode : undefined}
+                    sqlMode={sqlModeAvailable && !isAuto ? sqlMode : undefined}
+                    onSqlModeChange={
+                        sqlModeAvailable && !isAuto
+                            ? setSqlModeOverride
+                            : undefined
+                    }
+                    contentMentionPriorityItems={contentMentionItems}
                 />
             </div>
-        </div>
+        </LauncherPanelFrame>
     );
 };
+
+const LauncherAgentPicker: FC<{
+    candidates: LauncherRouterCandidate[];
+    onPick: (agentUuid: string) => void;
+}> = ({ candidates, onPick }) => (
+    <Stack gap="xs" px="md" pb="xs">
+        <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+            Choose agent
+        </Text>
+        <Stack gap="xxs">
+            {candidates.map((candidate) => (
+                <Button
+                    key={candidate.agentUuid}
+                    variant="default"
+                    justify="start"
+                    leftSection={
+                        <LightdashUserAvatar
+                            size="xs"
+                            name={candidate.name}
+                            src={candidate.agent?.imageUrl}
+                        />
+                    }
+                    onClick={() => onPick(candidate.agentUuid)}
+                >
+                    <Box className={styles.candidateContent}>
+                        <Box className={styles.candidateText}>
+                            {candidate.name}
+                        </Box>
+                        {candidate.isRecommended && (
+                            <Badge size="xs" color="violet">
+                                Recommended
+                            </Badge>
+                        )}
+                    </Box>
+                </Button>
+            ))}
+        </Stack>
+    </Stack>
+);
 
 const ExistingThreadPanel: FC<{
     projectUuid: string;
@@ -231,54 +477,186 @@ const ExistingThreadPanel: FC<{
     style?: CSSProperties;
 }> = ({ projectUuid, agent, agents, threadId, style }) => {
     const { user } = useApp();
+    const canStartDeepResearch = useDeepResearchAccess(projectUuid);
+    const navigate = useNavigate();
+    const location = useLocation();
     const {
         data: thread,
         isLoading: isLoadingThread,
         refetch,
     } = useAiAgentThread(projectUuid, agent.uuid, threadId);
 
-    const { isStreaming, isPending } = usePendingThreadRefetch(
+    const { isStreaming, isThreadPending } = usePendingThreadRefetch(
         thread,
         threadId,
         refetch,
     );
 
+    const refreshDocumentOnAgentSave =
+        useRefreshDocumentOnAgentSave(projectUuid);
+    const handleToolResult = useCallback(
+        (toolResult: AiAgentToolResult) => {
+            refreshDocumentOnAgentSave(toolResult);
+            const dashboardUrl = getDashboardNavigationUrlFromContentToolResult(
+                projectUuid,
+                toolResult,
+            );
+            if (!dashboardUrl) return;
+
+            void navigate(dashboardUrl, { viewTransition: true });
+        },
+        [navigate, projectUuid, refreshDocumentOnAgentSave],
+    );
+
     const {
         mutateAsync: createAgentThreadMessage,
         isLoading: isCreatingMessage,
-    } = useCreateAgentThreadMessageMutation(projectUuid, agent.uuid, threadId);
+    } = useCreateAgentThreadMessageMutation(projectUuid, agent.uuid, threadId, {
+        onToolResult: handleToolResult,
+    });
+    const startDeepResearch = useStartDeepResearchMutation({
+        projectUuid,
+        agentUuid: agent.uuid,
+        threadUuid: threadId,
+    });
+    const trackDeepResearchFollowUp = useTrackDeepResearchFollowUp({
+        projectUuid,
+        threadUuid: threadId,
+    });
 
     const sqlModeAvailable = useAiAgentSqlModeAvailable(projectUuid);
-    const sqlMode = useAiAgentStoreSelector(selectThreadSqlMode(threadId));
+    const sqlMode = useAiAgentStoreSelector(
+        selectThreadSqlMode(threadId, agent.enableSqlMode),
+    );
     const dispatchToStore = useAiAgentStoreDispatch();
+    const threadContext = useMemo(
+        () =>
+            thread?.messages.flatMap((message) =>
+                message.role === 'user' ? message.context : [],
+            ) ?? [],
+        [thread?.messages],
+    );
+    const { curateContext, recordSubmittedContext } =
+        useDashboardPageContextCuration({
+            previousContext: threadContext,
+            projectUuid,
+            threadId,
+            boundDashboardUuid:
+                thread?.binding?.type === 'dashboard'
+                    ? thread.binding.dashboardUuid
+                    : null,
+        });
 
     const isThreadFromCurrentUser = thread?.user.uuid === user?.data?.userUuid;
+    const isBusy = Boolean(
+        isCreatingMessage ||
+        isStreaming ||
+        isThreadPending ||
+        startDeepResearch.isLoading,
+    );
+    const isInputDisabled =
+        thread?.createdFrom === 'slack' || !isThreadFromCurrentUser;
+    const contentMentionItems = useMemo(
+        () => contextItemsToContentMentionSuggestions(threadContext, 'thread'),
+        [threadContext],
+    );
+    const threadModel = useThreadModel({
+        projectUuid,
+        agentUuid: agent.uuid,
+        messages: thread?.messages,
+    });
 
     const handleSubmit = ({
         message,
         toolHints,
+        context,
+        optimisticContext,
     }: {
         message: string;
         toolHints: string[];
+        context?: Parameters<typeof createAgentThreadMessage>[0]['context'];
+        optimisticContext?: Parameters<
+            typeof createAgentThreadMessage
+        >[0]['optimisticContext'];
     }) => {
-        const firstAssistantMessage = thread?.messages?.find(
-            (m) => m.role === 'assistant',
-        );
-        const modelConfig = firstAssistantMessage?.modelConfig ?? undefined;
+        const curatedContext = curateContext({ context, optimisticContext });
+
         void createAgentThreadMessage({
             prompt: message,
-            modelConfig,
+            context: curatedContext.context,
+            optimisticContext: curatedContext.optimisticContext,
             enableSqlMode: sqlModeAvailable && sqlMode,
             toolHints,
+        }).then(() => {
+            recordSubmittedContext(curatedContext.context);
+            trackDeepResearchFollowUp();
+        });
+    };
+
+    const handleStartDeepResearch = async ({
+        question,
+    }: StartDeepResearchArgs) => {
+        if (!canStartDeepResearch) {
+            return;
+        }
+        const retryableRun = findRetryableDeepResearchRun({
+            projectUuid,
+            agentUuid: agent.uuid,
+            threadUuid: threadId,
+            userUuid: user?.data?.userUuid,
+            question,
+        });
+        const promptUuid =
+            retryableRun?.promptUuid ??
+            (
+                await createAgentThreadMessage({
+                    prompt: question,
+                    skipAgentResponse: true,
+                })
+            ).uuid;
+        await startDeepResearch.mutateAsync({
+            question,
+            promptUuid,
+        });
+    };
+
+    const handleRunDeepResearchAgain = async (
+        registration: DeepResearchRunRegistration,
+    ) => {
+        if (!canStartDeepResearch) {
+            return;
+        }
+
+        return runDeepResearchAgain({
+            registration,
+            createPrompt: (question) =>
+                createAgentThreadMessage({
+                    prompt: question,
+                    skipAgentResponse: true,
+                }),
+            startRun: startDeepResearch.mutateAsync,
         });
     };
 
     const headerTitle =
         thread?.title || thread?.firstMessage?.message || agent.name;
 
+    const handleDashboardLinkClick = useCallback(
+        (dashboardUrl: string) => {
+            const currentUrl = createPath({
+                pathname: location.pathname,
+                search: location.search,
+            });
+            if (dashboardUrl !== currentUrl) {
+                void navigate(dashboardUrl, { viewTransition: true });
+            }
+        },
+        [location.pathname, location.search, navigate],
+    );
+
     if (isLoadingThread || !thread) {
         return (
-            <div className={styles.panel} style={style}>
+            <LauncherPanelFrame style={style}>
                 <PanelHeader
                     projectUuid={projectUuid}
                     agent={agent}
@@ -289,12 +667,12 @@ const ExistingThreadPanel: FC<{
                 <Center className={styles.panelBody}>
                     <Loader size="sm" color="gray" />
                 </Center>
-            </div>
+            </LauncherPanelFrame>
         );
     }
 
     return (
-        <div className={styles.panel} style={style}>
+        <LauncherPanelFrame style={style}>
             <PanelHeader
                 projectUuid={projectUuid}
                 agent={agent}
@@ -310,21 +688,38 @@ const ExistingThreadPanel: FC<{
                     projectUuid={projectUuid}
                     agentUuid={agent.uuid}
                     renderArtifactsInline
+                    onDashboardLinkClick={handleDashboardLinkClick}
+                    canRetryDeepResearch={
+                        canStartDeepResearch && !isInputDisabled && !isBusy
+                    }
+                    onRunDeepResearchAgain={(registration) => {
+                        void handleRunDeepResearchAgain(registration).catch(
+                            () => undefined,
+                        );
+                    }}
                 >
                     <AgentChatInput
-                        disabled={
-                            thread.createdFrom === 'slack' ||
-                            !isThreadFromCurrentUser
-                        }
+                        accessCalloutVariant="inline"
+                        disabled={isInputDisabled}
                         disabledReason="This thread is read-only. To continue the conversation, reply in Slack."
-                        loading={isCreatingMessage || isStreaming || isPending}
+                        loading={isBusy}
                         onSubmit={handleSubmit}
+                        onStartDeepResearch={
+                            canStartDeepResearch
+                                ? handleStartDeepResearch
+                                : undefined
+                        }
                         placeholder={`Ask ${agent.name} anything...`}
                         messageCount={thread.messages?.length || 0}
                         projectUuid={projectUuid}
                         agentUuid={agent.uuid}
                         fullWidth
                         threadUuid={threadId}
+                        threadModelName={threadModel?.name ?? null}
+                        threadModelWarning={
+                            threadModel?.deprecationWarning ?? null
+                        }
+                        contentMentionPriorityItems={contentMentionItems}
                         latestAssistantMessageUuid={
                             [...(thread.messages ?? [])]
                                 .reverse()
@@ -345,6 +740,6 @@ const ExistingThreadPanel: FC<{
                     />
                 </AgentChatDisplay>
             </div>
-        </div>
+        </LauncherPanelFrame>
     );
 };

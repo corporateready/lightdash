@@ -5,20 +5,28 @@
  * If the feature flag is no longer in use, remove it from this enum.
  */
 export enum FeatureFlags {
+    /** Organization-scoped, off by default. Retry missing cross-project refs with sibling models injected through a generated dbt plugin. */
+    CrossSourceDbtRefs = 'cross-source-dbt-refs',
+    DbtExplicitCredentials = 'dbt-explicit-credentials',
+    /**
+     * Agent identity gates agent query identity, organisation settings and
+     * Snowflake agent sign-in. Off by default; organization scope; no handler.
+     */
+    AgentIdentity = 'agent-identity',
+    OAuthScopeEnforcement = 'oauth-scope-enforcement',
+
+    MultiConnectionProjects = 'multi-connection-projects',
+    /** Extra warehouse connections of a different type to the project's original connection. */
+    MixedWarehouseConnections = 'mixed-warehouse-connections',
+    /** Backend-provisioned usage analytics projects. */
+    AnalyticsProject = 'analytics-project',
     /* Show user groups */
     UserGroupsEnabled = 'user-groups-enabled',
 
-    /* Send local timezone to the warehouse session */
-    EnableUserTimezones = 'enable-user-timezones',
-
     /* Gate new timezone features: warehouse session timezone, timezone-aware
-       DATE_TRUNC, result formatting, etc. Temporary — remove once stable. */
+       DATE_TRUNC, per-viewer (user-profile) timezone resolution, result
+       formatting, etc. Temporary — remove once stable. */
     EnableTimezoneSupport = 'enable-timezone-support',
-
-    /**
-     * Enable scheduler task that replaces custom metrics after project compile
-     */
-    ReplaceCustomMetricsOnCompile = 'replace-custom-metrics-on-compile',
 
     /**
      * Enable the dynamic calculation of series color, when not manually set on the chart config.
@@ -26,11 +34,6 @@ export enum FeatureFlags {
      * For more details, see https://github.com/lightdash/lightdash/issues/13831
      */
     CalculateSeriesColor = 'calculate-series-color',
-
-    /**
-     * Enable the ability to write back custom bin dimensions to dbt.
-     */
-    WriteBackCustomBinDimensions = 'write-back-custom-bin-dimensions',
 
     /**
      * Enable the ability to show the warehouse execution time and total time in the chart tile.
@@ -43,35 +46,10 @@ export enum FeatureFlags {
     AiCustomViz = 'ai-custom-viz',
 
     /**
-     * Enable SQL pivot results conversion to PivotData format
-     */
-    UseSqlPivotResults = 'use-sql-pivot-results',
-
-    /**
-     * Enable viewing and editing YAML source files in the Explore UI
-     */
-    EditYamlInUi = 'edit-yaml-in-ui',
-
-    /**
-     * Enable Google Chat as a scheduled delivery destination
-     */
-    GoogleChatEnabled = 'google-chat-enabled',
-
-    /**
      * Enable admin user impersonation. When disabled, impersonation
      * actions are blocked and active sessions are cleared.
      */
     UserImpersonation = 'user-impersonation',
-
-    /**
-     * Enable custom group bins for string dimensions
-     */
-    CustomGroupBins = 'custom-group-bins',
-
-    /**
-     * Enable changing the explore a chart points to from the chart UI
-     */
-    ChangeChartExplore = 'change-chart-explore',
 
     /**
      * Keep visited dashboard tabs mounted in the DOM (hidden) for instant
@@ -82,37 +60,69 @@ export enum FeatureFlags {
     DashboardTabsInMemory = 'dashboard-tabs-in-memory',
 
     /**
-     * Enable creating and editing metric filters on dashboards.
-     * When enabled, the "Add filter" UI includes metrics alongside dimensions.
-     * Existing metric filters are always displayed regardless of this flag.
+     * Enable dashboard controls: the new bar and sidebar for filter
+     * controls.
+     * Rolled out per organization. Temporary: remove once the new bar
+     * replaces the shipped one.
      */
-    MetricDashboardFilters = 'metric-dashboard-filters',
+    DashboardControls = 'dashboard-controls',
 
     /**
-     * Enable data apps feature. Works alongside the APPS_RUNTIME_ENABLED
-     * env var — data apps are enabled if either this flag or the env var
-     * is true. Disabled by default.
+     * Enable data apps feature. Disabled by default. Self-hosted
+     * deployments can force it on with APPS_RUNTIME_ENABLED=true, which
+     * the config parser translates into the enable allowlist. Does not gate
+     * Chart Studio, which is available with a valid licence and a configured
+     * sandbox provider, but still keeps installed chart types usable.
      */
     EnableDataApps = 'enable-data-apps',
 
     /**
-     * Enable AI Dashboard Summary feature (generates summaries of dashboard
-     * contents using the AI Copilot).
+     * AI access (in-app agent, Slack agent, MCP) skips the results cache,
+     * earlier results and pre-aggregates. Off by default; organization scope.
      */
-    AiDashboardSummary = 'ai-dashboard-summary',
+    AiAccessSkipResultsCache = 'ai-access-skip-results-cache',
+
+    /**
+     * Per-organization gate for declaring custom npm dependencies in data
+     * apps. Disabled by default; self-hosted instances can enable it globally
+     * via LIGHTDASH_ENABLE_FEATURE_FLAGS.
+     */
+    EnableDataAppCustomDependencies = 'enable-data-app-custom-dependencies',
+
+    /**
+     * Per-organization rollout of AI analysis in data apps (detect anomalies,
+     * investigate with an agent). Gates the endpoints and the admin toggle;
+     * the org's `dataAppRuntimeAiEnabled` setting is the separate customer
+     * consent. Disabled by default.
+     */
+    EnableDataAppAnalysis = 'enable-data-app-analysis',
+
+    /**
+     * Per-organization rollout of AI analysis on classic dashboards. Gates the
+     * dashboard analysis endpoints and entry points; shares the org's
+     * `dataAppRuntimeAiEnabled` consent setting and daily analysis budgets
+     * with data-app analysis. Disabled by default.
+     */
+    EnableDashboardAnalysis = 'enable-dashboard-analysis',
+
+    /**
+     * Per-organization gate for automatic (obscured) data app thumbnail
+     * capture and its settings card. Disabled by default.
+     */
+    EnableDataAppAutomaticThumbnails = 'enable-data-app-automatic-thumbnails',
+
+    /**
+     * Per-user / per-organization gate for the data app state store
+     * (`useAppState` / `useSharedAppState` in the SDK and its endpoints).
+     * Resolves user override, then organization, then instance default.
+     * Disabled by default on Cloud and self-hosted.
+     */
+    EnableDataAppState = 'enable-data-app-state',
 
     /**
      * Enable Autopilot project health agent.
      */
     AiAutopilot = 'ai-autopilot',
-
-    /**
-     * Enable AI agent revamp features including built-in skills, the
-     * loadSkill tool, and content editing tools like readContent/editContent.
-     * When enabled, these replace older dashboard-specific content lookup
-     * tools in the agent tool surface.
-     */
-    AiAgentRevamp = 'ai-agent-revamp',
 
     /**
      * Enable the Hexbin (H3 hexagonal binning) layer type for Map charts.
@@ -130,15 +140,6 @@ export enum FeatureFlags {
     SsoOrganizationSettings = 'sso-organization-settings',
 
     /**
-     * Expose the "Leave organization" action in the General settings danger
-     * zone and accept the corresponding API call. When disabled the panel is
-     * hidden and the endpoint returns a 403 — protects against accidental
-     * self-removal during early rollout and lets us disable the feature
-     * per-org if it causes operational issues.
-     */
-    LeaveOrganization = 'leave-organization',
-
-    /**
      * Enable query results caching. DB value (user/org override or flag
      * default) takes precedence; falls back to the RESULTS_CACHE_ENABLED env
      * var when no DB row is set. Lets shared-instance customers (eu1/app)
@@ -147,58 +148,175 @@ export enum FeatureFlags {
     ResultsCacheEnabled = 'results-cache-enabled',
 
     /**
-     * Allow dashboard editors to mark individual dashboard filters as locked.
-     * Locked filters are visible to viewers but cannot be edited from view
-     * mode, and URL/embed filter overrides targeting a locked filter's field
-     * are ignored. Gates the authoring UI; the override-stripping behaviour
-     * always runs regardless of the flag so saved-locked filters stay safe
-     * if the flag is later turned off.
-     */
-    LockDashboardFilters = 'lock-dashboard-filters',
-
-    /**
-     * Show empty-state suggestion chips above the AI agent chat input. Each
-     * chip carries a tool hint that biases the agent toward the implied tool
-     * on the first turn. Gated for staged rollout while we tune the Haiku
-     * prompt and measure click-through.
-     */
-    AiAgentSuggestions = 'ai-agent-suggestions',
-
-    /**
-     * Enable the new pivot-column-sort UI: per-pivot-column sort menu on
-     * pivot table headers, sort-direction indicators, and the pinned
-     * pivot-column entries in the Sort popover. Backend support
-     * (per-metric anchor CTE, pivot_values persistence) is always on;
-     * this flag only gates the UI/UX so we can validate with design
-     * partners before announcing GA.
-     */
-    PivotColumnSort = 'pivot-column-sort',
-
-    /**
-     * Gate the "Schedule delivery" entry point for data apps. Disabled by
-     * default while the screenshot pipeline is producing blank pages in
-     * production. Enable per-org once the underlying rendering issue is
-     * fixed.
-     */
-    DataAppsScheduledDeliveries = 'data-apps-scheduled-deliveries',
-
-    /**
-     * Enable UI for hiding dimensions in pivot table charts (so a dimension
-     * can drive sort order without rendering or leaking into CSV/XLSX).
-     * Off by default while we validate with design partners before GA.
-     */
-    HidePivotDimensions = 'hide-pivot-dimensions',
-
-    /**
-     * Enable AI thread context compaction for streamed web-app conversations.
-     */
-    AiContextCompaction = 'ai-context-compaction',
-
-    /**
      * Show a persistent trial warning banner for an organization on shared
      * instances. This does not block product access.
      */
     OrganizationTrialWarning = 'organization-trial-warning',
+
+    /**
+     * Block an organization from running queries because its trial has
+     * expired. Stronger than OrganizationTrialWarning — this DOES block a
+     * product action (query execution). Off by default; enable per-org.
+     */
+    OrganizationTrialBlock = 'organization-trial-block',
+
+    /**
+     * Gate the org-level export Limits settings panel (per-org query max rows
+     * and CSV cells limit). Backend enforcement of any stored overrides is
+     * always on; this flag only controls who can see/configure the panel.
+     */
+    ProLimits = 'pro-limits',
+
+    /**
+     * Show the coding-agent project onboarding flow. This gates only the UI;
+     * the CLI, APIs, and installed skills remain available independently.
+     */
+    CodingAgentOnboarding = 'coding-agent-onboarding',
+
+    /**
+     * Allow storing long-lived GitHub personal access tokens as GitHub MCP
+     * credentials (guided connect flow and generic bearer endpoints targeting
+     * the hosted GitHub MCP URL). Off by default — orgs should authenticate
+     * via the Lightdash GitHub App, which mints a short-lived installation
+     * token per run and stores no long-lived secret. When off, previously
+     * stored PATs are also ignored at runtime. Enable
+     * per-org only as a stopgap for orgs that cannot install the GitHub App.
+     */
+    AiMcpGithubPat = 'ai-mcp-github-pat',
+
+    /**
+     * Gate the whole new onboarding experience as one unit: email-only
+     * signup (register collects only an email; ownership proven via email
+     * OTP), the full-page organization setup experience shown after
+     * registration, and the dbt-less "connect to your warehouse" onboarding
+     * path including the Snowflake "connect via CLI (SSO)" auth method in
+     * project creation. Off by default. Note: the register page evaluates
+     * this flag anonymously, so per-org overrides do not apply there —
+     * enable instance-wide (or for everyone in posthog) to turn on signup.
+     */
+    NewOnboarding = 'new-onboarding',
+
+    /**
+     * Cloud-only: let an organization send report/notification emails from
+     * their own verified domain (email whitelabelling) instead of the
+     * Lightdash address. Gates both the setup UI and the admin API. Requires a
+     * Postmark account token to be configured on the instance — self-hosters
+     * without one can't self-serve, so the feature stays hidden. Off by
+     * default; enable per-org.
+     */
+    EmailWhitelabel = 'email-whitelabel',
+
+    /**
+     * Advertise compact filter expressions to AI agent and MCP metric-query
+     * tools, resolving them to the existing filter model at the tool boundary.
+     * Off by default while the public contract is rolled out per organization.
+     */
+    AiFilterExpressions = 'ai-filter-expressions',
+
+    /**
+     * Enable the async compose SQL endpoint
+     * (POST /api/v2/projects/{projectUuid}/query/compose-sql), which runs
+     * DuckDB SQL over other queries' results, exposed as named tables via
+     * the request's references map ({"orders": "<queryUuid>"}).
+     * Off by default; on in preview/dev environments via
+     * PREVIEW_ENABLED_FEATURE_FLAGS.
+     */
+    ComposeSqlRunner = 'compose-sql-runner',
+
+    /**
+     * Enable the multi-source query endpoints
+     * (/api/v2/projects/{projectUuid}/query-sources/*): source discovery,
+     * schema scans, source-query submission and batch status. Off by
+     * default; on in preview/dev environments via
+     * PREVIEW_ENABLED_FEATURE_FLAGS.
+     */
+    MultiSourceQuery = 'multi-source-query',
+
+    /**
+     * Enable the "My query history" page
+     * (/projects/{projectUuid}/query-history) and its listing endpoint
+     * (GET /api/v2/projects/{projectUuid}/query/history). Off by default.
+     */
+    QueryHistory = 'query-history',
+
+    /**
+     * Configurable retention for AI agent threads. Off by default; enabled
+     * per-org on demand for enterprise customers.
+     */
+    AiThreadRetention = 'ai-thread-retention',
+
+    /**
+     * Per-organization gate for experimental surfaces in Lightdash Desktop.
+     * Desktop reads it once per sign-in. Off by default; enable per org.
+     */
+    DesktopExperiments = 'desktop-experiments',
+
+    /**
+     * External data sources: upload CSV files or connect Google Sheets as
+     * project tables. Tables are ingested to typed parquet in object storage,
+     * generated as explores (ExploreType.EXTERNAL_SOURCE), and queried on the
+     * DuckDB compose engine — so this requires the enterprise pre-aggregates
+     * engine and its S3 configuration. Off by default.
+     */
+    ExternalSources = 'external-sources',
+
+    /**
+     * Prevent users from deleting their own AI agent threads. Admins can
+     * still delete threads from the agent admin threads view. Off by default.
+     */
+    AiDisableThreadDeletion = 'ai-disable-thread-deletion',
+
+    /**
+     * Enables the chart type library — browsing and installing official
+     * chart types from the configured chart registry — and, as an either/or
+     * gate with Chart Studio availability and `EnableDataApps`, usage of
+     * installed chart types (picking, configuring, rendering). Authoring,
+     * editing, and forking chart types follow Chart Studio availability
+     * (a valid licence and a configured sandbox provider), not this flag.
+     * Default: off.
+     */
+    ChartTypeRegistry = 'chart-type-registry',
+
+    /**
+     * Custom metrics created while building a chart inside a dashboard are
+     * kept on the dashboard and offered when building later charts there.
+     * Off by default.
+     */
+    DashboardCustomMetrics = 'dashboard-custom-metrics',
+    /**
+     * Build and edit charts in a full-screen modal over the dashboard
+     * instead of navigating away. Off by default.
+     */
+    InDashboardChartEditor = 'in-dashboard-chart-editor',
+
+    /**
+     * AI agent battle mode: send one prompt to two models in paired threads
+     * and compare the answers side by side with response timings. Internal
+     * experiment, off by default.
+     */
+    AiAgentBattleMode = 'ai-agent-battle-mode',
+    /**
+     * Organization-scoped: keep dbt's partial_parse.msgpack from a compile on
+     * the worker and seed the next compile of the same project and dbt source
+     * with it, so `dbt ls` re-parses only changed files. dbt checks file
+     * hashes, profile, vars and its own version and falls back to a full parse
+     * on any mismatch. Off by default.
+     */
+    DbtPartialParse = 'dbt-partial-parse',
+    /**
+     * Organization-scoped: Athena connections can authenticate with this
+     * instance's Google workload identity instead of AWS keys. Only enable on
+     * instances whose pods run as their own Google service account.
+     */
+    AthenaWebIdentityAuth = 'athena-web-identity-auth',
+    /**
+     * Organization-scoped: org admins can bring their own AI provider keys,
+     * restrict model visibility, and route those keys through a custom base
+     * URL (an OpenAI/Anthropic/Gemini-compatible gateway). Off by default;
+     * while off, stored org provider config is ignored and the instance
+     * providers are used. Enable it for an org BEFORE it stores a key.
+     */
+    OrgAiCustomProviders = 'org-ai-custom-providers',
 }
 
 export type FeatureFlag = {

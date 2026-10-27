@@ -1,0 +1,42 @@
+.action {
+    visibility: hidden;
+    cursor: pointer;
+}
+
+.root:hover .action {
+    visibility: visible;
+}
+
+.input {
+    border: none;
+    background: transparent;
+    font-weight: 500;
+    padding-left: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.input:hover {
+    white-space: normal;
+    overflow: visible;
+    background: var(--mantine-color-default-hover);
+}
+
+.input::placeholder {
+    color: var(--mantine-color-dimmed);
+}
+
+.lighter:hover {
+    background: var(--mantine-color-default-hover);
+}
+
+.lighter::placeholder {
+    color: var(--mantine-color-placeholder);
+}
+
+.heading {
+    font-size: var(--mantine-font-size-md);
+    font-weight: 600;
+    letter-spacing: -0.005em;
+}

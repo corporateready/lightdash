@@ -11,12 +11,15 @@ import {
     type VizTableConfig,
     type WarehouseTypes,
     formatSql,
+    getFieldQuoteChar,
 } from '@lightdash/common';
 import type { PayloadAction, SerializedError } from '@reduxjs/toolkit';
 import { createSlice } from '@reduxjs/toolkit';
 import { createSelector } from 'reselect';
+import { sharedLightdashApi } from '../../../api';
 import { type MonacoHighlightChar } from '../components/SqlEditor';
 import { SqlRunnerResultsRunnerFrontend } from '../runners/SqlRunnerResultsRunnerFrontend';
+import { resolveSqlErrorPosition } from '../utils/sqlErrorPosition';
 import { createHistoryReducer, withHistory, type WithHistory } from './history';
 import { prepareAndFetchChartData, runSqlQuery } from './thunks';
 
@@ -41,10 +44,22 @@ export const compareSqlQueries = (
     );
 };
 
+export type SqlRunnerConnection = {
+    warehouseConnectionUuid: string | null;
+    name: string;
+    warehouseType: WarehouseTypes;
+};
+
+export type SqlRunnerConnectionRoute =
+    | { route: 'pending' }
+    | { route: 'single' }
+    | { route: 'multi'; connection: SqlRunnerConnection | null };
+
 export interface SqlRunnerState {
     projectUuid: string;
     activeTable: string | undefined;
     activeSchema: string | undefined;
+    activeDatabase: string | undefined;
     savedSqlChart: SqlChart | undefined;
     queryUuid: string | undefined;
     fileUrl: string | undefined;
@@ -81,18 +96,24 @@ export interface SqlRunnerState {
             isOpen: boolean;
         };
     };
-    isLeftSidebarOpen: boolean;
     quoteChar: string;
     warehouseConnectionType: WarehouseTypes | undefined;
     sqlColumns: VizColumn[] | undefined;
     sqlRows: RawResultRow[] | undefined;
+    sqlDurationMs: number | null;
     activeConfigs: ChartKind[];
     fetchResultsOnLoad: boolean;
     mode: 'default' | 'virtualView';
     queryIsLoading: boolean;
     queryError: ApiErrorDetail | SerializedError | Error | undefined;
+    queryErrorProjectUuid: string | undefined;
     editorHighlightError: MonacoHighlightChar | undefined;
+    // Asks the editor to move its cursor; the counter makes repeat requests distinct
+    editorRevealRequest:
+        | (MonacoHighlightChar & { requestId: number })
+        | undefined;
     parameterValues: ParametersValuesMap;
+    connectionRoute: SqlRunnerConnectionRoute;
 }
 
 export const initialState: SqlRunnerState = {
@@ -100,6 +121,7 @@ export const initialState: SqlRunnerState = {
     projectUuid: '',
     activeTable: undefined,
     activeSchema: undefined,
+    activeDatabase: undefined,
     savedSqlChart: undefined,
     queryUuid: undefined,
     fileUrl: undefined,
@@ -136,18 +158,28 @@ export const initialState: SqlRunnerState = {
             isOpen: false,
         },
     },
-    isLeftSidebarOpen: true,
     quoteChar: '"',
     warehouseConnectionType: undefined,
     sqlColumns: undefined,
     sqlRows: undefined,
+    sqlDurationMs: null,
     activeConfigs: [ChartKind.TABLE, ChartKind.VERTICAL_BAR],
     fetchResultsOnLoad: false,
     queryIsLoading: false,
     queryError: undefined,
+    queryErrorProjectUuid: undefined,
     editorHighlightError: undefined,
+    editorRevealRequest: undefined,
     parameterValues: {},
+    connectionRoute: { route: 'pending' },
 };
+
+const connectionUuidOf = (
+    connectionRoute: SqlRunnerConnectionRoute | undefined,
+): string | null | undefined =>
+    connectionRoute?.route === 'multi'
+        ? connectionRoute.connection?.warehouseConnectionUuid
+        : undefined;
 
 const sqlHistoryReducer = createHistoryReducer<string | undefined>({
     maxHistoryItems: 5,
@@ -169,6 +201,8 @@ export const sqlRunnerSlice = createSlice({
         selectColumns: (state) => state.sqlColumns,
         selectRows: (state) => state.sqlRows,
         selectParameterValues: (state) => state.parameterValues,
+        selectConnectionRoute: (state) =>
+            state.connectionRoute ?? initialState.connectionRoute,
         selectSqlQueryResults: (state) => {
             if (state.sqlColumns === undefined || state.sqlRows === undefined) {
                 return undefined;
@@ -177,6 +211,7 @@ export const sqlRunnerSlice = createSlice({
                 columns: state.sqlColumns,
                 fileUrl: state.fileUrl,
                 results: state.sqlRows,
+                durationMs: state.sqlDurationMs,
             };
         },
     },
@@ -267,10 +302,6 @@ export const sqlRunnerSlice = createSlice({
                 if (!state.selectedChartType) {
                     state.selectedChartType = ChartKind.VERTICAL_BAR;
                 }
-                // Show the sidebar when switching to the chart tab
-                if (!state.isLeftSidebarOpen) {
-                    state.isLeftSidebarOpen = true;
-                }
             }
             if (action.payload === EditorTabs.SQL) {
                 state.activeSidebarTab = SidebarTabs.TABLES;
@@ -297,11 +328,12 @@ export const sqlRunnerSlice = createSlice({
         toggleActiveTable: (
             state,
             action: PayloadAction<
-                { table: string; schema: string } | undefined
+                { table: string; schema: string; database: string } | undefined
             >,
         ) => {
             state.activeTable = action.payload?.table;
             state.activeSchema = action.payload?.schema;
+            state.activeDatabase = action.payload?.database;
         },
         toggleModal: (
             state,
@@ -309,9 +341,6 @@ export const sqlRunnerSlice = createSlice({
         ) => {
             state.modals[action.payload].isOpen =
                 !state.modals[action.payload].isOpen;
-        },
-        setSidebarOpen: (state, action: PayloadAction<boolean>) => {
-            state.isLeftSidebarOpen = action.payload;
         },
         setQuoteChar: (state, action: PayloadAction<string>) => {
             state.quoteChar = action.payload;
@@ -328,17 +357,56 @@ export const sqlRunnerSlice = createSlice({
         ) => {
             state.editorHighlightError = action.payload;
         },
+        requestEditorReveal: (
+            state,
+            action: PayloadAction<MonacoHighlightChar>,
+        ) => {
+            state.editorRevealRequest = {
+                ...action.payload,
+                requestId: (state.editorRevealRequest?.requestId ?? 0) + 1,
+            };
+        },
+        setConnectionRoute: (
+            state,
+            action: PayloadAction<SqlRunnerConnectionRoute>,
+        ) => {
+            const previous = connectionUuidOf(state.connectionRoute);
+            const next = connectionUuidOf(action.payload);
+            state.connectionRoute = action.payload;
+            if (action.payload.route === 'multi' && action.payload.connection) {
+                state.warehouseConnectionType =
+                    action.payload.connection.warehouseType;
+                state.quoteChar = getFieldQuoteChar(
+                    action.payload.connection.warehouseType,
+                );
+            }
+            if (previous !== undefined && previous !== next) {
+                state.sqlColumns = undefined;
+                state.sqlRows = undefined;
+                state.sqlDurationMs = null;
+                state.queryUuid = undefined;
+                state.fileUrl = undefined;
+            }
+        },
     },
     extraReducers: (builder) => {
         builder
             .addCase(runSqlQuery.pending, (state) => {
                 state.queryIsLoading = true;
                 state.queryError = undefined;
+                state.queryErrorProjectUuid = undefined;
             })
             .addCase(runSqlQuery.fulfilled, (state, action) => {
                 state.queryIsLoading = false;
+                if (
+                    action.payload.warehouseConnectionUuid !==
+                    connectionUuidOf(state.connectionRoute)
+                ) {
+                    return;
+                }
                 state.sqlColumns = action.payload.columns;
                 state.sqlRows = action.payload.results;
+                state.sqlDurationMs = action.payload.durationMs;
                 state.queryUuid = action.payload.queryUuid;
                 state.fileUrl = action.payload.fileUrl;
                 state.editorHighlightError = undefined;
@@ -397,17 +465,26 @@ export const sqlRunnerSlice = createSlice({
             })
             .addCase(runSqlQuery.rejected, (state, action) => {
                 state.queryIsLoading = false;
+                // A cancelled run is not an error; the previous results stand
+                if (action.meta.aborted) return;
+                state.queryErrorProjectUuid = action.meta.arg.projectUuid;
                 state.queryError =
                     action.payload ??
                     action.error ??
                     new Error('Unexpected query error');
 
-                state.editorHighlightError = action.payload?.data
-                    ? {
-                          line: Number(action.payload.data.lineNumber),
-                          char: Number(action.payload.data.charNumber),
-                      }
-                    : undefined;
+                state.editorHighlightError =
+                    action.payload?.data &&
+                    action.payload.data.lineNumber !== undefined
+                        ? resolveSqlErrorPosition(action.meta.arg.sql, {
+                              lineNumber: Number(
+                                  action.payload.data.lineNumber,
+                              ),
+                              charNumber: Number(
+                                  action.payload.data.charNumber,
+                              ),
+                          })
+                        : undefined;
             })
             .addCase(prepareAndFetchChartData.pending, (state) => {
                 state.queryIsLoading = true;
@@ -432,16 +509,17 @@ export const {
     setSavedChartData,
     setSelectedChartType,
     toggleModal,
-    setSidebarOpen,
     resetState,
     setQuoteChar,
     setWarehouseConnectionType,
     setMode,
     setEditorHighlightError,
+    requestEditorReveal,
     setState,
     updateParameterValue,
     clearParameterValues,
     setParameterValues,
+    setConnectionRoute,
 } = sqlRunnerSlice.actions;
 
 export const {
@@ -456,7 +534,43 @@ export const {
     selectSavedSqlChart,
     selectSqlQueryResults,
     selectParameterValues,
+    selectConnectionRoute,
 } = sqlRunnerSlice.selectors;
+
+export const selectIsConnectionReady = createSelector(
+    [sqlRunnerSlice.selectors.selectConnectionRoute],
+    (connectionRoute) =>
+        connectionRoute.route === 'single' ||
+        (connectionRoute.route === 'multi' &&
+            connectionRoute.connection !== null),
+);
+
+export const selectConnectionUuid = createSelector(
+    [sqlRunnerSlice.selectors.selectConnectionRoute],
+    (connectionRoute) => connectionUuidOf(connectionRoute),
+);
+
+export type SqlRunnerConnectionRequest =
+    | { ready: true; field: { warehouseConnectionUuid?: string | null } }
+    | { ready: false };
+
+export const selectConnectionRequest = createSelector(
+    [sqlRunnerSlice.selectors.selectConnectionRoute],
+    (connectionRoute): SqlRunnerConnectionRequest => {
+        if (connectionRoute.route === 'single')
+            return { ready: true, field: {} };
+        if (connectionRoute.route === 'multi' && connectionRoute.connection) {
+            return {
+                ready: true,
+                field: {
+                    warehouseConnectionUuid:
+                        connectionRoute.connection.warehouseConnectionUuid,
+                },
+            };
+        }
+        return { ready: false };
+    },
+);
 
 export const selectSqlRunnerResultsRunner = createSelector(
     [
@@ -467,8 +581,18 @@ export const selectSqlRunnerResultsRunner = createSelector(
         selectSql,
         (_state, sortBy?: VizSortBy[]) => sortBy,
         selectParameterValues,
+        sqlRunnerSlice.selectors.selectConnectionRoute,
     ],
-    (columns, rows, projectUuid, limit, sql, sortBy, parameterValues) => {
+    (
+        columns,
+        rows,
+        projectUuid,
+        limit,
+        sql,
+        sortBy,
+        parameterValues,
+        connectionRoute,
+    ) => {
         return new SqlRunnerResultsRunnerFrontend({
             columns: columns || [],
             rows: rows || [],
@@ -477,6 +601,9 @@ export const selectSqlRunnerResultsRunner = createSelector(
             sql,
             sortBy,
             parameters: parameterValues,
+            warehouseConnectionUuid: connectionUuidOf(connectionRoute),
+            // The SQL runner store is a page-level singleton, so it uses the shared client.
+            lightdashApi: sharedLightdashApi,
         });
     },
 );

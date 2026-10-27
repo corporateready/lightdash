@@ -1,9 +1,10 @@
 import { FeatureFlags } from '@lightdash/common';
-import { Group, Skeleton, Text, TextInput } from '@mantine-8/core';
+import { Group, Skeleton, Text, TextInput } from '@mantine/core';
 import {
     IconAppWindow,
     IconChartBar,
     IconFolder,
+    IconFileText,
     IconLayoutDashboard,
 } from '@tabler/icons-react';
 import { useState, type FC } from 'react';
@@ -64,6 +65,7 @@ const DeleteSpaceModalContent: FC<
         descendantCount > 0 ||
         impact.chartCount > 0 ||
         impact.dashboardCount > 0 ||
+        impact.documentCount > 0 ||
         (dataAppsEnabled && impact.appCount > 0);
 
     if (!hasContent) {
@@ -89,7 +91,7 @@ const DeleteSpaceModalContent: FC<
                     />
                     <Text
                         size="sm"
-                        fw={700}
+                        fw={600}
                         c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
                     >
                         {descendantCount} space
@@ -105,7 +107,7 @@ const DeleteSpaceModalContent: FC<
                     />
                     <Text
                         size="sm"
-                        fw={700}
+                        fw={600}
                         c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
                     >
                         {impact.chartCount} chart
@@ -121,7 +123,7 @@ const DeleteSpaceModalContent: FC<
                     />
                     <Text
                         size="sm"
-                        fw={700}
+                        fw={600}
                         c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
                     >
                         {impact.dashboardCount} dashboard
@@ -138,7 +140,7 @@ const DeleteSpaceModalContent: FC<
                         />
                         <Text
                             size="sm"
-                            fw={700}
+                            fw={600}
                             c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
                         >
                             {impact.appCount} data app
@@ -146,6 +148,22 @@ const DeleteSpaceModalContent: FC<
                         </Text>
                     </Group>
                 )}
+                <Group gap={4}>
+                    <MantineIcon
+                        icon={IconFileText}
+                        size="sm"
+                        color={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                        stroke={1.5}
+                    />
+                    <Text
+                        size="sm"
+                        fw={600}
+                        c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                    >
+                        {impact.documentCount} document
+                        {impact.documentCount !== 1 ? 's' : ''}
+                    </Text>
+                </Group>
             </Group>
         </Callout>
     );
@@ -181,7 +199,7 @@ export const DeleteSpaceModal: FC<DeleteSpaceModalBody> = ({
                 {softDeleteEnabled ? (
                     <>
                         Are you sure you want to delete the space{' '}
-                        <Text span fw={700} fz="sm">
+                        <Text span fw={600} fz="sm">
                             &ldquo;{data?.name}&rdquo;
                         </Text>
                         ?
@@ -189,7 +207,7 @@ export const DeleteSpaceModal: FC<DeleteSpaceModalBody> = ({
                 ) : (
                     <>
                         Are you sure you want to delete the space{' '}
-                        <Text span fw={700}>
+                        <Text span fw={600}>
                             &ldquo;{data?.name}&rdquo;
                         </Text>
                         ?

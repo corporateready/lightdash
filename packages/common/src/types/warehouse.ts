@@ -2,14 +2,27 @@ import { type WeekDay } from '../utils/timeFrames';
 import { type QueryExecutionContext } from './analytics';
 import { type AnyType } from './any';
 import { type SupportedDbtAdapter } from './dbt';
-import { type DimensionType, type Metric } from './field';
+import { type DimensionType, type Metric, type TimestampDomain } from './field';
 import { type CreateWarehouseCredentials } from './projects';
 import type { WarehouseQueryMetadata } from './queryHistory';
+import { type ResultNumericKind } from './results';
+import { type UserAttributeValueMap } from './userAttributes';
 
-export type RunQueryTags = {
+const MAX_USER_ATTRIBUTE_QUERY_TAGS = 20;
+const MAX_QUERY_TAG_KEY_LENGTH = 60;
+const MAX_QUERY_TAG_VALUE_LENGTH = 60;
+const USER_ATTRIBUTE_QUERY_TAG_PREFIX = 'user_attribute_';
+
+export type UserAttributeQueryTag = `user_attribute_${string}`;
+
+export type RunQueryTags = Record<UserAttributeQueryTag, string> & {
     project_uuid?: string;
     user_uuid?: string;
+    ai_principal?: string;
+    agent?: 'true';
+    agent_uuid?: string;
     organization_uuid?: string;
+    app_uuid?: string;
     chart_uuid?: string;
     dashboard_uuid?: string;
     saved_sql_uuid?: string;
@@ -20,10 +33,82 @@ export type RunQueryTags = {
     query_context: QueryExecutionContext;
 };
 
+const sanitizeQueryTagString = (
+    value: string,
+    fallback: string,
+    maxLength: number,
+) =>
+    value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, '_')
+        .substring(0, maxLength) || fallback;
+
+export const sanitizeQueryTagKey = (key: string): string =>
+    sanitizeQueryTagString(key, 'empty_key', MAX_QUERY_TAG_KEY_LENGTH);
+
+export const sanitizeQueryTagValue = (value: string): string =>
+    sanitizeQueryTagString(value, 'empty_value', MAX_QUERY_TAG_VALUE_LENGTH);
+
+export const getUserAttributeQueryTags = (
+    userAttributes: UserAttributeValueMap,
+): Record<UserAttributeQueryTag, string> =>
+    Object.fromEntries(
+        Object.entries(userAttributes).reduce<
+            [UserAttributeQueryTag, string][]
+        >((acc, [name, values]) => {
+            if (acc.length >= MAX_USER_ATTRIBUTE_QUERY_TAGS) {
+                return acc;
+            }
+
+            const tagName = sanitizeQueryTagKey(
+                `${USER_ATTRIBUTE_QUERY_TAG_PREFIX}${name}`,
+            );
+            const value = values
+                .map((attribute) => attribute.trim())
+                .filter(Boolean)
+                .join(',')
+                .trim();
+            if (value) {
+                acc.push([
+                    tagName as UserAttributeQueryTag,
+                    sanitizeQueryTagValue(value),
+                ]);
+            }
+
+            return acc;
+        }, []),
+    ) as Record<UserAttributeQueryTag, string>;
+
 export type WarehouseTableSchema = {
     [column: string]: DimensionType;
 };
 
+/**
+ * Sparse sidecar of timestamp domains, keyed like the catalog itself. It
+ * lives on the catalog under a reserved key next to the database keys, so it
+ * survives the `cached_warehouse` JSON round-trip unchanged and is inert to
+ * readers that only look up their own database names.
+ */
+export const WAREHOUSE_TIMESTAMP_DOMAINS_KEY = '__lightdashTimestampDomains';
+
+export type WarehouseCatalogTimestampDomains = {
+    [database: string]: {
+        [schema: string]: {
+            [table: string]: {
+                [column: string]: TimestampDomain;
+            };
+        };
+    };
+};
+
+/**
+ * WARNING: a catalog may carry reserved `__lightdash*` sidecars (timestamp
+ * domains, nested columns, missing entries) alongside the database keys (their
+ * values are NOT database entries).
+ * Never enumerate `Object.keys(catalog)` as database names without excluding
+ * them — look entries up by name, or use the sidecar accessors below.
+ */
 export type WarehouseCatalog = {
     [database: string]: {
         [schema: string]: {
@@ -32,37 +117,374 @@ export type WarehouseCatalog = {
     };
 };
 
+export const getCatalogTimestampDomain = (
+    catalog: WarehouseCatalog,
+    database: string,
+    schema: string,
+    table: string,
+    column: string,
+): TimestampDomain | undefined =>
+    (
+        catalog as {
+            [WAREHOUSE_TIMESTAMP_DOMAINS_KEY]?: WarehouseCatalogTimestampDomains;
+        }
+    )[WAREHOUSE_TIMESTAMP_DOMAINS_KEY]?.[database]?.[schema]?.[table]?.[column];
+
+export const setCatalogTimestampDomain = (
+    catalog: WarehouseCatalog,
+    database: string,
+    schema: string,
+    table: string,
+    column: string,
+    timestampDomain: TimestampDomain | undefined,
+): void => {
+    if (timestampDomain === undefined) return;
+    const catalogWithDomains = catalog as {
+        [WAREHOUSE_TIMESTAMP_DOMAINS_KEY]?: WarehouseCatalogTimestampDomains;
+    };
+    const domains = catalogWithDomains[WAREHOUSE_TIMESTAMP_DOMAINS_KEY] ?? {};
+    catalogWithDomains[WAREHOUSE_TIMESTAMP_DOMAINS_KEY] = domains;
+    domains[database] = domains[database] ?? {};
+    domains[database][schema] = domains[database][schema] ?? {};
+    domains[database][schema][table] = domains[database][schema][table] ?? {};
+    domains[database][schema][table][column] = timestampDomain;
+};
+
+/**
+ * True when the catalog was produced by domain-aware code: the sidecar key is
+ * present, even if empty. A missing key means a pre-domain cache that should
+ * be refetched once so timestamp columns get classified.
+ */
+export const catalogHasTimestampDomains = (
+    catalog: WarehouseCatalog,
+): boolean => WAREHOUSE_TIMESTAMP_DOMAINS_KEY in catalog;
+
+/**
+ * Stamps the (possibly empty) sidecar onto a freshly fetched catalog so
+ * `catalogHasTimestampDomains` can tell it apart from a pre-domain cache —
+ * clients only create the key when they classify at least one column.
+ */
+export const ensureCatalogTimestampDomainsKey = (
+    catalog: WarehouseCatalog,
+): void => {
+    const catalogWithDomains = catalog as {
+        [WAREHOUSE_TIMESTAMP_DOMAINS_KEY]?: WarehouseCatalogTimestampDomains;
+    };
+    catalogWithDomains[WAREHOUSE_TIMESTAMP_DOMAINS_KEY] =
+        catalogWithDomains[WAREHOUSE_TIMESTAMP_DOMAINS_KEY] ?? {};
+};
+
+/**
+ * Shape of a non-scalar column path: `repeated` for arrays, `record` for
+ * structs. Keys are dotted paths (`product.attributes`), so a nested node
+ * appears at every level it occurs. Scalar columns have no entry.
+ */
+export type WarehouseNestedColumnShape = {
+    repeated: boolean;
+    record: boolean;
+};
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+
+export const isWarehouseNestedColumnShape = (
+    value: unknown,
+): value is WarehouseNestedColumnShape =>
+    isPlainRecord(value) &&
+    typeof value.repeated === 'boolean' &&
+    typeof value.record === 'boolean';
+
+/**
+ * Sidecar of nested column shapes keyed database → schema → table → column
+ * path, stored under a reserved key next to the database keys like the
+ * timestamp domains. Its value shares the catalog's key space, so it is read
+ * back through runtime checks rather than a cast; a malformed sidecar from an
+ * older cache is ignored.
+ */
+export const WAREHOUSE_NESTED_COLUMNS_KEY = '__lightdashNestedColumns';
+
+const getNestedColumnsSidecar = (
+    catalog: WarehouseCatalog,
+): Record<string, unknown> | undefined => {
+    const sidecar: unknown = catalog[WAREHOUSE_NESTED_COLUMNS_KEY];
+    return isPlainRecord(sidecar) ? sidecar : undefined;
+};
+
+export const getCatalogNestedColumnShape = (
+    catalog: WarehouseCatalog,
+    database: string,
+    schema: string,
+    table: string,
+    columnPath: string,
+): WarehouseNestedColumnShape | undefined => {
+    const shape = [database, schema, table, columnPath].reduce<unknown>(
+        (node, key) => (isPlainRecord(node) ? node[key] : undefined),
+        getNestedColumnsSidecar(catalog),
+    );
+    return isWarehouseNestedColumnShape(shape) ? shape : undefined;
+};
+
+const ensureRecord = (
+    parent: Record<string, unknown>,
+    key: string,
+): Record<string, unknown> => {
+    const existing = parent[key];
+    if (isPlainRecord(existing)) return existing;
+    const created: Record<string, unknown> = {};
+    // eslint-disable-next-line no-param-reassign
+    parent[key] = created;
+    return created;
+};
+
+const getSidecar = (
+    catalog: WarehouseCatalog,
+    key: string,
+): Record<string, unknown> => {
+    const existing: unknown = catalog[key];
+    if (isPlainRecord(existing)) return existing;
+    const created: Record<string, unknown> = {};
+    Object.assign(catalog, { [key]: created });
+    return created;
+};
+
+export const setCatalogNestedColumnShape = (
+    catalog: WarehouseCatalog,
+    database: string,
+    schema: string,
+    table: string,
+    columnPath: string,
+    shape: WarehouseNestedColumnShape | undefined,
+): void => {
+    if (shape === undefined) return;
+    const sidecar = getSidecar(catalog, WAREHOUSE_NESTED_COLUMNS_KEY);
+    ensureRecord(ensureRecord(ensureRecord(sidecar, database), schema), table)[
+        columnPath
+    ] = shape;
+};
+
+/**
+ * Tables whose nested column shapes the warehouse would not report, keyed
+ * database → schema → table → reason. Tells the compiler apart a table with
+ * no nested columns from one it should warn about.
+ */
+export const WAREHOUSE_NESTED_COLUMNS_UNAVAILABLE_KEY =
+    '__lightdashNestedColumnsUnavailable';
+
+export const getCatalogNestedColumnsUnavailableReason = (
+    catalog: WarehouseCatalog,
+    database: string,
+    schema: string,
+    table: string,
+): string | undefined => {
+    const reason = [database, schema, table].reduce<unknown>(
+        (node, key) => (isPlainRecord(node) ? node[key] : undefined),
+        catalog[WAREHOUSE_NESTED_COLUMNS_UNAVAILABLE_KEY],
+    );
+    return typeof reason === 'string' ? reason : undefined;
+};
+
+export const setCatalogNestedColumnsUnavailable = (
+    catalog: WarehouseCatalog,
+    database: string,
+    schema: string,
+    table: string,
+    reason: string,
+): void => {
+    const sidecar = getSidecar(
+        catalog,
+        WAREHOUSE_NESTED_COLUMNS_UNAVAILABLE_KEY,
+    );
+    ensureRecord(ensureRecord(sidecar, database), schema)[table] = reason;
+};
+
+export type WarehouseCatalogTable = {
+    database: string;
+    schema: string;
+    table: string;
+};
+
+/**
+ * What the compile requested but the warehouse did not return at the last
+ * full catalog fetch, keyed database → schema → table → `true` for a missing
+ * table or the list of missing column names for a table that exists. Lets a
+ * later compile tell an entry it already knows is absent from a new one.
+ */
+export const WAREHOUSE_MISSING_ENTRIES_KEY = '__lightdashMissingEntries';
+
+export type WarehouseCatalogMissingEntry = WarehouseCatalogTable & {
+    /** `null` when the whole table is missing. */
+    columns: string[] | null;
+};
+
+const toMissingEntryColumns = (value: unknown): string[] | null | undefined => {
+    if (value === true) return null;
+    if (
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every((column) => typeof column === 'string')
+    ) {
+        return value;
+    }
+    return undefined;
+};
+
+export const getCatalogMissingEntries = (
+    catalog: WarehouseCatalog,
+): WarehouseCatalogMissingEntry[] => {
+    const sidecar: unknown = catalog[WAREHOUSE_MISSING_ENTRIES_KEY];
+    if (!isPlainRecord(sidecar)) return [];
+    return Object.entries(sidecar).flatMap(([database, schemas]) =>
+        isPlainRecord(schemas)
+            ? Object.entries(schemas).flatMap(([schema, tables]) =>
+                  isPlainRecord(tables)
+                      ? Object.entries(tables).flatMap(([table, value]) => {
+                            const columns = toMissingEntryColumns(value);
+                            return columns === undefined
+                                ? []
+                                : [{ database, schema, table, columns }];
+                        })
+                      : [],
+              )
+            : [],
+    );
+};
+
+export const setCatalogMissingEntries = (
+    catalog: WarehouseCatalog,
+    entries: WarehouseCatalogMissingEntry[],
+): void => {
+    const sidecar: Record<string, unknown> = {};
+    entries.forEach(({ database, schema, table, columns }) => {
+        ensureRecord(ensureRecord(sidecar, database), schema)[table] =
+            columns ?? true;
+    });
+    Object.assign(catalog, { [WAREHOUSE_MISSING_ENTRIES_KEY]: sidecar });
+};
+
+export enum WarehouseTableType {
+    TABLE = 'table',
+    VIEW = 'view',
+    MATERIALIZED_VIEW = 'materialized_view',
+    EXTERNAL = 'external',
+}
+
+export const isWarehouseTableType = (
+    value: unknown,
+): value is WarehouseTableType =>
+    typeof value === 'string' &&
+    Object.values<string>(WarehouseTableType).includes(value);
+
+// Maps the table_type strings and engine names warehouses report onto one vocabulary
+export const getWarehouseTableType = (rawType: unknown): WarehouseTableType => {
+    const normalized =
+        typeof rawType === 'string'
+            ? rawType
+                  .trim()
+                  .toUpperCase()
+                  .replace(/[\s_]+/g, ' ')
+            : '';
+    switch (normalized) {
+        case 'VIEW':
+        case 'VIRTUAL VIEW':
+            return WarehouseTableType.VIEW;
+        case 'MATERIALIZED VIEW':
+        case 'MATERIALIZEDVIEW':
+            return WarehouseTableType.MATERIALIZED_VIEW;
+        case 'EXTERNAL':
+        case 'EXTERNAL TABLE':
+        case 'FOREIGN':
+        case 'FOREIGN TABLE':
+            return WarehouseTableType.EXTERNAL;
+        default:
+            return WarehouseTableType.TABLE;
+    }
+};
+
 export type WarehouseTablesCatalog = {
     [database: string]: {
         [schema: string]: {
-            [table: string]: { partitionColumn?: PartitionColumn };
+            [table: string]: {
+                partitionColumn?: PartitionColumn;
+                tableType?: WarehouseTableType;
+            };
         };
     };
+};
+
+export const WAREHOUSE_LISTED_DATABASES_LIMIT = 100;
+
+export type WarehouseListedDatabase = {
+    name: string;
+    database: string;
+    schema: string | null;
+    isDefault: boolean;
+};
+
+export type WarehouseDatabaseListing = {
+    databases: WarehouseListedDatabase[];
+    truncated: boolean;
+    limit: number;
+};
+
+export type ApiWarehouseDatabaseListing = {
+    status: 'ok';
+    results: WarehouseDatabaseListing;
 };
 
 export type WarehouseTables = {
     database: string;
     schema: string;
     table: string;
+    tableType: WarehouseTableType;
     partitionColumn?: PartitionColumn;
 }[];
 
-export type WarehouseResults = {
-    fields: Record<string, { type: DimensionType }>;
-    rows: Record<string, AnyType>[];
+export type WarehouseResultField = {
+    type: DimensionType;
+    numericKind?: ResultNumericKind;
 };
 
-export type WarehousePaginationArgs = {
-    page: number;
-    pageSize: number;
+export type WarehouseResults = {
+    fields: Record<string, WarehouseResultField>;
+    rows: Record<string, AnyType>[];
 };
 
 export type WarehouseExecuteAsyncQueryArgs = {
     tags: Record<string, string>;
+    // BigQuery only: overrides the connection limit for this job; 0 means no limit.
+    maximumBytesBilled?: number;
     timezone?: string;
     values?: AnyType[]; // same as queryParams but in array form
     queryParams?: Record<string, AnyType>; // same as values but in object form
     sql: string;
+};
+
+export type WarehouseQueryEstimate = {
+    /** Bytes the warehouse reports the query would process (dry run). */
+    totalBytesProcessed: number;
+};
+
+// `query` is execution up to the first row; `fetch` is streaming the rest.
+export type WarehouseQueryPhase =
+    | 'ssh_tunnel'
+    | 'connect'
+    | 'session'
+    | 'query'
+    | 'fetch';
+
+export type WarehousePhaseTimings = Partial<
+    Record<WarehouseQueryPhase, number>
+>;
+
+/** Execution statistics reported by the warehouse for one query job. */
+export type WarehouseExecutionStats = {
+    jobId: string | null;
+    bytesProcessed: number | null;
+    bytesBilled: number | null;
+    /** Warehouse-reported job duration, from job start to job end. */
+    executionTimeMs: number | null;
+    /** Whether the warehouse served the job from its own result cache. */
+    cacheHit: boolean | null;
 };
 
 export type WarehouseExecuteAsyncQuery = {
@@ -70,22 +492,9 @@ export type WarehouseExecuteAsyncQuery = {
     queryMetadata: WarehouseQueryMetadata | null;
     totalRows: number;
     durationMs: number;
-};
-
-export type WarehouseGetAsyncQueryResultsArgs = WarehousePaginationArgs & {
-    sql: string;
-    queryId: string | null;
-    queryMetadata: WarehouseQueryMetadata | null;
-};
-
-export type WarehouseGetAsyncQueryResults<
-    TFormattedRow extends Record<string, unknown>,
-> = {
-    queryId: string | null;
-    fields: Record<string, { type: DimensionType }>;
-    pageCount: number;
-    totalRows: number;
-    rows: TFormattedRow[];
+    phaseTimings: WarehousePhaseTimings;
+    /** Omitted by warehouses that do not report execution statistics. */
+    executionStats?: WarehouseExecutionStats;
 };
 
 export enum TimeIntervalUnit {
@@ -98,19 +507,42 @@ export enum TimeIntervalUnit {
     YEAR = 'YEAR',
 }
 
+/** The SQL pieces that turn a repeated column into a virtual table. */
+export type UnnestSql = {
+    /** The full FROM item, aliases included, that the join renderer emits verbatim. */
+    fromSql: string;
+    /** How a field of the exploded element is addressed. */
+    elementSql: string;
+    offsetSql: string;
+    /** Null when the join must be rendered without an ON clause. */
+    joinCondition: string | null;
+};
+
+export type UnnestSqlArgs = {
+    /** Element reference of the parent: its quoted alias, or its own `elementSql` when it is itself a virtual table. */
+    parentElementSql: string;
+    columnSegment: string;
+    alias: string;
+};
+
 export interface WarehouseSqlBuilder {
     getStartOfWeek: () => WeekDay | null | undefined;
     getAdapterType: () => SupportedDbtAdapter;
+    supportsCteMaterialization: () => boolean;
     getStringQuoteChar: () => string;
     getEscapeStringQuoteChar: () => string;
     getFieldQuoteChar: () => string;
     getFloatingType: () => string;
     getNullSafeEqualSql: (left: string, right: string) => string;
+    getNullSafeEqualJoinSql: (left: string, right: string) => string;
     getMetricSql: (sql: string, metric: Metric) => string;
     concatString: (...args: string[]) => string;
     escapeString: (value: string) => string;
     // Methods for funnel builder and general SQL generation
     castToTimestamp: (date: Date) => string;
+    castToDate: (date: Date) => string;
+    /** A zoneless (wall-clock) timestamp literal, e.g. BigQuery DATETIME. */
+    castToNaiveTimestamp: (date: Date) => string;
     getIntervalSql: (value: number, unit: TimeIntervalUnit) => string;
     getTimestampDiffSeconds: (
         startTimestampSql: string,
@@ -120,6 +552,8 @@ export interface WarehouseSqlBuilder {
     // Array construction methods for table calculations
     buildArray: (elements: string[]) => string;
     buildArrayAgg: (expression: string, orderBy?: string) => string;
+    /** Null when the warehouse cannot unnest a repeated column into a virtual table. */
+    getUnnestSql: (args: UnnestSqlArgs) => UnnestSql | null;
 }
 
 export interface WarehouseClient extends WarehouseSqlBuilder {
@@ -132,11 +566,6 @@ export interface WarehouseClient extends WarehouseSqlBuilder {
         }[],
     ) => Promise<WarehouseCatalog>;
 
-    getAsyncQueryResults<TFormattedRow extends Record<string, unknown>>(
-        args: WarehouseGetAsyncQueryResultsArgs,
-        rowFormatter?: (row: Record<string, unknown>) => TFormattedRow,
-    ): Promise<WarehouseGetAsyncQueryResults<TFormattedRow>>;
-
     streamQuery(
         query: string,
         streamCallback: (data: WarehouseResults) => void | Promise<void>,
@@ -144,6 +573,11 @@ export interface WarehouseClient extends WarehouseSqlBuilder {
             values?: AnyType[];
             tags: Record<string, string>;
             timezone?: string;
+            maximumBytesBilled?: number;
+            onPhaseTiming?: (
+                phase: WarehouseQueryPhase,
+                durationMs: number,
+            ) => void;
         },
     ): Promise<void>;
 
@@ -154,6 +588,14 @@ export interface WarehouseClient extends WarehouseSqlBuilder {
             fields: WarehouseResults['fields'],
         ) => void | Promise<void>,
     ): Promise<WarehouseExecuteAsyncQuery>;
+
+    /**
+     * Estimates the query cost without running it. Only implemented by
+     * warehouses with a free, fast estimate (BigQuery dry run).
+     */
+    estimateQuery?(
+        args: WarehouseExecuteAsyncQueryArgs,
+    ): Promise<WarehouseQueryEstimate>;
 
     /**
      * Runs a query and returns all the results
@@ -172,8 +614,26 @@ export interface WarehouseClient extends WarehouseSqlBuilder {
 
     test(): Promise<void>;
 
+    /**
+     * The timezone the warehouse session compares and truncates temporal
+     * values in. Null where the adapter cannot report one; callers fall back
+     * to the project timezone. Modelled because result files hold UTC
+     * instants, and reproducing the warehouse's equality outside it needs
+     * the timezone it silently used.
+     */
+    getSessionTimezone(): Promise<string | null>;
+
     getAllTables(
         schema?: string,
+        tags?: Record<string, string>,
+    ): Promise<WarehouseTables>;
+
+    listDatabases(
+        tags?: Record<string, string>,
+    ): Promise<WarehouseDatabaseListing>;
+
+    getTablesForDatabase(
+        database: WarehouseListedDatabase,
         tags?: Record<string, string>,
     ): Promise<WarehouseTables>;
 
@@ -187,6 +647,7 @@ export interface WarehouseClient extends WarehouseSqlBuilder {
     parseWarehouseCatalog(
         rows: Record<string, AnyType>[],
         mapFieldType: (type: string) => DimensionType,
+        mapTimestampDomain?: (type: string) => TimestampDomain | undefined,
     ): WarehouseCatalog;
 
     parseError(error: Error): Error;

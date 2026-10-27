@@ -1,6 +1,5 @@
 import {
     derivePivotConfigurationFromChart,
-    FeatureFlags,
     getFieldsFromMetricQuery,
     type ApiCompiledQueryResults,
     type ApiError,
@@ -9,7 +8,7 @@ import {
     type PivotConfiguration,
 } from '@lightdash/common';
 import { useQuery, type UseQueryOptions } from '@tanstack/react-query';
-import { lightdashApi } from '../api';
+import { type LightdashApi } from '../api';
 import {
     selectAdditionalMetrics,
     selectChartConfig,
@@ -27,13 +26,14 @@ import {
     selectTimezone,
     useExplorerSelector,
 } from '../features/explorer/store';
+import { useLightdashApi } from '../providers/LightdashApi/useLightdashApi';
 import { convertDateFilters } from '../utils/dateFilter';
 import { useExplore } from './useExplore';
 import { useProjectUuid } from './useProjectUuid';
 import useQueryError from './useQueryError';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
 
 const getCompiledQuery = async (
+    lightdashApi: LightdashApi,
     projectUuid: string,
     tableId: string,
     query: MetricQuery,
@@ -59,6 +59,7 @@ const getCompiledQuery = async (
 export const useCompiledSql = (
     queryOptions?: UseQueryOptions<ApiCompiledQueryResults, ApiError>,
 ) => {
+    const lightdashApi = useLightdashApi();
     const projectUuid = useProjectUuid();
 
     const tableId = useExplorerSelector(selectTableName);
@@ -78,9 +79,6 @@ export const useCompiledSql = (
     const preAggCacheEnabled = useExplorerSelector(selectPreAggCacheEnabled);
 
     const { data: explore } = useExplore(tableId);
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
 
     const setErrorResponse = useQueryError();
     const metricQuery: MetricQuery = {
@@ -96,9 +94,8 @@ export const useCompiledSql = (
         timezone: timezone ?? undefined,
     };
 
-    // Derive pivot configuration when SQL pivot results are enabled
     let pivotConfiguration: PivotConfiguration | undefined;
-    if (useSqlPivotResults?.enabled && explore) {
+    if (explore) {
         const items = getFieldsFromMetricQuery(metricQuery, explore);
         pivotConfiguration = derivePivotConfigurationFromChart(
             { chartConfig, pivotConfig },
@@ -121,6 +118,7 @@ export const useCompiledSql = (
         queryKey,
         queryFn: () =>
             getCompiledQuery(
+                lightdashApi,
                 projectUuid!,
                 tableId || '',
                 metricQuery,
@@ -139,14 +137,33 @@ export const useCompiledSqlFromMetricQuery = ({
     tableName,
     projectUuid,
     metricQuery,
+    pivotConfiguration,
+    enabled = true,
 }: Partial<{
     tableName: string;
     projectUuid: string;
     metricQuery: MetricQuery;
+    pivotConfiguration: PivotConfiguration;
+    enabled: boolean;
 }>) => {
+    const lightdashApi = useLightdashApi();
     return useQuery<ApiCompiledQueryResults, ApiError>({
-        queryKey: ['compiledQuery', tableName, metricQuery, projectUuid],
-        queryFn: () => getCompiledQuery(projectUuid!, tableName!, metricQuery!),
-        enabled: !!tableName && !!projectUuid && !!metricQuery,
+        queryKey: [
+            'compiledQuery',
+            tableName,
+            metricQuery,
+            projectUuid,
+            pivotConfiguration,
+        ],
+        queryFn: () =>
+            getCompiledQuery(
+                lightdashApi,
+                projectUuid!,
+                tableName!,
+                metricQuery!,
+                undefined,
+                pivotConfiguration,
+            ),
+        enabled: enabled && !!tableName && !!projectUuid && !!metricQuery,
     });
 };

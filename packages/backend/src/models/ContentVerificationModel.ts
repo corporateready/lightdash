@@ -5,11 +5,16 @@ import {
     type VerifiedContentListItem,
 } from '@lightdash/common';
 import { Knex } from 'knex';
+import { AppsTableName, AppVersionsTableName } from '../database/entities/apps';
 import {
     ContentVerificationTableName,
     type CreateDbContentVerification,
 } from '../database/entities/contentVerification';
-import { DashboardsTableName } from '../database/entities/dashboards';
+import {
+    DashboardsTableName,
+    DashboardVersionsTableName,
+} from '../database/entities/dashboards';
+import { DocumentsTableName } from '../database/entities/documents';
 import {
     SavedChartsTableName,
     SavedChartVersionFieldsTableName,
@@ -32,8 +37,9 @@ export class ContentVerificationModel {
     async getByContent(
         contentType: ContentType,
         contentUuid: string,
+        trx?: Knex,
     ): Promise<ContentVerificationInfo | null> {
-        const row = await this.database(ContentVerificationTableName)
+        const row = await (trx ?? this.database)(ContentVerificationTableName)
             .leftJoin(
                 UserTableName,
                 `${ContentVerificationTableName}.verified_by_user_uuid`,
@@ -125,13 +131,14 @@ export class ContentVerificationModel {
     async unverify(
         contentType: ContentType,
         contentUuid: string,
-    ): Promise<void> {
-        await this.database(ContentVerificationTableName)
+    ): Promise<boolean> {
+        const deleted = await this.database(ContentVerificationTableName)
             .where({
                 content_type: contentType,
                 content_uuid: contentUuid,
             })
             .delete();
+        return deleted > 0;
     }
 
     async getAllForProject(
@@ -165,6 +172,21 @@ export class ContentVerificationModel {
                 `${ContentVerificationTableName}.content_type`,
                 `${ContentVerificationTableName}.content_uuid`,
                 `${SavedChartsTableName}.name`,
+                `${SavedChartsTableName}.slug`,
+                `${SavedChartsTableName}.description`,
+                `${SavedChartsTableName}.views_count`,
+                `${SavedChartsTableName}.last_version_chart_kind`,
+                this.database
+                    .ref(`${SavedChartsTableName}.last_version_updated_at`)
+                    .as('last_updated_at'),
+                this.database(SavedChartVersionsTableName)
+                    .select('explore_name')
+                    .whereRaw(
+                        `${SavedChartVersionsTableName}.saved_query_id = ${SavedChartsTableName}.saved_query_id`,
+                    )
+                    .orderBy('created_at', 'desc')
+                    .limit(1)
+                    .as('explore_name'),
                 `${SpaceTableName}.space_uuid`,
                 this.database.ref(`${SpaceTableName}.name`).as('space_name'),
                 `${UserTableName}.user_uuid`,
@@ -201,6 +223,17 @@ export class ContentVerificationModel {
                 `${ContentVerificationTableName}.content_type`,
                 `${ContentVerificationTableName}.content_uuid`,
                 `${DashboardsTableName}.name`,
+                `${DashboardsTableName}.slug`,
+                `${DashboardsTableName}.description`,
+                `${DashboardsTableName}.views_count`,
+                this.database(DashboardVersionsTableName)
+                    .select('created_at')
+                    .whereRaw(
+                        `${DashboardVersionsTableName}.dashboard_id = ${DashboardsTableName}.dashboard_id`,
+                    )
+                    .orderBy('created_at', 'desc')
+                    .limit(1)
+                    .as('last_updated_at'),
                 `${SpaceTableName}.space_uuid`,
                 this.database.ref(`${SpaceTableName}.name`).as('space_name'),
                 `${UserTableName}.user_uuid`,
@@ -209,20 +242,156 @@ export class ContentVerificationModel {
                 `${ContentVerificationTableName}.verified_at`,
             );
 
-        return [...chartRows, ...dashboardRows].map((row) => ({
+        const toBaseItem = (row: {
+            content_verification_uuid: string;
+            content_uuid: string;
+            name: string;
+            description: string | null;
+            views_count: number;
+            last_updated_at: Date | null;
+            space_uuid: string;
+            space_name: string;
+            user_uuid: string;
+            first_name: string;
+            last_name: string;
+            verified_at: Date;
+        }) => ({
             uuid: row.content_verification_uuid,
-            contentType: row.content_type as ContentType,
             contentUuid: row.content_uuid,
             name: row.name,
+            description: row.description ?? null,
             spaceUuid: row.space_uuid,
             spaceName: row.space_name,
+            views: row.views_count,
+            lastUpdatedAt: row.last_updated_at,
             verifiedBy: {
                 userUuid: row.user_uuid,
                 firstName: row.first_name,
                 lastName: row.last_name,
             },
             verifiedAt: row.verified_at,
+        });
+
+        const charts: VerifiedContentListItem[] = chartRows.map((row) => ({
+            ...toBaseItem(row),
+            contentType: ContentType.CHART,
+            slug: row.slug,
+            chartKind: row.last_version_chart_kind,
+            exploreName: row.explore_name ?? null,
         }));
+
+        const dashboards: VerifiedContentListItem[] = dashboardRows.map(
+            (row) => ({
+                ...toBaseItem(row),
+                contentType: ContentType.DASHBOARD,
+                slug: row.slug,
+            }),
+        );
+
+        const dataAppRows = await this.database(ContentVerificationTableName)
+            .innerJoin(
+                AppsTableName,
+                `${ContentVerificationTableName}.content_uuid`,
+                `${AppsTableName}.app_id`,
+            )
+            .innerJoin(
+                SpaceTableName,
+                `${AppsTableName}.space_uuid`,
+                `${SpaceTableName}.space_uuid`,
+            )
+            .leftJoin(
+                UserTableName,
+                `${ContentVerificationTableName}.verified_by_user_uuid`,
+                `${UserTableName}.user_uuid`,
+            )
+            .where(`${ContentVerificationTableName}.project_uuid`, projectUuid)
+            .where(
+                `${ContentVerificationTableName}.content_type`,
+                ContentType.DATA_APP,
+            )
+            .whereNull(`${AppsTableName}.deleted_at`)
+            .whereNull(`${SpaceTableName}.deleted_at`)
+            .select(
+                `${ContentVerificationTableName}.content_verification_uuid`,
+                `${ContentVerificationTableName}.content_type`,
+                `${ContentVerificationTableName}.content_uuid`,
+                `${AppsTableName}.name`,
+                `${AppsTableName}.slug`,
+                `${AppsTableName}.description`,
+                `${AppsTableName}.views_count`,
+                this.database(AppVersionsTableName)
+                    .select('created_at')
+                    .whereRaw(
+                        `${AppVersionsTableName}.app_id = ${AppsTableName}.app_id`,
+                    )
+                    .orderBy('created_at', 'desc')
+                    .limit(1)
+                    .as('last_updated_at'),
+                `${SpaceTableName}.space_uuid`,
+                this.database.ref(`${SpaceTableName}.name`).as('space_name'),
+                `${UserTableName}.user_uuid`,
+                `${UserTableName}.first_name`,
+                `${UserTableName}.last_name`,
+                `${ContentVerificationTableName}.verified_at`,
+            );
+
+        const dataApps: VerifiedContentListItem[] = dataAppRows.map((row) => ({
+            ...toBaseItem(row),
+            contentType: ContentType.DATA_APP,
+            slug: row.slug,
+        }));
+
+        const documentRows = await this.database(ContentVerificationTableName)
+            .innerJoin(
+                DocumentsTableName,
+                `${ContentVerificationTableName}.content_uuid`,
+                `${DocumentsTableName}.document_uuid`,
+            )
+            .innerJoin(
+                SpaceTableName,
+                `${DocumentsTableName}.space_id`,
+                `${SpaceTableName}.space_id`,
+            )
+            .leftJoin(
+                UserTableName,
+                `${ContentVerificationTableName}.verified_by_user_uuid`,
+                `${UserTableName}.user_uuid`,
+            )
+            .where(`${ContentVerificationTableName}.project_uuid`, projectUuid)
+            .where(
+                `${ContentVerificationTableName}.content_type`,
+                ContentType.DOCUMENT,
+            )
+            .whereNull(`${DocumentsTableName}.deleted_at`)
+            .whereNull(`${SpaceTableName}.deleted_at`)
+            .select(
+                `${ContentVerificationTableName}.content_verification_uuid`,
+                `${ContentVerificationTableName}.content_type`,
+                `${ContentVerificationTableName}.content_uuid`,
+                `${DocumentsTableName}.name`,
+                `${DocumentsTableName}.slug`,
+                `${DocumentsTableName}.description`,
+                this.database
+                    .ref(`${DocumentsTableName}.document_views_count`)
+                    .as('views_count'),
+                this.database
+                    .ref(`${DocumentsTableName}.updated_at`)
+                    .as('last_updated_at'),
+                `${SpaceTableName}.space_uuid`,
+                this.database.ref(`${SpaceTableName}.name`).as('space_name'),
+                `${UserTableName}.user_uuid`,
+                `${UserTableName}.first_name`,
+                `${UserTableName}.last_name`,
+                `${ContentVerificationTableName}.verified_at`,
+            );
+        const documents: VerifiedContentListItem[] = documentRows.map(
+            (row) => ({
+                ...toBaseItem(row),
+                contentType: ContentType.DOCUMENT,
+                slug: row.slug,
+            }),
+        );
+        return [...charts, ...dashboards, ...dataApps, ...documents];
     }
 
     async getVerifiedFieldUsage(

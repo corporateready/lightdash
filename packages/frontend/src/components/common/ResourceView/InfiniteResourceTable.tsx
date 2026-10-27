@@ -7,51 +7,53 @@ import {
     contentToResourceViewItem,
     ContentType,
     FeatureFlags,
+    isResourceViewDataAppItem,
+    isResourceViewDocumentItem,
+    isResourceViewItemChart,
+    isResourceViewItemDashboard,
     isResourceViewSpaceItem,
     type ApiContentBulkActionBody,
     type ResourceViewItem,
+    type SpaceMemberRole,
     type SpaceSummary,
 } from '@lightdash/common';
 import {
-    ActionIcon,
-    Anchor,
+    TextInput,
     Box,
-    Button,
     Divider,
     Group,
     Text,
-    TextInput,
+    Button,
+    ActionIcon,
+    Anchor,
     Tooltip,
     useMantineTheme,
+    useMatches,
+    Menu,
 } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
+import { useDebouncedCallback, useDisclosure } from '@mantine/hooks';
 import {
     IconAppWindow,
-    IconArrowDown,
-    IconArrowsSort,
-    IconArrowUp,
     IconChartBar,
     IconFolder,
+    IconFileText,
     IconFolderSymlink,
     IconLayoutDashboard,
     IconSearch,
     IconX,
+    IconColumns,
+    IconCheck,
 } from '@tabler/icons-react';
-import {
-    useCallback,
-    useDeferredValue,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type UIEvent,
-} from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
+import { getListedDocumentAccess } from '../../../features/documents/listedDocumentAccess';
 import {
     useContentBulkAction,
     useInfiniteContent,
     type ContentArgs,
 } from '../../../hooks/useContent';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import { useSpaceSummaries } from '../../../hooks/useSpaces';
 import { useValidationUserAbility } from '../../../hooks/validation/useValidation';
@@ -59,22 +61,28 @@ import useApp from '../../../providers/App/useApp';
 import {
     ContentTable,
     useContentTable,
-    type MRT_ColumnDef,
-    type MRT_SortingState,
-    type MRT_TableOptions,
-    type MRT_Virtualizer,
+    type ContentTableColumnDef,
+    type ContentTableSortingState,
+    type ContentTableOptions,
+    type ContentTableVirtualizer,
 } from '../ContentTable';
 import MantineIcon from '../MantineIcon';
+import SuboptimalState from '../SuboptimalState/SuboptimalState';
 import TransferItemsModal from '../TransferItemsModal/TransferItemsModal';
-import AdminContentViewFilter from './AdminContentViewFilter';
+import { UserSelect } from '../UserSelect';
+import ViewsCountPopover from '../ViewsCountPopover';
+import AdminContentViewFilter, {
+    type ContentViewValue,
+} from './AdminContentViewFilter';
 import ContentTypeFilter from './ContentTypeFilter';
+import classes from './InfiniteResourceTable.module.css';
 import InfiniteResourceTableColumnName from './InfiniteResourceTableColumnName';
 import ResourceAccessInfo from './ResourceAccessInfo';
 import ResourceActionHandlers from './ResourceActionHandlers';
 import ResourceActionMenu from './ResourceActionMenu';
 import AttributeCount from './ResourceAttributeCount';
 import ResourceLastEdited from './ResourceLastEdited';
-import { getResourceUrl } from './resourceUtils';
+import { getResourceUrl, getViewStatsResourceType } from './resourceUtils';
 import {
     ColumnVisibility,
     ResourceViewItemAction,
@@ -82,29 +90,139 @@ import {
     type ResourceViewItemActionState,
 } from './types';
 
-type ResourceView2Props = Partial<MRT_TableOptions<ResourceViewItem>> & {
-    filters: Pick<ContentArgs, 'spaceUuids' | 'contentTypes'> & {
+type ResourceView2Props = Partial<ContentTableOptions<ResourceViewItem>> & {
+    filters: Pick<
+        ContentArgs,
+        | 'spaceUuids'
+        | 'contentTypes'
+        | 'includePersonalDataApps'
+        | 'includePersonalDocuments'
+        | 'dataAppVizsFilter'
+        | 'sharedWithMe'
+    > & {
         projectUuid: string;
     };
     contentTypeFilter?: {
         defaultValue: ContentType | undefined;
         options: ContentType[];
     };
+    /** Show an owner filter in the toolbar (dashboard and document lists only) */
+    ownerFilter?: boolean;
     columnVisibility?: ColumnVisibilityConfig;
     adminContentView?: boolean;
     initialAdminContentViewValue?: 'all' | 'shared';
+    /**
+     * Controlled content-view toggle for the root browsing surface:
+     * Spaces | Shared with me | Admin Content View. When provided it
+     * replaces the uncontrolled admin-only control.
+     */
+    contentView?: {
+        value: ContentViewValue;
+        onChange: (value: ContentViewValue) => void;
+        withSharedWithMe: boolean;
+        withAdminView: boolean;
+    };
+    showDataAppVersionStatus?: boolean;
+    errorStateTitle?: string;
 };
 
 const defaultSpaces: SpaceSummary[] = [];
 
+// Self-contained search input: holds the typed value locally and only lifts the
+// debounced value to the parent, so keystrokes don't re-render the whole table.
+const DebouncedSearchInput = memo(
+    ({ onSearch }: { onSearch: (value: string) => void }) => {
+        const [value, setValue] = useState('');
+        const debouncedOnSearch = useDebouncedCallback(onSearch, 300);
+
+        // Debounce typing. Clearing (empty value) flushes immediately; re-invoking
+        // the debounced fn cancels any pending call so a stale keystroke can't
+        // resurrect a just-cleared search.
+        const handleChange = useCallback(
+            (newValue: string) => {
+                setValue(newValue);
+                debouncedOnSearch(newValue);
+                if (newValue === '') {
+                    debouncedOnSearch.flush();
+                }
+            },
+            [debouncedOnSearch],
+        );
+
+        return (
+            <Tooltip label="Search by name">
+                <TextInput
+                    size="xs"
+                    w={{ base: '100%', sm: 309 }}
+                    aria-label="Search by name"
+                    classNames={{ input: classes.searchInput }}
+                    styles={(inputTheme) => ({
+                        input: {
+                            height: 32,
+                            width: '100%',
+                            textOverflow: 'ellipsis',
+                            fontSize: inputTheme.fontSizes.sm,
+                            fontWeight: 400,
+                            color: value
+                                ? inputTheme.colors.ldGray[8]
+                                : inputTheme.colors.ldGray[5],
+                            boxShadow: inputTheme.shadows.subtle,
+                        },
+                    })}
+                    type="search"
+                    variant="default"
+                    placeholder="Search by name"
+                    value={value}
+                    leftSection={
+                        <MantineIcon
+                            size="md"
+                            color="dimmed"
+                            icon={IconSearch}
+                        />
+                    }
+                    onChange={(e) => handleChange(e.target.value)}
+                    rightSectionPointerEvents="all"
+                    rightSection={
+                        value && (
+                            <ActionIcon
+                                aria-label="Clear search"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => handleChange('')}
+                                variant="transparent"
+                                size="xs"
+                                color="ldGray.5"
+                            >
+                                <MantineIcon icon={IconX} />
+                            </ActionIcon>
+                        )
+                    }
+                />
+            </Tooltip>
+        );
+    },
+);
+DebouncedSearchInput.displayName = 'DebouncedSearchInput';
+
 const InfiniteResourceTable = ({
     filters,
     contentTypeFilter,
+    ownerFilter = false,
     columnVisibility,
     adminContentView = false,
     initialAdminContentViewValue = 'shared',
-    ...mrtProps
+    contentView,
+    showDataAppVersionStatus = false,
+    errorStateTitle,
+    ...contentTableProps
 }: ResourceView2Props) => {
+    const compact = useMatches(
+        { base: true, sm: false },
+        { getInitialValueInEffect: false },
+    );
+    const [mobileColumns, setMobileColumns] = useState<string[]>([]);
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? filters.projectUuid;
     const [selectedAdminContentType, setSelectedAdminContentType] = useState<
         'all' | 'shared'
     >(initialAdminContentViewValue);
@@ -144,19 +262,21 @@ const InfiniteResourceTable = ({
         }),
     );
 
-    const ResourceColumns: MRT_ColumnDef<ResourceViewItem>[] = [
+    const ResourceColumns: ContentTableColumnDef<ResourceViewItem>[] = [
         {
             accessorKey: ColumnVisibility.NAME,
             header: capitalize(ColumnVisibility.NAME),
             enableSorting: true,
             enableEditing: false,
-            size: 300,
+            size: compact ? 220 : 300,
             Cell: ({ row }) => {
                 return (
                     <InfiniteResourceTableColumnName
                         item={row.original}
                         projectUuid={filters.projectUuid}
+                        projectUrlIdentifier={projectUrlIdentifier}
                         canUserManageValidation={canUserManageValidation}
+                        showDataAppVersionStatus={showDataAppVersionStatus}
                     />
                 );
             },
@@ -176,20 +296,53 @@ const InfiniteResourceTable = ({
                     (s) => s.uuid === item.data.spaceUuid,
                 );
 
-                return space ? (
-                    <Anchor
-                        color="ldGray.7"
-                        component={Link}
-                        to={`/projects/${space.projectUuid}/spaces/${space.uuid}`}
-                        onClick={(e: React.MouseEvent<HTMLAnchorElement>) =>
-                            e.stopPropagation()
-                        }
-                        fz={12}
-                        fw={500}
-                    >
-                        {space.name}
-                    </Anchor>
-                ) : null;
+                if (space) {
+                    return (
+                        <Anchor
+                            c="ldGray.7"
+                            component={Link}
+                            to={`/projects/${projectUrlIdentifier}/spaces/${space.uuid}`}
+                            onClick={(e: React.MouseEvent<HTMLAnchorElement>) =>
+                                e.stopPropagation()
+                            }
+                            fz="xs"
+                            fw={500}
+                        >
+                            {space.name}
+                        </Anchor>
+                    );
+                }
+
+                if (isResourceViewDocumentItem(item) && !item.data.spaceUuid) {
+                    return (
+                        <Text fz="xs" fw={500} c="dimmed">
+                            Personal
+                        </Text>
+                    );
+                }
+
+                // Personal (space-less) data apps have no space to link to.
+                if (isResourceViewDataAppItem(item) && !item.data.spaceUuid) {
+                    return (
+                        <Text fz="xs" fw={500} c="dimmed">
+                            -
+                        </Text>
+                    );
+                }
+
+                // Inaccessible parent space: real name, non-navigable.
+                const inaccessibleSpaceName = item.data.spaceUuid
+                    ? contentSpaceNames[item.data.spaceUuid]
+                    : undefined;
+                if (inaccessibleSpaceName) {
+                    return (
+                        <Text fz="xs" fw={500} c="ldGray.7">
+                            {inaccessibleSpaceName}
+                        </Text>
+                    );
+                }
+
+                return null;
             },
         },
         {
@@ -200,11 +353,72 @@ const InfiniteResourceTable = ({
             Cell: ({ row }) => {
                 if (isResourceViewSpaceItem(row.original))
                     return (
-                        <Text fz={12} fw={500} color="ldGray.7">
+                        <Text fz="xs" fw={500} c="ldGray.7">
                             -
                         </Text>
                     );
                 return <ResourceLastEdited item={row.original} />;
+            },
+        },
+        {
+            accessorKey: ColumnVisibility.OWNER,
+            enableSorting: false,
+            enableEditing: false,
+            header: 'Owner',
+            size: 160,
+            Cell: ({ row }) => {
+                const item = row.original;
+                if (
+                    !(
+                        isResourceViewItemDashboard(item) ||
+                        isResourceViewDocumentItem(item)
+                    ) ||
+                    !item.data.owner
+                ) {
+                    return (
+                        <Text fz="xs" fw={500} c="dimmed">
+                            -
+                        </Text>
+                    );
+                }
+                const { firstName, lastName, email } = item.data.owner;
+                const ownerName =
+                    `${firstName} ${lastName}`.trim() || email || '-';
+                return (
+                    <Text fz="xs" fw={500} c="ldGray.7">
+                        {ownerName}
+                    </Text>
+                );
+            },
+        },
+        {
+            accessorKey: ColumnVisibility.VIEWS,
+            enableSorting: true,
+            enableEditing: false,
+            header: 'Views',
+            size: 100,
+            Cell: ({ row }) => {
+                if (
+                    isResourceViewSpaceItem(row.original) ||
+                    isResourceViewDocumentItem(row.original)
+                )
+                    return (
+                        <Text fz="xs" fw={500} c="ldGray.7">
+                            -
+                        </Text>
+                    );
+                return (
+                    <ViewsCountPopover
+                        resourceType={getViewStatsResourceType(row.original)}
+                        resourceUuid={row.original.data.uuid}
+                        projectUuid={filters.projectUuid}
+                        views={row.original.data.views}
+                    >
+                        <Text fz="xs" fw={500} c="ldGray.7">
+                            {row.original.data.views}
+                        </Text>
+                    </ViewsCountPopover>
+                );
             },
         },
         {
@@ -215,11 +429,24 @@ const InfiniteResourceTable = ({
             Cell: ({ row }) => {
                 if (!isResourceViewSpaceItem(row.original)) return null;
                 return (
-                    <ResourceAccessInfo
-                        item={row.original}
-                        type="primary"
-                        withTooltip
-                    />
+                    // Scope-tour marker: the surface that shows a space's
+                    // access setting (result of manage:Space sharing). See
+                    // scripts/scope-tours/generate.ts.
+                    <Box
+                        data-tour-scope="manage:Space"
+                        data-tour-step="1"
+                        data-tour-route="/projects/:projectUuid/spaces"
+                        data-tour-label="Every space has an access setting"
+                        data-tour-docs="explore/spaces.mdx#managing-access-to-a-space:1-2"
+                        data-tour-return='[data-tour-anchor="modal-close"] >> [data-tour-nav="browse"] >> [data-tour-nav="all-spaces"]'
+                        data-tour-resultdocs="explore/spaces.mdx#restricted-access-spaces:1"
+                    >
+                        <ResourceAccessInfo
+                            item={row.original}
+                            type="primary"
+                            withTooltip
+                        />
+                    </Box>
                 );
             },
         },
@@ -237,11 +464,19 @@ const InfiniteResourceTable = ({
                             chartCount,
                             childSpaceCount,
                             appCount,
+                            documentCount,
                         },
                     },
                 } = row;
                 return (
                     <Group>
+                        {documentCount !== undefined && (
+                            <AttributeCount
+                                Icon={IconFileText}
+                                count={documentCount}
+                                name="Documents"
+                            />
+                        )}
                         <AttributeCount
                             Icon={IconLayoutDashboard}
                             count={dashboardCount}
@@ -269,22 +504,26 @@ const InfiniteResourceTable = ({
             },
         },
     ];
-    const initialSorting: MRT_SortingState = [
+    const initialSorting: ContentTableSortingState = [
         {
-            id: ContentSortByColumns.LAST_UPDATED_AT,
+            id: ColumnVisibility.UPDATED_AT,
             desc: true,
         },
     ];
-    const [sorting, setSorting] = useState<MRT_SortingState>(initialSorting);
-    const [search, setSearch] = useState<string | undefined>(undefined);
+    const [sorting, setSorting] =
+        useState<ContentTableSortingState>(initialSorting);
+    // Holds the debounced search value lifted from DebouncedSearchInput.
+    const [search, setSearch] = useState('');
     const [selectedContentType, setSelectedContentType] = useState<
         ContentType | undefined
     >(contentTypeFilter?.defaultValue);
-    const clearSearch = useCallback(() => setSearch(''), [setSearch]);
-    const deferredSearch = useDeferredValue(search);
-    const tableContainerRef = useRef<HTMLDivElement>(null);
+    const [selectedOwnerUserUuid, setSelectedOwnerUserUuid] = useState<
+        string | null
+    >(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
     const sortBy:
         | {
               sortBy: ContentSortByColumns;
@@ -293,18 +532,23 @@ const InfiniteResourceTable = ({
         | undefined = useMemo(() => {
         if (sorting.length === 0) return undefined;
 
+        // Sorting ids are column accessorKeys (ColumnVisibility values)
         const firstSorting = sorting[0].id;
 
         let sortByColumn: ContentSortByColumns =
             ContentSortByColumns.LAST_UPDATED_AT;
         const sortDirection: 'asc' | 'desc' = sorting[0].desc ? 'desc' : 'asc';
 
-        if (firstSorting === ContentSortByColumns.NAME) {
+        if (firstSorting === ColumnVisibility.NAME) {
             sortByColumn = ContentSortByColumns.NAME;
         }
 
-        if (firstSorting === ContentSortByColumns.SPACE_NAME) {
+        if (firstSorting === ColumnVisibility.SPACE) {
             sortByColumn = ContentSortByColumns.SPACE_NAME;
+        }
+
+        if (firstSorting === ColumnVisibility.VIEWS) {
+            sortByColumn = ContentSortByColumns.VIEWS;
         }
 
         return {
@@ -313,22 +557,71 @@ const InfiniteResourceTable = ({
         };
     }, [sorting]);
 
-    const { data, isInitialLoading, isFetching, hasNextPage, fetchNextPage } =
-        useInfiniteContent(
-            {
-                spaceUuids: filters.spaceUuids,
-                contentTypes: selectedContentType
-                    ? [selectedContentType]
-                    : filters.contentTypes,
-                projectUuids: [filters.projectUuid],
-                page: 1,
-                pageSize: 25,
-                search: deferredSearch,
-                sortBy: sortBy?.sortBy,
-                sortDirection: sortBy?.sortDirection,
-            },
-            { keepPreviousData: true },
-        );
+    const {
+        data,
+        isInitialLoading,
+        isFetching,
+        hasNextPage,
+        fetchNextPage,
+        isError,
+        error,
+        refetch,
+    } = useInfiniteContent(
+        {
+            spaceUuids: filters.spaceUuids,
+            contentTypes: selectedContentType
+                ? [selectedContentType]
+                : filters.contentTypes,
+            projectUuids: [filters.projectUuid],
+            page: 1,
+            pageSize: 25,
+            search,
+            sortBy: sortBy?.sortBy,
+            sortDirection: sortBy?.sortDirection,
+            includePersonalDataApps: filters.includePersonalDataApps,
+            includePersonalDocuments: filters.includePersonalDocuments,
+            dataAppVizsFilter: filters.dataAppVizsFilter,
+            sharedWithMe: filters.sharedWithMe,
+            ownerUserUuids: selectedOwnerUserUuid
+                ? [selectedOwnerUserUuid]
+                : undefined,
+        },
+        { keepPreviousData: true },
+    );
+
+    // Real parent names for rows whose space the viewer cannot access
+    // (directly shared content): shown as non-navigable context.
+    // Grant roles per resource: a direct grant never puts its space in the
+    // viewer's space list, so the row menu cannot infer these from spaces.
+    const contentGrantRoles = useMemo(() => {
+        const roles: Record<string, SpaceMemberRole[]> = {};
+        data?.pages.forEach((page) => {
+            page.data.forEach((content) => {
+                if (
+                    content.contentType !== ContentType.SPACE &&
+                    content.directAccessRoles.length > 0
+                ) {
+                    roles[content.uuid] = content.directAccessRoles;
+                }
+            });
+        });
+        return roles;
+    }, [data]);
+
+    const contentSpaceNames = useMemo(() => {
+        const names: Record<string, string> = {};
+        data?.pages.forEach((page) => {
+            page.data.forEach((content) => {
+                if (
+                    content.contentType !== ContentType.SPACE &&
+                    content.space
+                ) {
+                    names[content.space.uuid] = content.space.name;
+                }
+            });
+        });
+        return names;
+    }, [data]);
 
     const flatData = useMemo(() => {
         if (!data || !spaces) return [];
@@ -337,13 +630,23 @@ const InfiniteResourceTable = ({
             .filter((item) => {
                 if (!isResourceViewSpaceItem(item)) return true;
                 if (!userCanManageProject) return true;
-                if (selectedAdminContentType === 'all') return true;
+                if (
+                    (contentView?.value ?? selectedAdminContentType) === 'all'
+                ) {
+                    return true;
+                }
 
                 const space = spaces.find((s) => s.uuid === item.data.uuid);
                 if (!space) return false;
                 return space.inheritsFromOrgOrProject || !!space.userAccess;
             });
-    }, [data, userCanManageProject, spaces, selectedAdminContentType]);
+    }, [
+        data,
+        userCanManageProject,
+        spaces,
+        selectedAdminContentType,
+        contentView?.value,
+    ]);
 
     // Temporary workaround to resolve a memoization issue with react-mantine-table.
     // In certain scenarios, the content fails to render properly even when the data is updated.
@@ -370,35 +673,19 @@ const InfiniteResourceTable = ({
         return lastPage.pagination?.totalResults ?? 0;
     }, [data]);
 
-    //called on scroll and possibly on mount to fetch more data as the user scrolls and reaches bottom of table
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                //once the user has scrolled within 200px of the bottom of the table, fetch more data if we can
-                if (
-                    scrollHeight - scrollTop - clientHeight < 200 &&
-                    !isFetching &&
-                    hasNextPage
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, hasNextPage],
-    );
-
-    // Check if we need to fetch more data on mount
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
+    const { containerRef: tableContainerRef, onScroll } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: hasNextPage ?? false,
+    });
 
     const defaultColumnVisibility = useMemo(
         () => ({
             [ColumnVisibility.NAME]: true,
             [ColumnVisibility.SPACE]: true,
             [ColumnVisibility.UPDATED_AT]: true,
+            [ColumnVisibility.OWNER]: false,
+            [ColumnVisibility.VIEWS]: true,
             [ColumnVisibility.ACCESS]: false,
             [ColumnVisibility.CONTENT]: false,
             ...columnVisibility,
@@ -409,18 +696,11 @@ const InfiniteResourceTable = ({
     const table = useContentTable({
         columns: ResourceColumns,
         data: tableData,
+        getRowId: (item) => `${item.type}-${item.data.uuid}`,
         enableColumnResizing: true,
-        enableRowNumbers: false,
         positionActionsColumn: 'last',
         enableRowVirtualization: true,
         enablePagination: false,
-        enableFilters: true,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         onGlobalFilterChange: (s: string) => {
             setSearch(s);
         },
@@ -428,27 +708,15 @@ const InfiniteResourceTable = ({
         manualSorting: true,
         onSortingChange: setSorting,
         enableTopToolbar: true,
-        positionGlobalFilter: 'left',
-        mantinePaperProps: {
-            shadow: undefined,
-            sx: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm, // ! radius doesn't have rem(12) -> 0.75rem
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
         mantineTableContainerProps: {
             ref: tableContainerRef,
             sx: {
                 maxHeight: 'calc(100dvh - 350px)',
-                minHeight: '600px',
+                minHeight: compact ? '240px' : '600px',
                 display: 'flex',
                 flexDirection: 'column',
             },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
@@ -457,21 +725,6 @@ const InfiniteResourceTable = ({
                 flexGrow: 1,
                 display: 'flex',
                 flexDirection: 'column',
-            },
-        },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
-
-                // Each head row has a divider when resizing columns is enabled
-                'th > div > div:last-child': {
-                    top: -10,
-                    right: -5,
-                },
-
-                'th > div > div:last-child > .mantine-Divider-root': {
-                    border: 'none',
-                },
             },
         },
         mantineTableHeadCellProps: (props) => {
@@ -537,12 +790,61 @@ const InfiniteResourceTable = ({
                 table.getIsSomeRowsSelected() || table.getIsAllRowsSelected();
 
             return {
+                // Anchor for scope walkthroughs (data-tour-via): a space row
+                ...(isResourceViewSpaceItem(row.original)
+                    ? {
+                          'data-tour-anchor': 'space-row',
+                          'data-tour-hint': 'Open a space',
+                          'data-tour-hint-named': 'Open {value}',
+                          'data-tour-value': row.original.data.name,
+                      }
+                    : {}),
+                // ... and a dashboard row, by name.
+                ...(isResourceViewItemDashboard(row.original)
+                    ? {
+                          'data-tour-anchor': 'dashboard-row',
+                          'data-tour-hint': 'Open a dashboard',
+                          'data-tour-hint-named': 'Open {value}',
+                          'data-tour-value': row.original.data.name,
+                      }
+                    : {}),
+                // ... and a chart row, by name.
+                ...(isResourceViewItemChart(row.original)
+                    ? {
+                          'data-tour-anchor': 'chart-row',
+                          'data-tour-hint': 'Open a chart',
+                          'data-tour-hint-named': 'Open {value}',
+                          'data-tour-value': row.original.data.name,
+                      }
+                    : {}),
+                // ... and a document row, by name.
+                ...(isResourceViewDocumentItem(row.original)
+                    ? {
+                          'data-tour-anchor': 'document-row',
+                          'data-tour-hint': 'Open a document',
+                          'data-tour-hint-named': 'Open {value}',
+                          'data-tour-value': row.original.data.name,
+                      }
+                    : {}),
+                // ... and a data app row, by name.
+                ...(isResourceViewDataAppItem(row.original)
+                    ? {
+                          'data-tour-anchor': 'app-row',
+                          'data-tour-hint': 'Open a data app',
+                          'data-tour-hint-named': 'Open {value}',
+                          'data-tour-value': row.original.data.name,
+                      }
+                    : {}),
                 onClick: () => {
                     if (isTableSelectionActive) {
                         row.toggleSelected();
                     } else if (!isInitialLoading) {
                         void navigate(
-                            getResourceUrl(filters.projectUuid, row.original),
+                            getResourceUrl(
+                                filters.projectUuid,
+                                row.original,
+                                projectUrlIdentifier,
+                            ),
                         );
                     }
                 },
@@ -572,65 +874,82 @@ const InfiniteResourceTable = ({
 
             return (
                 <Box>
-                    <Group p={`${theme.spacing.lg} ${theme.spacing.xl}`}>
-                        <Group spacing="xs">
-                            <Tooltip
-                                withinPortal
-                                variant="xs"
-                                label="Search by name"
-                            >
-                                {/* Search input */}
-                                <TextInput
-                                    size="xs"
-                                    radius="md"
-                                    styles={(inputTheme) => ({
-                                        input: {
-                                            height: 32,
-                                            width: 309,
-                                            padding: `${inputTheme.spacing.xs} ${inputTheme.spacing.sm}`,
-                                            textOverflow: 'ellipsis',
-                                            fontSize: inputTheme.fontSizes.sm,
-                                            fontWeight: 400,
-                                            color: search
-                                                ? inputTheme.colors.ldGray[8]
-                                                : inputTheme.colors.ldGray[5],
-                                            boxShadow:
-                                                inputTheme.shadows.subtle,
-                                            border: `1px solid ${inputTheme.colors.ldGray[3]}`,
-                                            '&:hover': {
-                                                border: `1px solid ${inputTheme.colors.ldGray[4]}`,
-                                            },
-                                            '&:focus': {
-                                                border: `1px solid ${inputTheme.colors.blue[5]}`,
-                                            },
-                                        },
-                                    })}
-                                    type="search"
-                                    variant="default"
-                                    placeholder="Search by name"
-                                    value={search ?? ''}
-                                    icon={
-                                        <MantineIcon
-                                            size="md"
-                                            color="ldGray.6"
-                                            icon={IconSearch}
-                                        />
-                                    }
-                                    onChange={(e) => setSearch(e.target.value)}
-                                    rightSection={
-                                        search && (
-                                            <ActionIcon
-                                                onClick={clearSearch}
-                                                variant="transparent"
-                                                size="xs"
-                                                color="ldGray.5"
-                                            >
-                                                <MantineIcon icon={IconX} />
-                                            </ActionIcon>
-                                        )
-                                    }
-                                />
-                            </Tooltip>
+                    <Group
+                        p={{
+                            base: 'sm',
+                            sm: `${theme.spacing.lg} ${theme.spacing.xl}`,
+                        }}
+                    >
+                        <Group gap="xs" w={{ base: '100%', sm: 'auto' }}>
+                            <DebouncedSearchInput onSearch={setSearch} />
+
+                            {compact && (
+                                <Menu closeOnItemClick={false}>
+                                    <Menu.Target>
+                                        <Button
+                                            variant="default"
+                                            leftSection={
+                                                <MantineIcon
+                                                    icon={IconColumns}
+                                                />
+                                            }
+                                        >
+                                            Columns
+                                        </Button>
+                                    </Menu.Target>
+                                    <Menu.Dropdown>
+                                        {Object.entries(defaultColumnVisibility)
+                                            .filter(
+                                                ([key, visible]) =>
+                                                    visible &&
+                                                    key !==
+                                                        ColumnVisibility.NAME,
+                                            )
+                                            .map(([key]) => (
+                                                <Menu.Item
+                                                    key={key}
+                                                    role="menuitemcheckbox"
+                                                    aria-checked={mobileColumns.includes(
+                                                        key,
+                                                    )}
+                                                    leftSection={
+                                                        mobileColumns.includes(
+                                                            key,
+                                                        ) ? (
+                                                            <MantineIcon
+                                                                icon={IconCheck}
+                                                            />
+                                                        ) : null
+                                                    }
+                                                    onClick={() =>
+                                                        setMobileColumns(
+                                                            (current) =>
+                                                                current.includes(
+                                                                    key,
+                                                                )
+                                                                    ? current.filter(
+                                                                          (
+                                                                              column,
+                                                                          ) =>
+                                                                              column !==
+                                                                              key,
+                                                                      )
+                                                                    : [
+                                                                          ...current,
+                                                                          key,
+                                                                      ],
+                                                        )
+                                                    }
+                                                >
+                                                    {key ===
+                                                    ColumnVisibility.UPDATED_AT
+                                                        ? 'Last updated'
+                                                        : capitalize(key)}
+                                                </Menu.Item>
+                                            ))}
+                                    </Menu.Dropdown>
+                                </Menu>
+                            )}
 
                             {contentTypeFilter &&
                             contentTypeFilter.options.length > 1 ? (
@@ -639,10 +958,8 @@ const InfiniteResourceTable = ({
                                         orientation="vertical"
                                         w={1}
                                         h={20}
-                                        sx={{
-                                            alignSelf: 'center',
-                                            borderColor: '#DEE2E6',
-                                        }}
+                                        color="#DEE2E6"
+                                        visibleFrom="sm"
                                     />
                                     <ContentTypeFilter
                                         value={selectedContentType}
@@ -652,21 +969,53 @@ const InfiniteResourceTable = ({
                                 </>
                             ) : null}
 
-                            {adminContentView ? (
+                            {contentView &&
+                            (contentView.withSharedWithMe ||
+                                contentView.withAdminView) ? (
+                                <AdminContentViewFilter
+                                    value={contentView.value}
+                                    onChange={contentView.onChange}
+                                    withSharedWithMe={
+                                        contentView.withSharedWithMe
+                                    }
+                                    withAdminView={contentView.withAdminView}
+                                />
+                            ) : adminContentView ? (
                                 <AdminContentViewFilter
                                     value={selectedAdminContentType}
-                                    onChange={setSelectedAdminContentType}
+                                    onChange={(value) => {
+                                        if (value !== 'shared-with-me') {
+                                            setSelectedAdminContentType(value);
+                                        }
+                                    }}
                                 />
+                            ) : null}
+
+                            {ownerFilter ? (
+                                <>
+                                    <Divider
+                                        orientation="vertical"
+                                        w={1}
+                                        h={20}
+                                        color="#DEE2E6"
+                                    />
+                                    <Box w={220}>
+                                        <UserSelect
+                                            placeholder="Filter by owner"
+                                            value={selectedOwnerUserUuid}
+                                            onChange={setSelectedOwnerUserUuid}
+                                            clearable
+                                        />
+                                    </Box>
+                                </>
                             ) : null}
                         </Group>
 
                         {selectedItems.length > 0 ? (
                             <Button
                                 ml="auto"
-                                variant="filled"
                                 size="xs"
-                                color="blue"
-                                leftIcon={
+                                leftSection={
                                     <MantineIcon icon={IconFolderSymlink} />
                                 }
                                 onClick={openTransferItemsModal}
@@ -684,21 +1033,21 @@ const InfiniteResourceTable = ({
                 p={`${theme.spacing.sm} ${theme.spacing.xl} ${theme.spacing.md} ${theme.spacing.xl}`}
                 fz="xs"
                 fw={500}
-                color="ldGray.8"
-                sx={{
+                c="ldGray.8"
+                style={{
                     borderTop: `1px solid ${theme.colors.ldGray[3]}`,
                 }}
             >
                 {isFetching ? (
-                    <Text>Loading more...</Text>
+                    <Text fz="xs">Loading more...</Text>
                 ) : (
-                    <Group spacing="two">
-                        <Text>
+                    <Group gap="two">
+                        <Text fz="xs">
                             {hasNextPage
                                 ? 'Scroll for more results'
                                 : 'All results loaded'}
                         </Text>
-                        <Text fw={400} color="ldGray.6">
+                        <Text fz="xs" fw={400} c="dimmed">
                             {hasNextPage
                                 ? `(${flatData.length} of ${totalResults} loaded)`
                                 : `(${flatData.length})`}
@@ -732,28 +1081,32 @@ const InfiniteResourceTable = ({
                     <ResourceActionMenu
                         disabled={isSelected}
                         item={row.original}
+                        grantRoles={
+                            contentGrantRoles[row.original.data.uuid] ?? []
+                        }
                         onAction={handleAction}
                     />
                 </Box>
             );
         },
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
-        },
         state: {
+            columnVisibility: compact
+                ? Object.fromEntries(
+                      Object.entries(defaultColumnVisibility).map(
+                          ([key, visible]) => [
+                              key,
+                              visible &&
+                                  (key === ColumnVisibility.NAME ||
+                                      mobileColumns.includes(key)),
+                          ],
+                      ),
+                  )
+                : defaultColumnVisibility,
             sorting,
             showProgressBars: false,
             showSkeletons: isInitialLoading, // loading for the first time with no data
             density: 'md',
-            globalFilter: search ?? '',
+            globalFilter: search,
         },
         mantineLoadingOverlayProps: {
             loaderProps: {
@@ -767,20 +1120,49 @@ const InfiniteResourceTable = ({
         rowVirtualizerInstanceRef,
         rowVirtualizerProps: { estimateSize: () => 72, overscan: 40 },
         displayColumnDefOptions: {
-            'mrt-row-actions': {
+            'content-table-row-actions': {
                 header: '',
+                size: compact ? 44 : 72,
             },
-            'mrt-row-select': {
+            'content-table-row-select': {
                 size: 20,
                 minSize: 20,
                 maxSize: 20,
                 enableResizing: false,
             },
         },
-        enableFilterMatchHighlighting: true,
         enableEditing: true,
-        editDisplayMode: 'cell',
-        ...mrtProps,
+        ...contentTableProps,
+        enableRowSelection: contentTableProps.enableRowSelection
+            ? (row) => {
+                  const allowed =
+                      typeof contentTableProps.enableRowSelection === 'function'
+                          ? contentTableProps.enableRowSelection(row)
+                          : true;
+                  if (!allowed || !isResourceViewDocumentItem(row.original)) {
+                      return allowed;
+                  }
+                  const item = row.original;
+                  const space = spaces.find(
+                      ({ uuid }) => uuid === item.data.spaceUuid,
+                  );
+                  return (
+                      user.data?.ability.can(
+                          'update',
+                          subject('Document', {
+                              organizationUuid: item.data.organizationUuid,
+                              projectUuid: item.data.projectUuid,
+                              inheritsFromOrgOrProject:
+                                  space?.inheritsFromOrgOrProject ?? false,
+                              access: getListedDocumentAccess(
+                                  item.data,
+                                  space?.userAccess,
+                              ),
+                          }),
+                      ) === true
+                  );
+              }
+            : false,
         mantineSelectCheckboxProps: {
             size: 'sm',
         },
@@ -788,6 +1170,11 @@ const InfiniteResourceTable = ({
             size: 'sm',
         },
     });
+
+    const spaceUuidsKey = (filters.spaceUuids ?? []).join(',');
+    useEffect(() => {
+        table.resetRowSelection();
+    }, [spaceUuidsKey, table]);
 
     const {
         mutateAsync: contentBulkAction,
@@ -815,10 +1202,11 @@ const InfiniteResourceTable = ({
                                     },
                                 ];
                             case ContentType.DASHBOARD:
+                            case ContentType.DOCUMENT:
                                 return [
                                     {
                                         uuid: item.data.uuid,
-                                        contentType: ContentType.DASHBOARD,
+                                        contentType: item.type,
                                     },
                                 ];
                             case ContentType.SPACE:
@@ -854,6 +1242,25 @@ const InfiniteResourceTable = ({
     const selectedItems = table
         .getFilteredSelectedRowModel()
         .flatRows.map((row) => row.original);
+
+    if (errorStateTitle && isError) {
+        return (
+            <SuboptimalState
+                title={errorStateTitle}
+                description={error.error.message}
+                action={
+                    <Button
+                        variant="default"
+                        onClick={() => {
+                            void refetch();
+                        }}
+                    >
+                        Retry
+                    </Button>
+                }
+            />
+        );
+    }
 
     return (
         <>

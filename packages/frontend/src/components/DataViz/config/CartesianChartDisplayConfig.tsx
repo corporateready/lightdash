@@ -1,5 +1,5 @@
 import { VizIndexType, type ChartKind } from '@lightdash/common';
-import { Group, Stack, TextInput } from '@mantine/core';
+import { TextInput, Group, Stack } from '@mantine/core';
 import {
     useAppDispatch as useVizDispatch,
     useAppSelector as useVizSelector,
@@ -50,16 +50,16 @@ export const CartesianChartDisplayConfig = ({
     );
 
     return (
-        <Stack spacing="xl" mt="sm">
+        <Stack gap="xl" mt="sm">
             <Config>
                 <Config.Section>
                     <Config.Heading>{`X-axis`}</Config.Heading>
-                    <Group noWrap w="100%">
+                    <Group wrap="nowrap" w="100%">
                         <Config.Label>{`Label`}</Config.Label>
                         <TextInput
+                            size="xs"
                             w="100%"
                             value={xAxisLabel || ''}
-                            radius="md"
                             onChange={(e) =>
                                 dispatch(
                                     actions.setXAxisLabel({
@@ -92,12 +92,12 @@ export const CartesianChartDisplayConfig = ({
                         <Config.Heading>{`Y-axis ${
                             rightYAxisFields.length > 0 ? '(left)' : ''
                         }`}</Config.Heading>
-                        <Group noWrap w="100%">
+                        <Group wrap="nowrap" w="100%">
                             <Config.Label>{`Label`}</Config.Label>
                             <TextInput
+                                size="xs"
                                 w="100%"
                                 value={yAxisLabels[0] || ''}
-                                radius="md"
                                 onChange={(e) =>
                                     dispatch(
                                         actions.setYAxisLabel({
@@ -132,12 +132,12 @@ export const CartesianChartDisplayConfig = ({
                 <Config>
                     <Config.Section>
                         <Config.Heading>{`Y-axis (right)`}</Config.Heading>
-                        <Group noWrap w="100%">
+                        <Group wrap="nowrap" w="100%">
                             <Config.Label>{`Label`}</Config.Label>
                             <TextInput
+                                size="xs"
                                 w="100%"
                                 value={yAxisLabels[1] || ''}
-                                radius="md"
                                 onChange={(e) =>
                                     dispatch(
                                         actions.setYAxisLabel({

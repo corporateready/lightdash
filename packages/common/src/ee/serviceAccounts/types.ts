@@ -34,6 +34,7 @@ export type ServiceAccount = {
     } | null;
     organizationUuid: string;
     createdAt: Date;
+    /** Expiration timestamp, or null for a token that does not expire. */
     expiresAt: Date | null;
     description: string;
     lastUsedAt: Date | null;
@@ -52,6 +53,7 @@ export type ServiceAccount = {
 };
 
 export type ServiceAccountWithToken = ServiceAccount & {
+    /** Bearer token returned only when creating or rotating the service account. */
     token: string;
 };
 
@@ -107,7 +109,9 @@ export type ApiServiceAccountProjectGrantsResponse = {
  */
 export type ServiceAccountProjectAccessInput = {
     projectUuid: string;
+    /** Predefined project role. Provide exactly one of role or roleUuid. */
     role?: ProjectMemberRole;
+    /** Custom project role belonging to this organization. */
     roleUuid?: string;
 };
 
@@ -115,13 +119,11 @@ export type ApiCreateServiceAccountRequest = Pick<
     ServiceAccount,
     'expiresAt' | 'description'
 > & {
-    // One of `scopes` (legacy preset) or `roleUuid` (custom org role) must be
-    // provided. Sending both is rejected at the service layer.
+    /** Organization role scopes. Provide either scopes or roleUuid, not both. */
     scopes?: ServiceAccountScope[];
+    /** Custom organization role UUID, instead of scopes. */
     roleUuid?: string | null;
-    // Project-scope create path: when present and non-empty, the controller
-    // wraps the SA insert + matching `project_memberships` rows in one
-    // transaction. Requires `scopes: ['system:member']`.
+    /** Project grants. Requires scopes = ["system:member"]. */
     projectAccess?: ServiceAccountProjectAccessInput[];
 };
 
@@ -138,3 +140,29 @@ export type CreateServiceAccount = Pick<
     roleUuid?: string | null;
     projectAccess?: ServiceAccountProjectAccessInput[];
 };
+
+/**
+ * In-place edit of a service account's name, permissions, and project access,
+ * without rotating its token. `description` is always applied. The rest is
+ * target-shaped — the payload describes what the SA should become, and the SA
+ * can move between scope modes:
+ *
+ * - `projectAccess` (or `scopes = [system:member]`) → project-scoped: replace
+ *   its project grants (≥1 required), keeping `scopes = [system:member]`.
+ *   Sending an org `roleUuid` / non-member `scopes` alongside is rejected.
+ * - org `scopes` (preset) or `roleUuid` (custom role) → organization-scoped:
+ *   set the org permission and drop any project grants.
+ * - neither → rename only, preserving the current mode and permission.
+ *
+ * The token and expiry are never touched.
+ */
+export type UpdateServiceAccount = Pick<ServiceAccount, 'description'> & {
+    /** Replace the organization role scopes. Omit to preserve existing permissions. */
+    scopes?: ServiceAccountScope[];
+    /** Replace the organization custom role, instead of scopes. */
+    roleUuid?: string | null;
+    /** Replace all project grants. Must contain at least one project. */
+    projectAccess?: ServiceAccountProjectAccessInput[];
+};
+
+export type ApiUpdateServiceAccountRequest = UpdateServiceAccount;

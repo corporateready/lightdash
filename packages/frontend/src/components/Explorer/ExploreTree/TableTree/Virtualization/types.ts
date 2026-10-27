@@ -105,6 +105,7 @@ export interface SectionContext {
     itemsMap: Record<string, NodeItem>;
     nodeMap: NodeMap; // Pre-computed node hierarchy
     missingCustomMetrics?: AdditionalMetric[];
+    dashboardMetricIds?: Set<string>;
     missingCustomDimensions?: CustomDimension[];
     itemsAlerts?: {
         [id: string]: {
@@ -177,12 +178,13 @@ export interface FlattenTreeOptions {
     customDimensions?: CustomDimension[];
     missingCustomMetrics: AdditionalMetric[];
     missingCustomDimensions: CustomDimension[];
+    dashboardMetricIds?: Set<string>;
     missingFieldIds: string[];
 
     // Selected fields (for determining if missing field is dimension or metric)
     selectedDimensions: string[];
 
-    // Active fields (for pinning selected items to top)
+    // Active fields are excluded from the tree — they render in the pinned "Selected" section
     activeFields: Set<string>;
 
     // Git integration

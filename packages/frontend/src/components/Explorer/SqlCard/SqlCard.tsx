@@ -1,20 +1,13 @@
 import { subject } from '@casl/ability';
 import {
     formatSql,
+    getMergeCompiledSqlText,
     isCustomSqlDimension,
     isSqlTableCalculation,
 } from '@lightdash/common';
-import {
-    ActionIcon,
-    Box,
-    CopyButton,
-    Group,
-    SegmentedControl,
-    Skeleton,
-    Tooltip,
-} from '@mantine/core';
+import { Box, Group, Skeleton, SegmentedControl } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
-import { IconCheck, IconClipboard } from '@tabler/icons-react';
+import { IconClipboard } from '@tabler/icons-react';
 import {
     lazy,
     memo,
@@ -32,20 +25,23 @@ import {
     useExplorerDispatch,
     useExplorerSelector,
 } from '../../../features/explorer/store';
+import { useMergeCompiledSql } from '../../../features/mergeQuery/hooks/useMergeCompiledSql';
 import { useCompiledSql } from '../../../hooks/useCompiledSql';
+import { useExploreWarehouseConnection } from '../../../hooks/useExploreWarehouseConnection';
 import { useProject } from '../../../hooks/useProject';
-import { useCannotAuthorCustomSql } from '../../../hooks/user/useCannotAuthorCustomSql';
+import { useCannotViewCompiledSql } from '../../../hooks/user/useCannotViewCompiledSql';
 import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
 import { ExplorerSection } from '../../../providers/Explorer/types';
 import Callout from '../../common/Callout';
 import CollapsableCard from '../../common/CollapsableCard/CollapsableCard';
-import MantineIcon from '../../common/MantineIcon';
+import { CopyActionIcon } from '../../common/CopyActionIcon';
 import { type SqlViewType } from '../../RenderedSql';
 import OpenInSqlRunnerButton from './OpenInSqlRunnerButton';
 
 interface SqlCardProps {
     projectUuid: string;
+    warehouseConnectionUuid: string | null | undefined;
 }
 
 // Lazy load because it imports heavy module "@monaco-editor/react"
@@ -55,7 +51,8 @@ const LazyRenderedSql = lazy(() =>
     })),
 );
 
-const SqlCard: FC<SqlCardProps> = memo(({ projectUuid }) => {
+const SqlCard: FC<SqlCardProps> = memo((props) => {
+    const { projectUuid, warehouseConnectionUuid } = props;
     const { hovered, ref: headingRef } = useHover();
     const [selectedView, setSelectedView] = useState<SqlViewType>('query');
 
@@ -64,7 +61,7 @@ const SqlCard: FC<SqlCardProps> = memo(({ projectUuid }) => {
 
     const unsavedChartVersionTableName = useExplorerSelector(selectTableName);
     const metricQuery = useExplorerSelector(selectMetricQuery);
-    const cannotAuthorCustomSql = useCannotAuthorCustomSql(projectUuid);
+    const cannotViewCompiledSql = useCannotViewCompiledSql(projectUuid);
 
     const toggleExpandedSection = useCallback(
         (section: ExplorerSection) => {
@@ -79,23 +76,38 @@ const SqlCard: FC<SqlCardProps> = memo(({ projectUuid }) => {
         !!metricQuery.customDimensions?.some(isCustomSqlDimension) ||
         !!metricQuery.tableCalculations?.some(isSqlTableCalculation);
     const cannotViewSqlAuthoredFields =
-        hasSqlAuthoredFields && cannotAuthorCustomSql;
+        hasSqlAuthoredFields && cannotViewCompiledSql;
 
     const { data, isSuccess, isInitialLoading, error } = useCompiledSql({
         enabled: !!unsavedChartVersionTableName && !cannotViewSqlAuthoredFields,
     });
+    // With a merge configured, the legs and the join are what Run executes;
+    // the card's copy and open-in-SQL-runner must carry them, not the
+    // primary source's SQL alone.
+    const merge = useMergeCompiledSql();
 
-    const hasPivotQuery = !!data?.pivotQuery;
+    const hasPivotQuery = !merge.isMergeActive && !!data?.pivotQuery;
     const selectedSql =
         selectedView === 'pivotQuery' ? data?.pivotQuery : data?.query;
 
-    const formattedSql = useMemo(
-        () =>
-            selectedSql
-                ? formatSql(selectedSql, project?.warehouseConnection?.type)
-                : '',
-        [selectedSql, project?.warehouseConnection?.type],
+    const { warehouseType } = useExploreWarehouseConnection(
+        unsavedChartVersionTableName,
+        projectUuid,
     );
+    const formattedSql = useMemo(() => {
+        if (merge.isMergeActive) {
+            if (!merge.data) return '';
+            return (
+                getMergeCompiledSqlText(
+                    merge.data,
+                    warehouseType ?? undefined,
+                ) ?? ''
+            );
+        }
+        return selectedSql
+            ? formatSql(selectedSql, warehouseType ?? undefined)
+            : '';
+    }, [merge.isMergeActive, merge.data, selectedSql, warehouseType]);
 
     return (
         <CollapsableCard
@@ -105,46 +117,51 @@ const SqlCard: FC<SqlCardProps> = memo(({ projectUuid }) => {
             isOpen={sqlIsOpen}
             onToggle={() => toggleExpandedSection(ExplorerSection.SQL)}
             disabled={!unsavedChartVersionTableName}
+            // Walkthrough markers for view:CompiledSql: the heading's click
+            // unfolds the SQL Lightdash wrote; the card is the result. See
+            // scripts/scope-tours.
+            headingTourProps={{
+                'data-tour-scope': 'view:CompiledSql',
+                'data-tour-step': '2',
+                'data-tour-route':
+                    '/projects/:projectUuid/saved/:savedQueryUuid',
+                'data-tour-label': 'Open the SQL',
+                'data-tour-title': 'Read the SQL behind a chart',
+                'data-tour-interactive': 'true',
+                'data-tour-via':
+                    '[data-tour-nav="browse"] >> [data-tour-nav="all-charts"] >> [data-tour-anchor="chart-row"][data-tour-value="Orders over time"]',
+                'data-tour-docs':
+                    'explore/explore-view.mdx#the-explore-page:li5',
+            }}
+            tourProps={{
+                'data-tour-scope': 'view:CompiledSql',
+                'data-tour-step': '1',
+                'data-tour-route':
+                    '/projects/:projectUuid/saved/:savedQueryUuid',
+                'data-tour-label': 'Every chart is a query on a table',
+                'data-tour-docs': 'explore/explore-view.mdx#intro:1',
+                'data-tour-return': 'none',
+                'data-tour-resultdocs':
+                    'get-started/explore-your-data.mdx#3-run-your-own-query:1',
+            }}
             headerElement={
                 !cannotViewSqlAuthoredFields &&
                 (hovered || sqlIsOpen) &&
                 data &&
                 isSuccess ? (
-                    <CopyButton value={formattedSql} timeout={2000}>
-                        {({ copied, copy }) => (
-                            <Tooltip
-                                variant="xs"
-                                label={
-                                    copied ? 'Copied to clipboard' : 'Copy SQL'
-                                }
-                                withArrow
-                                position="right"
-                                color={copied ? 'green' : 'dark'}
-                                fw={500}
-                            >
-                                <ActionIcon
-                                    color={copied ? 'teal' : 'gray'}
-                                    onClick={copy}
-                                >
-                                    {
-                                        <MantineIcon
-                                            icon={
-                                                copied
-                                                    ? IconCheck
-                                                    : IconClipboard
-                                            }
-                                        />
-                                    }
-                                </ActionIcon>
-                            </Tooltip>
-                        )}
-                    </CopyButton>
+                    <CopyActionIcon
+                        value={formattedSql}
+                        icon={IconClipboard}
+                        copyLabel="Copy SQL"
+                        copiedLabel="Copied to clipboard"
+                        tooltipPosition="right"
+                    />
                 ) : undefined
             }
             rightHeaderElement={
                 sqlIsOpen &&
                 !cannotViewSqlAuthoredFields && (
-                    <Group spacing="xs">
+                    <Group gap="xs">
                         {hasPivotQuery && (
                             <SegmentedControl
                                 size="xs"
@@ -171,6 +188,15 @@ const SqlCard: FC<SqlCardProps> = memo(({ projectUuid }) => {
                             <OpenInSqlRunnerButton
                                 projectUuid={projectUuid}
                                 sql={formattedSql}
+                                warehouseConnectionUuid={
+                                    warehouseConnectionUuid
+                                }
+                                connectionRoute={
+                                    project
+                                        ? (project.connectionRoute ?? 'single')
+                                        : undefined
+                                }
+                                project={project}
                                 disabled={isInitialLoading || !!error}
                             />
                         </Can>

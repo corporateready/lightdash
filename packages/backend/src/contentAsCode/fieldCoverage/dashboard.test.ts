@@ -1,0 +1,47 @@
+import { describeContentAsCodeSchemaContract } from './schemaContractTestUtils';
+
+describeContentAsCodeSchemaContract({
+    resource: 'dashboard',
+    modelSchema: 'DashboardDAO',
+    documentSchema: 'DashboardAsCode',
+    serverMetadataFields: ['agentIdentity', 'agent_identity'],
+    skippedModelFields: [
+        'colorPaletteUuid',
+        // Creation time and resolved project metadata belong to the source instance.
+        'createdAt',
+        'projectName',
+        'projectType',
+        'dashboardVersionId',
+        'deletedAt',
+        'deletedBy',
+        // Overlay flags for unpublished drafts; not part of the as-code document.
+        'dismissedDraftUuid',
+        'draftOverlayError',
+        'draftStaleness',
+        'draftsAwaitingReview',
+        'firstViewedAt',
+        'hasUnpublishedChanges',
+        'organizationUuid',
+        // Represented as `ownerEmail` on the document for portability
+        'owner',
+        'pinnedListOrder',
+        'pinnedListUuid',
+        'projectUuid',
+        'spaceName',
+        'spaceUuid',
+        'updatedByUser',
+        'uuid',
+        'versionUuid',
+        'views',
+    ],
+    documentOnlyFields: [
+        'access',
+        'contentType',
+        'downloadedAt',
+        // Portable representation of the model's `owner`
+        'ownerEmail',
+        'spaceSlug',
+        'verified',
+        'version',
+    ],
+});

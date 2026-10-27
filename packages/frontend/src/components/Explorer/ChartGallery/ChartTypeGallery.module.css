@@ -1,0 +1,238 @@
+.root {
+    height: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* The offset scrollbar sits in the panel padding, so cards keep the same right
+   edge as the search input. */
+.scrollArea {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-right: -8px;
+}
+
+.scrollContent {
+    min-width: 0;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: var(--mantine-spacing-xs);
+}
+
+.cardWrapper {
+    position: relative;
+    display: grid;
+    min-width: 0;
+}
+
+/* Keep secondary actions quiet until hover or keyboard focus reveals them. */
+.cardMoreActions {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 100ms ease-out;
+}
+
+.cardWrapper:hover .cardMoreActions:not(:disabled),
+.cardWrapper:has(:focus-visible) .cardMoreActions,
+.cardWrapper[data-menu-open='true'] .cardMoreActions {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.cardWrapper .cardMoreActions {
+    color: var(--mantine-color-text);
+}
+
+.cardMoreActions {
+    position: absolute;
+    top: calc(var(--mantine-spacing-xs) / 2);
+    right: calc(var(--mantine-spacing-xs) / 2);
+    z-index: 2;
+}
+
+.card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: var(--mantine-spacing-xs);
+    padding: var(--mantine-spacing-sm) var(--mantine-spacing-xs);
+    border: 1px solid var(--mantine-color-default-border);
+    background: var(--mantine-color-body);
+    text-align: center;
+    border-radius: var(--mantine-radius-md);
+    /* User-defined names can be one long unbroken word; break rather than
+       forcing the gallery to scroll horizontally at min sidebar width. */
+    overflow-wrap: anywhere;
+    min-width: 0;
+    transition:
+        transform 120ms cubic-bezier(0.23, 1, 0.32, 1),
+        background-color 120ms ease,
+        box-shadow 120ms ease;
+}
+
+.card:hover:not(:disabled):not([data-selected='true']),
+.cardWrapper:hover .card:not(:disabled):not([data-selected='true']) {
+    border-color: var(--mantine-color-ldGray-3);
+    background: var(--mantine-color-default-hover);
+}
+
+/* Selection owns the blue at full strength: accent border over a tint of the
+   same hue. Dark mixes the tint into the card surface explicitly so it reads
+   as a lit tile, never a darker cut-out. The hairline stays on the border,
+   where the scroll viewport cannot clip it. */
+.card[data-selected='true'] {
+    border-color: light-dark(
+        var(--mantine-color-blue-6),
+        var(--mantine-color-blue-5)
+    );
+    background: light-dark(
+        var(--mantine-color-blue-0),
+        color-mix(
+            in srgb,
+            var(--mantine-color-blue-9) 30%,
+            var(--mantine-color-body)
+        )
+    );
+    box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+/* Every card keeps the same neutral material; the corner glyph alone says
+   where the chart type came from. */
+.provenanceMark {
+    position: absolute;
+    top: calc(var(--mantine-spacing-xs) / 2);
+    left: calc(var(--mantine-spacing-xs) / 2);
+    z-index: 1;
+    display: grid;
+    place-items: center;
+}
+
+.provenanceGlyph {
+    display: grid;
+    place-items: center;
+    color: var(--mantine-color-dimmed);
+}
+
+.provenanceGlyph[data-provenance='official'] {
+    color: light-dark(
+        var(--mantine-color-violet-6),
+        var(--mantine-color-violet-4)
+    );
+}
+
+/* Selection owns the color on the whole tile: the mark takes the selected
+   glyph's blue rather than clashing violet against it. */
+.cardWrapper:has(.card[data-selected='true'])
+    .provenanceGlyph[data-provenance='official'] {
+    color: light-dark(var(--mantine-color-blue-7), var(--mantine-color-blue-4));
+}
+
+/* Keeps the content cards' material — it stands for the pages not fetched
+   yet — with muted ink marking it as an affordance, not a chart type. */
+.moreCard {
+    color: var(--mantine-color-ldGray-7);
+}
+
+.card:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.cardIcon {
+    display: grid;
+    place-items: center;
+    height: 32px;
+    flex: 0 0 32px;
+    transition: opacity 100ms ease-out;
+}
+
+.cardLabel {
+    min-height: 2lh;
+}
+
+.cardLabelSlot {
+    width: 100%;
+    min-height: calc(var(--mantine-font-size-xs) * 1.2 * 2);
+}
+
+/* Sits in the label slot's second line, inside the card. */
+.cardWrapper .cardConfigureAction {
+    position: absolute;
+    left: 50%;
+    bottom: 5px;
+    z-index: 1;
+    height: 18px;
+    transform: translateX(-50%);
+}
+
+.cardWrapper .cardConfigureAction:active:not(:disabled) {
+    transform: translateX(-50%) scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .card,
+    .cardConfigureAction,
+    .cardMoreActions,
+    .cardIcon {
+        transition: none;
+    }
+
+    .card:active:not(:disabled) {
+        transform: none;
+    }
+}
+
+.card:disabled {
+    opacity: 0.5;
+}
+
+/* Keep editing available on devices without hover. */
+@media (hover: none) {
+    .cardMoreActions:not(:disabled) {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+/* Resting glyphs stay gray; only selection earns the blue fill. */
+.card .icon {
+    color: var(--mantine-color-ldGray-7);
+}
+
+.card[data-selected='true'] .icon {
+    color: light-dark(var(--mantine-color-blue-7), var(--mantine-color-blue-4));
+}
+
+.thumbnail {
+    display: grid;
+    width: 86px;
+    height: 54px;
+    flex: 0 0 86px;
+    place-items: center;
+    overflow: hidden;
+    border: 1px solid
+        light-dark(var(--mantine-color-ldGray-3), var(--mantine-color-ldDark-5));
+    border-radius: var(--mantine-radius-sm);
+    background: light-dark(
+        var(--mantine-color-ldGray-0),
+        var(--mantine-color-ldDark-3)
+    );
+    color: var(--mantine-color-ldGray-7);
+}
+
+.thumbnail[data-small='true'] {
+    width: 46px;
+    height: 30px;
+    flex: 0 0 46px;
+}
+
+.icon {
+    flex: 0 0 auto;
+}
+
+.icon[data-rotated='true'] {
+    rotate: 90deg;
+}

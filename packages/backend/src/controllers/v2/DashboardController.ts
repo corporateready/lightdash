@@ -3,14 +3,18 @@ import {
     SchedulerRunStatus,
     type ApiDashboardPaginatedSchedulersResponse,
     type ApiErrorPayload,
+    type ApiJobScheduledResponse,
     type ApiSchedulerRunsResponse,
+    type ExportContentRequest,
     type KnexPaginateArgs,
 } from '@lightdash/common';
 import {
+    Body,
     Get,
     Middlewares,
     OperationId,
     Path,
+    Post,
     Query,
     Request,
     Response,
@@ -20,6 +24,7 @@ import {
 } from '@tsoa/runtime';
 import express from 'express';
 import { toSessionUser } from '../../auth/account';
+import { requireOAuthScopeOperation } from '../../auth/oauthScopes/unchecked';
 import {
     parseEnumList,
     parseWhitelistedList,
@@ -36,6 +41,37 @@ import { VALID_SCHEDULER_RUN_DESTINATIONS } from '../schedulerConstants';
 @Tags('v2', 'Dashboards')
 export class DashboardControllerV2 extends BaseController {
     /**
+     * Export dashboard content
+     * @summary Export dashboard content
+     * @param dashboardUuid The uuid of the dashboard
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'DashboardControllerV2.exportDashboardContent',
+        ),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/exports')
+    @OperationId('exportDashboardContentV2')
+    async exportDashboardContent(
+        @Path() dashboardUuid: string,
+        @Body() body: ExportContentRequest,
+        @Request() req: express.Request,
+    ): Promise<ApiJobScheduledResponse> {
+        this.setStatus(200);
+
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .scheduleExportContent(req.account!, dashboardUuid, body),
+        };
+    }
+
+    /**
      * Get all schedulers for a dashboard
      * @summary List dashboard schedulers
      * @param dashboardUuid The uuid of the dashboard
@@ -45,7 +81,13 @@ export class DashboardControllerV2 extends BaseController {
      * @param searchQuery filter schedulers by name
      * @param includeLatestRun include the most recent run for each scheduler
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'DashboardControllerV2.getDashboardSchedulers',
+        ),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/schedulers')
     @OperationId('getDashboardSchedulers')
